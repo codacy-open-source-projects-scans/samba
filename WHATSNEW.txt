@@ -1,0 +1,132 @@
+Release Announcements
+=====================
+
+This is the first pre release of Samba 4.19.  This is *not*
+intended for production environments and is designed for testing
+purposes only.  Please report any defects via the Samba bug reporting
+system at https://bugzilla.samba.org/.
+
+Samba 4.19 will be the next version of the Samba suite.
+
+
+UPGRADING
+=========
+
+
+NEW FEATURES/CHANGES
+====================
+
+Migrated smbget to use common command line parser
+-------------------------------------------------
+
+The smbget utility implemented its own command line parsing logic. After
+discovering an issue we decided to migrate it to use the common command line
+parser. This has some advantages as you get all the feature it provides like
+Kerberos authentication. The downside is that breaks the options interface.
+The support for smbgetrc has been removed. You can use an authentication file
+if needed, this is documented in the manpage.
+
+Please check the smbget manpage or --help output.
+
+gpupdate changes
+----------------
+
+The libgpo.get_gpo_list function has been deprecated in favor of
+an implementation written in python. The new function can be imported via
+`import samba.gp`. The python implementation connects to Active Directory
+using the SamDB module, instead of ADS (which is what libgpo uses).
+
+Improved winbind logging and a new tool for parsing the winbind logs
+--------------------------------------------------------------------
+
+Winbind logs (if smb.conf 'winbind debug traceid = yes' is set) contain new
+trace header fields 'traceid' and 'depth'.  Field 'traceid' allows to track the
+trace records belonging to the same request.  Field 'depth' allows to track the
+request nesting level. A new tool samba-log-parser is added for better log
+parsing.
+
+AD database prepared to FL 2016 standards for new domains
+---------------------------------------------------------
+
+While Samba still provides only Functional Level 2008R2 by default,
+Samba as an AD DC will now, in provision ensure that the blank
+database is already prepared for Functional Level 2016, with AD Schema
+2019.
+
+This preparation is of the default objects in the database, adding
+containers for Authentication Policies, Authentication Silos and AD
+claims in particular.  These DB objects must be updated to allow
+operation of the new features found in higher functional levels.
+
+Kerberos Claims, Authentication Silos and NTLM authentication policies
+----------------------------------------------------------------------
+
+An initial, partial implementation of Active Directory Functional
+Level 2012, 2012R2 and 2016 is available in this release.
+
+While we continue to develop these features, existing domains can
+test the feature by selecting the functional level in provision or
+raising the DC functional level by setting
+
+ ad dc functional level = 2016
+
+in the smb.conf
+
+The smb.conf file on each DC must have 'ad dc functional level = 2016'
+set to have the partially complete feature available.  This will also,
+at first startup, update the server's own AD entry with the configured
+functional level.
+
+For new domains, add these parameters to 'samba-tool provision'
+
+--option="ad dc functional level = 2016" --function-level=2016
+
+The second option, setting the overall domain functional level
+indicates that all DCs should be at this functional level.
+
+To raise the domain functional level of an existing domain, after
+updating the smb.conf and restarting Samba run
+samba-tool domain schemaupgrade --schema=2019
+samba-tool domain functionalprep --function-level=2016
+samba-tool domain level raise --domain-level=2016 --forest-level=2016
+
+
+REMOVED FEATURES
+================
+
+
+smb.conf changes
+================
+
+  Parameter Name                          Description     Default
+  --------------                          -----------     -------
+  winbind debug traceid                   Add traceid     No
+  directory name cache size               Removed
+
+
+KNOWN ISSUES
+============
+
+https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.19#Release_blocking_bugs
+
+
+#######################################
+Reporting bugs & Development Discussion
+#######################################
+
+Please discuss this release on the samba-technical mailing list or by
+joining the #samba-technical:matrix.org matrix room, or
+#samba-technical IRC channel on irc.libera.chat
+
+If you do report problems then please try to send high quality
+feedback. If you don't provide vital information to help us track down
+the problem then you will probably be ignored.  All bug reports should
+be filed under the Samba 4.1 and newer product in the project's Bugzilla
+database (https://bugzilla.samba.org/).
+
+
+======================================================================
+== Our Code, Our Bugs, Our Responsibility.
+== The Samba Team
+======================================================================
+
