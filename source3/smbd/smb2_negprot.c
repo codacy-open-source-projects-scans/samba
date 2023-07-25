@@ -368,12 +368,6 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 	}
 
 	security_mode = SMB2_NEGOTIATE_SIGNING_ENABLED;
-	/*
-	 * We use xconn->smb2.signing_mandatory set up via
-	 * srv_init_signing() -> smb2_srv_init_signing().
-	 * This calls lpcfg_server_signing_allowed() to get the correct
-	 * defaults, e.g. signing_required for an ad_dc.
-	 */
 	if (xconn->smb2.signing_mandatory) {
 		security_mode |= SMB2_NEGOTIATE_SIGNING_REQUIRED;
 	}
@@ -995,7 +989,7 @@ DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
 	/* strangely enough, NT does not sent the single OID NTLMSSP when
 	   not a ADS member, it sends no OIDs at all
 
-	   OLD COMMENT : "we can't do this until we teach our sesssion setup parser to know
+	   OLD COMMENT : "we can't do this until we teach our session setup parser to know
 		   about raw NTLMSSP (clients send no ASN.1 wrapping if we do this)"
 
 	   Our sessionsetup code now handles raw NTLMSSP connects, so we can go

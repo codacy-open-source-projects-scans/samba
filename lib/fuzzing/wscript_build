@@ -42,6 +42,17 @@ bld.SAMBA_BINARY('fuzz_nmblib_parse_packet',
                  deps='fuzzing libsmb afl-fuzz-main',
                  fuzzer=True)
 
+bld.SAMBA_BINARY('fuzz_sddl_access_check',
+                 source='fuzz_sddl_access_check.c',
+                 deps='fuzzing samba-security  afl-fuzz-main',
+                 fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_sddl_access_check_ds',
+                 cflags='-DFUZZ_SEC_ACCESS_CHECK_DS=1',
+                 source='fuzz_sddl_access_check.c',
+                 deps='fuzzing samba-security  afl-fuzz-main',
+                 fuzzer=True)
+
 bld.SAMBA_BINARY('fuzz_regfio',
                  source='fuzz_regfio.c',
                  deps='fuzzing samba3-util smbconf REGFIO afl-fuzz-main',
@@ -126,6 +137,18 @@ bld.SAMBA_BINARY('fuzz_stable_sort_r',
                  source='fuzz_stable_sort_r.c',
                  deps='fuzzing stable_sort afl-fuzz-main',
                  fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_security_token_vs_descriptor',
+                 source='fuzz_security_token_vs_descriptor.c',
+                 deps='fuzzing samba-security afl-fuzz-main',
+                 fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_security_token_vs_descriptor_ds',
+                 cflags='-DFUZZ_SEC_ACCESS_CHECK_DS=1',
+                 source='fuzz_security_token_vs_descriptor.c',
+                 deps='fuzzing samba-security afl-fuzz-main',
+                 fuzzer=True)
+
 
 # The fuzz_type and fuzz_function parameters make the built
 # fuzzer take the same input as ndrdump and so the same that
