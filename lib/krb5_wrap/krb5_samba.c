@@ -114,6 +114,18 @@ void krb5_free_unparsed_name(krb5_context context, char *val)
 }
 #endif
 
+#if !defined(HAVE_KRB5_FREE_ENCTYPES)
+void krb5_free_enctypes(krb5_context context, krb5_enctype *val) {
+	krb5_xfree(val);
+}
+#endif
+
+#if !defined(HAVE_KRB5_FREE_STRING)
+void krb5_free_string(krb5_context context, char *val) {
+	SAFE_FREE(val);
+}
+#endif
+
 #if defined(HAVE_KRB5_PRINCIPAL_GET_COMP_STRING) && !defined(HAVE_KRB5_PRINC_COMPONENT)
 const krb5_data *krb5_princ_component(krb5_context context,
 				      krb5_principal principal, int i);
@@ -780,7 +792,7 @@ int smb_krb5_salt_principal2data(krb5_context context,
  * This function returns an allocated list of encryption types allowed for
  * session keys.
  *
- * Use free() to free the enctypes when it is no longer needed.
+ * Use krb5_free_enctypes() to free the enctypes when it is no longer needed.
  *
  * @retval 0 Success; otherwise - Kerberos error codes
  */
@@ -1678,15 +1690,20 @@ krb5_error_code smb_krb5_kt_seek_and_delete_old_entries(krb5_context context,
 	ZERO_STRUCT(cursor);
 	ZERO_STRUCT(kt_entry);
 
-	ret = krb5_kt_start_seq_get(context, keytab, &cursor);
-	if (ret == KRB5_KT_END || ret == ENOENT ) {
-		/* no entries */
-		return 0;
-	}
-
+	/*
+	 * Start with talloc_new() and only then call krb5_kt_start_seq_get().
+	 * If any of them fails, the cleanup code is simpler.
+	 */
 	tmp_ctx = talloc_new(NULL);
 	if (tmp_ctx == NULL) {
 		return ENOMEM;
+	}
+
+	ret = krb5_kt_start_seq_get(context, keytab, &cursor);
+	if (ret == KRB5_KT_END || ret == ENOENT ) {
+		/* no entries */
+		talloc_free(tmp_ctx);
+		return 0;
 	}
 
 	DEBUG(3, (__location__ ": Will try to delete old keytab entries\n"));

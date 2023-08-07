@@ -1,21 +1,21 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    Kerberos utility functions for GENSEC
-   
+
    Copyright (C) Andrew Bartlett <abartlet@samba.org> 2004-2005
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
 
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -56,6 +56,24 @@ static krb5_error_code parse_principal(TALLOC_CTX *parent_ctx,
 		 return 0;
 	}
 
+	/*
+	 * Start with talloc(), talloc_reference() and only then call
+	 * krb5_parse_name(). If any of them fails, the cleanup code is simpler.
+	 */
+	mem_ctx = talloc(parent_ctx, struct principal_container);
+	if (!mem_ctx) {
+		(*error_string) = error_message(ENOMEM);
+		return ENOMEM;
+	}
+
+	mem_ctx->smb_krb5_context = talloc_reference(mem_ctx,
+						     smb_krb5_context);
+	if (mem_ctx->smb_krb5_context == NULL) {
+		(*error_string) = error_message(ENOMEM);
+		talloc_free(mem_ctx);
+		return ENOMEM;
+	}
+
 	ret = krb5_parse_name(smb_krb5_context->krb5_context,
 			      princ_string, princ);
 
@@ -63,19 +81,12 @@ static krb5_error_code parse_principal(TALLOC_CTX *parent_ctx,
 		(*error_string) = smb_get_krb5_error_message(
 						smb_krb5_context->krb5_context,
 						ret, parent_ctx);
+		talloc_free(mem_ctx);
 		return ret;
-	}
-
-	mem_ctx = talloc(parent_ctx, struct principal_container);
-	if (!mem_ctx) {
-		(*error_string) = error_message(ENOMEM);
-		return ENOMEM;
 	}
 
 	/* This song-and-dance effectivly puts the principal
 	 * into talloc, so we can't loose it. */
-	mem_ctx->smb_krb5_context = talloc_reference(mem_ctx,
-						     smb_krb5_context);
 	mem_ctx->principal = *princ;
 	talloc_set_destructor(mem_ctx, free_principal);
 	return 0;
@@ -221,7 +232,7 @@ done:
 
 /**
  * Return a freshly allocated ccache (destroyed by destructor on child
- * of parent_ctx), for a given set of client credentials 
+ * of parent_ctx), for a given set of client credentials
  */
 
  krb5_error_code kinit_to_ccache(TALLOC_CTX *parent_ctx,
@@ -353,7 +364,7 @@ done:
 			return EINVAL;
 		} else {
 			/* No password available, try to use a keyblock instead */
-			
+
 			krb5_keyblock keyblock;
 			const struct samr_Password *mach_pwd;
 			mach_pwd = cli_credentials_get_nt_hash(credentials, mem_ctx);
@@ -368,9 +379,9 @@ done:
 			}
 			ret = smb_krb5_keyblock_init_contents(smb_krb5_context->krb5_context,
 						 ENCTYPE_ARCFOUR_HMAC,
-						 mach_pwd->hash, sizeof(mach_pwd->hash), 
+						 mach_pwd->hash, sizeof(mach_pwd->hash),
 						 &keyblock);
-			
+
 			if (ret == 0) {
 				ret = smb_krb5_kinit_keyblock_ccache(smb_krb5_context->krb5_context,
 								     ccache,
@@ -416,7 +427,7 @@ done:
 		DEBUG(4,("Advancing clock by %d seconds to cope with clock skew\n", time_offset));
 		krb5_set_real_time(smb_krb5_context->krb5_context, t + time_offset + 1, 0);
 	}
-	
+
 	if (ret == KRB5KDC_ERR_PREAUTH_FAILED && cli_credentials_wrong_password(credentials)) {
 		ret = kinit_to_ccache(parent_ctx,
 				      credentials,
@@ -457,6 +468,21 @@ krb5_error_code smb_krb5_get_keytab_container(TALLOC_CTX *mem_ctx,
 	krb5_keytab keytab;
 	krb5_error_code ret;
 
+	/*
+	 * Start with talloc(), talloc_reference() and only then call
+	 * krb5_kt_resolve(). If any of them fails, the cleanup code is simpler.
+	 */
+	*ktc = talloc(mem_ctx, struct keytab_container);
+	if (!*ktc) {
+		return ENOMEM;
+	}
+
+	(*ktc)->smb_krb5_context = talloc_reference(*ktc, smb_krb5_context);
+	if ((*ktc)->smb_krb5_context == NULL) {
+		TALLOC_FREE(*ktc);
+		return ENOMEM;
+	}
+
 	if (opt_keytab) {
 		keytab = opt_keytab;
 	} else {
@@ -467,16 +493,11 @@ krb5_error_code smb_krb5_get_keytab_container(TALLOC_CTX *mem_ctx,
 				 smb_get_krb5_error_message(
 					smb_krb5_context->krb5_context,
 					ret, mem_ctx)));
+			TALLOC_FREE(*ktc);
 			return ret;
 		}
 	}
 
-	*ktc = talloc(mem_ctx, struct keytab_container);
-	if (!*ktc) {
-		return ENOMEM;
-	}
-
-	(*ktc)->smb_krb5_context = talloc_reference(*ktc, smb_krb5_context);
 	(*ktc)->keytab = keytab;
 	(*ktc)->password_based = false;
 	talloc_set_destructor(*ktc, free_keytab_container);

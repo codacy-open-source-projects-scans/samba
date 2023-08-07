@@ -264,7 +264,7 @@ int64_t samdb_search_int64(struct ldb_context *sam_ldb,
 }
 
 /*
-  search the sam for multipe records each giving a single string attribute
+  search the sam for multiple records each giving a single string attribute
   return the number of matches, or -1 on error
 */
 int samdb_search_string_multiple(struct ldb_context *sam_ldb,
@@ -1274,6 +1274,25 @@ struct ldb_dn *samdb_infrastructure_dn(struct ldb_context *sam_ctx, TALLOC_CTX *
                return NULL;
        }
        return new_dn;
+}
+
+struct ldb_dn *samdb_system_container_dn(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx)
+{
+	struct ldb_dn *new_dn = NULL;
+	bool ok;
+
+	new_dn = ldb_dn_copy(mem_ctx, ldb_get_default_basedn(sam_ctx));
+	if (new_dn == NULL) {
+		return NULL;
+	}
+
+	ok = ldb_dn_add_child_fmt(new_dn, "CN=System");
+	if (!ok) {
+		TALLOC_FREE(new_dn);
+		return NULL;
+	}
+
+	return new_dn;
 }
 
 struct ldb_dn *samdb_sites_dn(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx)
@@ -4624,7 +4643,7 @@ int dsdb_normalise_dn_and_find_nc_root(struct ldb_context *samdb,
 
 	if (!has_extended && !has_normal_components) {
 		return ldb_error(samdb, LDB_ERR_NO_SUCH_OBJECT,
-				 "Request for NC root for rootDSE (\"\") deined.");
+				 "Request for NC root for rootDSE (\"\") denied.");
 	}
 
 	tmp_ctx = talloc_new(samdb);
@@ -5258,6 +5277,27 @@ int dsdb_replace(struct ldb_context *ldb, struct ldb_message *msg, uint32_t dsdb
 	return dsdb_modify(ldb, msg, dsdb_flags);
 }
 
+const char *dsdb_search_scope_as_string(enum ldb_scope scope)
+{
+	const char *scope_str;
+
+	switch (scope) {
+	case LDB_SCOPE_BASE:
+		scope_str = "BASE";
+		break;
+	case LDB_SCOPE_ONELEVEL:
+		scope_str = "ONE";
+		break;
+	case LDB_SCOPE_SUBTREE:
+		scope_str = "SUB";
+		break;
+	default:
+		scope_str = "<Invalid scope>";
+		break;
+	}
+	return scope_str;
+}
+
 
 /*
   search for attrs on one DN, allowing for dsdb_flags controls
@@ -5272,9 +5312,11 @@ int dsdb_search_dn(struct ldb_context *ldb,
 	int ret;
 	struct ldb_request *req;
 	struct ldb_result *res;
+	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 
-	res = talloc_zero(mem_ctx, struct ldb_result);
+	res = talloc_zero(tmp_ctx, struct ldb_result);
 	if (!res) {
+		talloc_free(tmp_ctx);
 		return ldb_oom(ldb);
 	}
 
@@ -5288,13 +5330,13 @@ int dsdb_search_dn(struct ldb_context *ldb,
 				   ldb_search_default_callback,
 				   NULL);
 	if (ret != LDB_SUCCESS) {
-		talloc_free(res);
+		talloc_free(tmp_ctx);
 		return ret;
 	}
 
 	ret = dsdb_request_add_controls(req, dsdb_flags);
 	if (ret != LDB_SUCCESS) {
-		talloc_free(res);
+		talloc_free(tmp_ctx);
 		return ret;
 	}
 
@@ -5305,11 +5347,26 @@ int dsdb_search_dn(struct ldb_context *ldb,
 
 	talloc_free(req);
 	if (ret != LDB_SUCCESS) {
-		talloc_free(res);
+		DBG_INFO("flags=0x%08x %s -> %s (%s)\n",
+			 dsdb_flags,
+			 basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+							       basedn,
+							       1):"NULL",
+			 ldb_errstring(ldb), ldb_strerror(ret));
+		talloc_free(tmp_ctx);
 		return ret;
 	}
 
-	*_result = res;
+	DBG_DEBUG("flags=0x%08x %s -> %d\n",
+		  dsdb_flags,
+		  basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+							basedn,
+							1):"NULL",
+		  res->count);
+
+	*_result = talloc_steal(mem_ctx, res);
+
+	talloc_free(tmp_ctx);
 	return LDB_SUCCESS;
 }
 
@@ -5405,17 +5462,39 @@ int dsdb_search(struct ldb_context *ldb,
 	}
 
 	if (ret != LDB_SUCCESS) {
+		DBG_INFO("%s flags=0x%08x %s %s -> %s (%s)\n",
+			 dsdb_search_scope_as_string(scope),
+			 dsdb_flags,
+			 basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+							       basedn,
+							       1):"NULL",
+			 expression?expression:"NULL",
+			 ldb_errstring(ldb), ldb_strerror(ret));
 		talloc_free(tmp_ctx);
 		return ret;
 	}
 
 	if (dsdb_flags & DSDB_SEARCH_ONE_ONLY) {
 		if (res->count == 0) {
+			DBG_INFO("%s SEARCH_ONE_ONLY flags=0x%08x %s %s -> %u results\n",
+				 dsdb_search_scope_as_string(scope),
+				 dsdb_flags,
+				 basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+								       basedn,
+								       1):"NULL",
+				 expression?expression:"NULL", res->count);
 			talloc_free(tmp_ctx);
 			ldb_reset_err_string(ldb);
 			return ldb_error(ldb, LDB_ERR_NO_SUCH_OBJECT, __func__);
 		}
 		if (res->count != 1) {
+			DBG_INFO("%s SEARCH_ONE_ONLY flags=0x%08x %s %s -> %u (expected 1) results\n",
+				 dsdb_search_scope_as_string(scope),
+				 dsdb_flags,
+				 basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+								       basedn,
+								       1):"NULL",
+				 expression?expression:"NULL", res->count);
 			talloc_free(tmp_ctx);
 			ldb_reset_err_string(ldb);
 			return LDB_ERR_CONSTRAINT_VIOLATION;
@@ -5423,8 +5502,16 @@ int dsdb_search(struct ldb_context *ldb,
 	}
 
 	*_result = talloc_steal(mem_ctx, res);
-	talloc_free(tmp_ctx);
 
+	DBG_DEBUG("%s flags=0x%08x %s %s -> %d\n",
+		  dsdb_search_scope_as_string(scope),
+		  dsdb_flags,
+		  basedn?ldb_dn_get_extended_linearized(tmp_ctx,
+							basedn,
+							1):"NULL",
+		  expression?expression:"NULL",
+		  res->count);
+	talloc_free(tmp_ctx);
 	return LDB_SUCCESS;
 }
 
@@ -6440,7 +6527,7 @@ struct dsdb_count_domain_context {
 };
 
 /*
- * @brief ldb aysnc callback for dsdb_domain_count.
+ * @brief ldb async callback for dsdb_domain_count.
  *
  * count the number of records in the database matching an LDAP query,
  * optionally filtering for domain membership.

@@ -5712,9 +5712,12 @@ class GPOTests(tests.TestCase):
 
     def test_smb_conf_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'MACHINE/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'MACHINE/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -5751,6 +5754,20 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Failed to create the Registry.pol file')
 
+        # Stage the other Registry.pol
+        entries = []
+        e = preg.entry()
+        e.keyname = 'Software\\Policies\\Samba\\smb_conf\\apply group policies'
+        e.type = 4
+        e.data = 0
+        e.valuename = 'apply group policies'
+        entries.append(e)
+        stage = preg.file()
+        stage.num_entries = len(entries)
+        stage.entries = entries
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Failed to create the Registry.pol file')
+
         with NamedTemporaryFile(suffix='_smb.conf') as f:
             copyfile(self.lp.configfile, f.name)
             lp = LoadParm(f.name)
@@ -5759,6 +5776,22 @@ class GPOTests(tests.TestCase):
             ext = gp_smb_conf_ext(lp, machine_creds,
                                   machine_creds.get_username(), store)
             ext.process_group_policy([], gpos)
+            lp = LoadParm(f.name)
+
+            template_homedir = lp.get('template homedir')
+            self.assertEquals(template_homedir, '/home/samba/%D/%U',
+                              'template homedir was not applied')
+            apply_group_policies = lp.get('apply group policies')
+            self.assertFalse(apply_group_policies,
+                            'apply group policies was not applied')
+            ldap_timeout = lp.get('ldap timeout')
+            self.assertEquals(ldap_timeout, 9999, 'ldap timeout was not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos)
             lp = LoadParm(f.name)
 
             template_homedir = lp.get('template homedir')
@@ -5775,7 +5808,6 @@ class GPOTests(tests.TestCase):
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [])
 
@@ -5796,9 +5828,12 @@ class GPOTests(tests.TestCase):
 
     def test_gp_motd(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'MACHINE/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'MACHINE/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -5830,10 +5865,38 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+        # Stage the other Registry.pol
+        stage = preg.file()
+        e3 = preg.entry()
+        e3.keyname = b'Software\\Policies\\Samba\\Unix Settings\\Messages'
+        e3.valuename = b'motd'
+        e3.type = 1
+        e3.data = b'This should overwrite the first policy'
+        stage.num_entries = 1
+        stage.entries = [e3]
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
         # Process all gpos, with temp output directory
         with TemporaryDirectory() as dname:
             ext.process_group_policy([], gpos, dname)
             motd_file = os.path.join(dname, 'motd')
+            self.assertTrue(os.path.exists(motd_file),
+                            'Message of the day file not created')
+            data = open(motd_file, 'r').read()
+            self.assertEquals(data, e3.data, 'Message of the day not applied')
+            issue_file = os.path.join(dname, 'issue')
+            self.assertTrue(os.path.exists(issue_file),
+                            'Login Prompt Message file not created')
+            data = open(issue_file, 'r').read()
+            self.assertEquals(data, e2.data, 'Login Prompt Message not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, dname)
+
             self.assertTrue(os.path.exists(motd_file),
                             'Message of the day file not created')
             data = open(motd_file, 'r').read()
@@ -5849,7 +5912,6 @@ class GPOTests(tests.TestCase):
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
             # Unapply policy, and ensure the test files are removed
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], dname)
             data = open(motd_file, 'r').read()
@@ -6276,8 +6338,11 @@ class GPOTests(tests.TestCase):
 
     def test_vgp_motd(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        manifest = os.path.join(local_path, policies, guid, 'MACHINE',
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        manifest = os.path.join(local_path, policies, guids[0], 'MACHINE',
+            'VGP/VTLA/UNIX/MOTD/MANIFEST.XML')
+        manifest2 = os.path.join(local_path, policies, guids[1], 'MACHINE',
             'VGP/VTLA/UNIX/MOTD/MANIFEST.XML')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
@@ -6306,9 +6371,33 @@ class GPOTests(tests.TestCase):
         ret = stage_file(manifest, etree.tostring(stage))
         self.assertTrue(ret, 'Could not create the target %s' % manifest)
 
+        # Stage the other manifest.xml
+        stage = etree.Element('vgppolicy')
+        policysetting = etree.SubElement(stage, 'policysetting')
+        version = etree.SubElement(policysetting, 'version')
+        version.text = '1'
+        data = etree.SubElement(policysetting, 'data')
+        filename = etree.SubElement(data, 'filename')
+        filename.text = 'motd'
+        text2 = etree.SubElement(data, 'text')
+        text2.text = 'This should overwrite the first policy'
+        ret = stage_file(manifest2, etree.tostring(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % manifest2)
+
         # Process all gpos, with temp output directory
         with NamedTemporaryFile() as f:
             ext.process_group_policy([], gpos, f.name)
+            self.assertTrue(os.path.exists(f.name),
+                            'Message of the day file not created')
+            data = open(f.name, 'r').read()
+            self.assertEquals(data, text2.text, 'Message of the day not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, f.name)
+
             self.assertEquals(open(f.name, 'r').read(), text.text,
                               'The motd was not applied')
 
@@ -6317,19 +6406,22 @@ class GPOTests(tests.TestCase):
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], f.name)
             self.assertNotEqual(open(f.name, 'r').read(), text.text,
                                 'The motd was not unapplied')
 
-        # Unstage the Registry.pol file
+        # Unstage the manifest files
         unstage_file(manifest)
+        unstage_file(manifest2)
 
     def test_vgp_issue(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        manifest = os.path.join(local_path, policies, guid, 'MACHINE',
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        manifest = os.path.join(local_path, policies, guids[0], 'MACHINE',
+            'VGP/VTLA/UNIX/ISSUE/MANIFEST.XML')
+        manifest2 = os.path.join(local_path, policies, guids[1], 'MACHINE',
             'VGP/VTLA/UNIX/ISSUE/MANIFEST.XML')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
@@ -6358,9 +6450,31 @@ class GPOTests(tests.TestCase):
         ret = stage_file(manifest, etree.tostring(stage))
         self.assertTrue(ret, 'Could not create the target %s' % manifest)
 
+        # Stage the other manifest.xml
+        stage = etree.Element('vgppolicy')
+        policysetting = etree.SubElement(stage, 'policysetting')
+        version = etree.SubElement(policysetting, 'version')
+        version.text = '1'
+        data = etree.SubElement(policysetting, 'data')
+        filename = etree.SubElement(data, 'filename')
+        filename.text = 'issue'
+        text2 = etree.SubElement(data, 'text')
+        text2.text = 'This test message overwrites the first'
+        ret = stage_file(manifest2, etree.tostring(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % manifest2)
+
         # Process all gpos, with temp output directory
         with NamedTemporaryFile() as f:
             ext.process_group_policy([], gpos, f.name)
+            self.assertEquals(open(f.name, 'r').read(), text2.text,
+                              'The issue was not applied')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, gpos, f.name)
+
             self.assertEquals(open(f.name, 'r').read(), text.text,
                               'The issue was not applied')
 
@@ -6369,7 +6483,6 @@ class GPOTests(tests.TestCase):
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(machine_creds.get_username())
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [], f.name)
             self.assertNotEqual(open(f.name, 'r').read(), text.text,
@@ -6845,9 +6958,12 @@ class GPOTests(tests.TestCase):
 
     def test_gp_user_scripts_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'USER/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'USER/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -6880,6 +6996,18 @@ class GPOTests(tests.TestCase):
             ret = stage_file(reg_pol, ndr_pack(stage))
             self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+            # Stage the other Registry.pol
+            stage = preg.file()
+            e2 = preg.entry()
+            e2.keyname = keyname
+            e2.valuename = b'Software\\Policies\\Samba\\Unix Settings'
+            e2.type = 1
+            e2.data = b'echo this is a second policy'
+            stage.num_entries = 1
+            stage.entries = [e2]
+            ret = stage_file(reg_pol2, ndr_pack(stage))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
             # Process all gpos, intentionally skipping the privilege drop
             ext.process_group_policy([], gpos)
             # Dump the fake crontab setup for testing
@@ -6888,13 +7016,31 @@ class GPOTests(tests.TestCase):
             entry = b'%s %s' % (sections[keyname], e.data.encode())
             self.assertIn(entry, crontab,
                 'The crontab entry was not installed')
+            entry2 = b'%s %s' % (sections[keyname], e2.data.encode())
+            self.assertIn(entry2, crontab,
+                'The crontab entry was not installed')
+
+            # Force apply with removal of second GPO
+            gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+            del_gpos = gp_db.get_applied_settings([guids[1]])
+            rgpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+            ext.process_group_policy(del_gpos, rgpos)
+
+            # Dump the fake crontab setup for testing
+            p = Popen(['crontab', '-l'], stdout=PIPE)
+            crontab, _ = p.communicate()
+
+            # Ensure the first entry remains, and the second entry is removed
+            self.assertIn(entry, crontab,
+                'The first crontab entry was not found')
+            self.assertNotIn(entry2, crontab,
+                'The second crontab entry was still present')
 
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
             # Remove policy
-            gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
             del_gpos = get_deleted_gpos_list(gp_db, [])
             ext.process_group_policy(del_gpos, [])
             # Dump the fake crontab setup for testing
@@ -6903,8 +7049,9 @@ class GPOTests(tests.TestCase):
             self.assertNotIn(entry, crontab,
                 'Unapply failed to cleanup crontab entry')
 
-            # Unstage the Registry.pol file
+            # Unstage the Registry.pol files
             unstage_file(reg_pol)
+            unstage_file(reg_pol2)
 
     def test_gp_firefox_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
@@ -6946,12 +7093,88 @@ class GPOTests(tests.TestCase):
                                  policy_data['policies'][name],
                                  'Policies were not applied')
 
+            # Check that modifying the policy will enforce the correct settings
+            entries = [e for e in parser.pol_file.entries \
+                       if e.valuename != 'AppUpdateURL']
+            for e in entries:
+                if e.valuename == 'AppAutoUpdate':
+                    e.data = 0
+            parser.pol_file.entries = entries
+            parser.pol_file.num_entries = len(entries)
+            # Stage the Registry.pol file with altered test data
+            unstage_file(reg_pol)
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+
+            # Enforce the altered policy
+            ext.process_group_policy([], gpos)
+
+            # Check that the App Update policy was altered
+            with open(policies_file, 'r') as r:
+                policy_data = json.load(r)
+            self.assertIn('policies', policy_data, 'Policies were not applied')
+            keys = list(expected_policy_data['policies'].keys())
+            keys.remove('AppUpdateURL')
+            keys.sort()
+            policy_keys = list(policy_data['policies'].keys())
+            policy_keys.sort()
+            self.assertEqual(keys, policy_keys, 'Firefox policies are incorrect')
+            for name in policy_data['policies'].keys():
+                self.assertNotEqual(name, 'AppUpdateURL',
+                                    'Failed to remove AppUpdateURL policy')
+                if name == 'AppAutoUpdate':
+                    self.assertEqual(False, policy_data['policies'][name],
+                                     'Failed to alter AppAutoUpdate policy')
+                    continue
+                self.assertEqual(expected_policy_data['policies'][name],
+                                 policy_data['policies'][name],
+                                 'Policies were not applied')
+
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
 
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
+
+            # Unapply the policy
+            gp_db = store.get_gplog(machine_creds.get_username())
+            del_gpos = get_deleted_gpos_list(gp_db, [])
+            ext.process_group_policy(del_gpos, [], dname)
+            if os.path.exists(policies_file):
+                data = json.load(open(policies_file, 'r'))
+                if 'policies' in data.keys():
+                    self.assertEqual(len(data['policies'].keys()), 0,
+                                     'The policy was not unapplied')
+
+            # Initialize the cache with old style existing policies,
+            # ensure they are overwritten.
+            old_cache = {'policies': {}}
+            ext.cache_add_attribute(guid, 'policies.json',
+                                    json.dumps(old_cache))
+            with open(policies_file, 'w') as w:
+                w.write(firefox_json_expected)
+
+            # Overwrite policy
+            ext.process_group_policy([], gpos)
+
+            # Check that policy was overwritten
+            with open(policies_file, 'r') as r:
+                policy_data = json.load(r)
+            self.assertIn('policies', policy_data, 'Policies were not applied')
+            policy_keys = list(policy_data['policies'].keys())
+            policy_keys.sort()
+            self.assertEqual(keys, policy_keys, 'Firefox policies are incorrect')
+            for name in policy_data['policies'].keys():
+                self.assertNotEqual(name, 'AppUpdateURL',
+                                    'Failed to remove AppUpdateURL policy')
+                if name == 'AppAutoUpdate':
+                    self.assertEqual(False, policy_data['policies'][name],
+                                     'Failed to overwrite AppAutoUpdate policy')
+                    continue
+                self.assertEqual(expected_policy_data['policies'][name],
+                                 policy_data['policies'][name],
+                                 'Policies were not applied')
 
             # Unapply the policy
             gp_db = store.get_gplog(machine_creds.get_username())
@@ -7125,9 +7348,33 @@ class GPOTests(tests.TestCase):
         cmd = [firewall_cmd, '--zone=work', '--list-rich-rules']
         p = Popen(cmd, stdout=PIPE, stderr=PIPE)
         out, err = p.communicate()
-        rule = b'rule family=ipv4 source address=172.25.1.7 ' + \
-               b'service name=ftp reject'
-        self.assertEquals(rule, out.strip(), 'Failed to set rich rule')
+        # Firewalld will report the rule one of two ways:
+        rules = [b'rule family=ipv4 source address=172.25.1.7 ' + \
+                 b'service name=ftp reject',
+                 b'rule family="ipv4" source address="172.25.1.7" ' + \
+                 b'service name="ftp" reject']
+        self.assertIn(out.strip(), rules, 'Failed to set rich rule')
+
+        # Check that modifying the policy will enforce the correct settings
+        entries = [e for e in parser.pol_file.entries if e.data != 'home']
+        self.assertEquals(len(entries), len(parser.pol_file.entries)-1,
+                          'Failed to remove the home zone entry')
+        parser.pol_file.entries = entries
+        parser.pol_file.num_entries = len(entries)
+        # Stage the Registry.pol file with altered test data
+        unstage_file(reg_pol)
+        ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+
+        # Enforce the altered policy
+        ext.process_group_policy([], gpos)
+
+        # Check that the home zone was removed
+        cmd = [firewall_cmd, '--get-zones']
+        p = Popen(cmd, stdout=PIPE, stderr=PIPE)
+        out, err = p.communicate()
+        self.assertIn(b'work', out, 'Failed to apply zones')
+        self.assertNotIn(b'home', out, 'Failed to apply zones')
 
         # Verify RSOP does not fail
         ext.rsop([g for g in gpos if g.name == guid][0])
@@ -7391,9 +7638,12 @@ class GPOTests(tests.TestCase):
 
     def test_gp_user_centrify_crontab_ext(self):
         local_path = self.lp.cache_path('gpo_cache')
-        guid = '{31B2F340-016D-11D2-945F-00C04FB984F9}'
-        reg_pol = os.path.join(local_path, policies, guid,
+        guids = ['{31B2F340-016D-11D2-945F-00C04FB984F9}',
+                 '{6AC1786C-016F-11D2-945F-00C04FB984F9}']
+        reg_pol = os.path.join(local_path, policies, guids[0],
                                'USER/REGISTRY.POL')
+        reg_pol2 = os.path.join(local_path, policies, guids[1],
+                                'USER/REGISTRY.POL')
         cache_dir = self.lp.get('cache directory')
         store = GPOStorage(os.path.join(cache_dir, 'gpo.tdb'))
 
@@ -7422,6 +7672,19 @@ class GPOTests(tests.TestCase):
         ret = stage_file(reg_pol, ndr_pack(stage))
         self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
 
+        # Stage the other Registry.pol
+        stage = preg.file()
+        e2 = preg.entry()
+        e2.keyname = \
+            b'Software\\Policies\\Centrify\\UnixSettings\\CrontabEntries'
+        e2.valuename = b'Command1'
+        e2.type = 1
+        e2.data = b'17 * * * * echo this is a second policy'
+        stage.num_entries = 1
+        stage.entries = [e2]
+        ret = stage_file(reg_pol2, ndr_pack(stage))
+        self.assertTrue(ret, 'Could not create the target %s' % reg_pol2)
+
         # Process all gpos, intentionally skipping the privilege drop
         ext.process_group_policy([], gpos)
         # Dump the fake crontab setup for testing
@@ -7429,13 +7692,30 @@ class GPOTests(tests.TestCase):
         crontab, _ = p.communicate()
         self.assertIn(get_bytes(e.data), crontab,
             'The crontab entry was not installed')
+        self.assertIn(get_bytes(e2.data), crontab,
+            'The crontab entry was not installed')
+
+        # Force apply with removal of second GPO
+        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
+        del_gpos = gp_db.get_applied_settings([guids[1]])
+        gpos = [gpo for gpo in gpos if gpo.name != guids[1]]
+        ext.process_group_policy(del_gpos, gpos)
+
+        # Dump the fake crontab setup for testing
+        p = Popen(['crontab', '-l'], stdout=PIPE)
+        crontab, _ = p.communicate()
+
+        # Ensure the first entry remains, and the second entry is removed
+        self.assertIn(get_bytes(e.data), crontab,
+            'The first crontab entry was not found')
+        self.assertNotIn(get_bytes(e2.data), crontab,
+            'The second crontab entry was still present')
 
         # Check that a call to gpupdate --rsop also succeeds
         ret = rsop(self.lp)
         self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
 
         # Remove policy
-        gp_db = store.get_gplog(os.environ.get('DC_USERNAME'))
         del_gpos = get_deleted_gpos_list(gp_db, [])
         ext.process_group_policy(del_gpos, [])
         # Dump the fake crontab setup for testing
@@ -7444,5 +7724,6 @@ class GPOTests(tests.TestCase):
         self.assertNotIn(get_bytes(e.data), crontab,
             'Unapply failed to cleanup crontab entry')
 
-        # Unstage the Registry.pol file
+        # Unstage the Registry.pol files
         unstage_file(reg_pol)
+        unstage_file(reg_pol2)

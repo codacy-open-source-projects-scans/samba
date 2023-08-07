@@ -357,6 +357,20 @@ plantestsuite("samba3.smbtorture_s3.smb1.SMB1-DFS-OPERATIONS",
                 '$PASSWORD',
                 smbtorture3,
                 "-mNT1"])
+#
+# SMB1-DFS-BADPATH needs to run against a special share msdfs-pathname-share
+# BUG: https://bugzilla.samba.org/show_bug.cgi?id=15419
+#
+plantestsuite("samba3.smbtorture_s3.smb1.SMB1-DFS-BADPATH",
+                "fileserver_smb1",
+                [os.path.join(samba3srcdir,
+                              "script/tests/test_smbtorture_s3.sh"),
+                'SMB1-DFS-BADPATH',
+                '//$SERVER_IP/msdfs-pathname-share',
+                '$USERNAME',
+                '$PASSWORD',
+                smbtorture3,
+                "-mNT1"])
 
 #
 # SMB2-STREAM-ACL needs to run against a special share - vfs_wo_fruit
@@ -1686,6 +1700,17 @@ plantestsuite("samba3.blackbox.smbclient-mget",
                "$USERNAME",
                "$PASSWORD",
                "valid_users"])
+
+plantestsuite("samba3.blackbox.smbclient-bug15435",
+              "fileserver",
+              [os.path.join(samba3srcdir, "script/tests/test_bug15435_widelink_dfs.sh"),
+               "$SERVER",
+               "$SERVER_IP",
+               "$USERNAME",
+               "$PASSWORD",
+               smbclient3,
+               configuration])
+
 
 if have_cluster_support:
     t = "readdir-timestamp"
