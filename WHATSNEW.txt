@@ -16,8 +16,29 @@ UPGRADING
 NEW FEATURES/CHANGES
 ====================
 
+New Minimum MIT Krb5 version for Samba AD Domain Controller
+-----------------------------------------------------------
 
-================
+Samba now requires MIT 1.21 when built against a system MIT Krb5 and
+acting as an Active Directory DC.  This addresses the issues that were
+fixed in CVE-2022-37967 (KrbtgtFullPacSignature) and ensures that
+Samba builds against the MIT version that allows us to avoid that
+attack.
+
+Removed dependency on Perl JSON module
+--------------------------------------
+
+Distributions are advised that the Perl JSON package is no longer
+required by Samba builds that use the imported Heimdal.  The build
+instead uses Perl's JSON::PP built into recent perl5 versions.
+
+Current lists of packages required by Samba for major distributions
+are found in the bootstrap/generated-dists/ directory of a Samba
+source tree.  While there will be some differences - due to features
+chosen by packagers - comparing these lists with the build dependencies
+in a package may locate other dependencies we no longer require.
+
+
 REMOVED FEATURES
 ================
 

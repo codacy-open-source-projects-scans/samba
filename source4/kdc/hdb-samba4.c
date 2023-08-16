@@ -178,7 +178,7 @@ static krb5_error_code hdb_samba4_fetch_kvno(krb5_context context, HDB *db,
 	ret = sdb_entry_to_hdb_entry(context, &sentry, entry);
 	sdb_entry_free(&sentry);
 
-	if (code != 0 && ret != 0) {
+	if (code == 0) {
 		code = ret;
 	}
 
@@ -405,7 +405,7 @@ static void reset_bad_password_netlogon(TALLOC_CTX *mem_ctx,
 						  &ndr_table_winbind);
 
 	if (irpc_handle == NULL) {
-		DEBUG(0, ("No winbind_server running!\n"));
+		DBG_ERR("No winbind_server running!\n");
 		return;
 	}
 
@@ -1119,7 +1119,7 @@ NTSTATUS hdb_samba4_create_kdc(struct samba_kdc_base_context *base_ctx,
 
 	*db = talloc_zero(base_ctx, HDB);
 	if (!*db) {
-		krb5_set_error_message(context, ENOMEM, "malloc: out of memory");
+		krb5_set_error_message(context, ENOMEM, "talloc_zero: out of memory");
 		return NT_STATUS_NO_MEMORY;
 	}
 

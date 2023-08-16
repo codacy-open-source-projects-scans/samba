@@ -1101,8 +1101,12 @@ int print_brl_json(struct traverse_state *state,
 		   const char *sharepath,
 		   const char *filename)
 {
-	struct json_object file_json;
-	struct json_object brl_json;
+	struct json_object file_json = {
+		.valid = false,
+	};
+	struct json_object brl_json = {
+		.valid = false,
+	};
 	int result = 0;
 	char *key;
 

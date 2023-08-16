@@ -116,15 +116,12 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 		talloc_get_type_abort(server->context,
 		struct samba_kdc_entry);
 	bool is_krbtgt = krb5_principal_is_krbtgt(context, server->principal);
-	/* Only include resource groups in a service ticket. */
 	enum auth_group_inclusion group_inclusion;
 	bool is_s4u2self = samba_wdc_is_s4u2self_req(r);
 	enum samba_asserted_identity asserted_identity =
 		(is_s4u2self) ?
 			SAMBA_ASSERTED_IDENTITY_SERVICE :
 			SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY;
-	const enum samba_claims_valid claims_valid = SAMBA_CLAIMS_VALID_INCLUDE;
-	const enum samba_compounded_auth compounded_auth = SAMBA_COMPOUNDED_AUTH_EXCLUDE;
 	struct authn_audit_info *server_audit_info = NULL;
 	NTSTATUS status = NT_STATUS_OK;
 
@@ -151,12 +148,12 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 	nt_status = samba_kdc_get_user_info_dc(mem_ctx,
 					       skdc_entry,
 					       asserted_identity,
-					       claims_valid,
-					       compounded_auth,
+					       SAMBA_CLAIMS_VALID_INCLUDE,
+					       SAMBA_COMPOUNDED_AUTH_EXCLUDE,
 					       &user_info_dc);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(mem_ctx);
-		return EINVAL;
+		return map_errno_from_nt_status(nt_status);
 	}
 
 	/*
@@ -199,7 +196,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 						  &logon_blob);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(mem_ctx);
-		return EINVAL;
+		return map_errno_from_nt_status(nt_status);
 	}
 
 	if (cred_ndr_ptr != NULL) {
@@ -208,7 +205,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 							cred_ndr_ptr);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			talloc_free(mem_ctx);
-			return EINVAL;
+			return map_errno_from_nt_status(nt_status);
 		}
 	}
 
@@ -217,7 +214,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 						&upn_blob);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(mem_ctx);
-		return EINVAL;
+		return map_errno_from_nt_status(nt_status);
 	}
 
 	if (is_krbtgt) {
@@ -226,7 +223,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 							 &pac_attrs_blob);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			talloc_free(mem_ctx);
-			return EINVAL;
+			return map_errno_from_nt_status(nt_status);
 		}
 
 		nt_status = samba_kdc_get_requester_sid_blob(mem_ctx,
@@ -234,7 +231,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 							     &requester_sid_blob);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			talloc_free(mem_ctx);
-			return EINVAL;
+			return map_errno_from_nt_status(nt_status);
 		}
 	}
 
@@ -243,7 +240,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 					      &client_claims_blob);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(mem_ctx);
-		return EINVAL;
+		return map_errno_from_nt_status(nt_status);
 	}
 
 	if (pk_reply_key != NULL && cred_ndr != NULL) {
@@ -370,7 +367,7 @@ static krb5_error_code samba_wdc_verify_pac2(astgs_request_t r,
 				      NULL,
 				      &key->key);
 		if (ret != 0) {
-			DEBUG(1, ("PAC KDC signature failed to verify\n"));
+			DBG_WARNING("PAC KDC signature failed to verify\n");
 			goto out;
 		}
 
@@ -406,7 +403,7 @@ out:
 	return ret;
 }
 
-/* Resign (and reform, including possibly new groups) a PAC */
+/* Re-sign (and reform, including possibly new groups) a PAC */
 
 static krb5_error_code samba_wdc_reget_pac(void *priv, astgs_request_t r,
 					   krb5_const_principal _client_principal,
@@ -581,7 +578,7 @@ static krb5_error_code samba_wdc_verify_pac(void *priv, astgs_request_t r,
 						     &ctype,
 						     &rodc_id);
 		if (ret != 0) {
-			DEBUG(1, ("Failed to get PAC checksum info\n"));
+			DBG_WARNING("Failed to get PAC checksum info\n");
 			return ret;
 		}
 
@@ -887,7 +884,7 @@ static krb5_error_code samba_wdc_finalize_reply(void *priv,
 		if (ret != 0) {
 			/*
 			 * So we do not leak the allocated
-			 * memory on kd in the error case
+			 * memory on md in the error case
 			 */
 			krb5_data_free(&md.padata_value);
 		}

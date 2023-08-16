@@ -22,6 +22,7 @@ dnf install -y \
     bison \
     ccache \
     chrpath \
+    codespell \
     crypto-policies-scripts \
     cups-devel \
     curl \
@@ -79,8 +80,6 @@ dnf install -y \
     perl \
     perl-Archive-Tar \
     perl-ExtUtils-MakeMaker \
-    perl-JSON \
-    perl-JSON-Parse \
     perl-Parse-Yapp \
     perl-Test-Base \
     perl-generators \

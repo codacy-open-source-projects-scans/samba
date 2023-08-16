@@ -90,11 +90,11 @@
 	}
 
 	if (!kdc_checksum) {
-		DEBUG(2, ("Invalid PAC constructed for signing, no KDC checksum present!"));
+		DEBUG(2, ("Invalid PAC constructed for signing, no KDC checksum present!\n"));
 		return EINVAL;
 	}
 	if (!srv_checksum) {
-		DEBUG(2, ("Invalid PAC constructed for signing, no SRV checksum present!"));
+		DEBUG(2, ("Invalid PAC constructed for signing, no SRV checksum present!\n"));
 		return EINVAL;
 	}
 
@@ -141,7 +141,7 @@
 		return ret;
 	}
 
-	/* And push it out again, this time to the world.  This relies on determanistic pointer values */
+	/* And push it out again, this time to the world.  This relies on deterministic pointer values */
 	ndr_err = ndr_push_struct_blob(&tmp_blob, mem_ctx,
 				       pac_data,
 				       (ndr_push_flags_fn_t)ndr_push_PAC_DATA);
@@ -400,7 +400,7 @@ krb5_error_code kerberos_pac_to_user_info_dc(TALLOC_CTX *mem_ctx,
 					 group_inclusion,
 					 &user_info_dc_out);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("make_user_info_dc_pac() failed -%s\n",
+		DBG_ERR("make_user_info_dc_pac() failed - %s\n",
 			nt_errstr(nt_status));
 		NDR_PRINT_DEBUG(PAC_LOGON_INFO, info.logon_info.info);
 		if (upn_dns_info != NULL) {

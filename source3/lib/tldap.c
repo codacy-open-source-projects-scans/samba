@@ -159,7 +159,7 @@ static int tldap_next_msgid(struct tldap_context *ld)
 	int result;
 
 	result = ld->msgid++;
-	if (ld->msgid == 2147483647) {
+	if (ld->msgid == INT_MAX) {
 		ld->msgid = 1;
 	}
 	return result;
@@ -1238,6 +1238,7 @@ static char *tldap_get_val(TALLOC_CTX *memctx,
 	while (*s) {
 		s = strchr(s, ')');
 		if (s && (*(s - 1) == '\\')) {
+			s++;
 			continue;
 		}
 		break;

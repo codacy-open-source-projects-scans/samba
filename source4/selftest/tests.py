@@ -1193,23 +1193,12 @@ for env in envs:
 
 have_fast_support = 1
 claims_support = 1
+
+# MIT
+kadmin_is_tgs = int('SAMBA4_USES_HEIMDAL' not in config_hash)
+
+# Heimdal
 compound_id_support = int('SAMBA4_USES_HEIMDAL' in config_hash)
-if ('SAMBA4_USES_HEIMDAL' in config_hash or
-    'HAVE_MIT_KRB5_1_20' in config_hash):
-    tkt_sig_support = 1
-else:
-    tkt_sig_support = 0
-
-if 'SAMBA4_USES_HEIMDAL' in config_hash:
-    full_sig_support = 1
-else:
-    full_sig_support = 0
-
-if 'HAVE_MIT_KRB5_1_20' in config_hash:
-    kadmin_is_tgs = 1
-else:
-    kadmin_is_tgs = 0
-
 expect_pac = int('SAMBA4_USES_HEIMDAL' in config_hash)
 extra_pac_buffers = int('SAMBA4_USES_HEIMDAL' in config_hash)
 check_cname = int('SAMBA4_USES_HEIMDAL' in config_hash)
@@ -1243,8 +1232,6 @@ krb5_environ = {
     'FAST_SUPPORT': have_fast_support,
     'CLAIMS_SUPPORT': claims_support,
     'COMPOUND_ID_SUPPORT': compound_id_support,
-    'TKT_SIG_SUPPORT': tkt_sig_support,
-    'FULL_SIG_SUPPORT': full_sig_support,
     'EXPECT_PAC': expect_pac,
     'EXPECT_EXTRA_PAC_BUFFERS': extra_pac_buffers,
     'CHECK_CNAME': check_cname,
@@ -1746,7 +1733,7 @@ planoldpythontestsuite(env, "ridalloc_exop",
 # That is why this test is run on the isolated environment and not on
 # those connected with ad_dc (vampiredc/promoteddc)
 #
-# The chgdcpass enviroment is likewise isolated and emulates Samba 4.5
+# The chgdcpass environment is likewise isolated and emulates Samba 4.5
 # with regard to GET_ANC
 
 env = 'schema_pair_dc'
@@ -1841,7 +1828,7 @@ for env in ['vampire_dc', 'promoted_dc', 'vampire_2000_dc']:
                            extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
 
 # A side-effect of the getncchanges tests is that they will create hundreds of
-# tombstone objects, so run them last to avoid interferring with (and slowing
+# tombstone objects, so run them last to avoid interfering with (and slowing
 # down) the other DRS tests
 for env in ['vampire_dc', 'promoted_dc']:
     planoldpythontestsuite(env, "getncchanges",

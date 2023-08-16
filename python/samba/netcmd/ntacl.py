@@ -20,8 +20,7 @@ from samba.credentials import DONT_USE_KERBEROS
 import samba.getopt as options
 from samba.dcerpc import security, idmap
 from samba.ntacls import setntacl, getntacl, getdosinfo
-from samba import Ldb
-from samba.ndr import ndr_unpack, ndr_print
+from samba.ndr import ndr_print
 from samba.samdb import SamDB
 from samba.samba3 import param as s3param, passdb
 from samba import provision
@@ -122,15 +121,15 @@ class cmd_ntacl_set(Command):
                 else:
                     self.outf.write("file: %s\n" % _path)
             try:
-                return setntacl(lp,
-                                _path,
-                                acl,
-                                str(domain_sid),
-                                system_session_unix(),
-                                xattr_backend,
-                                eadb_file,
-                                use_ntvfs=use_ntvfs,
-                                service=service)
+                setntacl(lp,
+                         _path,
+                         acl,
+                         str(domain_sid),
+                         system_session_unix(),
+                         xattr_backend,
+                         eadb_file,
+                         use_ntvfs=use_ntvfs,
+                         service=service)
             except Exception as e:
                 raise CommandError("Could not set acl for %s: %s" % (_path, e))
 
@@ -475,7 +474,6 @@ class cmd_ntacl_sysvolcheck(Command):
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp)
         creds.set_kerberos_state(DONT_USE_KERBEROS)
-        logger = self.get_logger()
 
         netlogon = lp.get("path", "netlogon")
         sysvol = lp.get("path", "sysvol")

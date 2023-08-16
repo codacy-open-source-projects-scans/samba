@@ -20,7 +20,10 @@
 #include "replace.h"
 #include "python/modules.h"
 #include "python/py3compat.h"
+#include "libcli/util/pyerrors.h"
+#include "reparse.h"
 #include "reparse_symlink.h"
+#include "smb_constants.h"
 
 static PyObject *py_reparse_put(PyObject *module, PyObject *args)
 {
@@ -104,8 +107,10 @@ static PyObject *py_reparse_symlink_get(PyObject *module, PyObject *args)
 {
 	char *buf = NULL;
 	Py_ssize_t buflen;
-	struct symlink_reparse_struct *syml = NULL;
+	struct reparse_data_buffer *syml = NULL;
+	struct symlink_reparse_struct *lnk = NULL;
 	PyObject *result = NULL;
+	NTSTATUS status;
 	bool ok;
 
 	ok = PyArg_ParseTuple(args, PYARG_BYTES_LEN ":get", &buf, &buflen);
@@ -113,18 +118,32 @@ static PyObject *py_reparse_symlink_get(PyObject *module, PyObject *args)
 		return NULL;
 	}
 
-	syml = symlink_reparse_buffer_parse(NULL, (uint8_t *)buf, buflen);
+	syml = talloc(NULL, struct reparse_data_buffer);
 	if (syml == NULL) {
 		PyErr_NoMemory();
 		return NULL;
 	}
 
-	result = Py_BuildValue(
-		"ssII",
-		syml->substitute_name,
-		syml->print_name,
-		(unsigned)syml->unparsed_path_length,
-		(unsigned)syml->flags);
+	status = reparse_data_buffer_parse(syml, syml, (uint8_t *)buf, buflen);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(syml);
+		PyErr_SetNTSTATUS(status);
+		return NULL;
+	}
+
+	if (syml->tag != IO_REPARSE_TAG_SYMLINK) {
+		TALLOC_FREE(syml);
+		PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+		return NULL;
+	}
+	lnk = &syml->parsed.lnk;
+
+	result = Py_BuildValue("ssII",
+			       lnk->substitute_name,
+			       lnk->print_name,
+			       (unsigned)lnk->unparsed_path_length,
+			       (unsigned)lnk->flags);
+
 	TALLOC_FREE(syml);
 	return result;
 }

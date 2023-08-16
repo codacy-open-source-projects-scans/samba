@@ -494,7 +494,8 @@ static PyObject *py_ldb_dn_get_casefold(PyLdbDnObject *self,
 	return PyUnicode_FromString(ldb_dn_get_casefold(self->dn));
 }
 
-static PyObject *py_ldb_dn_get_linearized(PyLdbDnObject *self)
+static PyObject *py_ldb_dn_get_linearized(PyLdbDnObject *self,
+		PyObject *Py_UNUSED(ignored))
 {
 	return PyUnicode_FromString(ldb_dn_get_linearized(self->dn));
 }
@@ -1391,18 +1392,26 @@ static struct ldb_message *PyDict_AsMessage(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 	msg->elements = talloc_zero_array(msg, struct ldb_message_element, PyDict_Size(py_obj));
+	if (msg->elements == NULL) {
+		PyErr_NoMemory();
+		TALLOC_FREE(msg);
+		return NULL;
+	}
 
 	if (dn_value) {
 		if (!pyldb_Object_AsDn(msg, dn_value, ldb_ctx, &msg->dn)) {
 			PyErr_SetString(PyExc_TypeError, "unable to import dn object");
+			TALLOC_FREE(msg);
 			return NULL;
 		}
 		if (msg->dn == NULL) {
 			PyErr_SetString(PyExc_TypeError, "dn set but not found");
+			TALLOC_FREE(msg);
 			return NULL;
 		}
 	} else {
 		PyErr_SetString(PyExc_TypeError, "no dn set");
+		TALLOC_FREE(msg);
 		return NULL;
 	}
 
@@ -1413,9 +1422,32 @@ static struct ldb_message *PyDict_AsMessage(TALLOC_CTX *mem_ctx,
 							   mod_flags, key_str);
 			if (msg_el == NULL) {
 				PyErr_Format(PyExc_TypeError, "unable to import element '%s'", key_str);
+				TALLOC_FREE(msg);
 				return NULL;
 			}
 			memcpy(&msg->elements[msg_pos], msg_el, sizeof(*msg_el));
+
+			/*
+			 * PyObject_AsMessageElement might have returned a
+			 * reference to an existing MessageElement, and so left
+			 * the name and flags unchanged. Thus if those members
+			 * aren’t set, we’ll assume that the user forgot to
+			 * initialize them.
+			 */
+			if (msg->elements[msg_pos].name == NULL) {
+				/* No name was set — set it now. */
+				msg->elements[msg_pos].name = talloc_strdup(msg->elements, key_str);
+				if (msg->elements[msg_pos].name == NULL) {
+					PyErr_NoMemory();
+					TALLOC_FREE(msg);
+					return NULL;
+				}
+			}
+			if (msg->elements[msg_pos].flags == 0) {
+				/* No flags were set — set them now. */
+				msg->elements[msg_pos].flags = mod_flags;
+			}
+
 			msg_pos++;
 		}
 	}
@@ -3128,12 +3160,12 @@ static PyTypeObject PyLdbModule = {
  * This will accept any sequence objects that contains strings, or 
  * a string object.
  *
- * A reference to set_obj will be borrowed. 
+ * A reference to set_obj might be borrowed.
  *
  * @param mem_ctx Memory context
  * @param set_obj Python object to convert
- * @param flags ldb_message_element flags to set
- * @param attr_name Name of the attribute
+ * @param flags ldb_message_element flags to set, if a new element is returned
+ * @param attr_name Name of the attribute to set, if a new element is returned
  * @return New ldb_message_element, allocated as child of mem_ctx
  */
 static struct ldb_message_element *PyObject_AsMessageElement(
@@ -3164,6 +3196,11 @@ static struct ldb_message_element *PyObject_AsMessageElement(
 	}
 
 	me->name = talloc_strdup(me, attr_name);
+	if (me->name == NULL) {
+		PyErr_NoMemory();
+		talloc_free(me);
+		return NULL;
+	}
 	me->flags = flags;
 	if (PyBytes_Check(set_obj) || PyUnicode_Check(set_obj)) {
 		me->num_values = 1;
@@ -3439,7 +3476,13 @@ static PyObject *py_ldb_msg_element_new(PyTypeObject *type, PyObject *args, PyOb
 	}
 
 	el->flags = flags;
-	el->name = talloc_strdup(el, name);
+	if (name != NULL) {
+		el->name = talloc_strdup(el, name);
+		if (el->name == NULL) {
+			talloc_free(mem_ctx);
+			return PyErr_NoMemory();
+		}
+	}
 
 	ret = PyObject_New(PyLdbMessageElementObject, type);
 	if (ret == NULL) {
@@ -3829,10 +3872,27 @@ static int py_ldb_msg_setitem(PyLdbMessageObject *self, PyObject *name, PyObject
 		if (el == NULL) {
 			return -1;
 		}
+		if (el->name == NULL) {
+			/*
+			 * If ‘value’ is a MessageElement,
+			 * PyObject_AsMessageElement() will have returned a
+			 * reference to it without setting the name. We don’t
+			 * want to modify the original object to set the name
+			 * ourselves, but making a copy would result in
+			 * different behaviour for a caller relying on a
+			 * reference being kept. Rather than continue with a
+			 * NULL name (and probably fail later on), let’s catch
+			 * this potential mistake early.
+			 */
+			PyErr_SetString(PyExc_ValueError, "MessageElement has no name set");
+			talloc_unlink(self->msg, el);
+			return -1;
+		}
 		ldb_msg_remove_attr(pyldb_Message_AsMessage(self), attr_name);
 		ret = ldb_msg_add(pyldb_Message_AsMessage(self), el, el->flags);
 		if (ret != LDB_SUCCESS) {
 			PyErr_SetLdbError(PyExc_LdbError, ret, NULL);
+			talloc_unlink(self->msg, el);
 			return -1;
 		}
 	}
@@ -4351,16 +4411,23 @@ static PyObject *py_register_module(PyObject *module, PyObject *args)
 
 	tmp = PyObject_GetAttrString(input, discard_const_p(char, "name"));
 	if (tmp == NULL) {
+		TALLOC_FREE(ops);
 		return NULL;
 	}
 	name = PyUnicode_AsUTF8(tmp);
 	if (name == NULL) {
+		Py_DECREF(tmp);
+		TALLOC_FREE(ops);
 		return NULL;
 	}
-	Py_XDECREF(tmp);
-	Py_INCREF(input);
 
 	ops->name = talloc_strdup(ops, name);
+	Py_XDECREF(tmp);
+	if (ops->name == NULL) {
+		TALLOC_FREE(ops);
+		return PyErr_NoMemory();
+	}
+	Py_INCREF(input);
 	ops->private_data = input;
 	ops->init_context = py_module_init;
 	ops->search = py_module_search;
@@ -4376,6 +4443,7 @@ static PyObject *py_register_module(PyObject *module, PyObject *args)
 
 	ret = ldb_register_module(ops);
 	if (ret != LDB_SUCCESS) {
+		Py_DECREF(input);
 		TALLOC_FREE(ops);
 	}
 

@@ -137,7 +137,7 @@ static void send_trans2_replies(connection_struct *conn,
 
 	if (useable_space < 0) {
 		DEBUG(0, ("send_trans2_replies failed sanity useable_space "
-			  "= %d!!!", useable_space));
+			  "= %d!!!\n", useable_space));
 		exit_server_cleanly("send_trans2_replies: Not enough space");
 	}
 
@@ -472,7 +472,7 @@ static struct ea_list *read_ea_name_list(TALLOC_CTX *ctx, const char *pdata, siz
 		if (!pull_ascii_talloc(ctx, &eal->ea.name, &pdata[offset],
 				       &converted_size)) {
 			DEBUG(0,("read_ea_name_list: pull_ascii_talloc "
-				 "failed: %s", strerror(errno)));
+				 "failed: %s\n", strerror(errno)));
 		}
 		if (!eal->ea.name) {
 			return NULL;
@@ -3317,10 +3317,11 @@ static NTSTATUS smb_posix_mkdir(connection_struct *conn,
 
 static NTSTATUS smb_posix_open(connection_struct *conn,
 			       struct smb_request *req,
-				char **ppdata,
-				int total_data,
-				struct smb_filename *smb_fname,
-				int *pdata_return_size)
+			       char **ppdata,
+			       int total_data,
+			       struct files_struct *dirfsp,
+			       struct smb_filename *smb_fname,
+			       int *pdata_return_size)
 {
 	bool extended_oplock_granted = False;
 	char *pdata = *ppdata;
@@ -3482,7 +3483,7 @@ static NTSTATUS smb_posix_open(connection_struct *conn,
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		NULL,					/* dirfsp */
+		dirfsp,					/* dirfsp */
 		smb_fname,				/* fname */
 		access_mask,				/* access_mask */
 		(FILE_SHARE_READ | FILE_SHARE_WRITE |	/* share_access */
@@ -3608,9 +3609,10 @@ static void smb_posix_unlink_locked(struct share_mode_lock *lck,
 
 static NTSTATUS smb_posix_unlink(connection_struct *conn,
 				 struct smb_request *req,
-				const char *pdata,
-				int total_data,
-				struct smb_filename *smb_fname)
+				 const char *pdata,
+				 int total_data,
+				 struct files_struct *dirfsp,
+				 struct smb_filename *smb_fname)
 {
 	struct smb_posix_unlink_state state = {};
 	NTSTATUS status = NT_STATUS_OK;
@@ -3657,7 +3659,7 @@ static NTSTATUS smb_posix_unlink(connection_struct *conn,
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		NULL,					/* dirfsp */
+		dirfsp,					/* dirfsp */
 		smb_fname,				/* fname */
 		DELETE_ACCESS,				/* access_mask */
 		(FILE_SHARE_READ | FILE_SHARE_WRITE |	/* share_access */
@@ -3870,9 +3872,10 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 ****************************************************************************/
 
 static NTSTATUS smb_unix_mknod(connection_struct *conn,
-					const char *pdata,
-					int total_data,
-					const struct smb_filename *smb_fname)
+			       const char *pdata,
+			       int total_data,
+			       struct files_struct *dirfsp,
+			       const struct smb_filename *smb_fname)
 {
 	uint32_t file_type = IVAL(pdata,56);
 #if defined(HAVE_MAKEDEV)
@@ -3885,7 +3888,7 @@ static NTSTATUS smb_unix_mknod(connection_struct *conn,
 	mode_t unixmode;
 	int ret;
 	struct smb_filename *parent_fname = NULL;
-	struct smb_filename *base_name = NULL;
+	struct smb_filename *atname = NULL;
 
 	if (total_data < 100) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -3942,21 +3945,21 @@ static NTSTATUS smb_unix_mknod(connection_struct *conn,
 		  "%.0f mode 0%o for file %s\n", (double)dev,
 		  (unsigned int)unixmode, smb_fname_str_dbg(smb_fname)));
 
-	status = parent_pathref(talloc_tos(),
-				conn->cwd_fsp,
-				smb_fname,
-				&parent_fname,
-				&base_name);
+	status = SMB_VFS_PARENT_PATHNAME(dirfsp->conn,
+					 talloc_tos(),
+					 smb_fname,
+					 &parent_fname,
+					 &atname);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
 	/* Ok - do the mknod. */
 	ret = SMB_VFS_MKNODAT(conn,
-			parent_fname->fsp,
-			base_name,
-			unixmode,
-			dev);
+			      dirfsp,
+			      atname,
+			      unixmode,
+			      dev);
 
 	if (ret != 0) {
 		TALLOC_FREE(parent_fname);
@@ -3969,7 +3972,7 @@ static NTSTATUS smb_unix_mknod(connection_struct *conn,
 
 	if (lp_inherit_permissions(SNUM(conn))) {
 		inherit_access_posix_acl(conn,
-					 parent_fname->fsp,
+					 dirfsp,
 					 smb_fname,
 					 unixmode);
 	}
@@ -3986,6 +3989,7 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 					struct smb_request *req,
 					const char *pdata,
 					int total_data,
+					struct files_struct *dirfsp,
 					files_struct *fsp,
 					struct smb_filename *smb_fname)
 {
@@ -4055,10 +4059,15 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 		 * a new info level should be used for mknod. JRA.
 		 */
 
+		if (dirfsp == NULL) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+
 		return smb_unix_mknod(conn,
-					pdata,
-					total_data,
-					smb_fname);
+				      pdata,
+				      total_data,
+				      dirfsp,
+				      smb_fname);
 	}
 
 #if 1
@@ -4219,6 +4228,7 @@ static NTSTATUS smb_set_file_unix_info2(connection_struct *conn,
 					struct smb_request *req,
 					const char *pdata,
 					int total_data,
+					struct files_struct *dirfsp,
 					files_struct *fsp,
 					struct smb_filename *smb_fname)
 {
@@ -4237,8 +4247,13 @@ static NTSTATUS smb_set_file_unix_info2(connection_struct *conn,
 	/* Start by setting all the fields that are common between UNIX_BASIC
 	 * and UNIX_INFO2.
 	 */
-	status = smb_set_file_unix_basic(conn, req, pdata, total_data,
-					 fsp, smb_fname);
+	status = smb_set_file_unix_basic(conn,
+					 req,
+					 pdata,
+					 total_data,
+					 dirfsp,
+					 fsp,
+					 smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -4550,18 +4565,22 @@ static void call_trans2setpathinfo(
 		break;
 
 	case SMB_POSIX_PATH_OPEN:
-		status = smb_posix_open(
-			conn,
-			req,
-			ppdata,
-			total_data,
-			smb_fname,
-			&data_return_size);
+		status = smb_posix_open(conn,
+					req,
+					ppdata,
+					total_data,
+					dirfsp,
+					smb_fname,
+					&data_return_size);
 		break;
 
 	case SMB_POSIX_PATH_UNLINK:
-		status = smb_posix_unlink(
-			conn, req, *ppdata, total_data, smb_fname);
+		status = smb_posix_unlink(conn,
+					  req,
+					  *ppdata,
+					  total_data,
+					  dirfsp,
+					  smb_fname);
 		break;
 
 	case SMB_SET_FILE_UNIX_LINK:
@@ -4575,23 +4594,23 @@ static void call_trans2setpathinfo(
 		break;
 
 	case SMB_SET_FILE_UNIX_BASIC:
-		status = smb_set_file_unix_basic(
-			conn,
-			req,
-			*ppdata,
-			total_data,
-			smb_fname->fsp,
-			smb_fname);
+		status = smb_set_file_unix_basic(conn,
+						 req,
+						 *ppdata,
+						 total_data,
+						 dirfsp,
+						 smb_fname->fsp,
+						 smb_fname);
 		break;
 
 	case SMB_SET_FILE_UNIX_INFO2:
-		status = smb_set_file_unix_info2(
-			conn,
-			req,
-			*ppdata,
-			total_data,
-			smb_fname->fsp,
-			smb_fname);
+		status = smb_set_file_unix_info2(conn,
+						 req,
+						 *ppdata,
+						 total_data,
+						 dirfsp,
+						 smb_fname->fsp,
+						 smb_fname);
 		break;
 	case SMB_SET_POSIX_ACL:
 		status = smb_set_posix_acl(
@@ -4756,13 +4775,23 @@ static void call_trans2setfileinfo(
 		break;
 
 	case SMB_SET_FILE_UNIX_BASIC:
-		status = smb_set_file_unix_basic(
-			conn, req, pdata, total_data, fsp, smb_fname);
+		status = smb_set_file_unix_basic(conn,
+						 req,
+						 pdata,
+						 total_data,
+						 NULL,
+						 fsp,
+						 smb_fname);
 		break;
 
 	case SMB_SET_FILE_UNIX_INFO2:
-		status = smb_set_file_unix_info2(
-			conn, req, pdata, total_data, fsp, smb_fname);
+		status = smb_set_file_unix_info2(conn,
+						 req,
+						 pdata,
+						 total_data,
+						 NULL,
+						 fsp,
+						 smb_fname);
 		break;
 
 	case SMB_SET_POSIX_LOCK:

@@ -160,7 +160,7 @@ def policy_check_fn(fn):
     return wrapper_fn
 
 
-class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
+class AuthnPolicyBaseTests(AuthLogTestBase, KdcTgsBaseTests):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -177,11 +177,6 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
 
         cls._max_ticket_life = None
         cls._max_renew_life = None
-
-    def setUp(self):
-        super().setUp()
-        self.do_asn1_print = global_asn1_print
-        self.do_hexdump = global_hexdump
 
     def take(self, n, iterable, *, take_all=True):
         """Yield n items from an iterable."""
@@ -262,7 +257,12 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
                    ntlm=False,
                    spn=None,
                    allowed_rodc=None,
-                   cached=True):
+                   additional_details=None,
+                   cached=None):
+        if cached is None:
+            # Policies and silos are rarely reused between accounts.
+            cached = assigned_policy is None and assigned_silo is None
+
         opts = {
             'kerberos_enabled': not ntlm,
             'spn': spn,
@@ -278,13 +278,13 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
             members += (member_of,)
         if assigned_policy is not None:
             opts['assigned_policy'] = str(assigned_policy.dn)
-            cached = False   # Policies are rarely reused between accounts.
         if assigned_silo is not None:
             opts['assigned_silo'] = str(assigned_silo.dn)
-            cached = False   # Silos are rarely reused between accounts.
         if allowed_rodc:
             opts['allowed_replication_mock'] = True
             opts['revealed_to_mock_rodc'] = True
+        if additional_details is not None:
+            opts['additional_details'] = self.freeze(additional_details)
 
         if members:
             opts['member_of'] = members
@@ -957,6 +957,182 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
                               audit_event=server_policy_event,
                               reason=server_policy_reason)
 
+    def check_ticket_times(self,
+                           ticket_creds,
+                           expected_life=None,
+                           expected_renew_life=None):
+        ticket = ticket_creds.ticket_private
+
+        authtime = ticket['authtime']
+        starttime = ticket.get('starttime', authtime)
+        endtime = ticket['endtime']
+        renew_till = ticket.get('renew-till', None)
+
+        starttime = self.get_EpochFromKerberosTime(starttime)
+
+        if expected_life is not None:
+            actual_end = self.get_EpochFromKerberosTime(
+                endtime.decode('ascii'))
+            actual_lifetime = actual_end - starttime
+
+            self.assertEqual(expected_life, actual_lifetime)
+
+        if renew_till is None:
+            self.assertIsNone(expected_renew_life)
+        else:
+            if expected_renew_life is not None:
+                actual_renew_till = self.get_EpochFromKerberosTime(
+                    renew_till.decode('ascii'))
+                actual_renew_life = actual_renew_till - starttime
+
+                self.assertEqual(expected_renew_life, actual_renew_life)
+
+    def _get_tgt(self, creds, *,
+                 armor_tgt=None,
+                 till=None,
+                 kdc_options=None,
+                 expected_flags=None,
+                 unexpected_flags=None,
+                 expected_error=0,
+                 expect_status=None,
+                 expected_status=None):
+        user_name = creds.get_username()
+        realm = creds.get_realm()
+        salt = creds.get_salt()
+
+        cname = self.PrincipalName_create(name_type=NT_PRINCIPAL,
+                                          names=user_name.split('/'))
+        sname = self.PrincipalName_create(name_type=NT_SRV_INST,
+                                          names=['krbtgt', realm])
+        expected_sname = self.PrincipalName_create(
+            name_type=NT_SRV_INST, names=['krbtgt', realm.upper()])
+
+        expected_cname = cname
+
+        if till is None:
+            till = self.get_KerberosTime(offset=36000)
+
+        renew_time = till
+
+        krbtgt_creds = self.get_krbtgt_creds()
+        ticket_decryption_key = (
+            self.TicketDecryptionKey_from_creds(krbtgt_creds))
+
+        expected_etypes = krbtgt_creds.tgs_supported_enctypes
+
+        if kdc_options is None:
+            kdc_options = str(krb5_asn1.KDCOptions('renewable'))
+            # Contrary to Microsoft’s documentation, the returned ticket is
+            # renewable.
+            expected_flags = krb5_asn1.TicketFlags('renewable')
+
+        preauth_key = self.PasswordKey_from_creds(creds,
+                                                  kcrypto.Enctype.AES256)
+
+        expected_realm = realm.upper()
+
+        etypes = kcrypto.Enctype.AES256, kcrypto.Enctype.RC4
+
+        if armor_tgt is not None:
+            authenticator_subkey = self.RandomKey(kcrypto.Enctype.AES256)
+            armor_key = self.generate_armor_key(authenticator_subkey,
+                                                armor_tgt.session_key)
+            armor_subkey = authenticator_subkey
+
+            client_challenge_key = self.generate_client_challenge_key(
+                armor_key, preauth_key)
+            enc_challenge_padata = self.get_challenge_pa_data(
+                client_challenge_key)
+
+            def generate_fast_padata_fn(kdc_exchange_dict,
+                                        _callback_dict,
+                                        req_body):
+                return [enc_challenge_padata], req_body
+
+            generate_fast_fn = self.generate_simple_fast
+            generate_fast_armor_fn = self.generate_ap_req
+            generate_padata_fn = None
+
+            fast_armor_type = FX_FAST_ARMOR_AP_REQUEST
+        else:
+            ts_enc_padata = self.get_enc_timestamp_pa_data_from_key(
+                preauth_key)
+
+            def generate_padata_fn(kdc_exchange_dict,
+                                   _callback_dict,
+                                   req_body):
+                return [ts_enc_padata], req_body
+
+            generate_fast_fn = None
+            generate_fast_padata_fn = None
+            generate_fast_armor_fn = None
+
+            armor_key = None
+            armor_subkey = None
+
+            fast_armor_type = None
+
+        if not expected_error:
+            check_error_fn = None
+            check_rep_fn = self.generic_check_kdc_rep
+        else:
+            check_error_fn = self.generic_check_kdc_error
+            check_rep_fn = None
+
+        kdc_exchange_dict = self.as_exchange_dict(
+            creds=creds,
+            expected_error_mode=expected_error,
+            expect_status=expect_status,
+            expected_status=expected_status,
+            expected_crealm=expected_realm,
+            expected_cname=expected_cname,
+            expected_srealm=expected_realm,
+            expected_sname=expected_sname,
+            expected_salt=salt,
+            expected_flags=expected_flags,
+            unexpected_flags=unexpected_flags,
+            expected_supported_etypes=expected_etypes,
+            generate_padata_fn=generate_padata_fn,
+            generate_fast_padata_fn=generate_fast_padata_fn,
+            generate_fast_fn=generate_fast_fn,
+            generate_fast_armor_fn=generate_fast_armor_fn,
+            fast_armor_type=fast_armor_type,
+            check_error_fn=check_error_fn,
+            check_rep_fn=check_rep_fn,
+            check_kdc_private_fn=self.generic_check_kdc_private,
+            armor_key=armor_key,
+            armor_tgt=armor_tgt,
+            armor_subkey=armor_subkey,
+            kdc_options=kdc_options,
+            preauth_key=preauth_key,
+            ticket_decryption_key=ticket_decryption_key,
+            # PA-DATA types are not important for these tests.
+            check_patypes=False)
+
+        rep = self._generic_kdc_exchange(kdc_exchange_dict,
+                                         cname=cname,
+                                         realm=realm,
+                                         sname=sname,
+                                         till_time=till,
+                                         renew_time=renew_time,
+                                         etypes=etypes)
+        if expected_error:
+            self.check_error_rep(rep, expected_error)
+
+            return None
+
+        self.check_as_reply(rep)
+
+        ticket_creds = kdc_exchange_dict['rep_ticket_creds']
+        return ticket_creds
+
+
+class AuthnPolicyTests(AuthnPolicyBaseTests):
+    def setUp(self):
+        super().setUp()
+        self.do_asn1_print = global_asn1_print
+        self.do_hexdump = global_hexdump
+
     def test_authn_policy_tgt_lifetime_user(self):
         # Create an authentication policy with certain TGT lifetimes set.
         user_life = 111
@@ -1435,6 +1611,77 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
                                 expected_renew_life=lifetime)
 
         self.check_as_log(client_creds)
+
+    # This variant of the test is adapted to the behaviour of Windows and MIT
+    # Kerberos. It asserts that tickets issued to Protected Users are neither
+    # forwardable nor proxiable.
+    def test_authn_policy_protected_flags_without_policy_error(self):
+        # Create an authentication policy with a TGT lifetime set.
+        lifetime = 6 * 60 * 60  # 6 hours
+        policy = self.create_authn_policy(enforced=True,
+                                          user_tgt_lifetime=lifetime)
+
+        # Create a user account with the assigned policy, belonging to the
+        # Protected Users group.
+        client_creds = self._get_creds(account_type=self.AccountType.USER,
+                                       protected=True,
+                                       assigned_policy=policy)
+
+        # Request a Kerberos ticket with a lifetime of eight hours, and request
+        # that it be renewable, forwardable and proxiable. Show that the
+        # returned ticket for the protected user is only renewable.
+        till = self.get_KerberosTime(offset=8 * 60 * 60)  # 8 hours
+        tgt = self._get_tgt(
+            client_creds,
+            till=till,
+            kdc_options=str(krb5_asn1.KDCOptions(
+                'renewable,forwardable,proxiable')),
+            expected_flags=krb5_asn1.TicketFlags('renewable'),
+            unexpected_flags=krb5_asn1.TicketFlags('forwardable,proxiable'))
+        self.check_ticket_times(tgt, expected_life=lifetime,
+                                expected_renew_life=lifetime)
+
+        self.check_as_log(client_creds)
+
+    # This variant of the test is adapted to the behaviour of Heimdal
+    # Kerberos. It asserts that we get a policy error when requesting a
+    # proxiable ticket.
+    def test_authn_policy_protected_flags_with_policy_error(self):
+        # Create an authentication policy with a TGT lifetime set.
+        lifetime = 6 * 60 * 60  # 6 hours
+        policy = self.create_authn_policy(enforced=True,
+                                          user_tgt_lifetime=lifetime)
+
+        # Create a user account with the assigned policy, belonging to the
+        # Protected Users group.
+        client_creds = self._get_creds(account_type=self.AccountType.USER,
+                                       protected=True,
+                                       assigned_policy=policy)
+
+        # Request a Kerberos ticket with a lifetime of eight hours, and request
+        # that it be renewable and forwardable. Show that the returned ticket
+        # for the protected user is only renewable.
+        till = self.get_KerberosTime(offset=8 * 60 * 60)  # 8 hours
+        tgt = self._get_tgt(
+            client_creds,
+            till=till,
+            kdc_options=str(krb5_asn1.KDCOptions('renewable,forwardable')),
+            expected_flags=krb5_asn1.TicketFlags('renewable'),
+            unexpected_flags=krb5_asn1.TicketFlags('forwardable'))
+        self.check_ticket_times(tgt, expected_life=lifetime,
+                                expected_renew_life=lifetime)
+
+        self.check_as_log(client_creds)
+
+        # Request that the Kerberos ticket be proxiable. Show that we get a
+        # policy error.
+        self._get_tgt(client_creds,
+                      till=till,
+                      kdc_options=str(krb5_asn1.KDCOptions('proxiable')),
+                      expected_error=KDC_ERR_POLICY)
+
+        self.check_as_log(client_creds,
+                          status=ntstatus.NT_STATUS_INVALID_WORKSTATION)
 
     def test_authn_policy_tgt_lifetime_zero_protected(self):
         # Create an authentication policy with the TGT lifetime set to zero.
@@ -3117,7 +3364,7 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
         target_creds = self._get_creds(account_type=self.AccountType.COMPUTER,
                                        assigned_policy=policy)
 
-        # Show that authentication is allowed.
+        # Show that obtaining a service ticket is allowed.
         self._tgs_req(tgt, 0, client_creds, target_creds,
                       armor_tgt=mach_tgt)
 
@@ -8222,170 +8469,6 @@ class AuthnPolicyTests(AuthLogTestBase, KdcTgsBaseTests):
             client_policy=policy,
             client_policy_status=ntstatus.NT_STATUS_ACCOUNT_RESTRICTION,
             event=AuditEvent.NTLM_DEVICE_RESTRICTION)
-
-    def check_ticket_times(self,
-                           ticket_creds,
-                           expected_life=None,
-                           expected_renew_life=None):
-        ticket = ticket_creds.ticket_private
-
-        authtime = ticket['authtime']
-        starttime = ticket.get('starttime', authtime)
-        endtime = ticket['endtime']
-        renew_till = ticket.get('renew-till', None)
-
-        starttime = self.get_EpochFromKerberosTime(starttime)
-
-        if expected_life is not None:
-            actual_end = self.get_EpochFromKerberosTime(
-                endtime.decode('ascii'))
-            actual_lifetime = actual_end - starttime
-
-            self.assertEqual(expected_life, actual_lifetime)
-
-        if renew_till is None:
-            self.assertIsNone(expected_renew_life)
-        else:
-            if expected_renew_life is not None:
-                actual_renew_till = self.get_EpochFromKerberosTime(
-                    renew_till.decode('ascii'))
-                actual_renew_life = actual_renew_till - starttime
-
-                self.assertEqual(expected_renew_life, actual_renew_life)
-
-    def _get_tgt(self, creds, *,
-                 armor_tgt=None,
-                 till=None,
-                 expected_error=0,
-                 expect_status=None,
-                 expected_status=None):
-        user_name = creds.get_username()
-        realm = creds.get_realm()
-        salt = creds.get_salt()
-
-        cname = self.PrincipalName_create(name_type=NT_PRINCIPAL,
-                                          names=user_name.split('/'))
-        sname = self.PrincipalName_create(name_type=NT_SRV_INST,
-                                          names=['krbtgt', realm])
-        expected_sname = self.PrincipalName_create(
-            name_type=NT_SRV_INST, names=['krbtgt', realm.upper()])
-
-        expected_cname = cname
-
-        if till is None:
-            till = self.get_KerberosTime(offset=36000)
-
-        renew_time = till
-
-        krbtgt_creds = self.get_krbtgt_creds()
-        ticket_decryption_key = (
-            self.TicketDecryptionKey_from_creds(krbtgt_creds))
-
-        expected_etypes = krbtgt_creds.tgs_supported_enctypes
-
-        kdc_options = str(krb5_asn1.KDCOptions('renewable'))
-        # Contrary to Microsoft’s documentation, the returned ticket is
-        # renewable.
-        expected_flags = krb5_asn1.TicketFlags('renewable')
-
-        preauth_key = self.PasswordKey_from_creds(creds,
-                                                  kcrypto.Enctype.AES256)
-
-        expected_realm = realm.upper()
-
-        etypes = kcrypto.Enctype.AES256, kcrypto.Enctype.RC4
-
-        if armor_tgt is not None:
-            authenticator_subkey = self.RandomKey(kcrypto.Enctype.AES256)
-            armor_key = self.generate_armor_key(authenticator_subkey,
-                                                armor_tgt.session_key)
-            armor_subkey = authenticator_subkey
-
-            client_challenge_key = self.generate_client_challenge_key(
-                armor_key, preauth_key)
-            enc_challenge_padata = self.get_challenge_pa_data(
-                client_challenge_key)
-
-            def generate_fast_padata_fn(kdc_exchange_dict,
-                                        _callback_dict,
-                                        req_body):
-                return [enc_challenge_padata], req_body
-
-            generate_fast_fn = self.generate_simple_fast
-            generate_fast_armor_fn = self.generate_ap_req
-            generate_padata_fn = None
-
-            fast_armor_type = FX_FAST_ARMOR_AP_REQUEST
-        else:
-            ts_enc_padata = self.get_enc_timestamp_pa_data_from_key(
-                preauth_key)
-
-            def generate_padata_fn(kdc_exchange_dict,
-                                   _callback_dict,
-                                   req_body):
-                return [ts_enc_padata], req_body
-
-            generate_fast_fn = None
-            generate_fast_padata_fn = None
-            generate_fast_armor_fn = None
-
-            armor_key = None
-            armor_subkey = None
-
-            fast_armor_type = None
-
-        if not expected_error:
-            check_error_fn = None
-            check_rep_fn = self.generic_check_kdc_rep
-        else:
-            check_error_fn = self.generic_check_kdc_error
-            check_rep_fn = None
-
-        kdc_exchange_dict = self.as_exchange_dict(
-            creds=creds,
-            expected_error_mode=expected_error,
-            expect_status=expect_status,
-            expected_status=expected_status,
-            expected_crealm=expected_realm,
-            expected_cname=expected_cname,
-            expected_srealm=expected_realm,
-            expected_sname=expected_sname,
-            expected_salt=salt,
-            expected_flags=expected_flags,
-            expected_supported_etypes=expected_etypes,
-            generate_padata_fn=generate_padata_fn,
-            generate_fast_padata_fn=generate_fast_padata_fn,
-            generate_fast_fn=generate_fast_fn,
-            generate_fast_armor_fn=generate_fast_armor_fn,
-            fast_armor_type=fast_armor_type,
-            check_error_fn=check_error_fn,
-            check_rep_fn=check_rep_fn,
-            check_kdc_private_fn=self.generic_check_kdc_private,
-            armor_key=armor_key,
-            armor_tgt=armor_tgt,
-            armor_subkey=armor_subkey,
-            kdc_options=kdc_options,
-            preauth_key=preauth_key,
-            ticket_decryption_key=ticket_decryption_key,
-            # PA-DATA types are not important for these tests.
-            check_patypes=False)
-
-        rep = self._generic_kdc_exchange(kdc_exchange_dict,
-                                         cname=cname,
-                                         realm=realm,
-                                         sname=sname,
-                                         till_time=till,
-                                         renew_time=renew_time,
-                                         etypes=etypes)
-        if expected_error:
-            self.check_error_rep(rep, expected_error)
-
-            return None
-
-        self.check_as_reply(rep)
-
-        ticket_creds = kdc_exchange_dict['rep_ticket_creds']
-        return ticket_creds
 
 
 if __name__ == '__main__':

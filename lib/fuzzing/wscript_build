@@ -37,6 +37,11 @@ bld.SAMBA_BINARY('fuzz_sddl_parse',
                  deps='fuzzing samba-security  afl-fuzz-main',
                  fuzzer=True)
 
+bld.SAMBA_BINARY('fuzz_sess_crypt_blob',
+                 source='fuzz_sess_crypt_blob.c',
+                 deps='fuzzing samba-security LIBCLI_AUTH NDR_DSSETUP  afl-fuzz-main',
+                 fuzzer=True)
+
 bld.SAMBA_BINARY('fuzz_nmblib_parse_packet',
                  source='fuzz_nmblib_parse_packet.c',
                  deps='fuzzing libsmb afl-fuzz-main',
@@ -115,6 +120,11 @@ bld.SAMBA_BINARY('fuzz_ldb_parse_binary_decode',
 
 bld.SAMBA_BINARY('fuzz_ldb_parse_tree',
                  source='fuzz_ldb_parse_tree.c',
+                 deps='fuzzing ldb afl-fuzz-main',
+                 fuzzer=True)
+
+bld.SAMBA_BINARY('fuzz_ldb_comparison_fold',
+                 source='fuzz_ldb_comparison_fold.c',
                  deps='fuzzing ldb afl-fuzz-main',
                  fuzzer=True)
 

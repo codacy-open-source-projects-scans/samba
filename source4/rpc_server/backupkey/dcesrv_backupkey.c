@@ -100,9 +100,9 @@ static NTSTATUS set_lsa_secret(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	ret = ldb_search(ldb, mem_ctx, &res, system_dn, LDB_SCOPE_SUBTREE, attrs,
+	ret = ldb_search(ldb, frame, &res, system_dn, LDB_SCOPE_SUBTREE, attrs,
 			   "(&(cn=%s)(objectclass=secret))",
-			   ldb_binary_encode_string(mem_ctx, name2));
+			   ldb_binary_encode_string(frame, name2));
 
 	if (ret != LDB_SUCCESS ||  res->count != 0 ) {
 		DEBUG(2, ("Secret %s already exists !\n", name2));
@@ -202,7 +202,7 @@ static NTSTATUS get_lsa_secret(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	ret = ldb_search(ldb, mem_ctx, &res, system_dn, LDB_SCOPE_SUBTREE, attrs,
+	ret = ldb_search(ldb, tmp_mem, &res, system_dn, LDB_SCOPE_SUBTREE, attrs,
 			   "(&(cn=%s Secret)(objectclass=secret))",
 			   ldb_binary_encode_string(tmp_mem, name));
 
@@ -1165,7 +1165,7 @@ static WERROR bkrp_retrieve_client_wrap_key(struct dcesrv_call_state *dce_call, 
 	NTSTATUS status;
 
 	/*
-	 * here we basicaly need to return our certificate
+	 * here we basically need to return our certificate
 	 * search for lsa secret BCKUPKEY_PREFERRED first
 	 */
 
@@ -1655,7 +1655,7 @@ static WERROR bkrp_server_wrap_encrypt_data(struct dcesrv_call_state *dce_call, 
 	 * and mackey values are unique for this operation, and
 	 * discovering these (by reversing the RC4 over the
 	 * attacker-controlled data) does not return something able to
-	 * be used to decyrpt the encrypted data of other users
+	 * be used to decrypt the encrypted data of other users
 	 */
 	generate_random_buffer(server_side_wrapped.r2, sizeof(server_side_wrapped.r2));
 

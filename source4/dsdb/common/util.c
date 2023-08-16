@@ -536,6 +536,9 @@ struct samr_Password *samdb_result_hash(TALLOC_CTX *mem_ctx, const struct ldb_me
 	const struct ldb_val *val = ldb_msg_find_ldb_val(msg, attr);
 	if (val && (val->length >= sizeof(hash->hash))) {
 		hash = talloc(mem_ctx, struct samr_Password);
+		if (hash == NULL) {
+			return NULL;
+		}
 		memcpy(hash->hash, val->data, MIN(val->length, sizeof(hash->hash)));
 	}
 	return hash;
@@ -3436,9 +3439,14 @@ WERROR dsdb_loadreps(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx, struct ld
 	*r = NULL;
 	*count = 0;
 
+	if (tmp_ctx == NULL) {
+		return WERR_NOT_ENOUGH_MEMORY;
+	}
+
 	ret = dsdb_search_dn(sam_ctx, tmp_ctx, &res, dn, attrs, 0);
 	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
 		/* partition hasn't been replicated yet */
+		talloc_free(tmp_ctx);
 		return WERR_OK;
 	}
 	if (ret != LDB_SUCCESS) {
@@ -3495,7 +3503,14 @@ WERROR dsdb_savereps(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx, struct ld
 	struct ldb_message_element *el;
 	unsigned int i;
 
+	if (tmp_ctx == NULL) {
+		goto failed;
+	}
+
 	msg = ldb_msg_new(tmp_ctx);
+	if (msg == NULL) {
+		goto failed;
+	}
 	msg->dn = dn;
 	if (ldb_msg_add_empty(msg, attr, LDB_FLAG_MOD_REPLACE, &el) != LDB_SUCCESS) {
 		goto failed;
@@ -3548,6 +3563,10 @@ int dsdb_load_partition_usn(struct ldb_context *ldb, struct ldb_dn *dn,
 	TALLOC_CTX *tmp_ctx = talloc_new(ldb);
 	struct dsdb_control_current_partition *p_ctrl;
 	struct ldb_result *res;
+
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
 
 	res = talloc_zero(tmp_ctx, struct ldb_result);
 	if (!res) {
@@ -3688,6 +3707,10 @@ int samdb_is_rodc(struct ldb_context *sam_ctx, const struct GUID *objectGUID, bo
 	struct ldb_message *msg;
 	TALLOC_CTX *tmp_ctx = talloc_new(sam_ctx);
 
+	if (tmp_ctx == NULL) {
+		return ldb_oom(sam_ctx);
+	}
+
 	ret = samdb_get_ntds_obj_by_guid(tmp_ctx,
 					 sam_ctx,
 					 objectGUID,
@@ -3700,7 +3723,7 @@ int samdb_is_rodc(struct ldb_context *sam_ctx, const struct GUID *objectGUID, bo
 	}
 
 	if (ret != LDB_SUCCESS) {
-		DEBUG(1,(("Failed to find our own NTDS Settings object by objectGUID=%s!\n"),
+		DEBUG(1,("Failed to find our own NTDS Settings object by objectGUID=%s!\n",
 			 GUID_string(tmp_ctx, objectGUID)));
 		*is_rodc = false;
 		talloc_free(tmp_ctx);
@@ -3771,11 +3794,14 @@ int samdb_dns_host_name(struct ldb_context *sam_ctx, const char **host_name)
 	}
 
 	tmp_ctx = talloc_new(sam_ctx);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(sam_ctx);
+	}
 
 	ret = dsdb_search_dn(sam_ctx, tmp_ctx, &res, NULL, attrs, 0);
 
 	if (res == NULL || res->count != 1 || ret != LDB_SUCCESS) {
-		DEBUG(0, ("Failed to get rootDSE for dnsHostName: %s",
+		DEBUG(0, ("Failed to get rootDSE for dnsHostName: %s\n",
 			  ldb_errstring(sam_ctx)));
 		TALLOC_FREE(tmp_ctx);
 		return ret;
@@ -3785,7 +3811,7 @@ int samdb_dns_host_name(struct ldb_context *sam_ctx, const char **host_name)
 						 "dnsHostName",
 						 NULL);
 	if (_host_name == NULL) {
-		DEBUG(0, ("Failed to get dnsHostName from rootDSE"));
+		DEBUG(0, ("Failed to get dnsHostName from rootDSE\n"));
 		TALLOC_FREE(tmp_ctx);
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
@@ -3961,8 +3987,17 @@ const char *samdb_cn_to_lDAPDisplayName(TALLOC_CTX *mem_ctx, const char *cn)
 		tokens[i][0] = toupper(tokens[i][0]);
 
 	ret = talloc_strdup(mem_ctx, tokens[0]);
-	for (i = 1; tokens[i] != NULL; i++)
+	if (ret == NULL) {
+		talloc_free(tokens);
+		return NULL;
+	}
+	for (i = 1; tokens[i] != NULL; i++) {
 		ret = talloc_asprintf_append_buffer(ret, "%s", tokens[i]);
+		if (ret == NULL) {
+			talloc_free(tokens);
+			return NULL;
+		}
+	}
 
 	talloc_free(tokens);
 
@@ -4182,7 +4217,7 @@ int dsdb_check_and_update_fl(struct ldb_context *ldb_ctx, struct loadparm_contex
 
 	ret = samdb_server_reference_dn(ldb_ctx, frame, &dc_computer_dn);
 	if (ret != LDB_SUCCESS) {
-		DBG_ERR("Failed get the dc_computer_dn: %s\n",
+		DBG_ERR("Failed to get the dc_computer_dn: %s\n",
 			ldb_errstring(ldb_ctx));
 		TALLOC_FREE(frame);
 		return ret;
@@ -4423,6 +4458,10 @@ int dsdb_wellknown_dn(struct ldb_context *samdb, TALLOC_CTX *mem_ctx,
 	int ret;
 	struct ldb_dn *dn;
 	struct ldb_result *res = NULL;
+
+	if (tmp_ctx == NULL) {
+		return ldb_oom(samdb);
+	}
 
 	/* construct the magic WKGUID DN */
 	dn = ldb_dn_new_fmt(tmp_ctx, samdb, "<WKGUID=%s,%s>",
@@ -4733,6 +4772,7 @@ int dsdb_normalise_dn_and_find_nc_root(struct ldb_context *samdb,
 			ldb_asprintf_errstring(samdb,
 					       "Request for NC root for %s failed to return any results.",
 					       ldb_dn_get_linearized(dn));
+			talloc_free(tmp_ctx);
 			return LDB_ERR_NO_SUCH_OBJECT;
 		}
 		*normalised_dn = context.dn;
@@ -4912,6 +4952,7 @@ int dsdb_load_udv_v2(struct ldb_context *samdb, struct ldb_dn *dn, TALLOC_CTX *m
 			/* we always store as version 2, and
 			 * replUpToDateVector is not replicated
 			 */
+			talloc_free(r);
 			return LDB_ERR_INVALID_ATTRIBUTE_SYNTAX;
 		}
 
@@ -5314,6 +5355,10 @@ int dsdb_search_dn(struct ldb_context *ldb,
 	struct ldb_result *res;
 	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
+
 	res = talloc_zero(tmp_ctx, struct ldb_result);
 	if (!res) {
 		talloc_free(tmp_ctx);
@@ -5385,6 +5430,10 @@ int dsdb_search_by_dn_guid(struct ldb_context *ldb,
 	struct ldb_dn *dn;
 	int ret;
 
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
+
 	dn = ldb_dn_new_fmt(tmp_ctx, ldb, "<GUID=%s>", GUID_string(tmp_ctx, guid));
 	if (dn == NULL) {
 		talloc_free(tmp_ctx);
@@ -5417,6 +5466,10 @@ int dsdb_search(struct ldb_context *ldb,
 
 	/* cross-partitions searches with a basedn break multi-domain support */
 	SMB_ASSERT(basedn == NULL || (dsdb_flags & DSDB_SEARCH_SEARCH_ALL_PARTITIONS) == 0);
+
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
 
 	res = talloc_zero(tmp_ctx, struct ldb_result);
 	if (!res) {
@@ -5535,6 +5588,10 @@ int dsdb_search_one(struct ldb_context *ldb,
 	char *expression = NULL;
 	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
+
 	dsdb_flags |= DSDB_SEARCH_ONE_ONLY;
 
 	res = talloc_zero(tmp_ctx, struct ldb_result);
@@ -5636,6 +5693,10 @@ int dsdb_validate_dsa_guid(struct ldb_context *ldb,
 	struct ldb_dn *dn, *account_dn;
 	struct dom_sid sid2;
 	NTSTATUS status;
+
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
 
 	config_dn = ldb_get_config_basedn(ldb);
 
@@ -5742,7 +5803,7 @@ WERROR dsdb_get_fsmo_role_info(TALLOC_CTX *tmp_ctx,
 		*fsmo_role_dn = samdb_partitions_dn(ldb, tmp_ctx);
 		ret = samdb_reference_dn(ldb, tmp_ctx, *fsmo_role_dn, "fSMORoleOwner", role_owner_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Naming Master object - %s",
+			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Naming Master object - %s\n",
 				 ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
@@ -5752,7 +5813,7 @@ WERROR dsdb_get_fsmo_role_info(TALLOC_CTX *tmp_ctx,
 		*fsmo_role_dn = samdb_infrastructure_dn(ldb, tmp_ctx);
 		ret = samdb_reference_dn(ldb, tmp_ctx, *fsmo_role_dn, "fSMORoleOwner", role_owner_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Schema Master object - %s",
+			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Schema Master object - %s\n",
 				 ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
@@ -5761,14 +5822,14 @@ WERROR dsdb_get_fsmo_role_info(TALLOC_CTX *tmp_ctx,
 	case DREPL_RID_MASTER:
 		ret = samdb_rid_manager_dn(ldb, tmp_ctx, fsmo_role_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0, (__location__ ": Failed to find RID Manager object - %s", ldb_errstring(ldb)));
+			DEBUG(0, (__location__ ": Failed to find RID Manager object - %s\n", ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
 		}
 
 		ret = samdb_reference_dn(ldb, tmp_ctx, *fsmo_role_dn, "fSMORoleOwner", role_owner_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in RID Manager object - %s",
+			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in RID Manager object - %s\n",
 				 ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
@@ -5778,7 +5839,7 @@ WERROR dsdb_get_fsmo_role_info(TALLOC_CTX *tmp_ctx,
 		*fsmo_role_dn = ldb_get_schema_basedn(ldb);
 		ret = samdb_reference_dn(ldb, tmp_ctx, *fsmo_role_dn, "fSMORoleOwner", role_owner_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Schema Master object - %s",
+			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Schema Master object - %s\n",
 				 ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
@@ -5788,7 +5849,7 @@ WERROR dsdb_get_fsmo_role_info(TALLOC_CTX *tmp_ctx,
 		*fsmo_role_dn = ldb_get_default_basedn(ldb);
 		ret = samdb_reference_dn(ldb, tmp_ctx, *fsmo_role_dn, "fSMORoleOwner", role_owner_dn);
 		if (ret != LDB_SUCCESS) {
-			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Pd Master object - %s",
+			DEBUG(0,(__location__ ": Failed to find fSMORoleOwner in Pd Master object - %s\n",
 				 ldb_errstring(ldb)));
 			talloc_free(tmp_ctx);
 			return WERR_DS_DRA_INTERNAL_ERROR;
@@ -5813,7 +5874,7 @@ const char *samdb_dn_to_dnshostname(struct ldb_context *ldb,
 			     LDB_SCOPE_BASE,
 			     attrs, NULL);
 	if (ldb_ret != LDB_SUCCESS) {
-		DEBUG(4, ("Failed to find dNSHostName for dn %s, ldb error: %s",
+		DEBUG(4, ("Failed to find dNSHostName for dn %s, ldb error: %s\n",
 			  ldb_dn_get_linearized(server_dn), ldb_errstring(ldb)));
 		return NULL;
 	}
@@ -5841,10 +5902,14 @@ bool dsdb_attr_in_parse_tree(struct ldb_parse_tree *tree,
        case LDB_OP_NOT:
                return dsdb_attr_in_parse_tree(tree->u.isnot.child, attr);
        case LDB_OP_EQUALITY:
+               if (ldb_attr_cmp(tree->u.equality.attr, attr) == 0) {
+                       return true;
+               }
+               return false;
        case LDB_OP_GREATER:
        case LDB_OP_LESS:
        case LDB_OP_APPROX:
-               if (ldb_attr_cmp(tree->u.equality.attr, attr) == 0) {
+               if (ldb_attr_cmp(tree->u.comparison.attr, attr) == 0) {
                        return true;
                }
                return false;
@@ -5966,6 +6031,10 @@ int dsdb_create_partial_replica_NC(struct ldb_context *ldb,  struct ldb_dn *dn)
 	struct ldb_message *msg;
 	int ret;
 
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
+
 	msg = ldb_msg_new(tmp_ctx);
 	if (msg == NULL) {
 		talloc_free(tmp_ctx);
@@ -6065,7 +6134,7 @@ static struct ldb_result *lookup_user_pso(struct ldb_context *sam_ldb,
 			 * log the error. The caller should fallback to using
 			 * the default domain password settings
 			 */
-			DBG_ERR("Error retrieving msDS-ResultantPSO %s for %s",
+			DBG_ERR("Error retrieving msDS-ResultantPSO %s for %s\n",
 				ldb_dn_get_linearized(pso_dn),
 				ldb_dn_get_linearized(user_msg->dn));
 		}
@@ -6480,6 +6549,9 @@ bool dsdb_objects_have_same_nc(struct ldb_context *ldb,
 	bool same_nc = true;
 
 	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
 
 	ret = dsdb_find_nc_root(ldb, tmp_ctx, source_dn, &source_nc);
 	/* fix clang warning */
@@ -6637,6 +6709,9 @@ int PRINTF_ATTRIBUTE(6, 7) dsdb_domain_count(
 
 	*count = 0;
 	tmp_ctx = talloc_new(ldb);
+	if (tmp_ctx == NULL) {
+		return ldb_oom(ldb);
+	}
 
 	context = talloc_zero(tmp_ctx, struct dsdb_count_domain_context);
 	if (context == NULL) {

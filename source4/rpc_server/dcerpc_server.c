@@ -64,7 +64,7 @@ static struct dcesrv_assoc_group *dcesrv_assoc_group_reference(struct dcesrv_con
 				transport);
 
 		DBG_NOTICE("assoc_group 0x%08x (transport %s) "
-			   "is not available on transport %s",
+			   "is not available on transport %s\n",
 			   id, at, ct);
 		return NULL;
 	}
@@ -139,7 +139,7 @@ NTSTATUS dcesrv_assoc_group_find_s4(
 	 *
 	 * We have to do this when it is not run as a single process,
 	 * because then it can't see the other valid association
-	 * groups.  We handle this genericly for all endpoints not
+	 * groups.  We handle this generically for all endpoints not
 	 * running in single process mode.
 	 *
 	 * We know which endpoint we are on even before checking the

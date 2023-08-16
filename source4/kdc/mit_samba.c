@@ -47,7 +47,7 @@
 
 void mit_samba_context_free(struct mit_samba_context *ctx)
 {
-	/* free heimdal's krb5_context */
+	/* free MIT's krb5_context */
 	if (ctx->context) {
 		krb5_free_context(ctx->context);
 	}
@@ -120,7 +120,7 @@ int mit_samba_context_init(struct mit_samba_context **_ctx)
 		goto done;
 	}
 
-	/* init heimdal's krb_context and log facilities */
+	/* init MIT's krb_context and log facilities */
 	ret = smb_krb5_init_context_basic(ctx,
 					  ctx->db_ctx->lp_ctx,
 					  &ctx->context);
@@ -478,19 +478,24 @@ int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 	krb5_error_code code;
 	struct samba_kdc_entry *skdc_entry;
 	struct samba_kdc_entry *server_entry = NULL;
-	bool is_krbtgt = ks_is_tgs_principal(smb_ctx, server->princ);
+	bool is_krbtgt;
 	/* Only include resource groups in a service ticket. */
 	enum auth_group_inclusion group_inclusion;
 	enum samba_asserted_identity asserted_identity =
 		(flags & KRB5_KDB_FLAG_PROTOCOL_TRANSITION) ?
 			SAMBA_ASSERTED_IDENTITY_SERVICE :
 			SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY;
-	const enum samba_claims_valid claims_valid = SAMBA_CLAIMS_VALID_INCLUDE;
-	const enum samba_compounded_auth compounded_auth = SAMBA_COMPOUNDED_AUTH_EXCLUDE;
 
+	if (client == NULL) {
+		return EINVAL;
+	}
 	skdc_entry = talloc_get_type_abort(client->e_data,
 					   struct samba_kdc_entry);
 
+	if (server == NULL) {
+		return EINVAL;
+	}
+	is_krbtgt = ks_is_tgs_principal(smb_ctx, server->princ);
 	server_entry = talloc_get_type_abort(server->e_data,
 					     struct samba_kdc_entry);
 
@@ -518,8 +523,8 @@ int mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 	nt_status = samba_kdc_get_user_info_dc(tmp_ctx,
 					       skdc_entry,
 					       asserted_identity,
-					       claims_valid,
-					       compounded_auth,
+					       SAMBA_CLAIMS_VALID_INCLUDE,
+					       SAMBA_COMPOUNDED_AUTH_EXCLUDE,
 					       &user_info_dc);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(tmp_ctx);
@@ -784,6 +789,10 @@ krb5_error_code mit_samba_update_pac(struct mit_samba_context *ctx,
 		talloc_get_type_abort(krbtgt->e_data,
 				      struct samba_kdc_entry);
 
+	if (server == NULL) {
+		code = EINVAL;
+		goto done;
+	}
 	server_skdc_entry =
 		talloc_get_type_abort(server->e_data,
 				      struct samba_kdc_entry);
@@ -1070,7 +1079,7 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 	krb5_error_code code = 0;
 
 #ifdef DEBUG_PASSWORD
-	DEBUG(1,("mit_samba_kpasswd_change_password called with: %s\n", pwd));
+	DBG_WARNING("mit_samba_kpasswd_change_password called with: %s\n", pwd);
 #endif
 
 	tmp_ctx = talloc_named(ctx, 0, "mit_samba_kpasswd_change_password");
@@ -1082,10 +1091,10 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 						 p->msg,
 						 &user_info_dc);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(1,("samba_kdc_get_user_info_from_db failed: %s\n",
-			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return EINVAL;
+		DBG_WARNING("samba_kdc_get_user_info_from_db failed: %s\n",
+			    nt_errstr(status));
+		code = EINVAL;
+		goto out;
 	}
 
 	status = auth_generate_session_info(tmp_ctx,
@@ -1096,10 +1105,10 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 					    &ctx->session_info);
 
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(1,("auth_generate_session_info failed: %s\n",
-			nt_errstr(status)));
-		talloc_free(tmp_ctx);
-		return EINVAL;
+		DBG_WARNING("auth_generate_session_info failed: %s\n",
+			    nt_errstr(status));
+		code = EINVAL;
+		goto out;
 	}
 
 	/* password is expected as UTF16 */
@@ -1107,9 +1116,9 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 	if (!convert_string_talloc(tmp_ctx, CH_UTF8, CH_UTF16,
 				   pwd, strlen(pwd),
 				   &password.data, &password.length)) {
-		DEBUG(1,("convert_string_talloc failed\n"));
-		talloc_free(tmp_ctx);
-		return EINVAL;
+		DBG_WARNING("convert_string_talloc failed\n");
+		code = EINVAL;
+		goto out;
 	}
 
 	status = samdb_kpasswd_change_password(tmp_ctx,
@@ -1122,8 +1131,8 @@ int mit_samba_kpasswd_change_password(struct mit_samba_context *ctx,
 					       &error_string,
 					       &result);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(1,("samdb_kpasswd_change_password failed: %s\n",
-			nt_errstr(status)));
+		DBG_WARNING("samdb_kpasswd_change_password failed: %s\n",
+			    nt_errstr(status));
 		code = KADM5_PASS_Q_GENERIC;
 		krb5_set_error_message(ctx->context, code, "%s", error_string);
 		goto out;

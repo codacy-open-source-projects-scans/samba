@@ -2390,7 +2390,7 @@ static ssize_t fruit_pread_meta(vfs_handle_struct *handle,
 	}
 
 	if (fio == NULL) {
-		DBG_ERR("Failed to fetch fsp extension");
+		DBG_ERR("Failed to fetch fsp extension\n");
 		return -1;
 	}
 
@@ -2797,7 +2797,7 @@ static ssize_t fruit_pwrite_meta(vfs_handle_struct *handle,
 	int cmp;
 
 	if (fio == NULL) {
-		DBG_ERR("Failed to fetch fsp extension");
+		DBG_ERR("Failed to fetch fsp extension\n");
 		return -1;
 	}
 
@@ -2936,7 +2936,7 @@ static ssize_t fruit_pwrite_rsrc(vfs_handle_struct *handle,
 	ssize_t nwritten;
 
 	if (fio == NULL) {
-		DBG_ERR("Failed to fetch fsp extension");
+		DBG_ERR("Failed to fetch fsp extension\n");
 		return -1;
 	}
 
@@ -4067,7 +4067,7 @@ static int fruit_fntimes(vfs_handle_struct *handle,
 		return SMB_VFS_NEXT_FNTIMES(handle, fsp, ft);
 	}
 
-	DBG_DEBUG("set btime for %s to %s\n", fsp_str_dbg(fsp),
+	DBG_DEBUG("set btime for %s to %s", fsp_str_dbg(fsp),
 		  time_to_asc(convert_timespec_to_time_t(ft->create_time)));
 
 	ad = ad_fget(talloc_tos(), handle, fsp, ADOUBLE_META);
@@ -4176,7 +4176,7 @@ static int fruit_ftruncate_rsrc(struct vfs_handle_struct *handle,
 	int ret;
 
 	if (fio == NULL) {
-		DBG_ERR("Failed to fetch fsp extension");
+		DBG_ERR("Failed to fetch fsp extension\n");
 		return -1;
 	}
 
@@ -4207,7 +4207,7 @@ static int fruit_ftruncate_meta(struct vfs_handle_struct *handle,
 				off_t offset)
 {
 	if (offset > 60) {
-		DBG_WARNING("ftruncate %s to %jd",
+		DBG_WARNING("ftruncate %s to %jd\n",
 			    fsp_str_dbg(fsp), (intmax_t)offset);
 		/* OS X returns NT_STATUS_ALLOTTED_SPACE_EXCEEDED  */
 		errno = EOVERFLOW;

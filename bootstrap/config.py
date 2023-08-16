@@ -137,6 +137,7 @@ PKGS = [
     ('', 'ShellCheck'),
     ('', 'shfmt'),
     ('', 'crypto-policies-scripts'),
+    ('', 'codespell'),
 
     ('python3', 'python3'),
     ('python3-cryptography', 'python3-cryptography'), # for krb5 tests
@@ -156,8 +157,6 @@ PKGS = [
 
     # perl
     ('libparse-yapp-perl', 'perl-Parse-Yapp'),
-    ('libjson-perl', 'perl-JSON'),
-    ('', 'perl-JSON-Parse'),
     ('perl-modules', ''),
     ('', 'perl-FindBin'),
     ('', 'perl-Archive-Tar'),
@@ -516,6 +515,7 @@ RPM_DISTS = {
             'mold': '',
             'ShellCheck': '',
             'shfmt': '',
+            'codespell': '',
         }
     },
     'centos8s': {
@@ -533,6 +533,7 @@ RPM_DISTS = {
             'mold': '',
             'ShellCheck': '',
             'shfmt': '',
+            'codespell': '',
         }
     },
     'fedora38': {

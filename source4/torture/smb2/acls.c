@@ -1734,10 +1734,10 @@ static bool test_sd_flags_vs_chown(struct torture_context *tctx,
 			CHECK_SECURITY_DESCRIPTOR(q.query_secdesc.out.sd, sd2);
 
 			/*
-			 * Check that changing ownder doesn't affect SD flags.
+			 * Check that changing owner doesn't affect SD flags.
 			 *
-			 * Do this by first changing ownder to world and then
-			 * back to the original ownder. Afterwards compare SD,
+			 * Do this by first changing owner to world and then
+			 * back to the original owner. Afterwards compare SD,
 			 * should be the same.
 			 */
 			owner_sd->owner_sid = &world_sid;
@@ -2138,40 +2138,6 @@ done:
 	return ret;
 }
 #endif
-
-/**
- * SMB2 connect with explicit share
- **/
-static bool torture_smb2_con_share(struct torture_context *tctx,
-                           const char *share,
-                           struct smb2_tree **tree)
-{
-        struct smbcli_options options;
-        NTSTATUS status;
-        const char *host = torture_setting_string(tctx, "host", NULL);
-
-        lpcfg_smbcli_options(tctx->lp_ctx, &options);
-
-        status = smb2_connect_ext(tctx,
-                                  host,
-                                  lpcfg_smb_ports(tctx->lp_ctx),
-                                  share,
-                                  lpcfg_resolve_context(tctx->lp_ctx),
-                                  samba_cmdline_get_creds(),
-                                  0,
-                                  tree,
-                                  tctx->ev,
-                                  &options,
-                                  lpcfg_socket_options(tctx->lp_ctx),
-                                  lpcfg_gensec_settings(tctx, tctx->lp_ctx)
-                                  );
-        if (!NT_STATUS_IS_OK(status)) {
-		torture_comment(tctx, "Failed to connect to SMB2 share \\\\%s\\%s - %s\n",
-			host, share, nt_errstr(status));
-                return false;
-        }
-        return true;
-}
 
 static bool test_access_based(struct torture_context *tctx,
 				struct smb2_tree *tree)

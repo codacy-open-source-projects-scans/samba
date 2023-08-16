@@ -4091,7 +4091,7 @@ void reply_writebraw(struct smb_request *req)
 		goto out;
 	}
 
-	DEBUG(3,("reply_writebraw: secondart write %s start=%.0f num=%d "
+	DEBUG(3,("reply_writebraw: secondary write %s start=%.0f num=%d "
 		"wrote=%d\n",
 		fsp_fnum_dbg(fsp), (double)startpos, (int)numtowrite,
 		(int)total_written));
@@ -5005,6 +5005,7 @@ static void reply_exit_done(struct tevent_req *req)
 		reply_force_doserror(smb1req, ERRSRV, ERRinvnid);
 		smb_request_done(smb1req);
 		END_PROFILE(SMBexit);
+		return;
 	}
 
 	/*
@@ -5044,6 +5045,7 @@ static void reply_exit_done(struct tevent_req *req)
 			reply_force_doserror(smb1req, ERRSRV, ERRinvnid);
 			smb_request_done(smb1req);
 			END_PROFILE(SMBexit);
+			return;
 		}
 		close_file_free(NULL, &fsp, SHUTDOWN_CLOSE);
 	}

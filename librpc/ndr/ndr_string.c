@@ -164,7 +164,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_string(struct ndr_pull *ndr, int ndr_flags, 
 		} else if (!convert_string_talloc(ndr->current_mem_ctx, chset,
 					   CH_UNIX, ndr->data + ndr->offset,
 					   conv_src_len * byte_mul,
-					   (void **)(void *)&as,
+					   &as,
 					   &converted_size)) {
 			return ndr_pull_error(ndr, NDR_ERR_CHARCNV,
 					      "Bad character conversion with flags 0x%x", flags);
@@ -243,7 +243,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_string(struct ndr_push *ndr, int ndr_flags, 
 		d_len = s_len;
 		dest = (uint8_t *)talloc_strndup(ndr, s, s_len);
 	} else if (!convert_string_talloc(ndr, CH_UNIX, chset, s, s_len,
-				   (void **)(void *)&dest, &d_len))
+					  &dest, &d_len))
 	{
 		return ndr_push_error(ndr, NDR_ERR_CHARCNV,
 				      "Bad character push conversion with flags 0x%x", flags);
@@ -620,7 +620,7 @@ _PUBLIC_ uint32_t ndr_string_length(const void *_var, uint32_t element_size)
  * This checks the string length based on the elements. The returned number
  * includes the terminating null byte(s) if found.
  *
- * @param[in]  _var    The string the calculate the length for.
+ * @param[in]  _var    The string to calculate the length for.
  *
  * @param[in]  length  The length of the buffer passed by _var.
  *
@@ -697,7 +697,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_charset(struct ndr_pull *ndr, int ndr_flags,
 
 	if (!convert_string_talloc(ndr->current_mem_ctx, chset, CH_UNIX,
 				   ndr->data+ndr->offset, length*byte_mul,
-				   discard_const_p(void *, var),
+				   var,
 				   &converted_size))
 	{
 		return ndr_pull_error(ndr, NDR_ERR_CHARCNV,
@@ -722,6 +722,9 @@ _PUBLIC_ enum ndr_err_code ndr_pull_charset_to_null(struct ndr_pull *ndr, int nd
 		chset = CH_UTF16BE;
 	}
 
+	if ((byte_mul != 0) && (length > UINT32_MAX/byte_mul)) {
+		return ndr_pull_error(ndr, NDR_ERR_BUFSIZE, "length overflow");
+	}
 	NDR_PULL_NEED_BYTES(ndr, length*byte_mul);
 
 	str_len = ndr_string_n_length(ndr->data+ndr->offset, length, byte_mul);
@@ -732,7 +735,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_charset_to_null(struct ndr_pull *ndr, int nd
 
 	if (!convert_string_talloc(ndr->current_mem_ctx, chset, CH_UNIX,
 				   ndr->data+ndr->offset, str_len*byte_mul,
-				   discard_const_p(void *, var),
+				   var,
 				   &converted_size))
 	{
 		return ndr_pull_error(ndr, NDR_ERR_CHARCNV,
@@ -808,8 +811,8 @@ _PUBLIC_ uint32_t ndr_charset_length(const void *var, charset_t chset)
 	case CH_DOS:
 	case CH_UNIX:
 		return strlen((const char *)var)+1;
+	default:
+		/* Fallback, this should never happen */
+		return strlen((const char *)var)+1;
 	}
-
-	/* Fallback, this should never happen */
-	return strlen((const char *)var)+1;
 }
