@@ -145,13 +145,13 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 							    struct GUID *object_list)
 {
 	uint32_t i;
-	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
-	struct security_acl *tmp_acl = talloc_zero(mem_ctx, struct security_acl);
-	if (!tmp_acl) {
-		return NULL;
-	}
+	struct security_acl *tmp_acl = NULL;
 
 	if (!acl) {
+		return NULL;
+	}
+	tmp_acl = talloc_zero(mem_ctx, struct security_acl);
+	if (!tmp_acl) {
 		return NULL;
 	}
 
@@ -267,7 +267,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 						       struct security_ace,
 						       tmp_acl->num_aces+1);
 			if (tmp_acl->aces == NULL) {
-				talloc_free(tmp_ctx);
+				TALLOC_FREE(tmp_acl);
 				return NULL;
 			}
 
@@ -340,7 +340,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 					       struct security_ace,
 					       tmp_acl->num_aces+1);
 		if (tmp_acl->aces == NULL) {
-			talloc_free(tmp_ctx);
+			TALLOC_FREE(tmp_acl);
 			return NULL;
 		}
 
@@ -363,6 +363,7 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 		}
 	}
 	if (tmp_acl->num_aces == 0) {
+		TALLOC_FREE(tmp_acl);
 		return NULL;
 	}
 	if (acl) {

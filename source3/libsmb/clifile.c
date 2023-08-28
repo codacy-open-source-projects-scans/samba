@@ -4582,11 +4582,26 @@ NTSTATUS cli_getatr(struct cli_state *cli,
 	NTSTATUS status = NT_STATUS_OK;
 
 	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
-		return cli_smb2_getatr(cli,
-					fname,
-					pattr,
-					size,
-					write_time);
+		struct stat_ex sbuf = {
+			.st_ex_nlink = 0,
+		};
+		uint32_t attr;
+
+		status = cli_smb2_qpathinfo_basic(cli, fname, &sbuf, &attr);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+
+		if (pattr != NULL) {
+			*pattr = attr;
+		}
+		if (size != NULL) {
+			*size = sbuf.st_ex_size;
+		}
+		if (write_time != NULL) {
+			*write_time = sbuf.st_ex_mtime.tv_sec;
+		}
+		return NT_STATUS_OK;
 	}
 
 	frame = talloc_stackframe();
@@ -5441,27 +5456,6 @@ NTSTATUS cli_ctemp(struct cli_state *cli,
  fail:
 	TALLOC_FREE(frame);
 	return status;
-}
-
-/*
-   send a raw ioctl - used by the torture code
-*/
-NTSTATUS cli_raw_ioctl(struct cli_state *cli, uint16_t fnum, uint32_t code, DATA_BLOB *blob)
-{
-	uint16_t vwv[3];
-	NTSTATUS status;
-
-	SSVAL(vwv+0, 0, fnum);
-	SSVAL(vwv+1, 0, code>>16);
-	SSVAL(vwv+2, 0, (code&0xFFFF));
-
-	status = cli_smb(talloc_tos(), cli, SMBioctl, 0, 3, vwv, 0, NULL,
-			 NULL, 0, NULL, NULL, NULL, NULL);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-	*blob = data_blob_null;
-	return NT_STATUS_OK;
 }
 
 /*********************************************************

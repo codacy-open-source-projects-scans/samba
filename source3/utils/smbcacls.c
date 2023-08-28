@@ -33,6 +33,7 @@
 #include "passdb/machine_sid.h"
 #include "../librpc/gen_ndr/ndr_lsa_c.h"
 #include "util_sd.h"
+#include "lib/param/param.h"
 
 static char DIRSEP_CHAR = '\\';
 
@@ -455,12 +456,12 @@ static int cacl_dump(struct cli_state *cli, const char *filename, bool numeric)
 	return EXIT_OK;
 }
 
-/***************************************************** 
+/*****************************************************
 Change the ownership or group ownership of a file. Just
 because the NT docs say this can't be done :-). JRA.
 *******************************************************/
 
-static int owner_set(struct cli_state *cli, enum chown_mode change_mode, 
+static int owner_set(struct cli_state *cli, enum chown_mode change_mode,
 			const char *filename, const char *new_username)
 {
 	struct dom_sid sid;
@@ -545,7 +546,7 @@ static void sort_acl(struct security_acl *the_acl)
 	}
 }
 
-/***************************************************** 
+/*****************************************************
 set the ACLs on a file given a security descriptor
 *******************************************************/
 
@@ -1501,6 +1502,7 @@ int main(int argc, char *argv[])
 	char *targetfile = NULL;
 	NTSTATUS status;
 	bool ok;
+	struct loadparm_context *lp_ctx = NULL;
 
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
@@ -1653,8 +1655,9 @@ int main(int argc, char *argv[])
 		TALLOC_FREE(frame);
 		exit(1);
 	}
+	lp_ctx = samba_cmdline_get_lp_ctx();
 	/* set default debug level to 1 regardless of what smb.conf sets */
-	lp_set_cmdline("log level", "1");
+	lpcfg_set_cmdline(lp_ctx, "log level", "1");
 
 	setlinebuf(stdout);
 
@@ -1709,7 +1712,7 @@ int main(int argc, char *argv[])
 			change_mode = REQUEST_INHERIT;
 			break;
 		case 'm':
-			lp_set_cmdline("client max protocol", poptGetOptArg(pc));
+			lpcfg_set_cmdline(lp_ctx, "client max protocol", poptGetOptArg(pc));
 			break;
 		case 'x':
 			want_mxac = true;

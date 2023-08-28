@@ -656,6 +656,54 @@ static bool check_error(int line, NTSTATUS status,
 	return True;
 }
 
+NTSTATUS cli_qpathinfo1(struct cli_state *cli,
+			const char *fname,
+			time_t *change_time,
+			time_t *access_time,
+			time_t *write_time,
+			off_t *size,
+			uint32_t *pattr)
+{
+	int timezone = smb1cli_conn_server_time_zone(cli->conn);
+	time_t (*date_fn)(const void *buf, int serverzone) = NULL;
+	uint8_t *rdata = NULL;
+	uint32_t num_rdata;
+	NTSTATUS status;
+
+	status = cli_qpathinfo(talloc_tos(),
+			       cli,
+			       fname,
+			       SMB_INFO_STANDARD,
+			       22,
+			       CLI_BUFFER_SIZE,
+			       &rdata,
+			       &num_rdata);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	if (cli->win95) {
+		date_fn = make_unix_date;
+	} else {
+		date_fn = make_unix_date2;
+	}
+
+	if (change_time) {
+		*change_time = date_fn(rdata + 0, timezone);
+	}
+	if (access_time) {
+		*access_time = date_fn(rdata + 4, timezone);
+	}
+	if (write_time) {
+		*write_time = date_fn(rdata + 8, timezone);
+	}
+	if (size) {
+		*size = PULL_LE_U32(rdata, 12);
+	}
+	if (pattr) {
+		*pattr = PULL_LE_U16(rdata, l1_attrFile);
+	}
+	return NT_STATUS_OK;
+}
 
 static bool wait_lock(struct cli_state *c, int fnum, uint32_t offset, uint32_t len)
 {
@@ -9853,6 +9901,42 @@ static NTSTATUS del_fn(struct file_info *finfo, const char *mask,
 
 
 /*
+   send a raw ioctl - used by the torture code
+*/
+static NTSTATUS cli_raw_ioctl(struct cli_state *cli,
+			      uint16_t fnum,
+			      uint32_t code,
+			      DATA_BLOB *blob)
+{
+	uint16_t vwv[3];
+	NTSTATUS status;
+
+	PUSH_LE_U16(vwv + 0, 0, fnum);
+	PUSH_LE_U16(vwv + 1, 0, code >> 16);
+	PUSH_LE_U16(vwv + 2, 0, (code & 0xFFFF));
+
+	status = cli_smb(talloc_tos(),
+			 cli,
+			 SMBioctl,
+			 0,
+			 3,
+			 vwv,
+			 0,
+			 NULL,
+			 NULL,
+			 0,
+			 NULL,
+			 NULL,
+			 NULL,
+			 NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	*blob = data_blob_null;
+	return NT_STATUS_OK;
+}
+
+/*
   sees what IOCTLs are supported
  */
 bool torture_ioctl_test(int dummy)
@@ -10955,9 +11039,6 @@ static bool run_mangle1(int dummy)
 	uint16_t fnum;
 	fstring alt_name;
 	NTSTATUS status;
-	time_t change_time, access_time, write_time;
-	off_t size;
-	uint32_t attr;
 
 	printf("starting mangle1 test\n");
 	if (!torture_open_connection(&cli, 0)) {
@@ -10991,8 +11072,7 @@ static bool run_mangle1(int dummy)
 	}
 	cli_close(cli, fnum);
 
-	status = cli_qpathinfo1(cli, alt_name, &change_time, &access_time,
-				&write_time, &size, &attr);
+	status = cli_qpathinfo1(cli, alt_name, NULL, NULL, NULL, NULL, NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("cli_qpathinfo1(%s) failed: %s\n", alt_name,
 			 nt_errstr(status));

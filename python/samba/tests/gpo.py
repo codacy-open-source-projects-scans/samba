@@ -281,6 +281,28 @@ b"""
 </PolFile>
 """
 
+auto_enroll_unchecked_reg_pol = \
+b"""
+<?xml version="1.0" encoding="utf-8"?>
+<PolFile num_entries="3" signature="PReg" version="1">
+        <Entry type="4" type_name="REG_DWORD">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>AEPolicy</ValueName>
+                <Value>0</Value>
+        </Entry>
+        <Entry type="4" type_name="REG_DWORD">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>OfflineExpirationPercent</ValueName>
+                <Value>10</Value>
+        </Entry>
+        <Entry type="1" type_name="REG_SZ">
+                <Key>Software\Policies\Microsoft\Cryptography\AutoEnrollment</Key>
+                <ValueName>OfflineExpirationStoreNames</ValueName>
+                <Value>MY</Value>
+        </Entry>
+</PolFile>
+"""
+
 advanced_enroll_reg_pol = \
 b"""
 <?xml version="1.0" encoding="utf-8"?>
@@ -6896,14 +6918,14 @@ class GPOTests(tests.TestCase):
         ldb.add({'dn': certa_dn,
                  'objectClass': 'certificationAuthority',
                  'authorityRevocationList': ['XXX'],
-                 'cACertificate': 'XXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateRevocationList': ['XXX'],
                 })
         # Write the dummy pKIEnrollmentService
         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
         ldb.add({'dn': enroll_dn,
                  'objectClass': 'pKIEnrollmentService',
-                 'cACertificate': 'XXXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateTemplates': ['Machine'],
                  'dNSHostName': hostname,
                 })
@@ -6925,12 +6947,61 @@ class GPOTests(tests.TestCase):
             self.assertTrue(os.path.exists(machine_crt),
                             'Machine key was not generated')
 
+            # Subsequent apply should react to new certificate templates
+            os.environ['CEPCES_SUBMIT_SUPPORTED_TEMPLATES'] = 'Machine,Workstation'
+            self.addCleanup(os.environ.pop, 'CEPCES_SUBMIT_SUPPORTED_TEMPLATES')
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertTrue(os.path.exists(ca_crt),
+                            'Root CA certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine key was not generated')
+            workstation_crt = os.path.join(dname, '%s.Workstation.crt' % ca_cn)
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation certificate was not requested')
+            workstation_key = os.path.join(dname, '%s.Workstation.key' % ca_cn)
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation key was not generated')
+
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
 
             # Check that a call to gpupdate --rsop also succeeds
             ret = rsop(self.lp)
             self.assertEquals(ret, 0, 'gpupdate --rsop failed!')
+
+            # Remove policy by staging pol file with auto-enroll unchecked
+            parser.load_xml(etree.fromstring(auto_enroll_unchecked_reg_pol.strip()))
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertFalse(os.path.exists(ca_crt),
+                            'Root CA certificate was not removed')
+            self.assertFalse(os.path.exists(machine_crt),
+                            'Machine certificate was not removed')
+            self.assertFalse(os.path.exists(machine_crt),
+                            'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation key was not removed')
+
+            # Reapply policy by staging the enabled pol file
+            parser.load_xml(etree.fromstring(auto_enroll_reg_pol.strip()))
+            ret = stage_file(reg_pol, ndr_pack(parser.pol_file))
+            self.assertTrue(ret, 'Could not create the target %s' % reg_pol)
+            ext.process_group_policy([], gpos, dname, dname)
+            self.assertTrue(os.path.exists(ca_crt),
+                            'Root CA certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine certificate was not requested')
+            self.assertTrue(os.path.exists(machine_crt),
+                            'Machine key was not generated')
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation certificate was not requested')
+            self.assertTrue(os.path.exists(workstation_crt),
+                            'Workstation key was not generated')
 
             # Remove policy
             gp_db = store.get_gplog(machine_creds.get_username())
@@ -6942,11 +7013,17 @@ class GPOTests(tests.TestCase):
                             'Machine certificate was not removed')
             self.assertFalse(os.path.exists(machine_crt),
                             'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation key was not removed')
             out, _ = Popen(['getcert', 'list-cas'], stdout=PIPE).communicate()
             self.assertNotIn(get_bytes(ca_cn), out, 'CA was not removed')
             out, _ = Popen(['getcert', 'list'], stdout=PIPE).communicate()
             self.assertNotIn(b'Machine', out,
                              'Machine certificate not removed')
+            self.assertNotIn(b'Workstation', out,
+                             'Workstation certificate not removed')
 
         # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
         ldb.delete(certa_dn)
@@ -7448,14 +7525,14 @@ class GPOTests(tests.TestCase):
         ldb.add({'dn': certa_dn,
                  'objectClass': 'certificationAuthority',
                  'authorityRevocationList': ['XXX'],
-                 'cACertificate': 'XXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateRevocationList': ['XXX'],
                 })
         # Write the dummy pKIEnrollmentService
         enroll_dn = 'CN=%s,CN=Enrollment Services,%s' % (ca_cn, confdn)
         ldb.add({'dn': enroll_dn,
                  'objectClass': 'pKIEnrollmentService',
-                 'cACertificate': 'XXXX',
+                 'cACertificate': b'0\x82\x03u0\x82\x02]\xa0\x03\x02\x01\x02\x02\x10I',
                  'certificateTemplates': ['Machine'],
                  'dNSHostName': hostname,
                 })
@@ -7480,6 +7557,25 @@ class GPOTests(tests.TestCase):
                 self.assertTrue(os.path.exists(machine_crt),
                                 'Machine key was not generated')
 
+            # Subsequent apply should react to new certificate templates
+            os.environ['CEPCES_SUBMIT_SUPPORTED_TEMPLATES'] = 'Machine,Workstation'
+            self.addCleanup(os.environ.pop, 'CEPCES_SUBMIT_SUPPORTED_TEMPLATES')
+            ext.process_group_policy([], gpos, dname, dname)
+            for ca in ca_list:
+                self.assertTrue(os.path.exists(ca_crt),
+                                'Root CA certificate was not requested')
+                self.assertTrue(os.path.exists(machine_crt),
+                                'Machine certificate was not requested')
+                self.assertTrue(os.path.exists(machine_crt),
+                                'Machine key was not generated')
+
+                workstation_crt = os.path.join(dname, '%s.Workstation.crt' % ca)
+                self.assertTrue(os.path.exists(workstation_crt),
+                                'Workstation certificate was not requested')
+                workstation_key = os.path.join(dname, '%s.Workstation.key' % ca)
+                self.assertTrue(os.path.exists(workstation_crt),
+                                'Workstation key was not generated')
+
             # Verify RSOP does not fail
             ext.rsop([g for g in gpos if g.name == guid][0])
 
@@ -7497,12 +7593,18 @@ class GPOTests(tests.TestCase):
                             'Machine certificate was not removed')
             self.assertFalse(os.path.exists(machine_crt),
                             'Machine key was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation certificate was not removed')
+            self.assertFalse(os.path.exists(workstation_crt),
+                            'Workstation key was not removed')
             out, _ = Popen(['getcert', 'list-cas'], stdout=PIPE).communicate()
             for ca in ca_list:
                 self.assertNotIn(get_bytes(ca), out, 'CA was not removed')
             out, _ = Popen(['getcert', 'list'], stdout=PIPE).communicate()
             self.assertNotIn(b'Machine', out,
                              'Machine certificate not removed')
+            self.assertNotIn(b'Workstation', out,
+                             'Workstation certificate not removed')
 
         # Remove the dummy CA, pKIEnrollmentService, and pKICertificateTemplate
         ldb.delete(certa_dn)
