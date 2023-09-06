@@ -30,10 +30,8 @@ from samba.dcerpc import preg
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.common import get_string
 from configparser import ConfigParser
-from io import StringIO
 import xml.etree.ElementTree as etree
 from tempfile import NamedTemporaryFile
-from time import sleep
 import re
 from samba.gp.gpclass import check_guid
 from samba.gp_parse.gp_ini import GPTIniParser
@@ -714,7 +712,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
         self.assertTrue(os.path.exists(reg_pol),
                         'The Registry.pol does not exist')
         reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
-        ret = any([get_string(e.valuename) == policy and e.data == 1 \
+        ret = any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not added')
 
@@ -733,7 +731,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
         self.assertGreater(after_vers, before_vers, 'GPT.INI was not updated')
 
         reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
-        ret = not any([get_string(e.valuename) == policy and e.data == 1 \
+        ret = not any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not removed')
 
@@ -1806,7 +1804,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
                           'The test cse was not enabled')
             self.assertIn('UserPolicy         : False', out,
                           'The test cse should not have User policy enabled')
-            cse_ext = re.findall('^UniqueGUID\s+:\s+(.*)', out)
+            cse_ext = re.findall(r'^UniqueGUID\s+:\s+(.*)', out)
             self.assertEquals(len(cse_ext), 1,
                               'The test cse GUID was not found')
             cse_ext = cse_ext[0]

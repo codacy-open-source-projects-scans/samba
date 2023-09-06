@@ -551,6 +551,14 @@ class KerberosCredentials(Credentials):
     def get_sid(self):
         return self.sid
 
+    def get_rid(self):
+        sid = self.get_sid()
+        if sid is None:
+            return None
+
+        _, rid = sid.rsplit('-', 1)
+        return int(rid)
+
     def set_type(self, account_type):
         self.account_type = account_type
 
@@ -5543,6 +5551,8 @@ class RawKerberosTest(TestCase):
             # A dict containing a key for each checksum type to be created in
             # the PAC.
             checksum_keys = {}
+        else:
+            checksum_keys = dict(checksum_keys)
 
         if include_checksums is None:
             # A dict containing a value for each checksum type; True if the
@@ -5550,6 +5560,8 @@ class RawKerberosTest(TestCase):
             # excluded, or None/not present if the checksum is to be included
             # based on its presence in the original PAC.
             include_checksums = {}
+        else:
+            include_checksums = dict(include_checksums)
 
         # Check that the values passed in by the caller make sense.
 

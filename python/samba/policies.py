@@ -15,7 +15,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import json
 from io import StringIO
 import ldb
 from samba.ndr import ndr_unpack, ndr_pack
@@ -154,7 +153,7 @@ class RegistryGroupPolicies(object):
     def __pol_remove(self, pol_data, entry):
         entries = []
         for e in pol_data.entries:
-            if not (e.keyname == entry['keyname'] and \
+            if not (e.keyname == entry['keyname'] and
                     e.valuename == entry['valuename']):
                 entries.append(e)
         pol_data.entries = entries
@@ -209,7 +208,7 @@ class RegistryGroupPolicies(object):
     def __validate_extension_registration(self, ext_name, ext_attr):
         try:
             ext_name_guid = GUID(ext_name)
-        except samba.NTSTATUSError as e:
+        except NTSTATUSError as e:
             if e.args[0] == NT_STATUS_INVALID_PARAMETER:
                 raise SyntaxError('Extension name not formatted correctly')
             raise
