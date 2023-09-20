@@ -322,6 +322,9 @@ static NTSTATUS authsam_domain_group_filter(TALLOC_CTX *mem_ctx,
 	*_filter = NULL;
 
 	filter = talloc_strdup(mem_ctx, "(&(objectClass=group)");
+	if (filter == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	/*
 	 * Skip all builtin groups, they're added later.
@@ -329,6 +332,9 @@ static NTSTATUS authsam_domain_group_filter(TALLOC_CTX *mem_ctx,
 	talloc_asprintf_addbuf(&filter,
 			       "(!(groupType:"LDB_OID_COMPARATOR_AND":=%u))",
 			       GROUP_TYPE_BUILTIN_LOCAL_GROUP);
+	if (filter == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 	/*
 	 * Only include security groups.
 	 */
@@ -729,10 +735,12 @@ _PUBLIC_ NTSTATUS authsam_update_user_info_dc(TALLOC_CTX *mem_ctx,
 						   &user_info_dc->sids,
 						   &user_info_dc->num_sids);
 		if (!NT_STATUS_IS_OK(status)) {
+			talloc_free(filter);
 			return status;
 		}
 	}
 
+	talloc_free(filter);
 	return NT_STATUS_OK;
 }
 
@@ -892,6 +900,7 @@ NTSTATUS authsam_get_user_info_dc_principal(TALLOC_CTX *mem_ctx,
 
 		nt_status = dom_sid_split_rid(tmp_ctx, user_sid, &domain_sid, NULL);
 		if (!NT_STATUS_IS_OK(nt_status)) {
+			talloc_free(tmp_ctx);
 			return nt_status;
 		}
 
@@ -902,10 +911,12 @@ NTSTATUS authsam_get_user_info_dc_principal(TALLOC_CTX *mem_ctx,
 			struct dom_sid_buf buf;
 			DEBUG(3, ("authsam_get_user_info_dc_principal: Failed to find domain with: SID %s\n",
 				  dom_sid_str_buf(domain_sid, &buf)));
+			talloc_free(tmp_ctx);
 			return NT_STATUS_NO_SUCH_USER;
 		}
 
 	} else {
+		talloc_free(tmp_ctx);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
@@ -1575,6 +1586,7 @@ NTSTATUS authsam_logon_success_accounting(struct ldb_context *sam_ctx,
 	status = authsam_check_bad_password_indicator(
 		sam_ctx, mem_ctx, &need_db_reread, msg);
 	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(mem_ctx);
 		return status;
 	}
 

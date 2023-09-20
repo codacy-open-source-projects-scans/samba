@@ -1577,7 +1577,6 @@ void reply_ntrename(struct smb_request *req)
 						req,
 						src_dirfsp,
 						smb_fname_old,
-						dst_dirfsp,
 						smb_fname_new,
 						dst_original_lcomp,
 						attrs,
@@ -1589,9 +1588,7 @@ void reply_ntrename(struct smb_request *req)
 						    conn,
 						    req,
 						    false,
-						    src_dirfsp,
 						    smb_fname_old,
-						    dst_dirfsp,
 						    smb_fname_new);
 			break;
 		case RENAME_FLAG_COPY:

@@ -24,7 +24,6 @@ We don't test samba-tool visualize reps here because repsTo and
 repsFrom are not replicated, and there are no actual remote servers to
 query.
 """
-import samba
 import os
 import tempfile
 import re
@@ -188,7 +187,7 @@ class SambaToolVisualizeLdif(SambaToolCmdTest):
                                                       '-H', self.dburl,
                                                       '-S',
                                                       opt)
-                except SystemExit as e:
+                except SystemExit:
                     # optparse makes us do this
                     self.fail(f"optparse rejects {env}, {opt}, {is_colour}")
 

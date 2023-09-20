@@ -1955,7 +1955,7 @@ static int setup_primary_samba_gpg(struct setup_password_fields_io *io,
 static int setup_supplemental_field(struct setup_password_fields_io *io)
 {
 	struct ldb_context *ldb;
-	struct supplementalCredentialsBlob scb;
+	struct supplementalCredentialsBlob scb = {};
 	struct supplementalCredentialsBlob *old_scb = NULL;
 	/*
 	 * Packages +
@@ -1963,9 +1963,9 @@ static int setup_supplemental_field(struct setup_password_fields_io *io)
 	 *   WDigest, CLEARTEXT, userPassword, SambaGPG)
 	 */
 	uint32_t num_names = 0;
-	const char *names[1+NUM_PACKAGES];
+	const char *names[1+NUM_PACKAGES] = {};
 	uint32_t num_packages = 0;
-	struct supplementalCredentialsPackage packages[1+NUM_PACKAGES];
+	struct supplementalCredentialsPackage packages[1+NUM_PACKAGES] = {};
 	struct supplementalCredentialsPackage *pp = packages;
 	int ret;
 	enum ndr_err_code ndr_err;
@@ -1974,9 +1974,6 @@ static int setup_supplemental_field(struct setup_password_fields_io *io)
 	bool do_samba_gpg = false;
 	struct loadparm_context *lp_ctx = NULL;
 
-	ZERO_STRUCT(names);
-	ZERO_STRUCT(packages);
-
 	ldb = ldb_module_get_ctx(io->ac->module);
 	lp_ctx = talloc_get_type(ldb_get_opaque(ldb, "loadparm"),
 				 struct loadparm_context);
@@ -1984,12 +1981,12 @@ static int setup_supplemental_field(struct setup_password_fields_io *io)
 	if (!io->n.cleartext_utf8) {
 		/*
 		 * when we don't have a cleartext password
-		 * we can't setup a supplementalCredential value
+		 * we can't setup a supplementalCredentials value
 		 */
 		return LDB_SUCCESS;
 	}
 
-	/* if there's an old supplementaCredentials blob then use it */
+	/* if there's an old supplementalCredentials blob then use it */
 	if (io->o.supplemental) {
 		if (io->o.scb.sub.signature == SUPPLEMENTAL_CREDENTIALS_SIGNATURE) {
 			old_scb = &io->o.scb;
@@ -2326,7 +2323,6 @@ static int setup_supplemental_field(struct setup_password_fields_io *io)
 		*prev = *pp;
 		*pp = temp;
 
-		ZERO_STRUCT(scb);
 		scb.sub.signature	= SUPPLEMENTAL_CREDENTIALS_SIGNATURE;
 		scb.sub.num_packages	= num_packages;
 		scb.sub.packages	= packages;
@@ -3535,7 +3531,7 @@ static int setup_io(struct ph_context *ac,
 	struct dom_sid *account_sid = NULL;
 	int rodc_krbtgt = 0;
 
-	ZERO_STRUCTP(io);
+	*io = (struct setup_password_fields_io) {};
 
 	/* Some operations below require kerberos contexts */
 
@@ -3878,7 +3874,7 @@ static int setup_io(struct ph_context *ac,
 
 	/*
 	 * Handles the password change control if it's specified. It has the
-	 * precedance and overrides already specified old password values of
+	 * precedence and overrides already specified old password values of
 	 * change requests (but that shouldn't happen since the control is
 	 * fully internal and only used in conjunction with replace requests!).
 	 */
@@ -4950,7 +4946,7 @@ static int password_hash_modify(struct ldb_module *module, struct ldb_request *r
 					DSDB_CONTROL_RESTORE_TOMBSTONE_OID);
 	if (restore == NULL) {
 		/*
-		 * A tomstone reanimation generates a double update
+		 * A tombstone reanimation generates a double update
 		 * of pwdLastSet.
 		 *
 		 * So we only remove it without the

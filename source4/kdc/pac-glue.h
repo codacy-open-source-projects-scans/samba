@@ -51,9 +51,7 @@ enum samba_compounded_auth {
 enum {
 	SAMBA_KDC_FLAG_PROTOCOL_TRANSITION    = 0x00000001,
 	SAMBA_KDC_FLAG_CONSTRAINED_DELEGATION = 0x00000002,
-	SAMBA_KDC_FLAG_KRBTGT_IN_DB           = 0x00000004,
 	SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED      = 0x00000008,
-	SAMBA_KDC_FLAG_SKIP_PAC_BUFFER        = 0x00000010,
 	SAMBA_KDC_FLAG_DEVICE_KRBTGT_IS_TRUSTED = 0x00000020,
 	SAMBA_KDC_FLAG_DELEGATED_PROXY_IS_TRUSTED = 0x00000040,
 };
@@ -78,9 +76,9 @@ krb5_error_code samba_make_krb5_pac(krb5_context context,
 
 bool samba_princ_needs_pac(const struct samba_kdc_entry *skdc_entry);
 
-int samba_krbtgt_is_in_db(struct samba_kdc_entry *skdc_entry,
-			  bool *is_in_db,
-			  bool *is_trusted);
+krb5_error_code samba_krbtgt_is_in_db(const struct samba_kdc_entry *skdc_entry,
+				      bool *is_in_db,
+				      bool *is_trusted);
 
 NTSTATUS samba_kdc_get_user_info_from_db(struct samba_kdc_entry *skdc_entry,
 					 const struct ldb_message *msg,
@@ -169,3 +167,12 @@ krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 				       const struct authn_kerberos_client_policy *client_policy,
 				       struct authn_audit_info **client_audit_info_out,
 				       NTSTATUS *status_out);
+
+NTSTATUS samba_kdc_add_asserted_identity(enum samba_asserted_identity ai,
+					 struct auth_user_info_dc *user_info_dc);
+
+NTSTATUS samba_kdc_add_claims_valid(enum samba_claims_valid claims_valid,
+				    struct auth_user_info_dc *user_info_dc);
+
+NTSTATUS samba_kdc_add_compounded_auth(enum samba_compounded_auth compounded_auth,
+				       struct auth_user_info_dc *user_info_dc);

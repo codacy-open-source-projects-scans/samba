@@ -460,9 +460,11 @@ struct smbXsrv_connection {
 			struct smbd_smb2_request *req;
 			struct {
 				uint8_t nbt[NBT_HDR_SIZE];
-				bool done;
 			} hdr;
-			struct iovec vector;
+			struct iovec _vector[1];
+			struct iovec *vector;
+			int count;
+			struct msghdr msg;
 			bool doing_receivefile;
 			size_t min_recv_size;
 			size_t pktfull;
@@ -686,6 +688,8 @@ struct smbd_smb2_send_queue {
 	DATA_BLOB *sendfile_header;
 	uint32_t sendfile_body_size;
 	NTSTATUS *sendfile_status;
+
+	struct msghdr msg;
 	struct iovec *vector;
 	int count;
 

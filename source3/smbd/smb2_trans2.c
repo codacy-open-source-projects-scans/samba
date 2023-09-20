@@ -2508,7 +2508,7 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 				SBIG_UINT(pdata,32,svfs.TotalFileNodes);
 				SBIG_UINT(pdata,40,svfs.FreeFileNodes);
 				SBIG_UINT(pdata,48,svfs.FsIdentifier);
-				DEBUG(5,("smbd_do_qfsinfo : SMB_QUERY_POSIX_FS_INFO succsessful\n"));
+				DEBUG(5,("smbd_do_qfsinfo : SMB_QUERY_POSIX_FS_INFO successful\n"));
 #ifdef EOPNOTSUPP
 			} else if (rc == EOPNOTSUPP) {
 				return NT_STATUS_INVALID_LEVEL;
@@ -3724,9 +3724,7 @@ NTSTATUS hardlink_internals(TALLOC_CTX *ctx,
 		connection_struct *conn,
 		struct smb_request *req,
 		bool overwrite_if_exists,
-		struct files_struct *old_dirfsp,
 		const struct smb_filename *smb_fname_old,
-		struct files_struct *new_dirfsp,
 		struct smb_filename *smb_fname_new)
 {
 	NTSTATUS status = NT_STATUS_OK;
@@ -4382,7 +4380,6 @@ static NTSTATUS smb2_file_rename_information(connection_struct *conn,
 		  smb_fname_str_dbg(smb_fname_dst)));
 	status = rename_internals_fsp(conn,
 				fsp,
-				NULL, /* dst_dirfsp */
 				smb_fname_dst,
 				dst_original_lcomp,
 				(FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM),
@@ -4472,9 +4469,7 @@ static NTSTATUS smb2_file_link_information(connection_struct *conn,
 				conn,
 				req,
 				overwrite,
-				NULL, /* src_dirfsp */
 				fsp->fsp_name,
-				dst_dirfsp, /* dst_dirfsp */
 				smb_fname_dst);
 
 	TALLOC_FREE(smb_fname_dst);
@@ -4570,9 +4565,7 @@ static NTSTATUS smb_file_link_information(connection_struct *conn,
 				conn,
 				req,
 				overwrite,
-				NULL, /* src_dirfsp */
 				fsp->fsp_name,
-				dst_dirfsp, /* dst_dirfsp */
 				smb_fname_dst);
 
 	TALLOC_FREE(smb_fname_dst);
@@ -4751,7 +4744,6 @@ static NTSTATUS smb_file_rename_information(connection_struct *conn,
 			  smb_fname_str_dbg(smb_fname_dst)));
 		status = rename_internals_fsp(conn,
 					fsp,
-					dst_dirfsp,
 					smb_fname_dst,
 					dst_original_lcomp,
 					0,
@@ -4766,7 +4758,6 @@ static NTSTATUS smb_file_rename_information(connection_struct *conn,
 					req,
 					NULL, /* src_dirfsp */
 					smb_fname_src,
-					dst_dirfsp,
 					smb_fname_dst,
 					dst_original_lcomp,
 					0,

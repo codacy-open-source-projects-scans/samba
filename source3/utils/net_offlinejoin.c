@@ -54,12 +54,7 @@ int net_offlinejoin(struct net_context *c, int argc, const char **argv)
 
 	net_warn_member_options();
 
-	status = libnetapi_net_init(&c->netapi_ctx);
-	if (status != 0) {
-		return -1;
-	}
-
-	status = libnetapi_set_creds(c->netapi_ctx, c->creds);
+	status = libnetapi_net_init(&c->netapi_ctx, c->lp_ctx, c->creds);
 	if (status != 0) {
 		return -1;
 	}
@@ -215,6 +210,11 @@ int net_offlinejoin_provision(struct net_context *c,
 
 		/* Add the unicode BOM mark */
 		blob = data_blob_talloc(c, NULL, ucs2_blob.length + 2);
+		if (blob.data == NULL) {
+			d_printf("Failed to allocate blob: %s\n",
+				 strerror(errno));
+			return -1;
+		}
 
 		blob.data[0] = 0xff;
 		blob.data[1] = 0xfe;
@@ -317,7 +317,7 @@ int net_offlinejoin_requestodj(struct net_context *c,
 
 	if (provision_bin_data == NULL || provision_bin_data_size == 0) {
 		d_printf("Please provide provision data either from file "
-			 "(using loadfile parameter) of from stdin (-i)\n");
+			 "(using loadfile parameter) or from stdin (-i)\n");
 		return -1;
 	}
 	if (provision_bin_data_size > UINT32_MAX) {
@@ -573,6 +573,11 @@ int net_offlinejoin_composeodj(struct net_context *c,
 
 		/* Add the unicode BOM mark */
 		blob = data_blob_talloc(c, NULL, ucs2_blob.length + 2);
+		if (blob.data == NULL) {
+			d_printf("Failed to allocate blob: %s\n",
+				 strerror(errno));
+			return -1;
+		}
 
 		blob.data[0] = 0xff;
 		blob.data[1] = 0xfe;

@@ -15844,6 +15844,10 @@ static struct {
 		.fn    = run_smb2_dfs_filename_leading_backslash,
 	},
 	{
+		.name  = "SMB2-PIPE-READ-ASYNC-DISCONNECT",
+		.fn    = run_smb2_pipe_read_async_disconnect,
+	},
+	{
 		.name  = "SMB1-TRUNCATED-SESSSETUP",
 		.fn    = run_smb1_truncated_sesssetup,
 	},
@@ -16233,6 +16237,7 @@ static void usage(void)
 	bool correct = True;
 	TALLOC_CTX *frame = talloc_stackframe();
 	int seed = time(NULL);
+	struct loadparm_context *lp_ctx = NULL;
 
 #ifdef HAVE_SETBUFFER
 	setbuffer(stdout, NULL, 0);
@@ -16242,6 +16247,13 @@ static void usage(void)
 
 	smb_init_locale();
 	fault_setup();
+
+	lp_ctx = loadparm_init_s3(frame, loadparm_s3_helpers());
+	if (lp_ctx == NULL) {
+		fprintf(stderr,
+			"Failed to initialise the global parameter structure.\n");
+		return 1;
+	}
 
 	if (is_default_dyn_CONFIGFILE()) {
 		if(getenv("SMB_CONF_PATH")) {
@@ -16299,7 +16311,7 @@ static void usage(void)
 			fstrcpy(workgroup,optarg);
 			break;
 		case 'm':
-			lp_set_cmdline("client max protocol", optarg);
+			lpcfg_set_cmdline(lp_ctx, "client max protocol", optarg);
 			break;
 		case 'N':
 			torture_nprocs = atoi(optarg);
@@ -16308,7 +16320,7 @@ static void usage(void)
 			torture_numops = atoi(optarg);
 			break;
 		case 'd':
-			lp_set_cmdline("log level", optarg);
+			lpcfg_set_cmdline(lp_ctx, "log level", optarg);
 			break;
 		case 'O':
 			sockops = optarg;

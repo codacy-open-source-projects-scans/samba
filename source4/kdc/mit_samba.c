@@ -69,7 +69,7 @@ static void mit_samba_debug(void *private_ptr, int msg_level, const char *msg)
 		is_error = 0;
 	}
 
-	com_err("", is_error, "%s", msg);
+	com_err("mitkdc", is_error, "%s", msg);
 }
 
 krb5_error_code mit_samba_context_init(struct mit_samba_context **_ctx)
@@ -137,22 +137,6 @@ done:
 		*_ctx = ctx;
 	}
 	return ret;
-}
-
-static krb5_error_code ks_is_tgs_principal(struct mit_samba_context *ctx,
-					   krb5_const_principal principal)
-{
-	char *p;
-	int eq = -1;
-
-	p = smb_krb5_principal_get_comp_string(ctx, ctx->context, principal, 0);
-
-	eq = krb5_princ_size(ctx->context, principal) == 2 &&
-	     (strcmp(p, KRB5_TGS_NAME) == 0);
-
-	talloc_free(p);
-
-	return eq;
 }
 
 int mit_samba_generate_salt(krb5_data *salt)
@@ -300,7 +284,7 @@ fetch_referral_principal:
 		 * and the error: SDB_ERR_WRONG_REALM.
 		 *
 		 * In the case of a TGS-REQ we need to return a referral ticket
-		 * fo the next trust hop to the client. This ticket will have
+		 * for the next trust hop to the client. This ticket will have
 		 * the following principal:
 		 *
 		 *     krbtgt/SAMBA2008R2.EXAMPLE.COM@ADDOM.SAMBA.EXAMPLE.COM
@@ -468,7 +452,14 @@ krb5_error_code mit_samba_get_pac(struct mit_samba_context *smb_ctx,
 	if (server == NULL) {
 		return EINVAL;
 	}
-	is_krbtgt = ks_is_tgs_principal(smb_ctx, server->princ);
+	{
+		int result = smb_krb5_principal_is_tgs(smb_ctx->context, server->princ);
+		if (result == -1) {
+			return ENOMEM;
+		}
+
+		is_krbtgt = result;
+	}
 	server_entry = talloc_get_type_abort(server->e_data,
 					     struct samba_kdc_entry);
 
@@ -606,7 +597,7 @@ krb5_error_code mit_samba_update_pac(struct mit_samba_context *ctx,
 	struct samba_kdc_entry *krbtgt_skdc_entry = NULL;
 	bool is_in_db = false;
 	bool is_trusted = false;
-	uint32_t flags = SAMBA_KDC_FLAG_SKIP_PAC_BUFFER;
+	uint32_t flags = 0;
 
 	/* Create a memory context early so code can use talloc_stackframe() */
 	tmp_ctx = talloc_named(ctx, 0, "mit_samba_update_pac context");
@@ -654,11 +645,6 @@ krb5_error_code mit_samba_update_pac(struct mit_samba_context *ctx,
 
 	if (is_trusted) {
 		flags |=  SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED;
-	}
-
-	if (is_in_db) {
-		flags |= SAMBA_KDC_FLAG_KRBTGT_IN_DB;
-
 	}
 
 	if (kdc_flags & KRB5_KDB_FLAG_PROTOCOL_TRANSITION) {

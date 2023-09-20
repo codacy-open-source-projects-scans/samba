@@ -409,41 +409,77 @@ samba-codecheck:
       # settings -> CI/CD -> Environment variables
     - if: $SUPPORT_PRIVATE_TEST == "yes"
 
-.needs_samba-def-build-private:
+.needs_ext4_support:
+  # All runners provide an ext4 filesystem
+  #
+  # Note: we don't use
+  # extends: .shared_template_test_only
+  # as that somehow resets the needs section
+  # and generates problems for something
+  # like this (which is used below)
+  #
+  # .needs_samba-SOME-build-ext4:
+  #   extends:
+  #     - .needs_samba-SOME-build
+  #     - .needs_ext4_support
+  #
+  # So we only set stage again instead...
+  stage: test_only
+
+.needs_5_15_kernel:
+  # Our private runners are based on
+  # ubuntu2204 with a 5.15 kernel.
+  #
+  # And they also provide an ext4 filesystem
+  extends: .private_test_only
+
+.needs_samba-def-build-ext4:
   extends:
     - .needs_samba-def-build
-    - .private_test_only
+    - .needs_ext4_support
 
-.needs_samba-mit-build-private:
+.needs_samba-mit-build-ext4:
   extends:
     - .needs_samba-mit-build
-    - .private_test_only
+    - .needs_ext4_support
 
-.needs_samba-h5l-build-private:
+.needs_samba-h5l-build-ext4:
   extends:
     - .needs_samba-h5l-build
-    - .private_test_only
+    - .needs_ext4_support
 
-.needs_samba-without-smb1-build-private:
+.needs_samba-without-smb1-build-5_15:
+  # Currently this doesn't strictly
+  # require a kernel >= 5.15, but only
+  # ext4 support.
+  #
+  # But we want to make sure that
+  # our private runners keep working
+  # and at least do a single job.
+  #
+  # In future we'll be able to run
+  # tests with io_uring in this
+  # setup, which will requires a
+  # 5.15 kernel in order to be useful.
   extends:
     - .needs_samba-without-smb1-build
-    - .private_test_only
+    - .needs_5_15_kernel
 
-.needs_samba-nt4-build-private:
+.needs_samba-nt4-build-ext4:
   extends:
     - .needs_samba-nt4-build
-    - .private_test_only
+    - .needs_ext4_support
 
-.needs_samba-no-opath-build-private:
+.needs_samba-no-opath-build-ext4:
   extends:
     - .needs_samba-no-opath-build
-    - .private_test_only
+    - .needs_ext4_support
 
 samba-fileserver:
-  extends: .needs_samba-h5l-build-private
+  extends: .needs_samba-h5l-build-ext4
 
 samba-fileserver-without-smb1:
-  extends: .needs_samba-without-smb1-build-private
+  extends: .needs_samba-without-smb1-build-5_15
 
 # This is a full build without the AD DC so we test the build with MIT
 # Kerberos from the default system (Ubuntu 22.04 at this stage).
@@ -453,19 +489,19 @@ samba-ktest-mit:
  extends: .shared_template
 
 samba-ad-dc-1:
-  extends: .needs_samba-def-build-private
+  extends: .needs_samba-def-build-ext4
 
 samba-nt4:
-  extends: .needs_samba-nt4-build-private
+  extends: .needs_samba-nt4-build-ext4
 
 samba-addc-mit-1:
-  extends: .needs_samba-mit-build-private
+  extends: .needs_samba-mit-build-ext4
 
 samba-no-opath1:
-  extends: .needs_samba-no-opath-build-private
+  extends: .needs_samba-no-opath-build-ext4
 
 samba-no-opath2:
-  extends: .needs_samba-no-opath-build-private
+  extends: .needs_samba-no-opath-build-ext4
 
 # 'pages' is a special job which can publish artifacts in `public` dir to gitlab pages
 pages:
@@ -529,7 +565,7 @@ coverity:
   script:
     - wget https://scan.coverity.com/download/linux64 --post-data "token=$COVERITY_SCAN_TOKEN&project=$COVERITY_SCAN_PROJECT_NAME" -O /tmp/coverity_tool.tgz
     - tar xf /tmp/coverity_tool.tgz
-    - ./configure.developer --with-cluster-support --with-system-mitkrb5 --with-experimental-mit-ad-dc
+    - ./configure.developer --with-cluster-support
     - cov-analysis-linux64-*/bin/cov-build --dir cov-int make -j$(nproc)
     - tar czf cov-int.tar.gz cov-int
     - curl
@@ -585,6 +621,7 @@ ubuntu2204-samba-o3:
     # (this uses the same variable as autobuild.py)
     - if: $AUTOBUILD_SKIP_SAMBA_O3 == "1"
       when: never
+    - when: on_success
 
 # All other jobs do not want code coverage.
 .samba-o3-template:

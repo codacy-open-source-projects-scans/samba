@@ -37,33 +37,11 @@
 
 static bool samba_wdc_is_s4u2self_req(astgs_request_t r)
 {
-	krb5_kdc_configuration *config = kdc_request_get_config((kdc_request_t)r);
 	const KDC_REQ *req = kdc_request_get_req(r);
 	const PA_DATA *pa_for_user = NULL;
 
 	if (req->msg_type != krb_tgs_req) {
 		return false;
-	}
-
-	if (config->enable_fast && req->padata != NULL) {
-		const PA_DATA *pa_fx_fast = NULL;
-		int idx = 0;
-
-		pa_fx_fast = krb5_find_padata(req->padata->val,
-					      req->padata->len,
-					      KRB5_PADATA_FX_FAST,
-					      &idx);
-		if (pa_fx_fast != NULL) {
-			/*
-			 * We're in the outer request
-			 * with KRB5_PADATA_FX_FAST
-			 * if fast is enabled we'll
-			 * process the s4u2self
-			 * request only in the
-			 * inner request.
-			 */
-			return false;
-		}
 	}
 
 	if (req->padata != NULL) {
@@ -123,7 +101,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 			SAMBA_ASSERTED_IDENTITY_SERVICE :
 			SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY;
 	struct authn_audit_info *server_audit_info = NULL;
-	NTSTATUS status = NT_STATUS_OK;
+	NTSTATUS reply_status = NT_STATUS_OK;
 
 	struct auth_user_info_dc *user_info_dc = NULL;
 
@@ -167,7 +145,7 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 							   user_info_dc,
 							   server_entry,
 							   &server_audit_info,
-							   &status);
+							   &reply_status);
 		if (server_audit_info != NULL) {
 			krb5_error_code ret2;
 
@@ -176,10 +154,10 @@ static krb5_error_code samba_wdc_get_pac(void *priv,
 				ret = ret2;
 			}
 		}
-		if (!NT_STATUS_IS_OK(status)) {
+		if (!NT_STATUS_IS_OK(reply_status)) {
 			krb5_error_code ret2;
 
-			ret2 = hdb_samba4_set_ntstatus(r, status, ret);
+			ret2 = hdb_samba4_set_ntstatus(r, reply_status, ret);
 			if (ret == 0) {
 				ret = ret2;
 			}
@@ -378,10 +356,6 @@ static krb5_error_code samba_wdc_verify_pac2(astgs_request_t r,
 		flags |= SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED;
 	}
 
-	if (is_in_db) {
-		flags |= SAMBA_KDC_FLAG_KRBTGT_IN_DB;
-	}
-
 	ret = samba_kdc_verify_pac(mem_ctx,
 				   context,
 				   flags,
@@ -431,7 +405,7 @@ static krb5_error_code samba_wdc_reget_pac(void *priv, astgs_request_t r,
 	krb5_pac new_pac = NULL;
 	struct authn_audit_info *server_audit_info = NULL;
 	krb5_error_code ret;
-	NTSTATUS status = NT_STATUS_OK;
+	NTSTATUS reply_status = NT_STATUS_OK;
 	uint32_t flags = 0;
 
 	mem_ctx = talloc_named(NULL, 0, "samba_wdc_reget_pac context");
@@ -495,7 +469,7 @@ static krb5_error_code samba_wdc_reget_pac(void *priv, astgs_request_t r,
 				   *pac,
 				   new_pac,
 				   &server_audit_info,
-				   &status);
+				   &reply_status);
 	if (server_audit_info != NULL) {
 		krb5_error_code ret2;
 
@@ -504,10 +478,10 @@ static krb5_error_code samba_wdc_reget_pac(void *priv, astgs_request_t r,
 			ret = ret2;
 		}
 	}
-	if (!NT_STATUS_IS_OK(status)) {
+	if (!NT_STATUS_IS_OK(reply_status)) {
 		krb5_error_code ret2;
 
-		ret2 = hdb_samba4_set_ntstatus(r, status, ret);
+		ret2 = hdb_samba4_set_ntstatus(r, reply_status, ret);
 		if (ret == 0) {
 			ret = ret2;
 		}
@@ -557,8 +531,9 @@ static krb5_error_code samba_wdc_verify_pac(void *priv, astgs_request_t r,
 		kdc_request_get_explicit_armor_pac(r);
 
 	if (delegated_proxy) {
-		uint16_t rodc_id;
-		unsigned int my_krbtgt_number;
+		uint16_t pac_kdc_signature_rodc_id;
+		const unsigned int local_tgs_rodc_id = krbtgt_skdc_entry->kdc_db_ctx->my_krbtgt_number;
+		const uint16_t header_ticket_rodc_id = krbtgt->kvno >> 16;
 
 		/*
 		 * We're using delegated_proxy for the moment to indicate cases
@@ -576,7 +551,7 @@ static krb5_error_code samba_wdc_verify_pac(void *priv, astgs_request_t r,
 		ret = krb5_pac_get_kdc_checksum_info(context,
 						     pac,
 						     &ctype,
-						     &rodc_id);
+						     &pac_kdc_signature_rodc_id);
 		if (ret != 0) {
 			DBG_WARNING("Failed to get PAC checksum info\n");
 			return ret;
@@ -586,16 +561,13 @@ static krb5_error_code samba_wdc_verify_pac(void *priv, astgs_request_t r,
 		 * We need to check the KDC and ticket signatures, fetching the
 		 * correct key based on the enctype.
 		 */
-
-		my_krbtgt_number = krbtgt_skdc_entry->kdc_db_ctx->my_krbtgt_number;
-
-		if (my_krbtgt_number != 0) {
+		if (local_tgs_rodc_id != 0) {
 			/*
 			 * If we are an RODC, and we are not the KDC that signed
 			 * the evidence ticket, then we need to proxy the
 			 * request.
 			 */
-			if (rodc_id != my_krbtgt_number) {
+			if (local_tgs_rodc_id != pac_kdc_signature_rodc_id) {
 				return HDB_ERR_NOT_FOUND_HERE;
 			}
 		} else {
@@ -604,14 +576,14 @@ static krb5_error_code samba_wdc_verify_pac(void *priv, astgs_request_t r,
 			 * different KDC than the one that issued the header
 			 * ticket.
 			 */
-			if (rodc_id != krbtgt->kvno >> 16) {
+			if (pac_kdc_signature_rodc_id != header_ticket_rodc_id) {
 				struct sdb_entry signing_krbtgt_sdb;
 
 				/*
 				 * If we didn't sign the ticket, then return an
 				 * error.
 				 */
-				if (rodc_id != 0) {
+				if (pac_kdc_signature_rodc_id != 0) {
 					return KRB5KRB_AP_ERR_MODIFIED;
 				}
 

@@ -61,7 +61,7 @@
 #include "dsdb/samdb/ldb_modules/util.h"
 
 /* default is 30 minutes: -1e7 * 30 * 60 */
-#define DEFAULT_OBSERVATION_WINDOW              -18000000000
+#define DEFAULT_OBSERVATION_WINDOW              (-18000000000)
 
 /*
   search the sam for the specified attributes in a specific domain, filter on
@@ -658,11 +658,9 @@ NTSTATUS samdb_result_passwords(TALLOC_CTX *mem_ctx,
 */
 struct samr_LogonHours samdb_result_logon_hours(TALLOC_CTX *mem_ctx, struct ldb_message *msg, const char *attr)
 {
-	struct samr_LogonHours hours;
+	struct samr_LogonHours hours = {};
 	size_t units_per_week = 168;
 	const struct ldb_val *val = ldb_msg_find_ldb_val(msg, attr);
-
-	ZERO_STRUCT(hours);
 
 	if (val) {
 		units_per_week = val->length * 8;
@@ -723,7 +721,7 @@ NTSTATUS samdb_result_parameters(TALLOC_CTX *mem_ctx,
 		/*
 		 * If the on-disk data is not even in length, we know
 		 * it is corrupt, and can not be safely pushed.  We
-		 * would either truncate, send either a un-initilaised
+		 * would either truncate, send an uninitialised
 		 * byte or send a forced zero byte
 		 */
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
@@ -1166,7 +1164,7 @@ int samdb_msg_add_parameters(struct ldb_context *sam_ldb, TALLOC_CTX *mem_ctx, s
 	for (i = 0; i < parameters->length / 2; i++) {
 		/*
 		 * The on-disk format needs to be in the 'network'
-		 * format, parmeters->array is a uint16_t array of
+		 * format, parameters->array is a uint16_t array of
 		 * length parameters->length / 2
 		 */
 		SSVAL(val.data, i * 2, parameters->array[i]);
@@ -3884,7 +3882,7 @@ int samdb_ntds_site_settings_options(struct ldb_context *ldb_ctx,
 		goto failed;
 
 	/* Perform a one level (child) search from the local
-         * site distinguided name.   We're looking for the
+         * site distinguished name.   We're looking for the
          * "options" attribute within the nTDSSiteSettings
          * object
 	 */
@@ -4819,7 +4817,7 @@ int dsdb_normalise_dn_and_find_nc_root(struct ldb_context *samdb,
 	}
 
 	/*
-	 * Either we are working aginast a remote LDAP
+	 * Either we are working against a remote LDAP
 	 * server or the object doesn't exist locally.
 	 *
 	 * This means any GUID that was present in the DN
@@ -6682,7 +6680,7 @@ static int dsdb_count_domain_callback(
  *
  * @param ldb [in] Current ldb context
  * @param count [out] Pointer to the count
- * @param base [in] The base dn for the quey
+ * @param base [in] The base dn for the query
  * @param dom_sid [in] The domain sid, if non NULL records that are not a member
  *                     of the domain are ignored.
  * @param scope [in] Search scope.

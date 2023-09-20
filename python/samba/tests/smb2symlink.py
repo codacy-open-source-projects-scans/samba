@@ -34,10 +34,12 @@ class Smb2SymlinkTests(samba.tests.libsmb.LibsmbTests):
                 self.server_ip,
                 share,
                 self.lp,
-                self.creds)
+                self.creds,
+                force_smb1=True)
         except NTSTATUSError as e:
             if e.args[0] != ntstatus.NT_STATUS_CONNECTION_RESET:
                 raise
+        smb1.smb1_posix()
 
         share = samba.tests.env_get_var_value(
             "SMB2_SHARE", allow_missing=True)
@@ -174,6 +176,21 @@ class Smb2SymlinkTests(samba.tests.libsmb.LibsmbTests):
               'flags' : 0 })
 
         self.clean_file(smb1, symlink)
+
+    def test_symlink_reparse_data_buffer_parse(self):
+        """Test parsing a symlink reparse buffer coming from Windows"""
+
+        buf = (b'\x0c\x00\x00\xa0\x18\x00\x00\x00'
+               b'\x06\x00\x06\x00\x00\x00\x06\x00'
+               b'\x01\x00\x00\x00\x62\x00\x61\x00'
+               b'\x72\x00\x62\x00\x61\x00\x72\x00')
+
+        try:
+            syml = reparse_symlink.symlink_get(buf);
+        except:
+            self.fail("Could not parse symlink buffer")
+
+        self.assertEqual(syml, ('bar', 'bar', 0, 1));
 
 if __name__ == '__main__':
     import unittest

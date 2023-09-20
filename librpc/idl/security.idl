@@ -545,15 +545,34 @@ interface security
 	} security_ace_flags;
 
 	typedef [public,enum8bit] enum {
+		/*
+		 * The following entries tagged *reserved* have been
+		 * named and allocated by Microsoft but apparently not
+		 * implemented (MS-DTYP 2.4.4.1).
+		 *
+		 * The entries marked *unused* are more or less
+		 * completely ignored by Samba.
+		 */
 		SEC_ACE_TYPE_ACCESS_ALLOWED		= 0,
 		SEC_ACE_TYPE_ACCESS_DENIED		= 1,
 		SEC_ACE_TYPE_SYSTEM_AUDIT		= 2,
-		SEC_ACE_TYPE_SYSTEM_ALARM		= 3,
-		SEC_ACE_TYPE_ALLOWED_COMPOUND		= 4,
+		SEC_ACE_TYPE_SYSTEM_ALARM		= 3, /* reserved */
+		SEC_ACE_TYPE_ALLOWED_COMPOUND		= 4, /* reserved */
 		SEC_ACE_TYPE_ACCESS_ALLOWED_OBJECT	= 5,
 		SEC_ACE_TYPE_ACCESS_DENIED_OBJECT	= 6,
 		SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT	= 7,
-		SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT	= 8
+		SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT	= 8, /* reserved */
+		SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK	= 9,
+		SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK	= 10,
+		SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT	= 11,
+		SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT	= 12,
+		SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK		= 13,
+		SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK		= 14, /* reserved */
+		SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT	= 15,
+		SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT	= 16, /* reserved */
+		SEC_ACE_TYPE_SYSTEM_MANDATORY_LABEL		= 17, /*unused */
+		SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE		= 18,
+		SEC_ACE_TYPE_SYSTEM_SCOPED_POLICY_ID		= 19 /* unused */
 	} security_ace_type;
 
 	typedef [bitmap32bit] bitmap {
@@ -580,6 +599,63 @@ interface security
 		[switch_is(flags & SEC_ACE_OBJECT_TYPE_PRESENT)] security_ace_object_type type;
 		[switch_is(flags & SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT)] security_ace_object_inherited_type inherited_type;
 	} security_ace_object;
+
+
+
+	/*
+	 * flags that might occur in
+	 * CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1.flags.
+	 *
+	 * Not all of them do anything. Conditional ACEs also use some
+	 * of these flags.
+	 */
+	typedef [bitmap32bit] bitmap {
+		CLAIM_SECURITY_ATTRIBUTE_NON_INHERITABLE =      1,
+		CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE = 2,
+		CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY    = 4, /*reserved*/
+		CLAIM_SECURITY_ATTRIBUTE_DISABLED_BY_DEFAULT  = 8,
+		CLAIM_SECURITY_ATTRIBUTE_DISABLED          = 0x10, /*reserved*/
+		CLAIM_SECURITY_ATTRIBUTE_MANDATORY         = 0x20,
+		/*
+		 * Conditional ACEs use some of the above flags in
+		 * combination with an internal one at the other end
+		 * of a 16 bit field (defined in conditional_ace.idl).
+		 * This next definition is warning us in case a clash
+		 * develops (which seems very unlikely).
+		 */
+		CLAIM_SECURITY_ATTRIBUTE_RESERVED_FOR_SAMBA = 0x8000
+	} claim_flags;
+
+	/*
+	 * These claim types for v1 claims mirror those of on-the-wire
+	 * PAC claims, but not conditional ace literal token types.
+	 */
+	typedef [public] enum {
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64 = 0x0001,
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_UINT64 =	0x0002,
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_STRING = 0x0003,
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_SID = 0x0005,
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN = 0x0006,
+		CLAIM_SECURITY_ATTRIBUTE_TYPE_OCTET_STRING = 0x0010
+	} security_claim_value_type;
+
+	typedef [nodiscriminant,flag(NDR_NOALIGN)] union {
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64),relative] int64 *int_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_UINT64),relative] hyper *uint_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_STRING),relative] nstring *string_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_SID),relative] DATA_BLOB *sid_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_OCTET_STRING),relative] DATA_BLOB *octet_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN),relative] hyper *bool_value;
+	} claim_values;
+
+	typedef [public,gensize] struct {
+		[relative] nstring *name;
+		uint16 value_type;
+		uint16 _reserved;
+		uint32 flags;
+		uint32 value_count;
+		[switch_is(value_type)] claim_values values[value_count];
+	} CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1;
 
 	typedef [public,nodiscriminant] union {
 		[case(SEC_ACE_TYPE_ACCESS_ALLOWED_OBJECT)] security_ace_object object;
@@ -682,6 +758,12 @@ interface security
 		[size_is(num_sids)] dom_sid sids[*];
 		se_privilege privilege_mask;
 		lsa_SystemAccessModeFlags rights_mask;
+		uint32 num_local_claims;
+		uint32 num_user_claims;
+		uint32 num_device_claims;
+		[size_is(num_local_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 local_claims[*];
+		[size_is(num_user_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 user_claims[*];
+		[size_is(num_device_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 device_claims[*];
 	} security_token;
 
         typedef [public] struct {

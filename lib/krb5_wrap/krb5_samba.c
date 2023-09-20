@@ -126,31 +126,54 @@ void krb5_free_string(krb5_context context, char *val) {
 }
 #endif
 
-#if defined(HAVE_KRB5_PRINCIPAL_GET_COMP_STRING) && !defined(HAVE_KRB5_PRINC_COMPONENT)
-const krb5_data *krb5_princ_component(krb5_context context,
-				      krb5_principal principal, int i);
-
-const krb5_data *krb5_princ_component(krb5_context context,
-				      krb5_principal principal, int i)
+krb5_error_code smb_krb5_princ_component(krb5_context context,
+					 krb5_const_principal principal,
+					 int i,
+					 krb5_data *data);
+krb5_error_code smb_krb5_princ_component(krb5_context context,
+					 krb5_const_principal principal,
+					 int i,
+					 krb5_data *data)
 {
-	static krb5_data kdata;
+#if defined(HAVE_KRB5_PRINCIPAL_GET_COMP_STRING) && !defined(HAVE_KRB5_PRINC_COMPONENT)
+	const char *component = NULL;
 
-	kdata.data = discard_const_p(char, krb5_principal_get_comp_string(context, principal, i));
-	kdata.length = strlen((const char *)kdata.data);
-	return &kdata;
-}
+	if (i < 0) {
+		return EINVAL;
+	}
+
+	component = krb5_principal_get_comp_string(context, principal, i);
+	if (component == NULL) {
+		return ENOENT;
+	}
+
+	*data = smb_krb5_make_data(discard_const_p(char, component), strlen(component));
+
+	return 0;
+#else
+	const krb5_data *kdata = NULL;
+
+	if (i < 0) {
+		return EINVAL;
+	}
+
+	kdata = krb5_princ_component(context, principal, i);
+	if (kdata == NULL) {
+		return ENOENT;
+	}
+
+	*data = *kdata;
+
+	return 0;
 #endif
-
+}
 
 /**********************************************************
  * WRAPPING FUNCTIONS
  **********************************************************/
 
-#if defined(HAVE_ADDR_TYPE_IN_KRB5_ADDRESS)
-/* HEIMDAL */
-
 /**
- * @brief Stores the address of a 'struct sockaddr_storage' a krb5_address
+ * @brief Stores the address of a 'struct sockaddr_storage' into a krb5_address
  *
  * @param[in]  paddr    A pointer to a 'struct sockaddr_storage to extract the
  *                      address from.
@@ -163,6 +186,8 @@ bool smb_krb5_sockaddr_to_kaddr(struct sockaddr_storage *paddr,
 				krb5_address *pkaddr)
 {
 	memset(pkaddr, '\0', sizeof(krb5_address));
+#if defined(HAVE_ADDR_TYPE_IN_KRB5_ADDRESS)
+/* HEIMDAL */
 #ifdef HAVE_IPV6
 	if (paddr->ss_family == AF_INET6) {
 		pkaddr->addr_type = KRB5_ADDRESS_INET6;
@@ -177,25 +202,8 @@ bool smb_krb5_sockaddr_to_kaddr(struct sockaddr_storage *paddr,
 		pkaddr->address.data = (char *)&(((struct sockaddr_in *)paddr)->sin_addr);
 		return true;
 	}
-	return false;
-}
 #elif defined(HAVE_ADDRTYPE_IN_KRB5_ADDRESS)
 /* MIT */
-
-/**
- * @brief Stores the address of a 'struct sockaddr_storage' a krb5_address
- *
- * @param[in]  paddr    A pointer to a 'struct sockaddr_storage to extract the
- *                      address from.
- *
- * @param[in]  pkaddr A Kerberos address to store the address in.
- *
- * @return True on success, false if an error occurred.
- */
-bool smb_krb5_sockaddr_to_kaddr(struct sockaddr_storage *paddr,
-				krb5_address *pkaddr)
-{
-	memset(pkaddr, '\0', sizeof(krb5_address));
 #ifdef HAVE_IPV6
 	if (paddr->ss_family == AF_INET6) {
 		pkaddr->addrtype = ADDRTYPE_INET6;
@@ -210,11 +218,11 @@ bool smb_krb5_sockaddr_to_kaddr(struct sockaddr_storage *paddr,
 		pkaddr->contents = (krb5_octet *)&(((struct sockaddr_in *)paddr)->sin_addr);
 		return true;
 	}
-	return false;
-}
 #else
 #error UNKNOWN_ADDRTYPE
 #endif
+	return false;
+}
 
 krb5_error_code smb_krb5_mk_error(krb5_context context,
 				  krb5_error_code error_code,
@@ -865,7 +873,7 @@ krb5_error_code smb_krb5_parse_name(krb5_context context,
  *
  * @param[in]  principal The principal.
  *
- * @param[out] unix_name A string representation of the princpial name as with
+ * @param[out] unix_name A string representation of the principal name as with
  *                       unix charset.
  *
  * Use talloc_free() to free the string representation if it is no longer
@@ -1644,7 +1652,7 @@ krb5_error_code smb_krb5_kt_get_name(TALLOC_CTX *mem_ctx,
  *
  * @param[in]  keep_old_kvno Keep the entries with the previous kvno.
  *
- * @param[in]  kvno          The kvnco to use.
+ * @param[in]  kvno          The kvno to use.
  *
  * @param[in]  enctype_only  Only evaluate the enctype argument if true
  *
@@ -2351,7 +2359,7 @@ done:
  *
  * @param[in]  password  The password (or NULL).
  *
- * @param[in]  impersonate_principal The impersonatiion principal (or NULL).
+ * @param[in]  impersonate_principal The impersonation principal (or NULL).
  *
  * @param[in]  self_service The local service for S4U2Self if
  *                          impersonate_principal is specified).
@@ -3180,11 +3188,22 @@ char *smb_krb5_principal_get_realm(TALLOC_CTX *mem_ctx,
 				   krb5_const_principal principal)
 {
 #ifdef HAVE_KRB5_PRINCIPAL_GET_REALM /* Heimdal */
-	return talloc_strdup(mem_ctx,
-			     krb5_principal_get_realm(context, principal));
+	const char *realm = NULL;
+
+	realm = krb5_principal_get_realm(context, principal);
+	if (realm == NULL) {
+		return NULL;
+	}
+
+	return talloc_strdup(mem_ctx, realm);
 #elif defined(krb5_princ_realm) /* MIT */
-	const krb5_data *realm;
+	const krb5_data *realm = NULL;
+
 	realm = krb5_princ_realm(context, principal);
+	if (realm == NULL) {
+		return NULL;
+	}
+
 	return talloc_strndup(mem_ctx, realm->data, realm->length);
 #else
 #error UNKNOWN_GET_PRINC_REALM_FUNCTIONS
