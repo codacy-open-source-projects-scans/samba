@@ -314,7 +314,7 @@ static NTSTATUS smbd_initialize_smb2(struct smbXsrv_connection *xconn,
 					xconn->client->raw_ev_ctx,
 					xconn,
 					xconn->transport.sock,
-					TEVENT_FD_READ,
+					TEVENT_FD_ERROR | TEVENT_FD_READ,
 					smbd_smb2_connection_handler,
 					xconn);
 	if (xconn->transport.fde == NULL) {
@@ -516,11 +516,11 @@ static NTSTATUS smbd_smb2_inbuf_parse_compound(struct smbXsrv_connection *xconn,
 
 			status = smb2srv_session_lookup_conn(xconn, uid, now,
 							     &s);
-			if (s == NULL) {
+			if (!NT_STATUS_IS_OK(status)) {
 				status = smb2srv_session_lookup_global(xconn->client,
 								       uid, req, &s);
 			}
-			if (s == NULL) {
+			if (!NT_STATUS_IS_OK(status)) {
 				DEBUG(1, ("invalid session[%llu] in "
 					  "SMB2_TRANSFORM header\n",
 					   (unsigned long long)uid));
@@ -2457,7 +2457,7 @@ static NTSTATUS smbd_smb2_request_process_cancel(struct smbd_smb2_request *req)
 	uint32_t flags;
 	uint64_t search_message_id;
 	uint64_t search_async_id;
-	uint64_t found_id;
+	uint64_t found_id = 0;
 
 	inhdr = SMBD_SMB2_IN_HDR_PTR(req);
 
@@ -3809,10 +3809,6 @@ static NTSTATUS smbd_smb2_request_reply(struct smbd_smb2_request *req)
 				return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
 			}
 		}
-		if (rc < 0) {
-			gnutls_hash_deinit(hash_hnd, NULL);
-			return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
-		}
 		gnutls_hash_output(hash_hnd, req->preauth->sha512_value);
 
 		rc = gnutls_hash(hash_hnd,
@@ -5130,7 +5126,24 @@ static NTSTATUS smbd_smb2_io_handler(struct smbXsrv_connection *xconn,
 		 */
 		TEVENT_FD_NOT_READABLE(xconn->transport.fde);
 		TEVENT_FD_NOT_WRITEABLE(xconn->transport.fde);
+		TEVENT_FD_NOT_WANTERROR(xconn->transport.fde);
 		return NT_STATUS_OK;
+	}
+
+	if (fde_flags & TEVENT_FD_ERROR) {
+		ret = samba_socket_poll_or_sock_error(xconn->transport.sock);
+		if (ret == -1) {
+			err = errno;
+			status = map_nt_error_from_unix_common(err);
+			smbXsrv_connection_disconnect_transport(xconn,
+								status);
+			return status;
+		}
+		/* This should not happen */
+		status = NT_STATUS_REMOTE_DISCONNECT;
+		smbXsrv_connection_disconnect_transport(xconn,
+							status);
+		return status;
 	}
 
 	if (fde_flags & TEVENT_FD_WRITE) {

@@ -81,7 +81,7 @@ LDAP *priv2ld(struct ldapsam_privates *priv)
 }
 
 /**********************************************************************
- Get the attribute name given a user schame version.
+ Get the attribute name given a user schema version.
  **********************************************************************/
 
 static const char* get_userattr_key2string( int schema_ver, int key )
@@ -441,7 +441,7 @@ static int ldapsam_delete_entry(struct ldapsam_privates *priv,
 static time_t ldapsam_get_entry_timestamp( struct ldapsam_privates *ldap_state, LDAPMessage * entry)
 {
 	char *temp;
-	struct tm tm;
+	struct tm tm = {};
 
 	temp = smbldap_talloc_single_attribute(
 		smbldap_get_ldap(ldap_state->smbldap_state), entry,
@@ -2849,7 +2849,8 @@ static NTSTATUS ldapsam_enum_group_members(struct pdb_methods *methods,
 						    entry,
 						    get_global_sam_sid(),
 						    &rid)) {
-			DEBUG(0, ("Severe DB error, %s can't miss the samba SID"								"attribute\n", LDAP_OBJ_SAMBASAMACCOUNT));
+			DEBUG(0, ("Severe DB error, %s can't miss the samba SID"
+				  "attribute\n", LDAP_OBJ_SAMBASAMACCOUNT));
 			ret = NT_STATUS_INTERNAL_DB_CORRUPTION;
 			goto done;
 		}
@@ -6562,7 +6563,7 @@ static void free_private_data(void **vp)
 }
 
 /*********************************************************************
- Intitalise the parts of the pdb_methods structure that are common to
+ Initialise the parts of the pdb_methods structure that are common to
  all pdb_ldap modes
 *********************************************************************/
 

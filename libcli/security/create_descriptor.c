@@ -199,6 +199,9 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 		case SEC_ACE_TYPE_ACCESS_DENIED_OBJECT:
 		case SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT:
 		case SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT:
+		case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
 			if (ace->object.object.flags & SEC_ACE_OBJECT_TYPE_PRESENT) {
 				inherited_property = &ace->object.object.type.type;
 			}
@@ -216,6 +219,16 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 
 			break;
 
+		case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK:
+		case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK:
+		case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK:
+			break;
+		case SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE:
+			break;
+		case SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK:
+		case SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT:
+		case SEC_ACE_TYPE_SYSTEM_MANDATORY_LABEL:
+		case SEC_ACE_TYPE_SYSTEM_SCOPED_POLICY_ID:
 		default:
 			DBG_WARNING("ACE type %d is not handled\n", ace->type);
 			TALLOC_FREE(tmp_acl);
@@ -332,9 +345,21 @@ static struct security_acl *calculate_inherited_from_parent(TALLOC_CTX *mem_ctx,
 				case SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT:
 					tmp_ace->type = SEC_ACE_TYPE_SYSTEM_AUDIT;
 					break;
-                                default:
-                                        /* all the _CALLBACK types */
-                                        break;
+				case SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK;
+					break;
+				case SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK;
+					break;
+				case SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
+					tmp_ace->type = SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK;
+					break;
+				default:
+					/*
+					 * SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT
+					 * is reserved.
+					 */
+					break;
 				}
 			}
 

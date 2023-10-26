@@ -33,6 +33,7 @@
 #include "../libcli/auth/libcli_auth.h"
 #include "../librpc/gen_ndr/xattr.h"
 #include "../librpc/gen_ndr/ndr_security.h"
+#include "../librpc/gen_ndr/ndr_smb3posix.h"
 #include "libcli/security/security.h"
 #include "trans2.h"
 #include "auth.h"
@@ -1702,45 +1703,35 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 
 	case SMB2_FILE_POSIX_INFORMATION:
 		{
-			uint8_t *buf = NULL;
-			ssize_t plen = 0;
+			struct smb3_file_posix_information info = {};
+			uint8_t buf[sizeof(info)];
+			struct ndr_push ndr = {
+				.data = buf,
+				.alloc_size = sizeof(buf),
+				.fixed_buf_size = true,
+			};
+			enum ndr_err_code ndr_err;
+
 			p+= 4;
 			SIVAL(p,0,reskey); p+= 4;
 
-			DEBUG(10,("smbd_marshall_dir_entry: "
-				  "SMB2_FILE_POSIX_INFORMATION\n"));
+			DBG_DEBUG("SMB2_FILE_POSIX_INFORMATION\n");
+
 			if (!(conn->sconn->using_smb2)) {
 				return NT_STATUS_INVALID_LEVEL;
 			}
-			if (!lp_smb3_unix_extensions()) {
-				return NT_STATUS_INVALID_LEVEL;
+
+			smb3_file_posix_information_init(
+				conn, &smb_fname->st, 0, mode, &info);
+
+			ndr_err = ndr_push_smb3_file_posix_information(
+				&ndr, NDR_SCALARS|NDR_BUFFERS, &info);
+			if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+				return NT_STATUS_INSUFFICIENT_RESOURCES;
 			}
 
-			/* Determine the size of the posix info context */
-			plen = store_smb2_posix_info(conn,
-						     &smb_fname->st,
-						     0,
-						     mode,
-						     NULL,
-						     0);
-			if (plen == -1) {
-				return NT_STATUS_INVALID_PARAMETER;
-			}
-			buf = talloc_zero_size(ctx, plen);
-			if (buf == NULL) {
-				return NT_STATUS_NO_MEMORY;
-			}
-
-			/* Store the context in buf */
-			store_smb2_posix_info(conn,
-					      &smb_fname->st,
-					      0,
-					      mode,
-					      buf,
-					      plen);
-			memcpy(p, buf, plen);
-			p += plen;
-			TALLOC_FREE(buf);
+			memcpy(p, buf, ndr.offset);
+			p += ndr.offset;
 
 			nameptr = p;
 			p += 4;
@@ -1976,8 +1967,7 @@ static bool fsinfo_unix_valid_level(connection_struct *conn,
 				    uint16_t info_level)
 {
 	if (conn->sconn->using_smb2 &&
-			lp_smb3_unix_extensions() &&
-			info_level == SMB2_FS_POSIX_INFORMATION_INTERNAL) {
+	    info_level == SMB2_FS_POSIX_INFORMATION_INTERNAL) {
 		return true;
 	}
 #if defined(SMB1SERVER)
@@ -2654,15 +2644,15 @@ NTSTATUS smb_set_fsquota(connection_struct *conn,
 
 	/* access check */
 	if ((get_current_uid(conn) != 0) || !CAN_WRITE(conn)) {
-		DEBUG(3, ("set_fsquota: access_denied service [%s] user [%s]\n",
-			  lp_servicename(talloc_tos(), lp_sub, SNUM(conn)),
-			  conn->session_info->unix_info->unix_name));
+		DBG_NOTICE("access_denied service [%s] user [%s]\n",
+			   lp_servicename(talloc_tos(), lp_sub, SNUM(conn)),
+			   conn->session_info->unix_info->unix_name);
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
 	if (!check_fsp_ntquota_handle(conn, req,
 				      fsp)) {
-		DEBUG(1, ("set_fsquota: no valid QUOTA HANDLE\n"));
+		DBG_WARNING("no valid QUOTA HANDLE\n");
 		return NT_STATUS_INVALID_HANDLE;
 	}
 
@@ -2671,8 +2661,8 @@ NTSTATUS smb_set_fsquota(connection_struct *conn,
 	 * --metze
 	 */
 	if (qdata->length < 42) {
-		DEBUG(0,("set_fsquota: requires total_data(%u) >= 42 bytes!\n",
-			(unsigned int)qdata->length));
+		DBG_ERR("requires total_data(%zu) >= 42 bytes!\n",
+			qdata->length);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
@@ -2691,8 +2681,8 @@ NTSTATUS smb_set_fsquota(connection_struct *conn,
 
 	/* now set the quotas */
 	if (vfs_set_ntquota(fsp, SMB_USER_FS_QUOTA_TYPE, NULL, &quotas)!=0) {
-		DEBUG(1, ("vfs_set_ntquota() failed for service [%s]\n",
-			  lp_servicename(talloc_tos(), lp_sub, SNUM(conn))));
+		DBG_WARNING("vfs_set_ntquota() failed for service [%s]\n",
+			    lp_servicename(talloc_tos(), lp_sub, SNUM(conn)));
 		status =  map_nt_error_from_unix(errno);
 	} else {
 		status = NT_STATUS_OK;
@@ -2733,8 +2723,8 @@ char *store_file_unix_basic(connection_struct *conn,
 {
 	dev_t devno;
 
-	DEBUG(10,("store_file_unix_basic: SMB_QUERY_FILE_UNIX_BASIC\n"));
-	DEBUG(4,("store_file_unix_basic: st_mode=%o\n",(int)psbuf->st_ex_mode));
+	DBG_DEBUG("SMB_QUERY_FILE_UNIX_BASIC\n");
+	DBG_NOTICE("st_mode=%o\n", (int)psbuf->st_ex_mode);
 
 	SOFF_T(pdata,0,get_file_size_stat(psbuf));             /* File size 64 Bit */
 	pdata += 8;
@@ -3019,8 +3009,7 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 			ok = true;
 		}
 
-		if (lp_smb3_unix_extensions() &&
-		    (fsp != NULL) &&
+		if ((fsp != NULL) &&
 		    (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN)) {
 			DBG_DEBUG("SMB2 posix open\n");
 			ok = true;
@@ -3664,13 +3653,16 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 		 */
 		case SMB2_FILE_POSIX_INFORMATION_INTERNAL:
 		{
-			uint8_t *buf = NULL;
-			ssize_t plen = 0;
+			struct smb3_file_posix_information info = {};
+			uint8_t buf[sizeof(info)];
+			struct ndr_push ndr = {
+				.data = buf,
+				.alloc_size = sizeof(buf),
+				.fixed_buf_size = true,
+			};
+			enum ndr_err_code ndr_err;
 
 			if (!(conn->sconn->using_smb2)) {
-				return NT_STATUS_INVALID_LEVEL;
-			}
-			if (!lp_smb3_unix_extensions()) {
 				return NT_STATUS_INVALID_LEVEL;
 			}
 			if (fsp == NULL) {
@@ -3680,30 +3672,17 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 				return NT_STATUS_INVALID_LEVEL;
 			}
 
-			/* Determine the size of the posix info context */
-			plen = store_smb2_posix_info(conn,
-						     &smb_fname->st,
-						     0,
-						     mode,
-						     NULL,
-						     0);
-			if (plen == -1 || data_size < plen) {
-				return NT_STATUS_INVALID_PARAMETER;
-			}
-			buf = talloc_zero_size(mem_ctx, plen);
-			if (buf == NULL) {
-				return NT_STATUS_NO_MEMORY;
+			smb3_file_posix_information_init(
+				conn, &smb_fname->st, 0, mode, &info);
+
+			ndr_err = ndr_push_smb3_file_posix_information(
+				&ndr, NDR_SCALARS|NDR_BUFFERS, &info);
+			if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+				return NT_STATUS_INSUFFICIENT_RESOURCES;
 			}
 
-			/* Store the context in buf */
-			store_smb2_posix_info(conn,
-					      &smb_fname->st,
-					      0,
-					      mode,
-					      buf,
-					      plen);
-			memcpy(pdata, buf, plen);
-			data_size = plen;
+			memcpy(pdata, buf, ndr.offset);
+			data_size = ndr.offset;
 			break;
 		}
 

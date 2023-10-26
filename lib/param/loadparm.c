@@ -2730,7 +2730,7 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "ntvfs handler", "unixuid default");
 	lpcfg_do_global_parameter(lp_ctx, "max connections", "0");
 
-	lpcfg_do_global_parameter(lp_ctx, "dcerpc endpoint servers", "epmapper wkssvc rpcecho samr netlogon lsarpc drsuapi dssetup unixinfo browser eventlog6 backupkey dnsserver");
+	lpcfg_do_global_parameter(lp_ctx, "dcerpc endpoint servers", "epmapper wkssvc samr netlogon lsarpc drsuapi dssetup unixinfo browser eventlog6 backupkey dnsserver");
 	lpcfg_do_global_parameter(lp_ctx, "server services", "s3fs rpc nbt wrepl ldap cldap kdc drepl winbindd ntp_signd kcc dnsupdate dns");
 	lpcfg_do_global_parameter(lp_ctx, "kccsrv:samba_kcc", "true");
 	/* the winbind method for domain controllers is for both RODC
@@ -3156,6 +3156,10 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 				  "ad dc functional level",
 				  "2008_R2");
 
+	lpcfg_do_global_parameter(lp_ctx,
+				  "acl claims evaluation",
+				  "AD DC only");
+
 	for (i = 0; parm_table[i].label; i++) {
 		if (!(lp_ctx->flags[i] & FLAG_CMDLINE)) {
 			lp_ctx->flags[i] |= FLAG_DEFAULT;
@@ -3197,7 +3201,16 @@ struct loadparm_context *loadparm_init_global(bool load_default)
 }
 
 /**
- * Initialise the global parameter structure.
+ * @brief Initialise the global parameter structure.
+ *
+ * This function initialized the globals if needed. Make sure that
+ * gfree_loadparm() is called before the application exits.
+ *
+ * @param mem_ctx   The talloc memory context to allocate lp_ctx on.
+ *
+ * @param s3_fns    The loadparm helper functions to use
+ *
+ * @return An initialized lp_ctx pointer or NULL on error.
  */
 struct loadparm_context *loadparm_init_s3(TALLOC_CTX *mem_ctx,
 					  const struct loadparm_s3_helpers *s3_fns)
@@ -3209,6 +3222,9 @@ struct loadparm_context *loadparm_init_s3(TALLOC_CTX *mem_ctx,
 	loadparm_context->s3_fns = s3_fns;
 	loadparm_context->globals = s3_fns->globals;
 	loadparm_context->flags = s3_fns->flags;
+
+	/* Make sure globals are correctly initialized */
+	loadparm_context->s3_fns->init_globals(loadparm_context, false);
 
 	return loadparm_context;
 }

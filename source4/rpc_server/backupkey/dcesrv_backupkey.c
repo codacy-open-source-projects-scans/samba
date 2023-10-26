@@ -431,14 +431,21 @@ static WERROR get_and_verify_access_check(TALLOC_CTX *sub_ctx,
 			return WERR_INVALID_DATA;
 		}
 
-		gnutls_hash_init(&dig_ctx, GNUTLS_DIG_SHA1);
-		gnutls_hash(dig_ctx,
-			    blob_us.data,
-			    blob_us.length - hash_size);
+		rc = gnutls_hash_init(&dig_ctx, GNUTLS_DIG_SHA1);
+		if (rc != GNUTLS_E_SUCCESS) {
+			return gnutls_error_to_werror(rc, WERR_INTERNAL_ERROR);
+		}
+		rc = gnutls_hash(dig_ctx,
+				 blob_us.data,
+				 blob_us.length - hash_size);
 		gnutls_hash_deinit(dig_ctx, hash);
+		if (rc != GNUTLS_E_SUCCESS) {
+			return gnutls_error_to_werror(rc, WERR_INTERNAL_ERROR);
+		}
+
 		/*
 		 * We free it after the sha1 calculation because blob.data
-		 * point to the same area
+		 * points to the same area
 		 */
 
 		if (!mem_equal_const_time(hash, uncrypted_accesscheckv2.hash, hash_size)) {
@@ -465,15 +472,21 @@ static WERROR get_and_verify_access_check(TALLOC_CTX *sub_ctx,
 			return WERR_INVALID_DATA;
 		}
 
-		gnutls_hash_init(&dig_ctx, GNUTLS_DIG_SHA512);
-		gnutls_hash(dig_ctx,
-			    blob_us.data,
-			    blob_us.length - hash_size);
+		rc = gnutls_hash_init(&dig_ctx, GNUTLS_DIG_SHA512);
+		if (rc != GNUTLS_E_SUCCESS) {
+			return gnutls_error_to_werror(rc, WERR_INTERNAL_ERROR);
+		}
+		rc = gnutls_hash(dig_ctx,
+				 blob_us.data,
+				 blob_us.length - hash_size);
 		gnutls_hash_deinit(dig_ctx, hash);
+		if (rc != GNUTLS_E_SUCCESS) {
+			return gnutls_error_to_werror(rc, WERR_INTERNAL_ERROR);
+		}
 
 		/*
 		 * We free it after the sha1 calculation because blob.data
-		 * point to the same area
+		 * points to the same area
 		 */
 
 		if (!mem_equal_const_time(hash, uncrypted_accesscheckv3.hash, hash_size)) {
@@ -1585,7 +1598,7 @@ static WERROR bkrp_generic_decrypt_data(struct dcesrv_call_state *dce_call, TALL
  * will be stored.  There is only one active encryption key per domain,
  * it is pointed at with G$BCKUPKEY_P in the LSA secrets store.
  *
- * The potentially multiple valid decryptiong keys (and the encryption
+ * The potentially multiple valid decryption keys (and the encryption
  * key) are in turn stored in the LSA secrets store as
  * G$BCKUPKEY_keyGuidString.
  *

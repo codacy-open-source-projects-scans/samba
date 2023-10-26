@@ -28,6 +28,7 @@ from datetime import datetime
 from xml.etree import ElementTree
 
 from ldb import Dn, MessageElement, string_to_time, timestring
+from samba.dcerpc import security
 from samba.dcerpc.misc import GUID
 from samba.ndr import ndr_pack, ndr_unpack
 
@@ -74,12 +75,13 @@ class Field(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Converts value to database value.
 
         This should return a MessageElement or None, where None means
         the field will be unset on the next save.
 
+        :param ldb: Ldb connection
         :param value: Input value from Python field
         :param flags: MessageElement flags
         :returns: MessageElement or None
@@ -99,7 +101,7 @@ class IntegerField(Field):
         else:
             return int(value[0])
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert int or list of int to MessageElement."""
         if value is None:
             return
@@ -129,7 +131,7 @@ class BinaryField(Field):
         else:
             return bytes(value[0])
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert bytes or list of bytes to MessageElement."""
         if value is None:
             return
@@ -152,7 +154,7 @@ class StringField(Field):
         else:
             return str(value)
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert str or list of str to MessageElement."""
         if value is None:
             return
@@ -190,7 +192,7 @@ class EnumField(Field):
         else:
             return self.enum_from_value(value)
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert enum or list of enum to MessageElement."""
         if value is None:
             return
@@ -214,7 +216,7 @@ class DateTimeField(Field):
         else:
             return datetime.fromtimestamp(string_to_time(str(value)))
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert datetime or list of datetime to MessageElement."""
         if value is None:
             return
@@ -251,7 +253,7 @@ class RelatedField(Field):
         else:
             return self.model.get(ldb, dn=Dn(ldb, str(value)))
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert related object or list of objects to MessageElement."""
         if value is None:
             return
@@ -276,7 +278,7 @@ class DnField(Field):
         else:
             return Dn(ldb, str(value))
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert Dn object or list of Dn objects into a MessageElement."""
         if value is None:
             return
@@ -299,7 +301,7 @@ class GUIDField(Field):
         else:
             return str(ndr_unpack(GUID, value[0]))
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert str with GUID into MessageElement."""
         if value is None:
             return
@@ -308,6 +310,36 @@ class GUIDField(Field):
                 [ndr_pack(GUID(item)) for item in value], flags, self.name)
         else:
             return MessageElement(ndr_pack(GUID(value)), flags, self.name)
+
+
+class SDDLField(Field):
+    """A SDDL field encodes and decodes SDDL data."""
+
+    def from_db_value(self, ldb, value):
+        if value is None:
+            return
+        elif len(value) > 1 or self.many:
+            return [ndr_unpack(security.descriptor, item).as_sddl()
+                    for item in value]
+        else:
+            return ndr_unpack(security.descriptor, value[0]).as_sddl()
+
+    def to_db_value(self, ldb, value, flags):
+        domain_sid = security.dom_sid(ldb.get_domain_sid())
+        if value is None:
+            return
+        elif isinstance(value, list):
+            return MessageElement([ndr_pack(security.descriptor.from_sddl(
+                item, domain_sid)) for item in value],
+                flags,
+                self.name)
+        else:
+            return MessageElement(
+                ndr_pack(security.descriptor.from_sddl(value,
+                                                       domain_sid)),
+                flags,
+                self.name
+            )
 
 
 class BooleanField(Field):
@@ -322,7 +354,7 @@ class BooleanField(Field):
         else:
             return str(value) == "TRUE"
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert bool or list of bool into a MessageElement."""
         if value is None:
             return
@@ -378,7 +410,7 @@ class PossibleClaimValuesField(Field):
 
             return values
 
-    def to_db_value(self, value, flags):
+    def to_db_value(self, ldb, value, flags):
         """Convert list of dicts back to XML as a MessageElement."""
         if value is None:
             return

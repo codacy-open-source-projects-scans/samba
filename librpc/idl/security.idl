@@ -645,27 +645,31 @@ interface security
 		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_STRING),relative] nstring *string_value;
 		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_SID),relative] DATA_BLOB *sid_value;
 		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_OCTET_STRING),relative] DATA_BLOB *octet_value;
-		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN),relative] hyper *bool_value;
+		[case(CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN),relative] hyper *uint_value;
 	} claim_values;
 
 	typedef [public,gensize] struct {
 		[relative] nstring *name;
 		uint16 value_type;
-		uint16 _reserved;
 		uint32 flags;
 		uint32 value_count;
 		[switch_is(value_type)] claim_values values[value_count];
 	} CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1;
 
 	typedef [public,nodiscriminant] union {
-		[case(SEC_ACE_TYPE_ACCESS_ALLOWED_OBJECT)] security_ace_object object;
-		[case(SEC_ACE_TYPE_ACCESS_DENIED_OBJECT)] security_ace_object object;
-		[case(SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT)] security_ace_object object;
-		[case(SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT)] security_ace_object object;
-		[default];
+		[default] security_ace_object object;
+		[case(false)];
 	} security_ace_object_ctr;
 
 	typedef [public,nodiscriminant,gensize] union {
+		[case(SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+		[case(SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+		[case(SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+		[case(SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+		[case(SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+		[case(SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT)] [flag(NDR_REMAINING)] DATA_BLOB conditions;
+
+		[case(SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 claim;
 		[default][flag(NDR_REMAINING)] DATA_BLOB ignored;
 	} security_ace_coda;
 
@@ -674,7 +678,7 @@ interface security
 		security_ace_flags flags; /* SEC_ACE_FLAG_* */
 		[value(ndr_size_security_ace(r,ndr->flags))] uint16 size;
 		uint32 access_mask;
-		[switch_is(type)] security_ace_object_ctr object;
+		[switch_is(sec_ace_object(type))] security_ace_object_ctr object;
 		dom_sid trustee;
 		[switch_is(type), subcontext(0), subcontext_size(ndr_subcontext_size_of_ace_coda(r, size, ndr->flags))] security_ace_coda coda;
 	} security_ace;
@@ -752,7 +756,21 @@ interface security
 		SE_GROUP_ENABLED_BY_DEFAULT |
 		SE_GROUP_ENABLED;
 
-	/* This is not yet sent over the network, but is simply defined in IDL */
+	/*
+	 * Should claims be evaluated on this token?
+	 *
+	 * 0 is invalid to catch a zeroed token
+	 */
+	typedef enum {
+		CLAIMS_EVALUATION_INVALID_STATE=0,
+		CLAIMS_EVALUATION_NEVER = 1,
+		CLAIMS_EVALUATION_ALWAYS = 2
+	} claims_evaluation_control;
+
+	/*
+	 * This is linearised to pass authentication over the NP proxy
+	 * from smbd to RPC servers, but is not in public network protocols
+	 */
 	typedef [public] struct {
 		uint32 num_sids;
 		[size_is(num_sids)] dom_sid sids[*];
@@ -761,9 +779,19 @@ interface security
 		uint32 num_local_claims;
 		uint32 num_user_claims;
 		uint32 num_device_claims;
+		uint32 num_device_sids;
 		[size_is(num_local_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 local_claims[*];
 		[size_is(num_user_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 user_claims[*];
 		[size_is(num_device_claims)] CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 device_claims[*];
+		[size_is(num_device_sids)] dom_sid device_sids[*];
+
+		/*
+		 * This allows us to disable claims evaluation on a
+		 * per-token basis, allowing library code to remain
+		 * distinct from configuration by passing this in as a
+		 * flag here
+		 */
+		claims_evaluation_control evaluate_claims;
 	} security_token;
 
         typedef [public] struct {

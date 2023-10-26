@@ -39,22 +39,14 @@ static size_t ndr_size_security_ace_core(const struct security_ace *ace, int fla
 	if (!ace) return 0;
 
 	ret = 8 + ndr_size_dom_sid(&ace->trustee, flags);
-
-	switch (ace->type) {
-	case SEC_ACE_TYPE_ACCESS_ALLOWED_OBJECT:
-	case SEC_ACE_TYPE_ACCESS_DENIED_OBJECT:
-	case SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT:
-	case SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT:
+	if (sec_ace_object(ace->type)) {
 		ret += 4; /* uint32 bitmap ace->object.object.flags */
 		if (ace->object.object.flags & SEC_ACE_OBJECT_TYPE_PRESENT) {
 			ret += 16; /* GUID ace->object.object.type.type */
 		}
 		if (ace->object.object.flags & SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT) {
-			ret += 16; /* GUID ace->object.object.inherited_typeinherited_type */
+			ret += 16; /* GUID ace->object.object.inherited_type.inherited_type */
 		}
-		break;
-	default:
-		break;
 	}
 
 	return ret;
@@ -65,10 +57,21 @@ static size_t ndr_size_security_ace_core(const struct security_ace *ace, int fla
 */
 size_t ndr_size_security_ace(const struct security_ace *ace, int flags)
 {
-	size_t ret = ndr_size_security_ace_core(ace, flags);
-
-	ret += ndr_size_security_ace_coda(&ace->coda, ace->type, flags);
-
+	size_t base = ndr_size_security_ace_core(ace, flags);
+	size_t ret = base;
+	if (sec_ace_callback(ace->type)) {
+		ret += ace->coda.conditions.length;
+	} else if (ace->type == SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE) {
+		ret += ndr_size_security_ace_coda(&ace->coda, ace->type, flags);
+	} else {
+		ret += ace->coda.ignored.length;
+	}
+	/* round up to a multiple of 4  (MS-DTYP 2.4.4.1) */
+	ret = (ret + 3ULL) & ~3ULL;
+	if (unlikely(ret < base)) {
+		/* overflow, and there's not much we can do anyway */
+		return 0;
+	}
 	return ret;
 }
 
@@ -188,7 +191,7 @@ enum ndr_err_code ndr_pull_dom_sid2(struct ndr_pull *ndr, int ndr_flags, struct 
 	NDR_CHECK(ndr_pull_dom_sid(ndr, ndr_flags, sid));
 	if (sid->num_auths != num_auths) {
 		return ndr_pull_error(ndr, NDR_ERR_ARRAY_SIZE,
-				      "Bad num_auths %u; should equal %u",
+				      "Bad num_auths %"PRIu32"; should equal %"PRId8,
 				      num_auths, sid->num_auths);
 	}
 	return NDR_ERR_SUCCESS;
@@ -259,7 +262,7 @@ enum ndr_err_code ndr_push_dom_sid28(struct ndr_push *ndr, int ndr_flags, const 
 
 	if (sid->num_auths > 5) {
 		return ndr_push_error(ndr, NDR_ERR_RANGE,
-				      "dom_sid28 allows only up to 5 sub auth [%u]",
+				      "dom_sid28 allows only up to 5 sub auths [%"PRId8"]",
 				      sid->num_auths);
 	}
 
@@ -321,7 +324,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_dom_sid(struct ndr_push *ndr, int ndr_flags,
 		NDR_CHECK(ndr_push_int8(ndr, NDR_SCALARS, r->num_auths));
 		NDR_CHECK(ndr_push_array_uint8(ndr, NDR_SCALARS, r->id_auth, 6));
 		if (r->num_auths < 0 || r->num_auths > ARRAY_SIZE(r->sub_auths)) {
-			return ndr_push_error(ndr, NDR_ERR_RANGE, "value out of range");
+			return ndr_push_error(ndr, NDR_ERR_RANGE, "value (%"PRId8") out of range (0 - %zu)", r->num_auths, ARRAY_SIZE(r->sub_auths));
 		}
 		for (cntr_sub_auths_0 = 0; cntr_sub_auths_0 < r->num_auths; cntr_sub_auths_0++) {
 			NDR_CHECK(ndr_push_uint32(ndr, NDR_SCALARS, r->sub_auths[cntr_sub_auths_0]));
@@ -338,7 +341,7 @@ _PUBLIC_ enum ndr_err_code ndr_pull_dom_sid(struct ndr_pull *ndr, int ndr_flags,
 		NDR_CHECK(ndr_pull_uint8(ndr, NDR_SCALARS, &r->sid_rev_num));
 		NDR_CHECK(ndr_pull_int8(ndr, NDR_SCALARS, &r->num_auths));
 		if (r->num_auths < 0 || r->num_auths > ARRAY_SIZE(r->sub_auths)) {
-			return ndr_pull_error(ndr, NDR_ERR_RANGE, "value out of range");
+			return ndr_pull_error(ndr, NDR_ERR_RANGE, "value (%"PRId8") out of range (0 - %zu)", r->num_auths, ARRAY_SIZE(r->sub_auths));
 		}
 		NDR_CHECK(ndr_pull_array_uint8(ndr, NDR_SCALARS, r->id_auth, 6));
 		ZERO_STRUCT(r->sub_auths);

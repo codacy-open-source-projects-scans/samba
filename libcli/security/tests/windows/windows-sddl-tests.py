@@ -65,6 +65,7 @@ def read_strings(files):
                 pass
 
             print(f"loading {filename} as 'a -> b' style")
+            f.seek(0)
             for line in f:
                 line = line.rstrip()
                 if line.startswith('#') or line == '':
@@ -110,7 +111,7 @@ def main():
     parser.add_argument('--export-bytes', const='sddl_bytes.json', nargs='?',
                         help='write JSON file containing SD bytes')
     parser.add_argument('--quiet', action='store_true',
-                        help='avoid printing to sdtout')
+                        help='avoid printing to stdout')
     parser.add_argument('files', nargs='+', help='read these files')
 
     args = parser.parse_args()
@@ -146,7 +147,7 @@ def main():
             # maybe 0xffff is an incorrect guess -- it gives use v2 (NT), not v4 (AD)
             c = w.ConvertSecurityDescriptorToStringSecurityDescriptor(sd, 1, 0xffff)
         except Exception as e:
-            print(f"could sot serialize '{sd}': {e}")
+            print(f"could not serialize '{sd}': {e}")
             print(f" derived from       '{a}'")
             exceptions[f"{e} serialize"].append(a)
             unserializeable_cases.append(a)
@@ -165,7 +166,7 @@ def main():
     for k, v in exceptions.items():
         print(f"{k}: {len(v)}")
 
-    print(f"{len(unparseable_cases)} failed to parsed")
+    print(f"{len(unparseable_cases)} failed to parse")
     print(f"{len(parseable_cases)} successfully parsed")
     print(f"{len(unserializeable_cases)} of these failed to re-serialize")
     print(f"{len(round_trip_failures)} of these failed to round trip")

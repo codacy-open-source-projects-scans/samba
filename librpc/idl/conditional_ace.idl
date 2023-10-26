@@ -264,37 +264,31 @@ interface conditional_ace
 	/*
 	 * Sub-structures for struct ace_condition_token -> data,
 	 * which vary according to the token->type.
-	 *
-	 * These are not used on the wire.
 	 */
 	typedef [flag(NDR_NOALIGN)] struct {
 		int64 value;
 	} ace_condition_result;
 
-	typedef struct {
+	typedef [public] struct {
 		int64 value;
-		uint8 base;
 		uint8 sign;
+		uint8 base;
 	} ace_condition_int;
 
-	typedef struct {
-		[string, charset(UTF16)]uint8 *value;
-		uint32 length;
+	typedef [public] struct {
+		[flag(STR_SIZE4|STR_NOTERM|STR_BYTESIZE)] string value;
 	} ace_condition_unicode;
 
-	typedef struct {
-		uint8 *bytes;
-		uint32 length;
-	} ace_condition_bytes;
-
-	typedef struct {
-		dom_sid *sid;
+	typedef [public] struct {
+		[subcontext(4)] dom_sid sid;
 	} ace_condition_sid;
 
 	/*
 	 * The composite type has an array of sub-tokens, which can
 	 * themselves be composites containing composites, though this
 	 * is unlikely to be useful when dealing with claims.
+	 *
+	 * This structure is not representative of the wire format.
 	 */
 	typedef struct {
 		ace_condition_token *tokens;
@@ -325,7 +319,7 @@ interface conditional_ace
 	typedef [nodiscriminant] union {
 		[case(CONDITIONAL_ACE_TOKEN_SID)] ace_condition_sid sid;
 		[case(CONDITIONAL_ACE_TOKEN_COMPOSITE)]ace_condition_composite composite;
-		[case(CONDITIONAL_ACE_TOKEN_OCTET_STRING)] ace_condition_bytes bytes;
+		[case(CONDITIONAL_ACE_TOKEN_OCTET_STRING)] DATA_BLOB bytes;
 		[case(CONDITIONAL_ACE_TOKEN_UNICODE)]ace_condition_unicode unicode;
 
 		[case(CONDITIONAL_ACE_LOCAL_ATTRIBUTE)]ace_condition_unicode local_attr;

@@ -35,28 +35,22 @@ class cmd_domain_auth_silo_member_add(Command):
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for database or target server.",
-               type=str, metavar="URL", dest="ldap_url"),
         Option("--name",
                help="Name of authentication silo (required).",
-               dest="name", action="store", type=str),
+               dest="name", action="store", type=str, required=True),
         Option("--member",
                help="Member to add to the silo (DN or account name).",
-               dest="member", action="store", type=str),
+               dest="member", action="store", type=str, required=True),
     ]
 
-    def run(self, ldap_url=None, sambaopts=None, credopts=None,
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
             name=None, member=None):
 
-        if not name:
-            raise CommandError("Argument --name is required.")
-        if not member:
-            raise CommandError("Argument --member is required.")
-
-        ldb = self.ldb_connect(ldap_url, sambaopts, credopts)
+        ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
         try:
             silo = AuthenticationSilo.get(ldb, cn=name)
@@ -103,25 +97,21 @@ class cmd_domain_auth_silo_member_list(Command):
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for database or target server.",
-               type=str, metavar="URL", dest="ldap_url"),
         Option("--name",
                help="Name of authentication silo (required).",
-               dest="name", action="store", type=str),
+               dest="name", action="store", type=str, required=True),
         Option("--json", help="Output results in JSON format.",
                dest="output_format", action="store_const", const="json"),
     ]
 
-    def run(self, ldap_url=None, sambaopts=None, credopts=None,
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
             name=None, output_format=None):
 
-        if not name:
-            raise CommandError("Argument --name is required.")
-
-        ldb = self.ldb_connect(ldap_url, sambaopts, credopts)
+        ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
         try:
             silo = AuthenticationSilo.get(ldb, cn=name)
@@ -154,28 +144,22 @@ class cmd_domain_auth_silo_member_remove(Command):
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for database or target server.",
-               type=str, metavar="URL", dest="ldap_url"),
         Option("--name",
                help="Name of authentication silo (required).",
-               dest="name", action="store", type=str),
+               dest="name", action="store", type=str, required=True),
         Option("--member",
                help="Member to remove from the silo (DN or account name).",
-               dest="member", action="store", type=str),
+               dest="member", action="store", type=str, required=True),
     ]
 
-    def run(self, ldap_url=None, sambaopts=None, credopts=None,
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
             name=None, member=None):
 
-        if not name:
-            raise CommandError("Argument --name is required.")
-        if not member:
-            raise CommandError("Argument --member is required.")
-
-        ldb = self.ldb_connect(ldap_url, sambaopts, credopts)
+        ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
         try:
             silo = AuthenticationSilo.get(ldb, cn=name)

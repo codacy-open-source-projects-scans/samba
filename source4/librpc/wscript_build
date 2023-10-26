@@ -232,6 +232,14 @@ bld.SAMBA_PYTHON('python_dcerpc_security',
         cflags_end=gen_cflags
         )
 
+bld.SAMBA_PYTHON('python_conditional_ace',
+        source=('../../librpc/gen_ndr/py_conditional_ace.c '
+                '../../librpc/gen_ndr/ndr_conditional_ace.c'),
+        deps='%s %s' % (pytalloc_util, pyrpc_util),
+        realname='samba/dcerpc/conditional_ace.so',
+        cflags_end=gen_cflags
+        )
+
 bld.SAMBA_PYTHON('python_lsa',
         source='../../librpc/gen_ndr/py_lsa.c',
         deps='RPC_NDR_LSA %s %s' % (pytalloc_util, pyrpc_util),
@@ -459,6 +467,13 @@ bld.SAMBA_PYTHON('python_dcerpc_xattr',
         source='../../librpc/gen_ndr/py_xattr.c',
         deps='%s %s NDR_XATTR' % (pytalloc_util, pyrpc_util),
         realname='samba/dcerpc/xattr.so',
+        cflags_end=gen_cflags
+        )
+
+bld.SAMBA_PYTHON('python_dcerpc_smb3posix',
+        source='../../librpc/gen_ndr/py_smb3posix.c',
+        deps='%s %s NDR_SMB3POSIX' % (pytalloc_util, pyrpc_util),
+        realname='samba/dcerpc/smb3posix.so',
         cflags_end=gen_cflags
         )
 

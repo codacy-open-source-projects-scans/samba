@@ -31,6 +31,8 @@
 #include "libcli/util/werror.h"
 #include "librpc/gen_ndr/auth.h"
 #include "kdc/samba_kdc.h"
+#include "lib/krb5_wrap/krb5_samba.h"
+#include "auth/session.h"
 
 enum samba_asserted_identity {
 	SAMBA_ASSERTED_IDENTITY_IGNORE = 0,
@@ -38,23 +40,39 @@ enum samba_asserted_identity {
 	SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
 };
 
-enum samba_claims_valid {
-	SAMBA_CLAIMS_VALID_EXCLUDE = 0,
-	SAMBA_CLAIMS_VALID_INCLUDE,
-};
-
-enum samba_compounded_auth {
-	SAMBA_COMPOUNDED_AUTH_EXCLUDE = 0,
-	SAMBA_COMPOUNDED_AUTH_INCLUDE,
-};
-
 enum {
 	SAMBA_KDC_FLAG_PROTOCOL_TRANSITION    = 0x00000001,
 	SAMBA_KDC_FLAG_CONSTRAINED_DELEGATION = 0x00000002,
-	SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED      = 0x00000008,
-	SAMBA_KDC_FLAG_DEVICE_KRBTGT_IS_TRUSTED = 0x00000020,
-	SAMBA_KDC_FLAG_DELEGATED_PROXY_IS_TRUSTED = 0x00000040,
 };
+
+bool samba_kdc_entry_is_trust(const struct samba_kdc_entry *entry);
+
+struct samba_kdc_entry_pac {
+	struct samba_kdc_entry *entry;
+	krb5_const_pac pac; /* NULL indicates that no PAC is present. */
+	bool is_from_trust : 1;
+#ifndef HAVE_KRB5_PAC_IS_TRUSTED /* MIT */
+	bool pac_is_trusted : 1;
+#endif /* HAVE_KRB5_PAC_IS_TRUSTED */
+};
+
+/*
+ * Return true if this entry has an associated PAC issued or signed by a KDC
+ * that our KDC trusts. We trust the main krbtgt account, but we don’t trust any
+ * RODC krbtgt besides ourselves.
+ */
+bool samba_krb5_pac_is_trusted(const struct samba_kdc_entry_pac pac);
+
+#ifdef HAVE_KRB5_PAC_IS_TRUSTED /* Heimdal */
+struct samba_kdc_entry_pac samba_kdc_entry_pac(krb5_const_pac pac,
+					       struct samba_kdc_entry *entry,
+					       bool is_from_trust);
+#else /* MIT */
+struct samba_kdc_entry_pac samba_kdc_entry_pac_from_trusted(krb5_const_pac pac,
+							    struct samba_kdc_entry *entry,
+							    bool is_from_trust,
+							    bool is_trusted);
+#endif /* HAVE_KRB5_PAC_IS_TRUSTED */
 
 krb5_error_code samba_kdc_encrypt_pac_credentials(krb5_context context,
 						  const krb5_keyblock *pkreplykey,
@@ -80,16 +98,18 @@ krb5_error_code samba_krbtgt_is_in_db(const struct samba_kdc_entry *skdc_entry,
 				      bool *is_in_db,
 				      bool *is_trusted);
 
-NTSTATUS samba_kdc_get_user_info_from_db(struct samba_kdc_entry *skdc_entry,
-					 const struct ldb_message *msg,
-					 const struct auth_user_info_dc **user_info_dc);
+krb5_error_code samba_kdc_get_user_info_dc(TALLOC_CTX *mem_ctx,
+					   krb5_context context,
+					   struct ldb_context *samdb,
+					   const struct samba_kdc_entry_pac entry,
+					   const struct auth_user_info_dc **info_out,
+					   const struct PAC_DOMAIN_GROUP_MEMBERSHIP **resource_groups_out);
 
-NTSTATUS samba_kdc_get_user_info_dc(TALLOC_CTX *mem_ctx,
-				    struct samba_kdc_entry *skdc_entry,
-				    enum samba_asserted_identity asserted_identity,
-				    enum samba_claims_valid claims_valid,
-				    enum samba_compounded_auth compounded_auth,
-				    struct auth_user_info_dc **user_info_dc_out);
+krb5_error_code samba_kdc_get_user_info_from_db(TALLOC_CTX *mem_ctx,
+						struct ldb_context *samdb,
+						struct samba_kdc_entry *entry,
+						const struct ldb_message *msg,
+						const struct auth_user_info_dc **info_out);
 
 krb5_error_code samba_kdc_map_policy_err(NTSTATUS nt_status);
 
@@ -100,12 +120,10 @@ NTSTATUS samba_kdc_check_client_access(struct samba_kdc_entry *kdc_entry,
 
 krb5_error_code samba_kdc_verify_pac(TALLOC_CTX *mem_ctx,
 				     krb5_context context,
+				     struct ldb_context *samdb,
 				     uint32_t flags,
-				     struct samba_kdc_entry *client,
-				     const struct samba_kdc_entry *krbtgt,
-				     const struct samba_kdc_entry *device,
-				     const krb5_const_pac *device_pac,
-				     krb5_const_pac pac);
+				     const struct samba_kdc_entry_pac client,
+				     const struct samba_kdc_entry *krbtgt);
 
 struct authn_audit_info;
 krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
@@ -113,17 +131,12 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 				     struct ldb_context *samdb,
 				     struct loadparm_context *lp_ctx,
 				     uint32_t flags,
-				     const struct samba_kdc_entry *client_krbtgt,
-				     struct samba_kdc_entry *client,
+				     const struct samba_kdc_entry_pac client,
 				     const krb5_const_principal server_principal,
 				     const struct samba_kdc_entry *server,
 				     const krb5_const_principal delegated_proxy_principal,
-				     struct samba_kdc_entry *delegated_proxy,
-				     const krb5_const_pac delegated_proxy_pac,
-				     const struct samba_kdc_entry *device_krbtgt,
-				     struct samba_kdc_entry *device,
-				     const krb5_const_pac device_pac,
-				     const krb5_const_pac old_pac,
+				     const struct samba_kdc_entry_pac delegated_proxy,
+				     const struct samba_kdc_entry_pac device,
 				     krb5_pac new_pac,
 				     struct authn_audit_info **server_audit_info_out,
 				     NTSTATUS *status_out);
@@ -145,7 +158,7 @@ NTSTATUS samba_kdc_get_requester_sid_blob(TALLOC_CTX *mem_ctx,
 					  const struct auth_user_info_dc *user_info_dc,
 					  DATA_BLOB **_requester_sid_blob);
 NTSTATUS samba_kdc_get_claims_blob(TALLOC_CTX *mem_ctx,
-				   const struct samba_kdc_entry *p,
+				   struct samba_kdc_entry *p,
 				   const DATA_BLOB **_claims_blob);
 
 krb5_error_code samba_kdc_allowed_to_authenticate_to(TALLOC_CTX *mem_ctx,
@@ -153,6 +166,8 @@ krb5_error_code samba_kdc_allowed_to_authenticate_to(TALLOC_CTX *mem_ctx,
 						     struct loadparm_context *lp_ctx,
 						     const struct samba_kdc_entry *client,
 						     const struct auth_user_info_dc *client_info,
+						     const struct auth_user_info_dc *device_info,
+						     const struct auth_claims auth_claims,
 						     const struct samba_kdc_entry *server,
 						     struct authn_audit_info **server_audit_info_out,
 						     NTSTATUS *status_out);
@@ -161,18 +176,27 @@ krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 				       krb5_context context,
 				       struct ldb_context *samdb,
 				       struct loadparm_context *lp_ctx,
-				       struct samba_kdc_entry *device,
-				       krb5_const_pac device_pac,
-				       bool device_pac_is_trusted,
+				       const struct samba_kdc_entry_pac device,
 				       const struct authn_kerberos_client_policy *client_policy,
 				       struct authn_audit_info **client_audit_info_out,
 				       NTSTATUS *status_out);
 
+krb5_error_code samba_kdc_get_claims_data(TALLOC_CTX *mem_ctx,
+					  krb5_context context,
+					  struct ldb_context *samdb,
+					  struct samba_kdc_entry_pac entry,
+					  struct claims_data **claims_data_out);
+
+krb5_error_code samba_kdc_get_claims_data_from_pac(TALLOC_CTX *mem_ctx,
+						   krb5_context context,
+						   struct samba_kdc_entry_pac entry,
+						   struct claims_data **claims_data_out);
+
+krb5_error_code samba_kdc_get_claims_data_from_db(struct ldb_context *samdb,
+						  struct samba_kdc_entry *entry,
+						  struct claims_data **claims_data_out);
+
 NTSTATUS samba_kdc_add_asserted_identity(enum samba_asserted_identity ai,
 					 struct auth_user_info_dc *user_info_dc);
 
-NTSTATUS samba_kdc_add_claims_valid(enum samba_claims_valid claims_valid,
-				    struct auth_user_info_dc *user_info_dc);
-
-NTSTATUS samba_kdc_add_compounded_auth(enum samba_compounded_auth compounded_auth,
-				       struct auth_user_info_dc *user_info_dc);
+NTSTATUS samba_kdc_add_claims_valid(struct auth_user_info_dc *user_info_dc);

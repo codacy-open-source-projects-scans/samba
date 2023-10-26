@@ -42,31 +42,66 @@ static size_t classic_interfaces(
 	static const struct ndr_interface_table *ifaces[] = {
 		&ndr_table_srvsvc,
 		&ndr_table_netdfs,
-		&ndr_table_wkssvc,
+		&ndr_table_initshutdown,
 		&ndr_table_svcctl,
 		&ndr_table_ntsvcs,
 		&ndr_table_eventlog,
-		&ndr_table_initshutdown,
+		/*
+		 * This last item is truncated from the list by the
+		 * num_ifaces -= 1 below.  Take care when adding new
+		 * services.
+		 */
+		&ndr_table_wkssvc,
 	};
+	size_t num_ifaces = ARRAY_SIZE(ifaces);
+
+	switch(lp_server_role()) {
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		/*
+		 * On the AD DC wkssvc is provided by the 'samba'
+		 * binary from source4/
+		 */
+		num_ifaces -= 1;
+		break;
+	default:
+		break;
+	}
+
 	*pifaces = ifaces;
-	return ARRAY_SIZE(ifaces);
+	return num_ifaces;
+
 }
 
-static size_t classic_servers(
+static NTSTATUS classic_servers(
 	struct dcesrv_context *dce_ctx,
 	const struct dcesrv_endpoint_server ***_ep_servers,
+	size_t *_num_ep_servers,
 	void *private_data)
 {
 	static const struct dcesrv_endpoint_server *ep_servers[7] = { NULL };
+	size_t num_servers = ARRAY_SIZE(ep_servers);
+	NTSTATUS status;
 	bool ok;
 
 	ep_servers[0] = srvsvc_get_ep_server();
 	ep_servers[1] = netdfs_get_ep_server();
-	ep_servers[2] = wkssvc_get_ep_server();
+	ep_servers[2] = initshutdown_get_ep_server();
 	ep_servers[3] = svcctl_get_ep_server();
 	ep_servers[4] = ntsvcs_get_ep_server();
 	ep_servers[5] = eventlog_get_ep_server();
-	ep_servers[6] = initshutdown_get_ep_server();
+	ep_servers[6] = wkssvc_get_ep_server();
+
+	switch(lp_server_role()) {
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		/*
+		 * On the AD DC wkssvc is provided by the 'samba'
+		 * binary from source4/
+		 */
+		num_servers -= 1;
+		break;
+	default:
+		break;
+	}
 
 	ok = secrets_init();
 	if (!ok) {
@@ -84,8 +119,14 @@ static size_t classic_servers(
 
 	mangle_reset_cache();
 
+	status = dcesrv_register_default_auth_types_machine_principal(dce_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
 	*_ep_servers = ep_servers;
-	return ARRAY_SIZE(ep_servers);
+	*_num_ep_servers = num_servers;
+	return NT_STATUS_OK;
 }
 
 int main(int argc, const char *argv[])

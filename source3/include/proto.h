@@ -257,7 +257,7 @@ time_t make_unix_date3(const void *date_ptr, int zone_offset);
 time_t srv_make_unix_date(const void *date_ptr);
 time_t srv_make_unix_date2(const void *date_ptr);
 time_t srv_make_unix_date3(const void *date_ptr);
-struct timespec interpret_long_date(const char *p);
+struct timespec interpret_long_date(NTTIME nt);
 void TimeInit(void);
 void get_process_uptime(struct timeval *ret_time);
 void get_startup_time(struct timeval *ret_time);
@@ -394,11 +394,9 @@ void smb_nscd_flush_group_cache(void);
 
 /* The following definitions come from lib/util_nttoken.c  */
 
-struct security_token *dup_nt_token(TALLOC_CTX *mem_ctx, const struct security_token *ptoken);
-NTSTATUS merge_nt_token(TALLOC_CTX *mem_ctx,
-			const struct security_token *token_1,
-			const struct security_token *token_2,
-			struct security_token **token_out);
+NTSTATUS merge_with_system_token(TALLOC_CTX *mem_ctx,
+				 const struct security_token *token_1,
+				 struct security_token **token_out);
 bool token_sid_in_ace(const struct security_token *token, const struct security_ace *ace);
 
 /* The following definitions come from lib/util_sec.c  */
@@ -577,16 +575,6 @@ struct in_addr wins_srv_ip_tag(const char *tag, struct in_addr src_ip);
 bool wins_server_tag_ips(const char *tag, TALLOC_CTX *mem_ctx,
 			 struct in_addr **pservers, size_t *pnum_servers);
 unsigned wins_srv_count_tag(const char *tag);
-
-#ifndef ASN1_MAX_OIDS
-#define ASN1_MAX_OIDS 20
-#endif
-bool spnego_parse_negTokenInit(TALLOC_CTX *ctx,
-			       DATA_BLOB blob,
-			       char *OIDs[ASN1_MAX_OIDS],
-			       char **principal,
-			       DATA_BLOB *secblob);
-DATA_BLOB spnego_gen_krb5_wrap(TALLOC_CTX *ctx, const DATA_BLOB ticket, const uint8_t tok_id[2]);
 
 /* The following definitions come from libsmb/conncache.c  */
 

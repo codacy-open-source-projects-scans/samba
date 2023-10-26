@@ -120,6 +120,7 @@ struct sdb_entry {
 #define SDB_F_FOR_AS_REQ	4096	/* fetch is for a AS REQ */
 #define SDB_F_FOR_TGS_REQ	8192	/* fetch is for a TGS REQ */
 #define SDB_F_ARMOR_PRINCIPAL 262144	/* fetch is for the client of an armor ticket */
+#define SDB_F_USER2USER_PRINCIPAL 524288/* fetch is for the server of a user2user tgs-req */
 
 #define SDB_F_HDB_MASK		(SDB_F_DECRYPT | \
 				 SDB_F_GET_CLIENT| \
@@ -130,15 +131,16 @@ struct sdb_entry {
 				 SDB_F_KVNO_SPECIFIED | \
 				 SDB_F_FOR_AS_REQ | \
 				 SDB_F_FOR_TGS_REQ | \
-				 SDB_F_ARMOR_PRINCIPAL)
+				 SDB_F_ARMOR_PRINCIPAL| \
+				 SDB_F_USER2USER_PRINCIPAL)
 
-/* This is not supported by HDB */
+/* These are not supported by HDB */
 #define SDB_F_FORCE_CANON	16384	/* force canonicalization */
+#define SDB_F_RODC_NUMBER_SPECIFIED	32768	/* we want a particular RODC number */
 
 void sdb_key_free(struct sdb_key *key);
 void sdb_keys_free(struct sdb_keys *keys);
 void sdb_entry_free(struct sdb_entry *e);
-struct SDBFlags int2SDBFlags(unsigned n);
 krb5_error_code sdb_entry_set_etypes(struct sdb_entry *s);
 krb5_error_code sdb_entry_set_session_etypes(struct sdb_entry *s,
 					     bool add_aes256,

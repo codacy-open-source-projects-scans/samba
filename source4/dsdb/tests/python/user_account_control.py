@@ -199,9 +199,7 @@ class UserAccountControlTests(samba.tests.TestCase):
         if samdb is None:
             samdb = self.samdb
         dn = "CN=%s,%s" % (computername, self.OU)
-        domainname = ldb.Dn(self.samdb, self.samdb.domain_dn()).canonical_str().replace("/", "")
         samaccountname = "%s$" % computername
-        dnshostname = "%s.%s" % (computername, domainname)
         msg_dict = {
             "dn": dn,
             "objectclass": "computer"}
@@ -311,7 +309,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = f"(OA;CI;WDCC;{dsdb.DS_GUID_SCHEMA_CLASS_COMPUTER};;{user_sid})"
 
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
         computername = self.computernames[0]
@@ -391,8 +388,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = "(OA;;CC;bf967a86-0de6-11d0-a285-00aa003049e2;;%s)" % str(user_sid)
 
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
-
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
         computername = self.computernames[0]
@@ -449,7 +444,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = f"(OA;CI;CC;{dsdb.DS_GUID_SCHEMA_CLASS_COMPUTER};;{user_sid})"
 
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
         computername = self.computernames[0]
@@ -485,9 +479,8 @@ class UserAccountControlTests(samba.tests.TestCase):
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         self.assertRaisesLdbError([ldb.ERR_OBJECT_CLASS_VIOLATION,
                                    ldb.ERR_UNWILLING_TO_PERFORM],
-                                  f"Unexpectedly able to set userAccountControl to be an Normal "
-                                  "account without |UF_PASSWD_NOTREQD Unexpectedly able to "
-                                  "set userAccountControl to be a workstation on {m.dn}",
+                                  "Unexpectedly able to set userAccountControl to be a Normal "
+                                  "account without |UF_PASSWD_NOTREQD",
                                   self.samdb.modify, m)
 
 
@@ -511,9 +504,9 @@ class UserAccountControlTests(samba.tests.TestCase):
                                                          UF_TRUSTED_FOR_DELEGATION),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         self.assertRaisesLdbError(ldb.ERR_OTHER,
-                                  f"Unexpectedly able to set userAccountControl to "
+                                  "Unexpectedly able to set userAccountControl to "
                                   "UF_WORKSTATION_TRUST_ACCOUNT|UF_PARTIAL_SECRETS_ACCOUNT|"
-                                  "UF_TRUSTED_FOR_DELEGATION on {m.dn}",
+                                  f"UF_TRUSTED_FOR_DELEGATION on {m.dn}",
                                   self.admin_samdb.modify, m)
 
         m = ldb.Message()
@@ -553,8 +546,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         # attributes (this is not a test of ACLs, this is a test of
         # non-ACL userAccountControl rules
         mod = f"(OA;CI;WP;;;{user_sid})(OA;;CC;;;{user_sid})"
-
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
 
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
@@ -619,8 +610,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         # attributes (this is not a test of ACLs, this is a test of
         # non-ACL userAccountControl rules
         mod = f"(OA;CI;WP;;;{user_sid})(OA;;CC;;;{user_sid})"
-
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
 
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
@@ -821,8 +810,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = "(OA;;CC;bf967a86-0de6-11d0-a285-00aa003049e2;;%s)" % str(user_sid)
 
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
-
         self.sd_utils.dacl_add_ace(self.OU, mod)
 
         invalid_bits = set([UF_TEMP_DUPLICATE_ACCOUNT])
@@ -888,7 +875,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         ace_cc = f"(OA;;CC;{dsdb.DS_GUID_SCHEMA_CLASS_COMPUTER};;{user_sid})"
         ace_wp_dnshostname = f"(OA;CI;WP;{dsdb.DS_GUID_SCHEMA_ATTR_DNS_HOST_NAME};;{user_sid})"
         ace_wp_primarygroupid = f"(OA;CI;WP;{dsdb.DS_GUID_SCHEMA_ATTR_PRIMARY_GROUP_ID};;{user_sid})"
-        old_sd = self.sd_utils.read_sd_on_dn(self.OU)
         mod = ace_cc + ace_wp_dnshostname + ace_wp_primarygroupid
 
         self.sd_utils.dacl_add_ace(self.OU, mod)
@@ -1280,7 +1266,7 @@ class UserAccountControlTests(samba.tests.TestCase):
             self.admin_samdb.add(msg_dict)
             if (objectclass == "user"
                 and account_type != UF_NORMAL_ACCOUNT):
-                self.fail("Able to create {account_type_str} on {objectclass}")
+                self.fail(f"Able to create {account_type_str} on {objectclass}")
         except LdbError as e:
             (enum, estr) = e.args
             self.assertEqual(enum, ldb.ERR_OBJECT_CLASS_VIOLATION)
@@ -1301,11 +1287,12 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         self.assertRaisesLdbError([ldb.ERR_OBJECT_CLASS_VIOLATION,
                                    ldb.ERR_UNWILLING_TO_PERFORM],
-                                  "Should have been unable Able to change objectclass of a {objectclass}",
+                                  f"Should have been unable to change objectclass of a {objectclass}",
                                   self.admin_samdb.modify, m)
 
 runner = SubunitTestRunner()
 rc = 0
-if not runner.run(unittest.makeSuite(UserAccountControlTests)).wasSuccessful():
+if not runner.run(unittest.TestLoader().loadTestsFromTestCase(
+        UserAccountControlTests)).wasSuccessful():
     rc = 1
 sys.exit(rc)

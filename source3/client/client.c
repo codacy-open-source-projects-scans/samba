@@ -2282,11 +2282,12 @@ static int cmd_mput(void)
 
 static int do_cancel(int job)
 {
-	if (cli_printjob_del(cli, job)) {
+	NTSTATUS status = cli_printjob_del(cli, job);
+
+	if (NT_STATUS_IS_OK(status)) {
 		d_printf("Job %d cancelled\n",job);
 		return 0;
 	} else {
-		NTSTATUS status = cli_nt_error(cli);
 		d_printf("Error cancelling job %d : %s\n",
 			 job, nt_errstr(status));
 		return 1;
@@ -3075,6 +3076,64 @@ static int cmd_posix_rmdir(void)
 	return 0;
 }
 
+static int cmd_mkfifo(void)
+{
+	TALLOC_CTX *ctx = talloc_tos();
+	char *mask = NULL;
+	char *buf = NULL;
+	char *targetname = NULL;
+	struct cli_state *targetcli;
+	mode_t mode;
+	struct cli_credentials *creds = samba_cmdline_get_creds();
+	NTSTATUS status;
+
+	if (!next_token_talloc(ctx, &cmd_ptr, &buf, NULL)) {
+		d_printf("mkfifo <filename> 0<mode>\n");
+		return 1;
+	}
+	mask = talloc_asprintf(ctx, "%s%s", client_get_cur_dir(), buf);
+	if (!mask) {
+		return 1;
+	}
+	mask = client_clean_name(ctx, mask);
+	if (mask == NULL) {
+		return 1;
+	}
+
+	if (!next_token_talloc(ctx, &cmd_ptr, &buf, NULL)) {
+		d_printf("mkfifo <filename> 0<mode>\n");
+		return 1;
+	}
+
+	mode = (mode_t)strtol(buf, (char **)NULL, 8);
+	if ((mode & ~(S_IRWXU | S_IRWXG | S_IRWXO)) != 0) {
+		d_printf("mode %o can only contain permission bits\n", mode);
+		return 1;
+	}
+
+	status = cli_resolve_path(ctx,
+				  "",
+				  creds,
+				  cli,
+				  mask,
+				  &targetcli,
+				  &targetname);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("mkfifo %s: %s\n", mask, nt_errstr(status));
+		return 1;
+	}
+
+	status = cli_mknod(targetcli, targetname, mode | S_IFIFO, 0);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("Failed to open file %s. %s\n",
+			 targetname,
+			 nt_errstr(status));
+	} else {
+		d_printf("mkfifo created %s\n", targetname);
+	}
+	return 0;
+}
+
 static int cmd_close(void)
 {
 	TALLOC_CTX *ctx = talloc_tos();
@@ -3105,9 +3164,14 @@ static int cmd_posix(void)
 	char *caps;
 	NTSTATUS status;
 
-	if (!SERVER_HAS_UNIX_CIFS(cli)) {
+	if (!(SERVER_HAS_UNIX_CIFS(cli) || cli->smb2.server_smb311_posix)) {
 		d_printf("Server doesn't support UNIX CIFS extensions.\n");
 		return 1;
+	}
+
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB3_11) {
+		cli->smb2.client_smb311_posix = true;
+		return 0;
 	}
 
 	status = cli_unix_extensions_version(cli, &major, &minor, &caplow,
@@ -3121,62 +3185,36 @@ static int cmd_posix(void)
 	d_printf("Server supports CIFS extensions %u.%u\n", (unsigned int)major, (unsigned int)minor);
 
 	caps = talloc_strdup(ctx, "");
-	if (!caps) {
-		return 1;
-	}
-        if (caplow & CIFS_UNIX_FCNTL_LOCKS_CAP) {
-		caps = talloc_asprintf_append(caps, "locks ");
-		if (!caps) {
-			return 1;
-		}
+	if (caplow & CIFS_UNIX_FCNTL_LOCKS_CAP) {
+		talloc_asprintf_addbuf(&caps, "locks ");
 	}
         if (caplow & CIFS_UNIX_POSIX_ACLS_CAP) {
-		caps = talloc_asprintf_append(caps, "acls ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "acls ");
 	}
         if (caplow & CIFS_UNIX_XATTTR_CAP) {
-		caps = talloc_asprintf_append(caps, "eas ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "eas ");
 	}
         if (caplow & CIFS_UNIX_POSIX_PATHNAMES_CAP) {
-		caps = talloc_asprintf_append(caps, "pathnames ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "pathnames ");
 	}
         if (caplow & CIFS_UNIX_POSIX_PATH_OPERATIONS_CAP) {
-		caps = talloc_asprintf_append(caps, "posix_path_operations ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "posix_path_operations ");
 	}
         if (caplow & CIFS_UNIX_LARGE_READ_CAP) {
-		caps = talloc_asprintf_append(caps, "large_read ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "large_read ");
 	}
         if (caplow & CIFS_UNIX_LARGE_WRITE_CAP) {
-		caps = talloc_asprintf_append(caps, "large_write ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "large_write ");
 	}
 	if (caplow & CIFS_UNIX_TRANSPORT_ENCRYPTION_CAP) {
-		caps = talloc_asprintf_append(caps, "posix_encrypt ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "posix_encrypt ");
 	}
 	if (caplow & CIFS_UNIX_TRANSPORT_ENCRYPTION_MANDATORY_CAP) {
-		caps = talloc_asprintf_append(caps, "mandatory_posix_encrypt ");
-		if (!caps) {
-			return 1;
-		}
+		talloc_asprintf_addbuf(&caps, "mandatory_posix_encrypt ");
+	}
+
+	if (caps == NULL) {
+		return 1;
 	}
 
 	if (*caps && caps[strlen(caps)-1] == ' ') {
@@ -5621,6 +5659,7 @@ static struct {
   {"md",cmd_mkdir,"<directory> make a directory",{COMPL_NONE,COMPL_NONE}},
   {"mget",cmd_mget,"<mask> get all the matching files",{COMPL_REMOTE,COMPL_NONE}},
   {"mkdir",cmd_mkdir,"<directory> make a directory",{COMPL_NONE,COMPL_NONE}},
+  {"mkfifo",cmd_mkfifo,"<file mode> make a fifo",{COMPL_NONE,COMPL_NONE}},
   {"more",cmd_more,"<remote name> view a remote file with your pager",{COMPL_REMOTE,COMPL_NONE}},
   {"mput",cmd_mput,"<mask> put all matching files",{COMPL_REMOTE,COMPL_NONE}},
   {"newer",cmd_newer,"<file> only mget files newer than the specified local file",{COMPL_LOCAL,COMPL_NONE}},
@@ -6759,6 +6798,8 @@ int main(int argc,char *argv[])
 	} else if (process(base_directory)) {
 		rc = 1;
 	}
+
+	gfree_all();
 
 	TALLOC_FREE(frame);
 	return rc;

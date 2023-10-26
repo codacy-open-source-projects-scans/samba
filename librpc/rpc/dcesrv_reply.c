@@ -168,6 +168,10 @@ _PUBLIC_ NTSTATUS dcesrv_reply(struct dcesrv_call_state *call)
 		push->flags |= LIBNDR_FLAG_BIGENDIAN;
 	}
 
+	if (context->ndr64) {
+		push->flags |= LIBNDR_FLAG_NDR64;
+	}
+
 	status = context->iface->ndr_push(call, call, push, call->r);
 	if (!NT_STATUS_IS_OK(status)) {
 		return dcesrv_fault(call, call->fault_code);
@@ -262,4 +266,19 @@ _PUBLIC_ NTSTATUS dcesrv_reply(struct dcesrv_call_state *call)
 	}
 
 	return NT_STATUS_OK;
+}
+
+_PUBLIC_ void _dcesrv_async_reply(struct dcesrv_call_state *call,
+				  const char *func,
+				  const char *location)
+{
+	struct dcesrv_connection *conn = call->conn;
+	NTSTATUS status;
+
+	status = dcesrv_reply(call);
+	if (!NT_STATUS_IS_OK(status)) {
+		D_ERR("%s: %s: dcesrv_async_reply() failed - %s\n",
+		      func, location, nt_errstr(status));
+		dcesrv_terminate_connection(conn, nt_errstr(status));
+	}
 }

@@ -100,6 +100,7 @@ def options(opt):
 
     # default = None means autodetection
     opt.samba_add_onoff_option('spotlight', with_name="enable", without_name="disable", default=None)
+    opt.samba_add_onoff_option('wsp', with_name="enable", without_name="disable", default=False)
 
 def configure(conf):
     default_static_modules = []
@@ -107,11 +108,6 @@ def configure(conf):
     required_static_modules = []
     forced_static_modules = []
     forced_shared_modules = []
-
-    if Options.options.developer:
-        conf.ADD_CFLAGS('-DDEVELOPER -DDEBUG_PASSWORD')
-        conf.env.developer = True
-        conf.DEFINE('HAVE_SMB3_UNIX_EXTENSIONS', '1')
 
     if sys.platform != 'openbsd5':
         conf.ADD_LDFLAGS("-Wl,--export-dynamic", testflags=True)
@@ -1826,6 +1822,14 @@ int main(void) {
         and conf.env['FLEX']
         and conf.CONFIG_GET('HAVE_UTF8_NORMALISATION')
     )
+
+    conf.env.with_wsp = False
+    if conf.CONFIG_GET('ENABLE_SELFTEST'):
+        Options.options.with_wsp = True
+    if Options.options.with_wsp:
+        Logs.info("building with WSP support")
+        conf.DEFINE('WITH_WSP', '1')
+        conf.env.with_wsp = True
 
     conf.env.with_spotlight = False
     if Options.options.with_spotlight is not False:

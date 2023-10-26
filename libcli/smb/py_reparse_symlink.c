@@ -22,7 +22,7 @@
 #include "python/py3compat.h"
 #include "libcli/util/pyerrors.h"
 #include "reparse.h"
-#include "reparse_symlink.h"
+#include "lib/util/iov_buf.h"
 #include "smb_constants.h"
 
 static PyObject *py_reparse_put(PyObject *module, PyObject *args)
@@ -31,10 +31,10 @@ static PyObject *py_reparse_put(PyObject *module, PyObject *args)
 	Py_ssize_t reparse_len;
 	unsigned long long tag = 0;
 	unsigned reserved = 0;
-	struct iovec iov;
 	uint8_t *buf = NULL;
 	ssize_t buflen;
 	PyObject *result = NULL;
+	struct reparse_data_buffer reparse_buf = {};
 	bool ok;
 
 	ok = PyArg_ParseTuple(
@@ -47,11 +47,13 @@ static PyObject *py_reparse_put(PyObject *module, PyObject *args)
 	if (!ok) {
 		return NULL;
 	}
-	iov = (struct iovec) {
-		.iov_base = reparse, .iov_len = reparse_len,
-	};
 
-	buflen = reparse_buffer_marshall(tag, reserved, &iov, 1, NULL, 0);
+	reparse_buf.tag = tag;
+	reparse_buf.parsed.raw.data = (uint8_t *)reparse;
+	reparse_buf.parsed.raw.length = reparse_len;
+	reparse_buf.parsed.raw.reserved = reserved;
+
+	buflen = reparse_data_buffer_marshall(&reparse_buf, NULL, 0);
 	if (buflen == -1) {
 		errno = EINVAL;
 		PyErr_SetFromErrno(PyExc_RuntimeError);
@@ -62,7 +64,7 @@ static PyObject *py_reparse_put(PyObject *module, PyObject *args)
 		PyErr_NoMemory();
 		return NULL;
 	}
-	reparse_buffer_marshall(tag, reserved, &iov, 1, buf, buflen);
+	reparse_data_buffer_marshall(&reparse_buf, buf, buflen);
 
 	result = PyBytes_FromStringAndSize((char *)buf, buflen);
 	TALLOC_FREE(buf);
@@ -71,35 +73,47 @@ static PyObject *py_reparse_put(PyObject *module, PyObject *args)
 
 static PyObject *py_reparse_symlink_put(PyObject *module, PyObject *args)
 {
-	char *substitute = NULL;
-	char *printname = NULL;
 	int unparsed = 0;
 	int flags = 0;
-	uint8_t *buf = NULL;
-	size_t buflen;
+	struct reparse_data_buffer reparse = {
+		.tag = IO_REPARSE_TAG_SYMLINK,
+	};
+	struct symlink_reparse_struct *lnk = &reparse.parsed.lnk;
+	uint8_t stackbuf[1024];
+	uint8_t *buf = stackbuf;
+	ssize_t buflen = sizeof(stackbuf);
 	PyObject *result = NULL;
 	bool ok;
 
-	ok = PyArg_ParseTuple(
-		args,
-		"ssii:symlink_put",
-		&substitute,
-		&printname,
-		&unparsed,
-		&flags);
+	ok = PyArg_ParseTuple(args,
+			      "ssii:symlink_put",
+			      &lnk->substitute_name,
+			      &lnk->print_name,
+			      &unparsed,
+			      &flags);
 	if (!ok) {
 		return NULL;
 	}
+	lnk->unparsed_path_length = unparsed;
+	lnk->flags = flags;
 
-	ok = symlink_reparse_buffer_marshall(
-		substitute, printname, unparsed, flags, NULL, &buf, &buflen);
-	if (!ok) {
-		PyErr_NoMemory();
-		return false;
+	buflen = reparse_data_buffer_marshall(&reparse, buf, buflen);
+
+	if ((buflen > 0) && ((size_t)buflen > sizeof(stackbuf))) {
+		buf = malloc(buflen);
+		buflen = reparse_data_buffer_marshall(&reparse, buf, buflen);
 	}
 
-	result = PyBytes_FromStringAndSize((char *)buf, buflen);
-	TALLOC_FREE(buf);
+	if (buflen == -1) {
+		PyErr_NoMemory();
+	} else {
+		result = PyBytes_FromStringAndSize((char *)buf, buflen);
+	}
+
+	if (buf != stackbuf) {
+		free(buf);
+	}
+
 	return result;
 }
 

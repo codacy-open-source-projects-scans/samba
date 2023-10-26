@@ -95,8 +95,6 @@ have_inotify = ("HAVE_INOTIFY" in config_hash)
 have_ldwrap = ("HAVE_LDWRAP" in config_hash)
 with_pthreadpool = ("WITH_PTHREADPOOL" in config_hash)
 
-have_smb3_unix_extensions = ("HAVE_SMB3_UNIX_EXTENSIONS" in config_hash)
-
 have_cluster_support = "CLUSTER_SUPPORT" in config_hash
 
 def is_module_enabled(module):
@@ -306,6 +304,20 @@ plantestsuite("samba3.smbtorture_s3.smb2.SMB2-DFS-FILENAME-LEADING-BACKSLASH",
                               "script/tests/test_smbtorture_s3.sh"),
                 'SMB2-DFS-FILENAME-LEADING-BACKSLASH',
                 '//$SERVER_IP/msdfs-pathname-share',
+                '$USERNAME',
+                '$PASSWORD',
+                smbtorture3,
+                "-mSMB2"])
+
+# BUG: https://bugzilla.samba.org/show_bug.cgi?id=15422
+# Prevent bad pipenames.
+#
+plantestsuite("samba3.smbtorture_s3.smb2.SMB2-INVALID-PIPENAME",
+                "fileserver",
+                [os.path.join(samba3srcdir,
+                              "script/tests/test_smbtorture_s3.sh"),
+                'SMB2-INVALID-PIPENAME',
+                '//$SERVER_IP/tmp',
                 '$USERNAME',
                 '$PASSWORD',
                 smbtorture3,
@@ -639,6 +651,9 @@ for env in ["nt4_member", "ad_member"]:
 
 env = "ad_dc_smb1"
 plantestsuite("samba3.blackbox.smbspool", env, [os.path.join(samba3srcdir, "script/tests/test_smbspool.sh"), '$SERVER', '$SERVER_IP', '$DC_USERNAME', '$DC_PASSWORD', env])
+
+env = "ad_member_fips"
+plantestsuite("samba3.blackbox.krbsmbspool", env, [os.path.join(samba3srcdir, "script/tests/test_smbspool_krb.sh"), '$SERVER', 'bob', 'Secret007', '$REALM'])
 
 plantestsuite("samba3.blackbox.printing_var_exp", "nt4_dc", [os.path.join(samba3srcdir, "script/tests/test_printing_var_exp.sh"), '$SERVER', '$SERVER_IP', '$DOMAIN', '$DC_USERNAME', '$DC_PASSWORD'])
 
@@ -1046,6 +1061,7 @@ rpc = ["rpc.authcontext",
        "rpc.samba3.smb-reauth2",
        "rpc.samba3.lsa_over_netlogon",
        "rpc.samba3.pipes_supported_interfaces",
+       "rpc.mgmt",
        "rpc.svcctl",
        "rpc.ntsvcs",
        "rpc.winreg",
@@ -1820,6 +1836,13 @@ plantestsuite("samba3.blackbox.force-user-unlink",
               [os.path.join(samba3srcdir,
                             "script/tests/test_force_user_unlink.sh")])
 
+plansmbtorture4testsuite(
+    "vfs.fruit_validate_afpinfo", "fileserver",
+    '//$SERVER_IP/vfs_fruit -U$USERNAME%$PASSWORD --option=torture:validate_afpinfo=yes')
+plansmbtorture4testsuite(
+    "vfs.fruit_validate_afpinfo", "fileserver",
+    '//$SERVER_IP/vfs_fruit_zero_fileid -U$USERNAME%$PASSWORD --option=torture:validate_afpinfo=no')
+
 def planclusteredmembertestsuite(tname, prefix):
     '''Define a clustered test for the clusteredmember environment'''
 
@@ -1867,8 +1890,7 @@ if have_cluster_support:
              smbtorture3,
              "-N 1000 -o 2000"])
 
-if have_smb3_unix_extensions:
-    planpythontestsuite("fileserver", "samba.tests.smb3unix")
+planpythontestsuite("fileserver_smb1", "samba.tests.smb3unix")
 planpythontestsuite("fileserver", "samba.tests.reparsepoints")
 planpythontestsuite("fileserver_smb1", "samba.tests.smb2symlink")
 planpythontestsuite("fileserver_smb1", "samba.tests.smb1posix")

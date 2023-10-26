@@ -19,7 +19,7 @@
 """Samba Python tests."""
 import os
 import tempfile
-import warnings
+import traceback
 import collections
 import ldb
 import samba
@@ -59,7 +59,8 @@ BINDIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
 
 HEXDUMP_FILTER = bytearray([x if ((len(repr(chr(x))) == 3) and (x < 127)) else ord('.') for x in range(256)])
 
-LDB_ERR_LUT = {v: k for k,v in vars(ldb).items() if k.startswith('ERR_')}
+LDB_ERR_LUT = {v: k for k, v in vars(ldb).items() if k.startswith('ERR_')}
+
 
 def ldb_err(v):
     if isinstance(v, ldb.LdbError):
@@ -79,8 +80,62 @@ def DynamicTestCase(cls):
     cls.setUpDynamicTestCases()
     return cls
 
+
 class TestCase(unittest.TestCase):
     """A Samba test case."""
+
+    # Re-implement addClassCleanup to support Python versions older than 3.8.
+    # Can be removed once these older Python versions are no longer needed.
+    if sys.version_info.major == 3 and sys.version_info.minor < 8:
+        _class_cleanups = []
+
+        @classmethod
+        def addClassCleanup(cls, function, *args, **kwargs):
+            cls._class_cleanups.append((function, args, kwargs))
+
+        @classmethod
+        def tearDownClass(cls):
+            teardown_exceptions = []
+
+            while cls._class_cleanups:
+                function, args, kwargs = cls._class_cleanups.pop()
+                try:
+                    function(*args, **kwargs)
+                except Exception:
+                    teardown_exceptions.append(traceback.format_exc())
+
+            # ExceptionGroup would be better but requires Python 3.11
+            if teardown_exceptions:
+                raise ValueError("tearDownClass failed:\n\n" +
+                                 "\n".join(teardown_exceptions))
+
+        @classmethod
+        def setUpClass(cls):
+            """
+            Call setUpTestData, ensure tearDownClass is called on exceptions.
+
+            This is only required on Python versions older than 3.8.
+            """
+            try:
+                cls.setUpTestData()
+            except Exception:
+                cls.tearDownClass()
+                raise
+    else:
+        @classmethod
+        def setUpClass(cls):
+            """
+            setUpClass only needs to call setUpTestData.
+
+            On Python 3.8 and above unittest will always call tearDownClass,
+            even if an exception was raised in setUpClass.
+            """
+            cls.setUpTestData()
+
+    @classmethod
+    def setUpTestData(cls):
+        """Create class level test fixtures here."""
+        pass
 
     @classmethod
     def generate_dynamic_test(cls, fnname, suffix, *args, doc=None):
@@ -311,7 +366,7 @@ class TestCaseInTempDir(TestCase):
             # os.path.join will happily step out of the tempdir,
             # so let's just check.
             if os.path.dirname(path) != self.tempdir:
-                raise ValueError("{path} might be outside {self.tempdir}")
+                raise ValueError(f"{path} might be outside {self.tempdir}")
 
             try:
                 _rm(path)
@@ -405,10 +460,10 @@ class BlackboxTestCase(TestCaseInTempDir):
         exe = os.path.join(BINDIR, cmd)
 
         python_cmds = ["samba-tool",
-            "samba_dnsupdate",
-            "samba_upgradedns",
-            "script/traffic_replay",
-            "script/traffic_learner"]
+                       "samba_dnsupdate",
+                       "samba_upgradedns",
+                       "script/traffic_replay",
+                       "script/traffic_learner"]
 
         if os.path.exists(exe):
             parts[0] = exe
@@ -420,11 +475,13 @@ class BlackboxTestCase(TestCaseInTempDir):
 
         return line
 
-    def check_run(self, line, msg=None):
-        self.check_exit_code(line, 0, msg=msg)
+    @classmethod
+    def check_run(cls, line, msg=None):
+        cls.check_exit_code(line, 0, msg=msg)
 
-    def check_exit_code(self, line, expected, msg=None):
-        line = self._make_cmdline(line)
+    @classmethod
+    def check_exit_code(cls, line, expected, msg=None):
+        line = cls._make_cmdline(line)
         use_shell = not isinstance(line, list)
         p = subprocess.Popen(line,
                              stdout=subprocess.PIPE,
@@ -442,9 +499,10 @@ class BlackboxTestCase(TestCaseInTempDir):
                                        msg)
         return stdoutdata
 
-    def check_output(self, line):
+    @classmethod
+    def check_output(cls, line):
         use_shell = not isinstance(line, list)
-        line = self._make_cmdline(line)
+        line = cls._make_cmdline(line)
         p = subprocess.Popen(line, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              shell=use_shell, close_fds=True)
         stdoutdata, stderrdata = p.communicate()
@@ -478,8 +536,8 @@ class BlackboxTestCase(TestCaseInTempDir):
         password += SystemRandom().choice(string.digits)
         password += SystemRandom().choice(string.ascii_lowercase)
         password += ''.join(SystemRandom().choice(string.ascii_uppercase +
-                    string.ascii_lowercase +
-                    string.digits) for x in range(count - 3))
+                            string.ascii_lowercase +
+                            string.digits) for x in range(count - 3))
         return password
 
 
@@ -640,7 +698,7 @@ def parse_help_consistency(out,
         prev = ' '
         for c in line:
             if state == OptState.NOOPT:
-                if c == '-' and  prev.isspace():
+                if c == '-' and prev.isspace():
                     state = OptState.HYPHEN1
                 prev = c
                 continue
@@ -655,7 +713,7 @@ def parse_help_consistency(out,
                 if c.isalnum():
                     name = '--' + c
                     state = OptState.NAME
-                else: # WTF, perhaps '--' ending option list.
+                else:  # WTF, perhaps '--' ending option list.
                     state = OptState.NOOPT
                     prev = c
                 continue

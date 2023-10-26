@@ -61,12 +61,15 @@ const struct dom_sid global_sid_System =			/* System */
 /* S-1-0-0 */
 const struct dom_sid global_sid_NULL =            		/* NULL sid */
 { 1, 1, {0,0,0,0,0,0}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-5-10 */
+const struct dom_sid global_sid_Self =				/* SELF */
+{ 1, 1, {0,0,0,0,0,5}, {10,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 /* S-1-5-11 */
 const struct dom_sid global_sid_Authenticated_Users =	/* All authenticated rids */
 { 1, 1, {0,0,0,0,0,5}, {11,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 #if 0
 /* for documentation S-1-5-12 */
-const struct dom_sid global_sid_Restriced =			/* Restricted Code */
+const struct dom_sid global_sid_Restricted =			/* Restricted Code */
 { 1, 1, {0,0,0,0,0,5}, {12,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 #endif
 
@@ -74,10 +77,10 @@ const struct dom_sid global_sid_Restriced =			/* Restricted Code */
 const struct dom_sid global_sid_Asserted_Identity =       /* Asserted Identity */
 { 1, 0, {0,0,0,0,0,18}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 /* S-1-18-1 */
-const struct dom_sid global_sid_Asserted_Identity_Service =	/* Asserted Identity Service */
+const struct dom_sid global_sid_Asserted_Identity_Authentication_Authority =	/* Asserted Identity Authentication Authority */
 { 1, 1, {0,0,0,0,0,18}, {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 /* S-1-18-2 */
-const struct dom_sid global_sid_Asserted_Identity_Authentication_Authority =	/* Asserted Identity Authentication Authority */
+const struct dom_sid global_sid_Asserted_Identity_Service =	/* Asserted Identity Service */
 { 1, 1, {0,0,0,0,0,18}, {2,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 
 /* S-1-5-2 */
@@ -99,6 +102,12 @@ const struct dom_sid global_sid_Anonymous =			/* Anonymous login */
 /* S-1-5-9 */
 const struct dom_sid global_sid_Enterprise_DCs =		/* Enterprise DCs */
 { 1, 1, {0,0,0,0,0,5}, {9,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-5-21-0-0-0-496 */
+const struct dom_sid global_sid_Compounded_Authentication = 	/* Compounded Authentication */
+{1, 5, {0,0,0,0,0,5}, {21,0,0,0,496,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-5-21-0-0-0-497 */
+const struct dom_sid global_sid_Claims_Valid = 		/* Claims Valid */
+{1, 5, {0,0,0,0,0,5}, {21,0,0,0,497,0,0,0,0,0,0,0,0,0,0}};
 /* S-1-5-32 */
 const struct dom_sid global_sid_Builtin = 			/* Local well-known domain */
 { 1, 1, {0,0,0,0,0,5}, {32,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};

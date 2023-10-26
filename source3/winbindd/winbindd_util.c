@@ -1547,12 +1547,16 @@ static bool assume_domain(const char *domain)
 }
 
 /* Parse a DOMAIN\user or UPN string into a domain, namespace and a user */
-bool parse_domain_user(const char *domuser,
-		       fstring namespace,
-		       fstring domain,
-		       fstring user)
+bool parse_domain_user(TALLOC_CTX *ctx,
+		       const char *domuser,
+		       char **pnamespace,
+		       char **pdomain,
+		       char **puser)
 {
 	char *p = NULL;
+	char *namespace = NULL;
+	char *domain = NULL;
+	char *user = NULL;
 
 	if (strlen(domuser) == 0) {
 		return false;
@@ -1560,54 +1564,112 @@ bool parse_domain_user(const char *domuser,
 
 	p = strchr(domuser, *lp_winbind_separator());
 	if (p != NULL) {
-		fstrcpy(user, p + 1);
-		fstrcpy(domain, domuser);
+		user = talloc_strdup(ctx, p + 1);
+		if (user == NULL) {
+			goto fail;
+		}
+		domain = talloc_strdup(ctx,
+				domuser);
+		if (domain == NULL) {
+			goto fail;
+		}
 		domain[PTR_DIFF(p, domuser)] = '\0';
-		fstrcpy(namespace, domain);
+		namespace = talloc_strdup(ctx, domain);
+		if (namespace == NULL) {
+			goto fail;
+		}
 	} else {
-		fstrcpy(user, domuser);
-
-		domain[0] = '\0';
-		namespace[0] = '\0';
+		user = talloc_strdup(ctx, domuser);
+		if (user == NULL) {
+			goto fail;
+		}
 		p = strchr(domuser, '@');
 		if (p != NULL) {
 			/* upn */
-			fstrcpy(namespace, p + 1);
+			namespace = talloc_strdup(ctx, p + 1);
+			if (namespace == NULL) {
+				goto fail;
+			}
+			domain = talloc_strdup(ctx, "");
+			if (domain == NULL) {
+				goto fail;
+			}
+
 		} else if (assume_domain(lp_workgroup())) {
-			fstrcpy(domain, lp_workgroup());
-			fstrcpy(namespace, domain);
+			domain = talloc_strdup(ctx, lp_workgroup());
+			if (domain == NULL) {
+				goto fail;
+			}
+			namespace = talloc_strdup(ctx, domain);
+			if (namespace == NULL) {
+				goto fail;
+			}
 		} else {
-			fstrcpy(namespace, lp_netbios_name());
+			namespace = talloc_strdup(ctx, lp_netbios_name());
+			if (namespace == NULL) {
+				goto fail;
+			}
+			domain = talloc_strdup(ctx, "");
+			if (domain == NULL) {
+				goto fail;
+			}
 		}
 	}
 
-	return strupper_m(domain);
+	if (!strupper_m(domain)) {
+		goto fail;
+	}
+
+	*pnamespace = namespace;
+	*pdomain = domain;
+	*puser = user;
+	return true;
+fail:
+	TALLOC_FREE(user);
+	TALLOC_FREE(domain);
+	TALLOC_FREE(namespace);
+	return false;
 }
 
-/* Ensure an incoming username from NSS is fully qualified. Replace the
-   incoming fstring with DOMAIN <separator> user. Returns the same
-   values as parse_domain_user() but also replaces the incoming username.
-   Used to ensure all names are fully qualified within winbindd.
-   Used by the NSS protocols of auth, chauthtok, logoff and ccache_ntlm_auth.
-   The protocol definitions of auth_crap, chng_pswd_auth_crap
-   really should be changed to use this instead of doing things
-   by hand. JRA. */
-
-bool canonicalize_username(fstring username_inout,
-			   fstring namespace,
-			   fstring domain,
-			   fstring user)
+bool canonicalize_username(TALLOC_CTX *mem_ctx,
+			   char **pusername_inout,
+			   char **pnamespace,
+			   char **pdomain,
+			   char **puser)
 {
 	bool ok;
+	char *namespace = NULL;
+	char *domain = NULL;
+	char *user = NULL;
+	char *username_inout = NULL;
 
-	ok = parse_domain_user(username_inout, namespace, domain, user);
+	ok = parse_domain_user(mem_ctx,
+			*pusername_inout,
+			&namespace, &domain, &user);
+
 	if (!ok) {
 		return False;
 	}
-	slprintf(username_inout, sizeof(fstring) - 1, "%s%c%s",
+
+	username_inout = talloc_asprintf(mem_ctx, "%s%c%s",
 		 domain, *lp_winbind_separator(),
 		 user);
+
+	if (username_inout == NULL) {
+		goto fail;
+	}
+
+	*pnamespace = namespace;
+	*puser = user;
+	*pdomain = domain;
+	*pusername_inout = username_inout;
 	return True;
+fail:
+	TALLOC_FREE(username_inout);
+	TALLOC_FREE(namespace);
+	TALLOC_FREE(domain);
+	TALLOC_FREE(user);
+	return false;
 }
 
 /*

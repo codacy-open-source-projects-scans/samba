@@ -545,7 +545,7 @@ class SidStringsAsDnSearchWithDnObject(SidStringBase):
 
 @DynamicTestCase
 class SidStringsAsDnInSearchFilter(SidStringBase):
-    """How does a bad <SID=x> dn work is a search filter?
+    """How does a bad <SID=x> dn work in a search filter?
 
     Answer: on Windows it always works.
     """
@@ -560,7 +560,7 @@ class SidStringsAsDnInSearchFilter(SidStringBase):
         try:
             self.ldb.search(base=basedn,
                             scope=ldb.SCOPE_ONELEVEL,
-                            expression="(distinguishedName=<SID={code}>)")
+                            expression=f"(distinguishedName=<SID={code}>)")
         except ldb.LdbError as e:
             self.fail(f"expected no failure, got {e}")
 

@@ -232,6 +232,7 @@ struct dcesrv_connection_context {
 
 	/* the negotiated transfer syntax */
 	struct ndr_syntax_id transfer_syntax;
+	bool ndr64;
 };
 
 
@@ -436,12 +437,28 @@ struct dcesrv_context {
 		bool use_single_process;
 	} *endpoint_list;
 
+	/*
+	 * registered auth_type/principals
+	 * for dcesrv_mgmt_inq_princ_name()
+	 */
+	struct dcesrv_ctx_principal {
+		struct dcesrv_ctx_principal *next, *prev;
+		enum dcerpc_AuthType auth_type;
+		const char *principal_name;
+	} *principal_list;
+
 	/* loadparm context to use for this connection */
 	struct loadparm_context *lp_ctx;
 
 	struct idr_context *assoc_groups_idr;
+	uint32_t assoc_groups_num;
 
 	struct dcesrv_connection *broken_connections;
+
+	/*
+	 * Our preferred transfer syntax.
+	 */
+	const struct ndr_syntax_id *preferred_transfer;
 
 	struct dcesrv_context_callbacks *callbacks;
 };
@@ -460,6 +477,14 @@ struct dcesrv_critical_sizes {
 	int sizeof_dcesrv_handle;
 };
 
+NTSTATUS dcesrv_auth_type_principal_register(struct dcesrv_context *dce_ctx,
+					     enum dcerpc_AuthType auth_type,
+					     const char *principal_name);
+const char *dcesrv_auth_type_principal_find(struct dcesrv_context *dce_ctx,
+					    enum dcerpc_AuthType auth_type);
+NTSTATUS dcesrv_register_default_auth_types(struct dcesrv_context *dce_ctx,
+					    const char *principal);
+NTSTATUS dcesrv_register_default_auth_types_machine_principal(struct dcesrv_context *dce_ctx);
 NTSTATUS dcesrv_interface_register(struct dcesrv_context *dce_ctx,
 				   const char *ep_name,
 				   const char *ncacn_np_secondary_endpoint,
@@ -489,7 +514,16 @@ void dcesrv_context_set_callbacks(
 	struct dcesrv_context *dce_ctx,
 	struct dcesrv_context_callbacks *cb);
 
+/*
+ * Use dcesrv_async_reply() in async code
+ */
 NTSTATUS dcesrv_reply(struct dcesrv_call_state *call);
+void _dcesrv_async_reply(struct dcesrv_call_state *call,
+			 const char *func,
+			 const char *location);
+#define dcesrv_async_reply(__call) \
+	_dcesrv_async_reply(__call, __func__, __location__)
+
 struct dcesrv_handle *dcesrv_handle_create(struct dcesrv_call_state *call,
 					   uint8_t handle_type);
 

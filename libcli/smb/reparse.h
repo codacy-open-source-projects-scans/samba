@@ -15,8 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __UTIL_REPARSE_H__
-#define __UTIL_REPARSE_H__
+#ifndef __LIBCLI_SMB_REPARSE_H__
+#define __LIBCLI_SMB_REPARSE_H__
 
 #include <talloc.h>
 #include "replace.h"
@@ -69,5 +69,9 @@ NTSTATUS reparse_data_buffer_parse(TALLOC_CTX *mem_ctx,
 				   size_t buflen);
 char *reparse_data_buffer_str(TALLOC_CTX *mem_ctx,
 			      const struct reparse_data_buffer *dst);
+
+ssize_t reparse_data_buffer_marshall(const struct reparse_data_buffer *src,
+				     uint8_t *buf,
+				     size_t buflen);
 
 #endif

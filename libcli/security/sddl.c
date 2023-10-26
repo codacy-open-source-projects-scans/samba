@@ -22,6 +22,7 @@
 #include "replace.h"
 #include "lib/util/debug.h"
 #include "libcli/security/security.h"
+#include "libcli/security/conditional_ace.h"
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "lib/util/smb_strtox.h"
 #include "libcli/security/sddl.h"
@@ -65,7 +66,7 @@ static bool sddl_map_flag(
 */
 static bool sddl_map_flags(const struct flag_map *map, const char *str,
 			   uint32_t *pflags, size_t *plen,
-                           bool unknown_flag_is_part_of_next_thing)
+			   bool unknown_flag_is_part_of_next_thing)
 {
 	const char *str0 = str;
 	if (plen != NULL) {
@@ -92,15 +93,15 @@ static bool sddl_map_flags(const struct flag_map *map, const char *str,
 	 * For ACL flags, unknown_flag_is_part_of_next_thing is set,
 	 * and we expect some more stuff that isn't flags.
 	 *
-         * For ACE flags, unknown_flag_is_part_of_next_thing is unset,
-         * and the flags have been tokenised into their own little
-         * string. We don't expect anything here, even whitespace.
-         */
-        if (*str == '\0' || unknown_flag_is_part_of_next_thing) {
-                return true;
-        }
+	 * For ACE flags, unknown_flag_is_part_of_next_thing is unset,
+	 * and the flags have been tokenised into their own little
+	 * string. We don't expect anything here, even whitespace.
+	 */
+	if (*str == '\0' || unknown_flag_is_part_of_next_thing) {
+		return true;
+	}
 	DBG_WARNING("Unknown flag - '%s' in '%s'\n", str, str0);
-        return false;
+	return false;
 }
 
 
@@ -210,8 +211,8 @@ static struct dom_sid *sddl_transition_decode_sid(TALLOC_CTX *mem_ctx, const cha
 	if (strncmp(sddl, "S-", 2) == 0) {
 		struct dom_sid *sid = NULL;
 		char *sid_str = NULL;
-                const char *end = NULL;
-                bool ok;
+		const char *end = NULL;
+		bool ok;
 		size_t len = strspn(sddl + 2, "-0123456789ABCDEFabcdefxX") + 2;
 		if (len < 5) { /* S-1-x */
 			return NULL;
@@ -229,23 +230,23 @@ static struct dom_sid *sddl_transition_decode_sid(TALLOC_CTX *mem_ctx, const cha
 		if (sid_str == NULL) {
 			return NULL;
 		}
-                sid = talloc(mem_ctx, struct dom_sid);
-                if (sid == NULL) {
+		sid = talloc(mem_ctx, struct dom_sid);
+		if (sid == NULL) {
 			TALLOC_FREE(sid_str);
-                        return NULL;
-                };
-                ok = dom_sid_parse_endp(sid_str, sid, &end);
-                if (!ok) {
+			return NULL;
+		};
+		ok = dom_sid_parse_endp(sid_str, sid, &end);
+		if (!ok) {
 			DBG_WARNING("could not parse SID '%s'\n", sid_str);
 			TALLOC_FREE(sid_str);
-                        TALLOC_FREE(sid);
-                        return NULL;
-                }
+			TALLOC_FREE(sid);
+			return NULL;
+		}
 		if (end - sid_str != len) {
 			DBG_WARNING("trailing junk after SID '%s'\n", sid_str);
 			TALLOC_FREE(sid_str);
-                        TALLOC_FREE(sid);
-                        return NULL;
+			TALLOC_FREE(sid);
+			return NULL;
 		}
 		TALLOC_FREE(sid_str);
 		(*sddlp) += len;
@@ -306,8 +307,22 @@ static const struct flag_map ace_types[] = {
 	{ "OD", SEC_ACE_TYPE_ACCESS_DENIED_OBJECT },
 	{ "OU", SEC_ACE_TYPE_SYSTEM_AUDIT_OBJECT },
 	{ "OL", SEC_ACE_TYPE_SYSTEM_ALARM_OBJECT },
-	{ "A",  SEC_ACE_TYPE_ACCESS_ALLOWED },
-	{ "D",  SEC_ACE_TYPE_ACCESS_DENIED },
+	{ "A",	SEC_ACE_TYPE_ACCESS_ALLOWED },
+	{ "D",	SEC_ACE_TYPE_ACCESS_DENIED },
+
+	{ "XA", SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK },
+	{ "XD", SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK },
+	{ "ZA", SEC_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT },
+	/*
+	 * SEC_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT exists but has
+	 * no SDDL flag.
+	 *
+	 * ZA and XU are switched in [MS-DTYP] as of version 36.0,
+	 * but this should be corrected in later versions.
+	 */
+	{ "XU", SEC_ACE_TYPE_SYSTEM_AUDIT_CALLBACK },
+
+	{ "RA", SEC_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE },
 	{ NULL, 0 }
 };
 
@@ -370,7 +385,7 @@ static char *sddl_match_file_rights(TALLOC_CTX *mem_ctx,
 static bool sddl_decode_access(const char *str, uint32_t *pmask)
 {
 	const char *str0 = str;
-        char *end = NULL;
+	char *end = NULL;
 	uint32_t mask = 0;
 	unsigned long long numeric_mask;
 	int err;
@@ -445,10 +460,10 @@ static bool sddl_decode_access(const char *str, uint32_t *pmask)
 		mask |= flags;
 		str += len;
 	}
-        if (*str != '\0') {
+	if (*str != '\0') {
 		DBG_WARNING("Bad characters in '%s'\n", str0);
-                return false;
-        }
+		return false;
+	}
 	*pmask = mask;
 	return true;
 }
@@ -456,10 +471,40 @@ static bool sddl_decode_access(const char *str, uint32_t *pmask)
 
 static bool sddl_decode_guid(const char *str, struct GUID *guid)
 {
-        if (strlen(str) != 36) {
-                return false;
-        }
-        return parse_guid_string(str, guid);
+	if (strlen(str) != 36) {
+		return false;
+	}
+	return parse_guid_string(str, guid);
+}
+
+
+
+static DATA_BLOB sddl_decode_conditions(TALLOC_CTX *mem_ctx,
+					const char *conditions,
+					const char **message,
+					size_t *length)
+{
+	DATA_BLOB blob = {0};
+	struct ace_condition_script *script = NULL;
+	size_t message_offset;
+	script = ace_conditions_compile_sddl(mem_ctx,
+					     conditions,
+					     message,
+					     &message_offset,
+					     length);
+	if (script != NULL) {
+		bool ok = conditional_ace_encode_binary(mem_ctx,
+							script,
+							&blob);
+		if (! ok) {
+			DBG_ERR("could not blobify '%s'\n", conditions);
+		}
+		if (*message) {
+			DBG_ERR("                  %*c", (int)message_offset, '^');
+			DBG_ERR("error '%s'\n", *message);
+		}
+	}
+	return blob;
 }
 
 
@@ -481,6 +526,7 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	size_t len;
 	size_t count = 0;
 	char *str = *sddl_copy;
+	bool has_extra_data = false;
 	ZERO_STRUCTP(ace);
 
 	if (*str != '(') {
@@ -488,7 +534,7 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	}
 	str++;
 	/*
-	 * First we split apart the 6 tokens.
+	 * First we split apart the 6 (or 7) tokens.
 	 *
 	 * 0.		 ace type
 	 * 1.		 ace flags
@@ -497,6 +543,7 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	 * 4.		 inherit guid
 	 * 5.		 sid
 	 *
+	 * 6/extra_data	 rare optional extra data
 	 */
 	tok[0] = str;
 	while (*str != '\0') {
@@ -507,11 +554,13 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 			tok[count] = str;
 			if (count == 6) {
 				/*
-				 * When we get conditional or resource ACEs,
-				 * this will set a flag and break;
-				 * for now we just...
+				 * this looks like a conditional ACE
+				 * or resource ACE, but we can't say
+				 * for sure until we look at the ACE
+				 * type (tok[0]), after the loop.
 				 */
-				return false;
+				has_extra_data = true;
+				break;
 			}
 			continue;
 		}
@@ -545,6 +594,25 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	}
 
 	ace->type = v;
+
+	/*
+	 * Only callback and resource aces should have trailing data.
+	 */
+	if (sec_ace_callback(ace->type)) {
+		if (! has_extra_data) {
+			DBG_WARNING("callback ACE has no trailing data\n");
+			return false;
+		}
+	} else if (sec_ace_resource(ace->type)) {
+		if (! has_extra_data) {
+			DBG_WARNING("resource ACE has no trailing data\n");
+			return false;
+		}
+	} else if (has_extra_data) {
+		DBG_WARNING("ACE has trailing section but is not a "
+			    "callback or resource ACE\n");
+		return false;
+	}
 
 	/* ace flags */
 	if (!sddl_map_flags(ace_flags, tok[1], &v, NULL, false)) {
@@ -588,6 +656,63 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	if (*s != '\0') {
 		return false;
 	}
+
+	if (sec_ace_callback(ace->type)) {
+		/*
+		 * This is either a conditional ACE or some unknown
+		 * type of callback ACE that will be rejected by the
+		 * conditional ACE compiler.
+		 */
+		size_t length;
+		const char *message = NULL;
+		DATA_BLOB conditions = {0};
+		s = tok[6];
+
+		conditions = sddl_decode_conditions(mem_ctx, s, &message, &length);
+		if (conditions.data == NULL) {
+			DBG_WARNING("Conditional ACE compilation failure: %s\n", message);
+			return false;
+		}
+		ace->coda.conditions = conditions;
+
+		/*
+		 * We have found the end of the conditions, and the
+		 * next character should be the ')' to end the ACE.
+		 */
+		if (s[length] != ')') {
+			DBG_WARNING("Conditional ACE has trailing bytes\n");
+			return false;
+		}
+		str = discard_const_p(char, s + length + 1);
+	} else if (sec_ace_resource(ace->type)) {
+		size_t length;
+		struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim = NULL;
+
+		if (! dom_sid_equal(&ace->trustee, &global_sid_World)) {
+			/* these are just the rules */
+			DBG_WARNING("Resource Attribute ACE trustee must be "
+				    "'S-1-1-0' or 'WD'.\n");
+			return false;
+		}
+
+		s = tok[6];
+		claim = sddl_decode_resource_attr(mem_ctx, s, &length);
+		if (claim == NULL) {
+			DBG_WARNING("Resource Attribute ACE parse failure\n");
+			return false;
+		}
+		ace->coda.claim = *claim;
+
+		/*
+		 * We want a ')' to end the ACE.
+		 */
+		if (s[length] != ')') {
+			DBG_WARNING("Resource ACE has trailing bytes\n");
+			return false;
+		}
+		str = discard_const_p(char, s + length + 1);
+	}
+
 	*sddl_copy = str;
 	return true;
 }
@@ -859,7 +984,6 @@ static char *sddl_transition_encode_ace(TALLOC_CTX *mem_ctx, const struct securi
 	struct GUID_txt_buf object_buf, iobject_buf;
 	const char *sddl_type="", *sddl_flags="", *sddl_mask="",
 		*sddl_object="", *sddl_iobject="", *sddl_trustee="";
-
 	tmp_ctx = talloc_new(mem_ctx);
 	if (tmp_ctx == NULL) {
 		DEBUG(0, ("talloc_new failed\n"));
@@ -906,16 +1030,50 @@ static char *sddl_transition_encode_ace(TALLOC_CTX *mem_ctx, const struct securi
 				&iobject_buf);
 		}
 	}
-
 	sddl_trustee = sddl_transition_encode_sid(tmp_ctx, &ace->trustee, state);
 	if (sddl_trustee == NULL) {
 		goto failed;
 	}
 
-	sddl = talloc_asprintf(mem_ctx, "%s;%s;%s;%s;%s;%s",
-			       sddl_type, sddl_flags, sddl_mask, sddl_object,
-			       sddl_iobject, sddl_trustee);
+	if (sec_ace_callback(ace->type)) {
+		/* encode the conditional part */
+		struct ace_condition_script *s = NULL;
+		const char *sddl_conditions = NULL;
 
+		s = parse_conditional_ace(tmp_ctx, ace->coda.conditions);
+
+		if (s == NULL) {
+			goto failed;
+		}
+
+		sddl_conditions = sddl_from_conditional_ace(tmp_ctx, s);
+		if (sddl_conditions == NULL) {
+			goto failed;
+		}
+
+		sddl = talloc_asprintf(mem_ctx, "%s;%s;%s;%s;%s;%s;%s",
+				       sddl_type, sddl_flags, sddl_mask,
+				       sddl_object, sddl_iobject,
+				       sddl_trustee, sddl_conditions);
+	} else if (sec_ace_resource(ace->type)) {
+		/* encode the resource part */
+		const char *coda = NULL;
+		coda = sddl_resource_attr_from_claim(tmp_ctx,
+						     &ace->coda.claim);
+
+		if (coda == NULL) {
+			DBG_WARNING("resource ACE has invalid claim\n");
+			goto failed;
+		}
+		sddl = talloc_asprintf(mem_ctx, "%s;%s;%s;%s;%s;%s;%s",
+				       sddl_type, sddl_flags, sddl_mask,
+				       sddl_object, sddl_iobject,
+				       sddl_trustee, coda);
+	} else {
+		sddl = talloc_asprintf(mem_ctx, "%s;%s;%s;%s;%s;%s",
+				       sddl_type, sddl_flags, sddl_mask,
+				       sddl_object, sddl_iobject, sddl_trustee);
+	}
 failed:
 	talloc_free(tmp_ctx);
 	return sddl;

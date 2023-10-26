@@ -42,6 +42,7 @@
 #include "librpc/gen_ndr/ndr_ioctl.h"
 #include "ntioctl.h"
 #include "librpc/gen_ndr/ndr_quota.h"
+#include "librpc/gen_ndr/ndr_smb3posix.h"
 #include "lib/util/string_wrappers.h"
 #include "lib/util/idtree.h"
 
@@ -243,6 +244,24 @@ struct tevent_req *cli_smb2_create_fnum_send(
 
 	if (cli->backup_intent) {
 		create_options |= FILE_OPEN_FOR_BACKUP_INTENT;
+	}
+
+	if (cli->smb2.client_smb311_posix) {
+		uint8_t modebuf[4] = {
+			0,
+		};
+
+		status =
+			smb2_create_blob_add(state,
+					     &state->in_cblobs,
+					     SMB2_CREATE_TAG_POSIX,
+					     (DATA_BLOB){
+						     .data = modebuf,
+						     .length = sizeof(modebuf),
+					     });
+		if (tevent_req_nterror(req, status)) {
+			return tevent_req_post(req, ev);
+		}
 	}
 
 	/* Check for @GMT- paths. Remove the @GMT and turn into TWrp if so. */
@@ -462,7 +481,8 @@ static void cli_smb2_close_fnum_done(struct tevent_req *subreq);
 struct tevent_req *cli_smb2_close_fnum_send(TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
 					    struct cli_state *cli,
-					    uint16_t fnum)
+					    uint16_t fnum,
+					    uint16_t flags)
 {
 	struct tevent_req *req, *subreq;
 	struct cli_smb2_close_fnum_state *state;
@@ -481,9 +501,14 @@ struct tevent_req *cli_smb2_close_fnum_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	subreq = smb2cli_close_send(state, ev, cli->conn, cli->timeout,
-				    cli->smb2.session, cli->smb2.tcon,
-				    0, state->ph->fid_persistent,
+	subreq = smb2cli_close_send(state,
+				    ev,
+				    cli->conn,
+				    cli->timeout,
+				    cli->smb2.session,
+				    cli->smb2.tcon,
+				    flags,
+				    state->ph->fid_persistent,
 				    state->ph->fid_volatile);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
@@ -545,7 +570,7 @@ NTSTATUS cli_smb2_close_fnum(struct cli_state *cli, uint16_t fnum)
 	if (ev == NULL) {
 		goto fail;
 	}
-	req = cli_smb2_close_fnum_send(frame, ev, cli, fnum);
+	req = cli_smb2_close_fnum_send(frame, ev, cli, fnum, 0);
 	if (req == NULL) {
 		goto fail;
 	}
@@ -842,7 +867,8 @@ static void cli_smb2_mkdir_opened(struct tevent_req *subreq)
 		return;
 	}
 
-	subreq = cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum);
+	subreq =
+		cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -1003,8 +1029,11 @@ static void cli_smb2_rmdir_disp_set(struct tevent_req *subreq)
 	 * Close the fd even if the set_disp failed
 	 */
 
-	subreq = cli_smb2_close_fnum_send(
-		state, state->ev, state->cli, state->fnum);
+	subreq = cli_smb2_close_fnum_send(state,
+					  state->ev,
+					  state->cli,
+					  state->fnum,
+					  0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -1133,7 +1162,8 @@ static void cli_smb2_unlink_opened1(struct tevent_req *subreq)
 		return;
 	}
 
-	subreq = cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum);
+	subreq =
+		cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -1156,7 +1186,8 @@ static void cli_smb2_unlink_opened2(struct tevent_req *subreq)
 		return;
 	}
 
-	subreq = cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum);
+	subreq =
+		cli_smb2_close_fnum_send(state, state->ev, state->cli, fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -1174,29 +1205,6 @@ NTSTATUS cli_smb2_unlink_recv(struct tevent_req *req)
 	return tevent_req_simple_recv_ntstatus(req);
 }
 
-static ssize_t sid_parse_wire(TALLOC_CTX *mem_ctx, const uint8_t *data,
-			      struct dom_sid *sid, size_t num_rdata)
-{
-	size_t sid_size;
-	enum ndr_err_code ndr_err;
-	DATA_BLOB in = data_blob_const(data, num_rdata);
-
-	ndr_err = ndr_pull_struct_blob(&in,
-				       mem_ctx,
-				       sid,
-				       (ndr_pull_flags_fn_t)ndr_pull_dom_sid);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		return 0;
-	}
-
-	sid_size = ndr_size_dom_sid(sid, 0);
-	if (sid_size > num_rdata) {
-		return 0;
-	}
-
-	return sid_size;
-}
-
 /***************************************************************
  Utility function to parse a SMB2_FIND_POSIX_INFORMATION reply.
 ***************************************************************/
@@ -1206,8 +1214,10 @@ static NTSTATUS parse_finfo_posix_info(const uint8_t *dir_data,
 				       struct file_info *finfo,
 				       uint32_t *next_offset)
 {
+	struct smb3_file_posix_information info = {};
+	size_t consumed;
+	enum ndr_err_code ndr_err;
 	size_t namelen = 0;
-	size_t slen = 0, slen2 = 0;
 	size_t ret = 0;
 	uint32_t _next_offset = 0;
 
@@ -1226,43 +1236,64 @@ static NTSTATUS parse_finfo_posix_info(const uint8_t *dir_data,
 		dir_data_length = _next_offset;
 	}
 
-	if (dir_data_length < 92) {
+	/*
+	 * Skip NextEntryOffset and FileIndex
+	 */
+	if (dir_data_length < 8) {
+		return NT_STATUS_INFO_LENGTH_MISMATCH;
+	}
+	dir_data += 8;
+	dir_data_length -= 8;
+
+	ndr_err = ndr_pull_struct_blob_noalloc(
+		dir_data,
+		dir_data_length,
+		&info,
+		(ndr_pull_flags_fn_t)ndr_pull_smb3_file_posix_information,
+		&consumed);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		return ndr_map_error2ntstatus(ndr_err);
+	}
+	if (consumed > dir_data_length) {
+		return NT_STATUS_INFO_LENGTH_MISMATCH;
+	}
+	dir_data += consumed;
+	dir_data_length -= consumed;
+
+	finfo->btime_ts = interpret_long_date(info.creation_time);
+	finfo->atime_ts = interpret_long_date(info.last_access_time);
+	finfo->mtime_ts = interpret_long_date(info.last_write_time);
+	finfo->ctime_ts = interpret_long_date(info.change_time);
+	finfo->allocated_size = info.allocation_size;
+	finfo->size = info.end_of_file;
+	finfo->mode = info.file_attributes;
+	finfo->ino = info.inode;
+	finfo->st_ex_dev = info.device;
+	finfo->st_ex_nlink = info.cc.nlinks;
+	finfo->reparse_tag = info.cc.reparse_tag;
+	finfo->st_ex_mode = wire_perms_to_unix(info.cc.posix_perms);
+	sid_copy(&finfo->owner_sid, &info.cc.owner);
+	sid_copy(&finfo->group_sid, &info.cc.group);
+
+	if (dir_data_length < 4) {
+		return NT_STATUS_INFO_LENGTH_MISMATCH;
+	}
+	namelen = PULL_LE_U32(dir_data, 0);
+
+	dir_data += 4;
+	dir_data_length -= 4;
+
+	if (namelen > dir_data_length) {
 		return NT_STATUS_INFO_LENGTH_MISMATCH;
 	}
 
-	finfo->btime_ts = interpret_long_date((const char *)dir_data + 8);
-	finfo->atime_ts = interpret_long_date((const char *)dir_data + 16);
-	finfo->mtime_ts = interpret_long_date((const char *)dir_data + 24);
-	finfo->ctime_ts = interpret_long_date((const char *)dir_data + 32);
-	finfo->allocated_size = PULL_LE_U64(dir_data, 40);
-	finfo->size = PULL_LE_U64(dir_data, 48);
-	finfo->mode = PULL_LE_U32(dir_data, 56);
-	finfo->ino = PULL_LE_U64(dir_data, 60);
-	finfo->st_ex_dev = PULL_LE_U32(dir_data, 68);
-	finfo->st_ex_nlink = PULL_LE_U32(dir_data, 76);
-	finfo->reparse_tag = PULL_LE_U32(dir_data, 80);
-	finfo->st_ex_mode = wire_perms_to_unix(PULL_LE_U32(dir_data, 84));
-
-	slen = sid_parse_wire(finfo, dir_data+88, &finfo->owner_sid,
-			      dir_data_length-88);
-	if (slen == 0) {
-		return NT_STATUS_INVALID_NETWORK_RESPONSE;
-	}
-	slen2 = sid_parse_wire(finfo, dir_data+88+slen, &finfo->group_sid,
-			       dir_data_length-88-slen);
-	if (slen2 == 0) {
-		return NT_STATUS_INVALID_NETWORK_RESPONSE;
-	}
-	slen += slen2;
-
-	namelen = PULL_LE_U32(dir_data, 88+slen);
 	ret = pull_string_talloc(finfo,
-				dir_data,
-				FLAGS2_UNICODE_STRINGS,
-				&finfo->name,
-				dir_data+92+slen,
-				namelen,
-				STR_UNICODE);
+				 dir_data,
+				 FLAGS2_UNICODE_STRINGS,
+				 &finfo->name,
+				 dir_data,
+				 namelen,
+				 STR_UNICODE);
 	if (ret == (size_t)-1) {
 		/* Bad conversion. */
 		return NT_STATUS_INVALID_NETWORK_RESPONSE;
@@ -1309,10 +1340,10 @@ static NTSTATUS parse_finfo_id_both_directory_info(const uint8_t *dir_data,
 		return NT_STATUS_INFO_LENGTH_MISMATCH;
 	}
 
-	finfo->btime_ts = interpret_long_date((const char *)dir_data + 8);
-	finfo->atime_ts = interpret_long_date((const char *)dir_data + 16);
-	finfo->mtime_ts = interpret_long_date((const char *)dir_data + 24);
-	finfo->ctime_ts = interpret_long_date((const char *)dir_data + 32);
+	finfo->btime_ts = interpret_long_date(BVAL(dir_data, 8));
+	finfo->atime_ts = interpret_long_date(BVAL(dir_data, 16));
+	finfo->mtime_ts = interpret_long_date(BVAL(dir_data, 24));
+	finfo->ctime_ts = interpret_long_date(BVAL(dir_data, 32));
 	finfo->size = IVAL2_TO_SMB_BIG_UINT(dir_data + 40, 0);
 	finfo->allocated_size = IVAL2_TO_SMB_BIG_UINT(dir_data + 48, 0);
 	finfo->attr = IVAL(dir_data + 56, 0);
@@ -1321,6 +1352,7 @@ static NTSTATUS parse_finfo_id_both_directory_info(const uint8_t *dir_data,
 	if (namelen > (dir_data_length - 104)) {
 		return NT_STATUS_INFO_LENGTH_MISMATCH;
 	}
+	finfo->reparse_tag = IVAL(dir_data + 64, 0);
 	slen = CVAL(dir_data + 68, 0);
 	if (slen > 24) {
 		return NT_STATUS_INFO_LENGTH_MISMATCH;
@@ -1540,8 +1572,11 @@ static void cli_smb2_list_done(struct tevent_req *subreq)
 
 	TALLOC_FREE(response);
 
-	subreq = cli_smb2_close_fnum_send(
-		state, state->ev, state->cli, state->fnum);
+	subreq = cli_smb2_close_fnum_send(state,
+					  state->ev,
+					  state->cli,
+					  state->fnum,
+					  0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -2148,101 +2183,6 @@ static NTSTATUS get_fnum_from_path(struct cli_state *cli,
 	return status;
 }
 
-/***************************************************************
- Wrapper that allows SMB2 to query a path info (ALTNAME level).
- Synchronous only.
-***************************************************************/
-
-NTSTATUS cli_smb2_qpathinfo_alt_name(struct cli_state *cli,
-				const char *name,
-				fstring alt_name)
-{
-	NTSTATUS status;
-	DATA_BLOB outbuf = data_blob_null;
-	uint16_t fnum = 0xffff;
-	uint32_t altnamelen = 0;
-	TALLOC_CTX *frame = talloc_stackframe();
-
-	if (smbXcli_conn_has_async_calls(cli->conn)) {
-		/*
-		 * Can't use sync call while an async call is in flight
-		 */
-		status = NT_STATUS_INVALID_PARAMETER;
-		goto fail;
-	}
-
-	status = get_fnum_from_path(cli,
-				name,
-				FILE_READ_ATTRIBUTES,
-				&fnum);
-
-	if (!NT_STATUS_IS_OK(status)) {
-		goto fail;
-	}
-
-	status = cli_smb2_query_info_fnum(
-		cli,
-		fnum,
-		1, /* in_info_type */
-		(SMB_FILE_ALTERNATE_NAME_INFORMATION - 1000), /* in_file_info_class */
-		0xFFFF, /* in_max_output_length */
-		NULL, /* in_input_buffer */
-		0, /* in_additional_info */
-		0, /* in_flags */
-		frame,
-		&outbuf);
-
-	if (!NT_STATUS_IS_OK(status)) {
-		goto fail;
-	}
-
-	/* Parse the reply. */
-	if (outbuf.length < 4) {
-		status = NT_STATUS_INVALID_NETWORK_RESPONSE;
-		goto fail;
-	}
-
-	altnamelen = IVAL(outbuf.data, 0);
-	if (altnamelen > outbuf.length - 4) {
-		status = NT_STATUS_INVALID_NETWORK_RESPONSE;
-		goto fail;
-	}
-
-	if (altnamelen > 0) {
-		size_t ret = 0;
-		char *short_name = NULL;
-		ret = pull_string_talloc(frame,
-				outbuf.data,
-				FLAGS2_UNICODE_STRINGS,
-				&short_name,
-				outbuf.data + 4,
-				altnamelen,
-				STR_UNICODE);
-		if (ret == (size_t)-1) {
-			/* Bad conversion. */
-			status = NT_STATUS_INVALID_NETWORK_RESPONSE;
-			goto fail;
-		}
-
-	        fstrcpy(alt_name, short_name);
-	} else {
-		alt_name[0] = '\0';
-	}
-
-	status = NT_STATUS_OK;
-
-  fail:
-
-	if (fnum != 0xffff) {
-		cli_smb2_close_fnum(cli, fnum);
-	}
-
-	cli->raw_status = status;
-
-	TALLOC_FREE(frame);
-	return status;
-}
-
 struct cli_smb2_qpathinfo_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
@@ -2344,7 +2284,8 @@ static void cli_smb2_qpathinfo_done(struct tevent_req *subreq)
 	subreq = cli_smb2_close_fnum_send(state,
 					  state->ev,
 					  state->cli,
-					  state->fnum);
+					  state->fnum,
+					  0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -2516,6 +2457,7 @@ NTSTATUS cli_smb2_setattrE(struct cli_state *cli,
 {
 	uint8_t inbuf_store[40];
 	DATA_BLOB inbuf = data_blob_null;
+	NTSTATUS status;
 
 	if (smbXcli_conn_has_async_calls(cli->conn)) {
 		/*
@@ -2542,15 +2484,15 @@ NTSTATUS cli_smb2_setattrE(struct cli_state *cli,
 		put_long_date((char *)inbuf.data + 16, write_time);
 	}
 
-	cli->raw_status = cli_smb2_set_info_fnum(
-		cli,
-		fnum,
-		1,		/* in_info_type */
-		SMB_FILE_BASIC_INFORMATION - 1000, /* in_file_info_class */
-		&inbuf,		   /* in_input_buffer */
-		0);		   /* in_additional_info */
-
-	return cli->raw_status;
+	status = cli_smb2_set_info_fnum(cli,
+					fnum,
+					1, /* in_info_type */
+					SMB_FILE_BASIC_INFORMATION -
+						1000, /* in_file_info_class */
+					&inbuf,	      /* in_input_buffer */
+					0);	      /* in_additional_info */
+	cli->raw_status = status;
+	return status;
 }
 
 /***************************************************************
@@ -2886,7 +2828,7 @@ NTSTATUS cli_smb2_get_fs_volume_info(struct cli_state *cli,
 
 	if (pdate) {
 		struct timespec ts;
-		ts = interpret_long_date((char *)outbuf.data);
+		ts = interpret_long_date(BVAL(outbuf.data, 0));
 		*pdate = ts.tv_sec;
 	}
 	if (pserial_number) {
@@ -3025,8 +2967,11 @@ static void cli_smb2_mxac_opened(struct tevent_req *subreq)
 	state->mxac = IVAL(mxac_blob->data.data, 4);
 
 close:
-	subreq = cli_smb2_close_fnum_send(
-		state, state->ev, state->cli, state->fnum);
+	subreq = cli_smb2_close_fnum_send(state,
+					  state->ev,
+					  state->cli,
+					  state->fnum,
+					  0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -3331,8 +3276,11 @@ static void cli_smb2_rename_renamed(struct tevent_req *subreq)
 	state->rename_status = cli_smb2_rename_fnum_recv(subreq);
 	TALLOC_FREE(subreq);
 
-	subreq = cli_smb2_close_fnum_send(
-		state, state->ev, state->cli, state->fnum);
+	subreq = cli_smb2_close_fnum_send(state,
+					  state->ev,
+					  state->cli,
+					  state->fnum,
+					  0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}

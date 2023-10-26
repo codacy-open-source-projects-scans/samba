@@ -170,7 +170,8 @@ struct rpc_work_process {
 	 * MSG_RPC_HOST_WORKER_STATUS sent by workers whenever a
 	 * client exits.
 	 */
-	uint32_t num_clients;
+	uint32_t num_associations;
+	uint32_t num_connections;
 
 	/*
 	 * Send SHUTDOWN to an idle child after a while
@@ -214,7 +215,6 @@ struct rpc_server_get_endpoints_state {
 	char **argl;
 	char *ncalrpc_endpoint;
 	enum dcerpc_transport_t only_transport;
-	struct dcerpc_binding **existing_bindings;
 
 	struct rpc_host_iface_name *iface_names;
 	struct rpc_host_endpoint **endpoints;
@@ -235,7 +235,6 @@ static void rpc_server_get_endpoints_done(struct tevent_req *subreq);
  * @param[in] ev Event context to run this on
  * @param[in] rpc_server_exe Binary to ask with --list-interfaces
  * @param[in] only_transport Filter out anything but this
- * @param[in] existing_bindings Filter out endpoints served by "samba"
  * @return The tevent_req representing this process
  */
 
@@ -243,8 +242,7 @@ static struct tevent_req *rpc_server_get_endpoints_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
 	const char *rpc_server_exe,
-	enum dcerpc_transport_t only_transport,
-	struct dcerpc_binding **existing_bindings)
+	enum dcerpc_transport_t only_transport)
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct rpc_server_get_endpoints_state *state = NULL;
@@ -256,7 +254,6 @@ static struct tevent_req *rpc_server_get_endpoints_send(
 		return NULL;
 	}
 	state->only_transport = only_transport;
-	state->existing_bindings = existing_bindings;
 
 	progname = strrchr(rpc_server_exe, '/');
 	if (progname != NULL) {
@@ -417,37 +414,17 @@ static bool dcerpc_binding_same_endpoint(
  * In member mode, we only serve named pipes. Indicated by NCACN_NP
  * passed in via "only_transport".
  *
- * In AD mode, the "samba" process already serves many endpoints,
- * passed in via "existing_binding". Don't serve those from
- * samba-dcerpcd.
- *
  * @param[in] binding Which binding is in question?
  * @param[in] only_transport Exclusive transport to serve
- * @param[in] existing_bindings Endpoints served by "samba" already
  * @return Do we want to serve "binding" from samba-dcerpcd?
  */
 
 static bool rpc_host_serve_endpoint(
 	struct dcerpc_binding *binding,
-	enum dcerpc_transport_t only_transport,
-	struct dcerpc_binding **existing_bindings)
+	enum dcerpc_transport_t only_transport)
 {
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(binding);
-	size_t i, num_existing_bindings;
-
-	num_existing_bindings = talloc_array_length(existing_bindings);
-
-	for (i=0; i<num_existing_bindings; i++) {
-		bool same = dcerpc_binding_same_endpoint(
-			binding, existing_bindings[i]);
-		if (same) {
-			DBG_DEBUG("%s served by samba\n",
-				  dcerpc_binding_get_string_option(
-					  binding, "endpoint"));
-			return false;
-		}
-	}
 
 	if (only_transport == NCA_UNKNOWN) {
 		/* no filter around */
@@ -486,7 +463,7 @@ static struct rpc_host_endpoint *rpc_host_endpoint_find(
 	}
 
 	serve_this = rpc_host_serve_endpoint(
-		ep->binding, state->only_transport, state->existing_bindings);
+		ep->binding, state->only_transport);
 	if (!serve_this) {
 		goto fail;
 	}
@@ -626,6 +603,15 @@ static void rpc_server_get_endpoints_done(struct tevent_req *subreq)
 			  strerror(ret));
 		tevent_req_error(req, ret);
 		return;
+	}
+	/*
+	 * We need to limit the number of workers in order
+	 * to put the worker index into a 16-bit space,
+	 * in order to use a 16-bit association group space
+	 * per worker.
+	 */
+	if (state->num_workers > 65536) {
+		state->num_workers = 65536;
 	}
 
 	state->idle_seconds = smb_strtoul(
@@ -981,6 +967,8 @@ static struct tevent_req *rpc_host_bind_read_send(
 		close(sock_dup);
 		return tevent_req_post(req, ev);
 	}
+	/* as server we want to fail early */
+	tstream_bsd_fail_readv_first_error(state->plain, true);
 
 	if (transport == NCACN_NP) {
 		subreq = tstream_npa_accept_existing_send(
@@ -1177,11 +1165,10 @@ fail:
 static struct rpc_work_process *rpc_host_find_worker(struct rpc_server *server)
 {
 	struct rpc_work_process *worker = NULL;
-	size_t i;
+	struct rpc_work_process *perfect_worker = NULL;
+	struct rpc_work_process *best_worker = NULL;
 	size_t empty_slot = SIZE_MAX;
-
-	uint32_t min_clients = UINT32_MAX;
-	size_t min_worker = server->max_workers;
+	size_t i;
 
 	for (i=0; i<server->max_workers; i++) {
 		worker = &server->workers[i];
@@ -1193,14 +1180,46 @@ static struct rpc_work_process *rpc_host_find_worker(struct rpc_server *server)
 		if (!worker->available) {
 			continue;
 		}
-		if (worker->num_clients < min_clients) {
-			min_clients = worker->num_clients;
-			min_worker = i;
+		if (worker->num_associations == 0) {
+			/*
+			 * We have an idle worker...
+			 */
+			perfect_worker = worker;
+			break;
+		}
+		if (best_worker == NULL) {
+			/*
+			 * It's busy, but the best so far...
+			 */
+			best_worker = worker;
+			continue;
+		}
+		if (worker->num_associations < best_worker->num_associations) {
+			/*
+			 * It's also busy, but has less association groups
+			 * (logical clients)
+			 */
+			best_worker = worker;
+			continue;
+		}
+		if (worker->num_associations > best_worker->num_associations) {
+			/*
+			 * It's not better
+			 */
+			continue;
+		}
+		/*
+		 * Ok, with the same number of association groups
+		 * we pick the one with the lowest number of connections
+		 */
+		if (worker->num_connections < best_worker->num_connections) {
+			best_worker = worker;
+			continue;
 		}
 	}
 
-	if (min_clients == 0) {
-		return &server->workers[min_worker];
+	if (perfect_worker != NULL) {
+		return perfect_worker;
 	}
 
 	if (empty_slot < SIZE_MAX) {
@@ -1212,8 +1231,8 @@ static struct rpc_work_process *rpc_host_find_worker(struct rpc_server *server)
 		return NULL;
 	}
 
-	if (min_worker < server->max_workers) {
-		return &server->workers[min_worker];
+	if (best_worker != NULL) {
+		return best_worker;
 	}
 
 	return NULL;
@@ -1241,7 +1260,7 @@ static struct rpc_work_process *rpc_host_find_idle_worker(
 		if (!worker->available) {
 			continue;
 		}
-		if (worker->num_clients == 0) {
+		if (worker->num_associations == 0) {
 			return &server->workers[i];
 		}
 	}
@@ -1259,7 +1278,10 @@ static struct rpc_work_process *rpc_host_find_idle_worker(
 	 * All workers are busy. We need to expand the number of
 	 * workers because we were asked for an idle worker.
 	 */
-	if (num_workers+1 < num_workers) {
+	if (num_workers >= UINT16_MAX) {
+		/*
+		 * The worker index would not fit into 16-bits
+		 */
 		return NULL;
 	}
 	tmp = talloc_realloc(
@@ -1294,6 +1316,7 @@ static void rpc_host_distribute_clients(struct rpc_server *server)
 	struct iovec iov;
 	enum ndr_err_code ndr_err;
 	NTSTATUS status;
+	const char *client_type = NULL;
 
 again:
 	pending_client = server->pending_clients;
@@ -1306,7 +1329,9 @@ again:
 
 	if (assoc_group_id != 0) {
 		size_t num_workers = talloc_array_length(server->workers);
-		uint8_t worker_index = assoc_group_id >> 24;
+		uint16_t worker_index = assoc_group_id >> 16;
+
+		client_type = "associated";
 
 		if (worker_index >= num_workers) {
 			DBG_DEBUG("Invalid assoc group id %"PRIu32"\n",
@@ -1316,7 +1341,7 @@ again:
 		worker = &server->workers[worker_index];
 
 		if ((worker->pid == -1) || !worker->available) {
-			DBG_DEBUG("Requested worker index %"PRIu8": "
+			DBG_DEBUG("Requested worker index %"PRIu16": "
 				  "pid=%d, available=%d\n",
 				  worker_index,
 				  (int)worker->pid,
@@ -1324,6 +1349,7 @@ again:
 			/*
 			 * Pick a random one for a proper bind nack
 			 */
+			client_type = "associated+lost";
 			worker = rpc_host_find_worker(server);
 		}
 	} else {
@@ -1332,20 +1358,24 @@ again:
 		uint32_t flags = 0;
 		bool found;
 
+		client_type = "new";
+
 		found = security_token_find_npa_flags(
 			session_info->session_info->security_token,
 			&flags);
 
 		/* fresh assoc group requested */
 		if (found & (flags & SAMBA_NPA_FLAGS_NEED_IDLE)) {
+			client_type = "new+exclusive";
 			worker = rpc_host_find_idle_worker(server);
 		} else {
+			client_type = "new";
 			worker = rpc_host_find_worker(server);
 		}
 	}
 
 	if (worker == NULL) {
-		DBG_DEBUG("No worker found\n");
+		DBG_DEBUG("No worker found for %s client\n", client_type);
 		return;
 	}
 
@@ -1362,10 +1392,13 @@ again:
 		goto done;
 	}
 
-	DBG_INFO("Sending new client %s to %d with %"PRIu32" clients\n",
+	DBG_INFO("Sending %s client %s to %d with "
+		 "%"PRIu32" associations and %"PRIu32" connections\n",
+		 client_type,
 		 server->rpc_server_exe,
 		 worker->pid,
-		 worker->num_clients);
+		 worker->num_associations,
+		 worker->num_connections);
 
 	iov = (struct iovec) {
 		.iov_base = blob.data, .iov_len = blob.length,
@@ -1391,7 +1424,10 @@ again:
 			  nt_errstr(status));
 		goto done;
 	}
-	worker->num_clients += 1;
+	if (assoc_group_id == 0) {
+		worker->num_associations += 1;
+	}
+	worker->num_connections += 1;
 	TALLOC_FREE(worker->exit_timer);
 
 	TALLOC_FREE(server->host->np_helper_shutdown);
@@ -1607,7 +1643,6 @@ static struct tevent_req *rpc_server_setup_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
 	struct rpc_host *host,
-	struct dcerpc_binding **existing_bindings,
 	const char *rpc_server_exe)
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
@@ -1639,8 +1674,7 @@ static struct tevent_req *rpc_server_setup_send(
 		state,
 		ev,
 		rpc_server_exe,
-		host->np_helper ? NCACN_NP : NCA_UNKNOWN,
-		existing_bindings);
+		host->np_helper ? NCACN_NP : NCA_UNKNOWN);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -1839,7 +1873,7 @@ static void rpc_host_exit_worker(
 		}
 		w->exit_timer = NULL;
 
-		SMB_ASSERT(w->num_clients == 0);
+		SMB_ASSERT(w->num_associations == 0);
 
 		status = messaging_send(
 			server->host->msg_ctx,
@@ -1919,9 +1953,10 @@ static void rpc_host_child_status_recv(
 	}
 
 	worker->available = true;
-	worker->num_clients = status_message.num_clients;
+	worker->num_associations = status_message.num_association_groups;
+	worker->num_connections = status_message.num_connections;
 
-	if (worker->num_clients != 0) {
+	if (worker->num_associations != 0) {
 		TALLOC_FREE(worker->exit_timer);
 	} else {
 		worker->exit_timer = tevent_add_timer(
@@ -2322,10 +2357,11 @@ static bool rpc_host_dump_status_filter(
 			}
 
 			fprintf(f,
-				" worker[%zu]: pid=%d, num_clients=%"PRIu32"\n",
+				" worker[%zu]: pid=%d, num_associations=%"PRIu32", num_connections=%"PRIu32"\n",
 				j,
 				(int)w->pid,
-				w->num_clients);
+				w->num_associations,
+				w->num_connections);
 		}
 	}
 
@@ -2344,7 +2380,6 @@ static struct tevent_req *rpc_host_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
 	struct messaging_context *msg_ctx,
-	struct dcerpc_binding **existing_bindings,
 	char *servers,
 	int ready_signal_fd,
 	const char *daemon_ready_progname,
@@ -2465,7 +2500,6 @@ static struct tevent_req *rpc_host_send(
 			state,
 			ev,
 			host,
-			existing_bindings,
 			exe);
 		if (tevent_req_nomem(subreq, req)) {
 			return tevent_req_post(req, ev);
@@ -2648,117 +2682,6 @@ static int rpc_host_pidfile_create(
 	return EAGAIN;
 }
 
-/*
- * Find which interfaces are already being served by the samba AD
- * DC so we know not to serve them. Some interfaces like netlogon
- * are served by "samba", some like srvsvc will be served by the
- * source3 based RPC servers.
- */
-static NTSTATUS rpc_host_epm_lookup(
-	TALLOC_CTX *mem_ctx,
-	struct dcerpc_binding ***pbindings)
-{
-	struct rpc_pipe_client *cli = NULL;
-	struct pipe_auth_data *auth = NULL;
-	struct policy_handle entry_handle = { .handle_type = 0 };
-	struct dcerpc_binding **bindings = NULL;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
-
-	status = rpc_pipe_open_ncalrpc(mem_ctx, &ndr_table_epmapper, &cli);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("rpc_pipe_open_ncalrpc failed: %s\n",
-			  nt_errstr(status));
-		goto fail;
-	}
-	status = rpccli_ncalrpc_bind_data(cli, &auth);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("rpccli_ncalrpc_bind_data failed: %s\n",
-			  nt_errstr(status));
-		goto fail;
-	}
-	status = rpc_pipe_bind(cli, auth);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("rpc_pipe_bind failed: %s\n", nt_errstr(status));
-		goto fail;
-	}
-
-	for (;;) {
-		size_t num_bindings = talloc_array_length(bindings);
-		struct dcerpc_binding **tmp = NULL;
-		uint32_t num_entries = 0;
-		struct epm_entry_t *entry = NULL;
-		struct dcerpc_binding *binding = NULL;
-		uint32_t result;
-
-		entry = talloc(cli, struct epm_entry_t);
-		if (entry == NULL) {
-			goto fail;
-		}
-
-		status = dcerpc_epm_Lookup(
-			cli->binding_handle, /* binding_handle */
-			cli,		     /* mem_ctx */
-			0,		     /* rpc_c_ep_all */
-			NULL,		     /* object */
-			NULL,		     /* interface id */
-			0,		     /* rpc_c_vers_all */
-			&entry_handle,	     /* entry_handle */
-			1,		     /* max_ents */
-			&num_entries,	     /* num_ents */
-			entry,		     /* entries */
-			&result);	     /* result */
-		if (!NT_STATUS_IS_OK(status)) {
-			DBG_DEBUG("dcerpc_epm_Lookup failed: %s\n",
-				  nt_errstr(status));
-			goto fail;
-		}
-
-		if (result == EPMAPPER_STATUS_NO_MORE_ENTRIES) {
-			break;
-		}
-
-		if (result != EPMAPPER_STATUS_OK) {
-			DBG_DEBUG("dcerpc_epm_Lookup returned %"PRIu32"\n",
-				  result);
-			break;
-		}
-
-		if (num_entries != 1) {
-			DBG_DEBUG("epm_Lookup returned %"PRIu32" "
-				  "entries, expected one\n",
-				  num_entries);
-			break;
-		}
-
-		status = dcerpc_binding_from_tower(
-			mem_ctx, &entry->tower->tower, &binding);
-		if (!NT_STATUS_IS_OK(status)) {
-			break;
-		}
-
-		tmp = talloc_realloc(
-			mem_ctx,
-			bindings,
-			struct dcerpc_binding *,
-			num_bindings+1);
-		if (tmp == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto fail;
-		}
-		bindings = tmp;
-
-		bindings[num_bindings] = talloc_move(bindings, &binding);
-
-		TALLOC_FREE(entry);
-	}
-
-	*pbindings = bindings;
-	status = NT_STATUS_OK;
-fail:
-	TALLOC_FREE(cli);
-	return status;
-}
-
 static void samba_dcerpcd_stdin_handler(
 	struct tevent_context *ev,
 	struct tevent_fd *fde,
@@ -2788,7 +2711,6 @@ int main(int argc, const char *argv[])
 	struct tevent_context *ev_ctx = NULL;
 	struct messaging_context *msg_ctx = NULL;
 	struct tevent_req *req = NULL;
-	struct dcerpc_binding **existing_bindings = NULL;
 	char *servers = NULL;
 	const char *arg = NULL;
 	size_t num_servers;
@@ -2978,12 +2900,12 @@ int main(int argc, const char *argv[])
 
 	dump_core_setup(progname, lp_logfile(frame, lp_sub));
 
+	reopen_logs();
+
 	DEBUG(0, ("%s version %s started.\n",
 		  progname,
 		  samba_version_string()));
 	DEBUGADD(0,("%s\n", COPYRIGHT_STARTUP_MESSAGE));
-
-	reopen_logs();
 
 	(void)winbind_off();
 	ok = init_guest_session_info(frame);
@@ -2994,11 +2916,6 @@ int main(int argc, const char *argv[])
 		TALLOC_FREE(frame);
 		exit(1);
 	}
-
-	status = rpc_host_epm_lookup(frame, &existing_bindings);
-	DBG_DEBUG("rpc_host_epm_lookup returned %s, %zu bindings\n",
-		  nt_errstr(status),
-		  talloc_array_length(existing_bindings));
 
 	ret = rpc_host_pidfile_create(msg_ctx, progname, ready_signal_fd);
 	if (ret != 0) {
@@ -3013,7 +2930,6 @@ int main(int argc, const char *argv[])
 		ev_ctx,
 		ev_ctx,
 		msg_ctx,
-		existing_bindings,
 		servers,
 		ready_signal_fd,
 		cmdline_daemon_cfg->fork ? NULL : progname,

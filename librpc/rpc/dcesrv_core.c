@@ -166,6 +166,112 @@ static struct dcesrv_call_state *dcesrv_find_fragmented_call(struct dcesrv_conne
 }
 
 /*
+ * register a principal for an auth_type
+ *
+ * In order to get used in dcesrv_mgmt_inq_princ_name()
+ */
+_PUBLIC_ NTSTATUS dcesrv_auth_type_principal_register(struct dcesrv_context *dce_ctx,
+						      enum dcerpc_AuthType auth_type,
+						      const char *principal_name)
+{
+	const char *existing = NULL;
+	struct dcesrv_ctx_principal *p = NULL;
+
+	existing = dcesrv_auth_type_principal_find(dce_ctx, auth_type);
+	if (existing != NULL) {
+		DBG_ERR("auth_type[%u] already registered with principal_name[%s]\n",
+			auth_type, existing);
+		return NT_STATUS_ALREADY_REGISTERED;
+	}
+
+	p = talloc_zero(dce_ctx, struct dcesrv_ctx_principal);
+	if (p == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	p->auth_type = auth_type;
+	p->principal_name = talloc_strdup(p, principal_name);
+	if (p->principal_name == NULL) {
+		TALLOC_FREE(p);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	DLIST_ADD_END(dce_ctx->principal_list, p);
+	return NT_STATUS_OK;
+}
+
+_PUBLIC_ const char *dcesrv_auth_type_principal_find(struct dcesrv_context *dce_ctx,
+						     enum dcerpc_AuthType auth_type)
+{
+	struct dcesrv_ctx_principal *p = NULL;
+
+	for (p = dce_ctx->principal_list; p != NULL; p = p->next) {
+		if (p->auth_type == auth_type) {
+			return p->principal_name;
+		}
+	}
+
+	return NULL;
+}
+
+_PUBLIC_ NTSTATUS dcesrv_register_default_auth_types(struct dcesrv_context *dce_ctx,
+						     const char *principal)
+{
+	const char *realm = lpcfg_realm(dce_ctx->lp_ctx);
+	NTSTATUS status;
+
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_NTLMSSP,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_SPNEGO,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	if (realm == NULL || realm[0] == '\0') {
+		return NT_STATUS_OK;
+	}
+
+	status = dcesrv_auth_type_principal_register(dce_ctx,
+						     DCERPC_AUTH_TYPE_KRB5,
+						     principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+_PUBLIC_ NTSTATUS dcesrv_register_default_auth_types_machine_principal(struct dcesrv_context *dce_ctx)
+{
+	const char *realm = lpcfg_realm(dce_ctx->lp_ctx);
+	const char *nb = lpcfg_netbios_name(dce_ctx->lp_ctx);
+	char *principal = NULL;
+	NTSTATUS status;
+
+	if (realm == NULL || realm[0] == '\0') {
+		return dcesrv_register_default_auth_types(dce_ctx, "");
+	}
+
+	principal = talloc_asprintf(talloc_tos(), "%s$@%s", nb, realm);
+	if (principal == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = dcesrv_register_default_auth_types(dce_ctx, principal);
+	TALLOC_FREE(principal);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+/*
   register an interface on an endpoint
 
   An endpoint is one unix domain socket (for ncalrpc), one TCP port
@@ -598,10 +704,7 @@ _PUBLIC_ NTSTATUS dcesrv_endpoint_connect(struct dcesrv_context *dce_ctx,
 
 	p->default_auth_state = auth;
 
-	/*
-	 * For now we only support NDR32.
-	 */
-	p->preferred_transfer = &ndr_transfer_syntax_ndr;
+	p->preferred_transfer = dce_ctx->preferred_transfer;
 
 	*_p = p;
 	return NT_STATUS_OK;
@@ -1488,6 +1591,8 @@ static NTSTATUS dcesrv_check_or_create_context(struct dcesrv_call_state *call,
 	context->context_id = ctx->context_id;
 	context->iface = iface;
 	context->transfer_syntax = *selected_transfer;
+	context->ndr64 = ndr_syntax_id_equal(&context->transfer_syntax,
+					     &ndr_transfer_syntax_ndr64);
 	DLIST_ADD(call->conn->contexts, context);
 	call->context = context;
 	talloc_set_destructor(context, dcesrv_connection_context_destructor);
@@ -1928,13 +2033,17 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 		return dcesrv_fault(call, faultcode);
 	}
 
+	if (call->context->ndr64) {
+		call->ndr_pull->flags |= LIBNDR_FLAG_NDR64;
+	}
+
 	/* unravel the NDR for the packet */
 	status = call->context->iface->ndr_pull(call, call, pull, &call->r);
 	if (!NT_STATUS_IS_OK(status)) {
 		uint8_t extra_flags = 0;
 		if (call->fault_code == DCERPC_FAULT_OP_RNG_ERROR) {
 			/* we got an unknown call */
-			DEBUG(3,(__location__ ": Unknown RPC call %u on %s\n",
+			DEBUG(3,(__location__ ": Unknown RPC call %"PRIu16" on %s\n",
 				 call->pkt.u.request.opnum,
 				 call->context->iface->name));
 			dcesrv_save_call(call, "unknown");
@@ -1952,7 +2061,7 @@ static NTSTATUS dcesrv_request(struct dcesrv_call_state *call)
 
 	if (pull->offset != pull->data_size) {
 		dcesrv_save_call(call, "extrabytes");
-		DEBUG(3,("Warning: %d extra bytes in incoming RPC request\n",
+		DEBUG(3,("Warning: %"PRIu32" extra bytes in incoming RPC request\n",
 			 pull->data_size - pull->offset));
 	}
 
@@ -2459,6 +2568,11 @@ _PUBLIC_ NTSTATUS dcesrv_init_context(TALLOC_CTX *mem_ctx,
 	}
 	dce_ctx->broken_connections = NULL;
 	dce_ctx->callbacks = cb;
+
+	/*
+	 * For now we only support NDR32.
+	 */
+	dce_ctx->preferred_transfer = &ndr_transfer_syntax_ndr;
 
 	*_dce_ctx = dce_ctx;
 	return NT_STATUS_OK;

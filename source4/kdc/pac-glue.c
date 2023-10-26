@@ -791,15 +791,14 @@ krb5_error_code samba_krbtgt_is_in_db(const struct samba_kdc_entry *p,
 NTSTATUS samba_kdc_add_asserted_identity(enum samba_asserted_identity ai,
 					 struct auth_user_info_dc *user_info_dc)
 {
-	struct dom_sid ai_sid;
-	const char *sid_str = NULL;
+	const struct dom_sid *ai_sid = NULL;
 
 	switch (ai) {
 	case SAMBA_ASSERTED_IDENTITY_SERVICE:
-		sid_str = SID_SERVICE_ASSERTED_IDENTITY;
+		ai_sid = &global_sid_Asserted_Identity_Service;
 		break;
 	case SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY:
-		sid_str = SID_AUTHENTICATION_AUTHORITY_ASSERTED_IDENTITY;
+		ai_sid = &global_sid_Asserted_Identity_Authentication_Authority;
 		break;
 	case SAMBA_ASSERTED_IDENTITY_IGNORE:
 		return NT_STATUS_OK;
@@ -807,100 +806,86 @@ NTSTATUS samba_kdc_add_asserted_identity(enum samba_asserted_identity ai,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	if (!dom_sid_parse(sid_str, &ai_sid)) {
-		return NT_STATUS_UNSUCCESSFUL;
-	}
-
 	return add_sid_to_array_attrs_unique(
 		user_info_dc,
-		&ai_sid,
+		ai_sid,
 		SE_GROUP_DEFAULT_FLAGS,
 		&user_info_dc->sids,
 		&user_info_dc->num_sids);
 }
 
-NTSTATUS samba_kdc_add_claims_valid(enum samba_claims_valid claims_valid,
-				    struct auth_user_info_dc *user_info_dc)
+NTSTATUS samba_kdc_add_claims_valid(struct auth_user_info_dc *user_info_dc)
 {
-	switch (claims_valid) {
-	case SAMBA_CLAIMS_VALID_EXCLUDE:
-		return NT_STATUS_OK;
-	case SAMBA_CLAIMS_VALID_INCLUDE:
-	{
-		struct dom_sid claims_valid_sid;
-
-		if (!dom_sid_parse(SID_CLAIMS_VALID, &claims_valid_sid)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-
-		return add_sid_to_array_attrs_unique(
-			user_info_dc,
-			&claims_valid_sid,
-			SE_GROUP_DEFAULT_FLAGS,
-			&user_info_dc->sids,
-			&user_info_dc->num_sids);
-	}
-	}
-
-	return NT_STATUS_INVALID_PARAMETER;
+	return add_sid_to_array_attrs_unique(
+		user_info_dc,
+		&global_sid_Claims_Valid,
+		SE_GROUP_DEFAULT_FLAGS,
+		&user_info_dc->sids,
+		&user_info_dc->num_sids);
 }
 
-NTSTATUS samba_kdc_add_compounded_auth(enum samba_compounded_auth compounded_auth,
-				       struct auth_user_info_dc *user_info_dc)
+static NTSTATUS samba_kdc_add_compounded_auth(struct auth_user_info_dc *user_info_dc)
 {
-	switch (compounded_auth) {
-	case SAMBA_COMPOUNDED_AUTH_EXCLUDE:
-		return NT_STATUS_OK;
-	case SAMBA_COMPOUNDED_AUTH_INCLUDE:
-	{
-		struct dom_sid compounded_auth_sid;
+	return add_sid_to_array_attrs_unique(
+		user_info_dc,
+		&global_sid_Compounded_Authentication,
+		SE_GROUP_DEFAULT_FLAGS,
+		&user_info_dc->sids,
+		&user_info_dc->num_sids);
+}
 
-		if (!dom_sid_parse(SID_COMPOUNDED_AUTHENTICATION, &compounded_auth_sid)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-
-		return add_sid_to_array_attrs_unique(
-			user_info_dc,
-			&compounded_auth_sid,
-			SE_GROUP_DEFAULT_FLAGS,
-			&user_info_dc->sids,
-			&user_info_dc->num_sids);
-	}
-	}
-
-	return NT_STATUS_INVALID_PARAMETER;
+bool samba_kdc_entry_is_trust(const struct samba_kdc_entry *entry)
+{
+	return entry != NULL && entry->is_trust;
 }
 
 /*
- * Look up the user's info in the database and create a auth_user_info_dc
- * structure. If the resulting structure is not talloc_free()d, it will be
- * reused on future calls to this function.
+ * Return true if this entry has an associated PAC issued or signed by a KDC
+ * that our KDC trusts. We trust the main krbtgt account, but we don’t trust any
+ * RODC krbtgt besides ourselves.
  */
-NTSTATUS samba_kdc_get_user_info_from_db(struct samba_kdc_entry *skdc_entry,
-                                         const struct ldb_message *msg,
-                                         const struct auth_user_info_dc **user_info_dc)
+bool samba_krb5_pac_is_trusted(const struct samba_kdc_entry_pac pac)
 {
-	if (skdc_entry->user_info_dc == NULL) {
-		NTSTATUS nt_status;
-		struct loadparm_context *lp_ctx = skdc_entry->kdc_db_ctx->lp_ctx;
-
-		nt_status = authsam_make_user_info_dc(skdc_entry,
-						      skdc_entry->kdc_db_ctx->samdb,
-						      lpcfg_netbios_name(lp_ctx),
-						      lpcfg_sam_name(lp_ctx),
-						      lpcfg_sam_dnsname(lp_ctx),
-						      skdc_entry->realm_dn,
-						      msg,
-						      data_blob_null,
-						      data_blob_null,
-						      &skdc_entry->user_info_dc);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			return nt_status;
-		}
+	if (pac.pac == NULL) {
+		return false;
 	}
 
-	*user_info_dc = skdc_entry->user_info_dc;
-	return NT_STATUS_OK;
+#ifdef HAVE_KRB5_PAC_IS_TRUSTED /* Heimdal */
+	return krb5_pac_is_trusted(pac.pac);
+#else /* MIT */
+	return pac.pac_is_trusted;
+#endif /* HAVE_KRB5_PAC_IS_TRUSTED */
+}
+
+#ifdef HAVE_KRB5_PAC_IS_TRUSTED /* Heimdal */
+struct samba_kdc_entry_pac samba_kdc_entry_pac(krb5_const_pac pac,
+					       struct samba_kdc_entry *entry,
+					       bool is_from_trust)
+{
+	return (struct samba_kdc_entry_pac) {
+		.entry = entry,
+		.pac = pac,
+		.is_from_trust = is_from_trust,
+	};
+}
+#else /* MIT */
+struct samba_kdc_entry_pac samba_kdc_entry_pac_from_trusted(krb5_const_pac pac,
+							    struct samba_kdc_entry *entry,
+							    bool is_from_trust,
+							    bool is_trusted)
+{
+	return (struct samba_kdc_entry_pac) {
+		.entry = entry,
+		.pac = pac,
+		.is_from_trust = is_from_trust,
+		.pac_is_trusted = is_trusted,
+	};
+}
+#endif /* HAVE_KRB5_PAC_IS_TRUSTED */
+
+static bool samba_kdc_entry_pac_issued_by_trust(const struct samba_kdc_entry_pac entry)
+{
+	return entry.pac != NULL && entry.is_from_trust;
 }
 
 NTSTATUS samba_kdc_get_logon_info_blob(TALLOC_CTX *mem_ctx,
@@ -1080,10 +1065,11 @@ NTSTATUS samba_kdc_get_requester_sid_blob(TALLOC_CTX *mem_ctx,
 }
 
 NTSTATUS samba_kdc_get_claims_blob(TALLOC_CTX *mem_ctx,
-				   const struct samba_kdc_entry *p,
+				   struct samba_kdc_entry *p,
 				   const DATA_BLOB **_claims_blob)
 {
 	DATA_BLOB *claims_blob = NULL;
+	struct claims_data *claims_data = NULL;
 	NTSTATUS nt_status;
 	int ret;
 
@@ -1096,14 +1082,21 @@ NTSTATUS samba_kdc_get_claims_blob(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	ret = get_claims_blob_for_principal(p->kdc_db_ctx->samdb,
-					    claims_blob,
-					    p->msg,
-					    claims_blob);
+	ret = samba_kdc_get_claims_data_from_db(p->kdc_db_ctx->samdb,
+						p,
+						&claims_data);
 	if (ret != LDB_SUCCESS) {
 		nt_status = dsdb_ldb_err_to_ntstatus(ret);
 		DBG_ERR("Building claims failed: %s\n",
 			nt_errstr(nt_status));
+		talloc_free(claims_blob);
+		return nt_status;
+	}
+
+	nt_status = claims_data_encoded_claims_set(claims_blob,
+						   claims_data,
+						   claims_blob);
+	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(claims_blob);
 		return nt_status;
 	}
@@ -1113,102 +1106,105 @@ NTSTATUS samba_kdc_get_claims_blob(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
-NTSTATUS samba_kdc_get_user_info_dc(TALLOC_CTX *mem_ctx,
-				    struct samba_kdc_entry *skdc_entry,
-				    enum samba_asserted_identity asserted_identity,
-				    enum samba_claims_valid claims_valid,
-				    enum samba_compounded_auth compounded_auth,
-				    struct auth_user_info_dc **user_info_dc_out)
+krb5_error_code samba_kdc_get_user_info_from_db(TALLOC_CTX *mem_ctx,
+						struct ldb_context *samdb,
+						struct samba_kdc_entry *entry,
+						const struct ldb_message *msg,
+						const struct auth_user_info_dc **info_out)
 {
 	NTSTATUS nt_status;
-	const struct auth_user_info_dc *user_info_dc_from_db = NULL;
-	struct auth_user_info_dc *user_info_dc = NULL;
 
-	nt_status = samba_kdc_get_user_info_from_db(skdc_entry, skdc_entry->msg, &user_info_dc_from_db);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Getting user info for PAC failed: %s\n",
-			nt_errstr(nt_status));
-		return nt_status;
+	if (samdb == NULL) {
+		return EINVAL;
 	}
 
-	/* Make a shallow copy of the user_info_dc structure. */
-	nt_status = authsam_shallow_copy_user_info_dc(mem_ctx, user_info_dc_from_db, &user_info_dc);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Failed to allocate user_info_dc SIDs: %s\n",
-			nt_errstr(nt_status));
-		return nt_status;
+	if (msg == NULL) {
+		return EINVAL;
 	}
 
-	/* Here we modify the SIDs to add the Asserted Identity SID. */
-	nt_status = samba_kdc_add_asserted_identity(asserted_identity,
-						    user_info_dc);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Failed to add asserted identity: %s\n",
-			nt_errstr(nt_status));
-		return nt_status;
+	if (info_out == NULL) {
+		return EINVAL;
 	}
 
-	nt_status = samba_kdc_add_claims_valid(claims_valid,
-					       user_info_dc);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Failed to add Claims Valid: %s\n",
-			nt_errstr(nt_status));
-		return nt_status;
+	if (entry == NULL) {
+		return KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
 	}
 
-	nt_status = samba_kdc_add_compounded_auth(compounded_auth,
-						  user_info_dc);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Failed to add Compounded Authentication: %s\n",
-			nt_errstr(nt_status));
-		return nt_status;
+	*info_out = NULL;
+
+	if (entry->info_from_db == NULL) {
+		struct auth_user_info_dc *info_from_db = NULL;
+		struct loadparm_context *lp_ctx = entry->kdc_db_ctx->lp_ctx;
+
+		nt_status = authsam_make_user_info_dc(entry,
+						      samdb,
+						      lpcfg_netbios_name(lp_ctx),
+						      lpcfg_sam_name(lp_ctx),
+						      lpcfg_sam_dnsname(lp_ctx),
+						      entry->realm_dn,
+						      msg,
+						      data_blob_null,
+						      data_blob_null,
+						      &info_from_db);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			DBG_ERR("Getting user info for PAC failed: %s\n",
+				nt_errstr(nt_status));
+			/* NT_STATUS_OBJECT_NAME_NOT_FOUND is mapped to ENOENT. */
+			return map_errno_from_nt_status(nt_status);
+		}
+
+		entry->info_from_db = info_from_db;
 	}
 
-	*user_info_dc_out = user_info_dc;
+	*info_out = entry->info_from_db;
 
-	return NT_STATUS_OK;
+	return 0;
 }
 
-static krb5_error_code samba_kdc_obtain_user_info_dc(TALLOC_CTX *mem_ctx,
-						     krb5_context context,
-						     struct ldb_context *samdb,
-						     const enum auth_group_inclusion group_inclusion,
-						     struct samba_kdc_entry *skdc_entry,
-						     const krb5_const_pac pac,
-						     const bool pac_is_trusted,
-						     struct auth_user_info_dc **user_info_dc_out,
-						     struct PAC_DOMAIN_GROUP_MEMBERSHIP **resource_groups_out)
+static krb5_error_code samba_kdc_get_user_info_from_pac(TALLOC_CTX *mem_ctx,
+							krb5_context context,
+							struct ldb_context *samdb,
+							const struct samba_kdc_entry_pac entry,
+							const struct auth_user_info_dc **info_out,
+							const struct PAC_DOMAIN_GROUP_MEMBERSHIP **resource_groups_out)
 {
-	struct auth_user_info_dc *user_info_dc = NULL;
+	TALLOC_CTX *frame = NULL;
+	struct auth_user_info_dc *info = NULL;
+	struct PAC_DOMAIN_GROUP_MEMBERSHIP *resource_groups = NULL;
 	krb5_error_code ret = 0;
 	NTSTATUS nt_status;
 
-	*user_info_dc_out = NULL;
+	if (samdb == NULL) {
+		ret = EINVAL;
+		goto out;
+	}
+
+	if (!samba_krb5_pac_is_trusted(entry)) {
+		ret = EINVAL;
+		goto out;
+	}
+
+	if (info_out == NULL) {
+		ret = EINVAL;
+		goto out;
+	}
+
+	*info_out = NULL;
 	if (resource_groups_out != NULL) {
 		*resource_groups_out = NULL;
 	}
 
-	if (pac != NULL && pac_is_trusted) {
-		struct PAC_DOMAIN_GROUP_MEMBERSHIP **resource_groups = NULL;
+	if (entry.entry == NULL || entry.entry->info_from_pac == NULL) {
+		frame = talloc_stackframe();
 
-		if (group_inclusion == AUTH_EXCLUDE_RESOURCE_GROUPS) {
-			/*
-			 * Since we are creating a TGT, resource groups from our domain
-			 * are not to be put into the PAC. Instead, we take the resource
-			 * groups directly from the original PAC and copy them
-			 * unmodified into the new one.
-			 */
-			resource_groups = resource_groups_out;
-		}
-
-		ret = kerberos_pac_to_user_info_dc(mem_ctx,
-						   pac,
+		ret = kerberos_pac_to_user_info_dc(frame,
+						   entry.pac,
 						   context,
-						   &user_info_dc,
+						   &info,
 						   AUTH_EXCLUDE_RESOURCE_GROUPS,
 						   NULL,
 						   NULL,
-						   resource_groups);
+						   &resource_groups);
 		if (ret) {
 			const char *krb5err = krb5_get_error_message(context, ret);
 			DBG_ERR("kerberos_pac_to_user_info_dc failed: %s\n",
@@ -1222,9 +1218,9 @@ static krb5_error_code samba_kdc_obtain_user_info_dc(TALLOC_CTX *mem_ctx,
 		 * We need to expand group memberships within our local domain,
 		 * as the token might be generated by a trusted domain.
 		 */
-		nt_status = authsam_update_user_info_dc(mem_ctx,
+		nt_status = authsam_update_user_info_dc(frame,
 							samdb,
-							user_info_dc);
+							info);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			DBG_ERR("authsam_update_user_info_dc failed: %s\n",
 				nt_errstr(nt_status));
@@ -1232,43 +1228,113 @@ static krb5_error_code samba_kdc_obtain_user_info_dc(TALLOC_CTX *mem_ctx,
 			ret = map_errno_from_nt_status(nt_status);
 			goto out;
 		}
-	} else {
-		if (skdc_entry == NULL) {
-			ret = KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
-			goto out;
-		}
 
-		/*
-		 * In this case the RWDC discards the PAC an RODC generated.
-		 * Windows adds the asserted_identity in this case too.
-		 *
-		 * Note that SAMBA_KDC_FLAG_CONSTRAINED_DELEGATION
-		 * generates KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN.
-		 * So we can always use
-		 * SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY
-		 * here.
-		 */
-		nt_status = samba_kdc_get_user_info_dc(mem_ctx,
-						       skdc_entry,
-						       SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
-						       SAMBA_CLAIMS_VALID_EXCLUDE,
-						       SAMBA_COMPOUNDED_AUTH_EXCLUDE,
-						       &user_info_dc);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			DBG_ERR("samba_kdc_get_user_info_dc failed: %s\n",
-				nt_errstr(nt_status));
-			ret = KRB5KDC_ERR_TGT_REVOKED;
-			goto out;
+		if (entry.entry != NULL) {
+			entry.entry->info_from_pac = talloc_steal(entry.entry, info);
+			entry.entry->resource_groups_from_pac = talloc_steal(entry.entry, resource_groups);
 		}
 	}
 
-	*user_info_dc_out = user_info_dc;
-	user_info_dc = NULL;
+
+	if (entry.entry != NULL) {
+		/* Note: the caller does not own this! */
+		*info_out = entry.entry->info_from_pac;
+
+		if (resource_groups_out != NULL) {
+			/* Note: the caller does not own this! */
+			*resource_groups_out = entry.entry->resource_groups_from_pac;
+		}
+	} else {
+		*info_out = talloc_steal(mem_ctx, info);
+
+		if (resource_groups_out != NULL) {
+			*resource_groups_out = talloc_steal(mem_ctx, resource_groups);
+		}
+	}
 
 out:
-	TALLOC_FREE(user_info_dc);
-
+	talloc_free(frame);
 	return ret;
+}
+
+krb5_error_code samba_kdc_get_user_info_dc(TALLOC_CTX *mem_ctx,
+					   krb5_context context,
+					   struct ldb_context *samdb,
+					   const struct samba_kdc_entry_pac entry,
+					   const struct auth_user_info_dc **info_out,
+					   const struct PAC_DOMAIN_GROUP_MEMBERSHIP **resource_groups_out)
+{
+	const struct auth_user_info_dc *info = NULL;
+	struct auth_user_info_dc *info_shallow_copy = NULL;
+	krb5_error_code ret = 0;
+	NTSTATUS nt_status;
+
+	*info_out = NULL;
+	if (resource_groups_out != NULL) {
+		*resource_groups_out = NULL;
+	}
+
+	if (samba_krb5_pac_is_trusted(entry)) {
+		return samba_kdc_get_user_info_from_pac(mem_ctx,
+							context,
+							samdb,
+							entry,
+							info_out,
+							resource_groups_out);
+	}
+
+	if (entry.entry == NULL) {
+		return KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
+	}
+
+	/*
+	 * In this case the RWDC discards the PAC an RODC generated.
+	 * Windows adds the asserted_identity in this case too.
+	 *
+	 * Note that SAMBA_KDC_FLAG_CONSTRAINED_DELEGATION
+	 * generates KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN.
+	 * So we can always use
+	 * SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY
+	 * here.
+	 */
+	ret = samba_kdc_get_user_info_from_db(mem_ctx,
+					      samdb,
+					      entry.entry,
+					      entry.entry->msg,
+					      &info);
+	if (ret) {
+		const char *krb5err = krb5_get_error_message(context, ret);
+		DBG_ERR("samba_kdc_get_user_info_from_db: %s\n",
+			krb5err != NULL ? krb5err : "?");
+		krb5_free_error_message(context, krb5err);
+
+		return KRB5KDC_ERR_TGT_REVOKED;
+	}
+
+	/* Make a shallow copy of the user_info_dc structure. */
+	nt_status = authsam_shallow_copy_user_info_dc(mem_ctx,
+						      info,
+						      &info_shallow_copy);
+	info = NULL;
+
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DBG_ERR("Failed to allocate user_info_dc SIDs: %s\n",
+			nt_errstr(nt_status));
+		return map_errno_from_nt_status(nt_status);
+	}
+
+	nt_status = samba_kdc_add_asserted_identity(SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
+						    info_shallow_copy);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DBG_ERR("Failed to add asserted identity: %s\n",
+			nt_errstr(nt_status));
+		TALLOC_FREE(info_shallow_copy);
+		return KRB5KDC_ERR_TGT_REVOKED;
+	}
+
+	*info_out = info_shallow_copy;
+
+	return 0;
 }
 
 static NTSTATUS samba_kdc_update_delegation_info_blob(TALLOC_CTX *mem_ctx,
@@ -1471,8 +1537,7 @@ out:
 /* Does a parse and SID check, but no crypto. */
 static krb5_error_code samba_kdc_validate_pac_blob(
 		krb5_context context,
-		const struct samba_kdc_entry *client_skdc_entry,
-		const krb5_const_pac pac)
+		const struct samba_kdc_entry_pac client)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct auth_user_info_dc *pac_user_info = NULL;
@@ -1484,7 +1549,7 @@ static krb5_error_code samba_kdc_validate_pac_blob(
 	/*
 	 * First, try to get the SID from the requester SID buffer in the PAC.
 	 */
-	code = samba_get_requester_sid(frame, pac, context, &pac_sid);
+	code = samba_get_requester_sid(frame, client.pac, context, &pac_sid);
 
 	if (code == ENOENT) {
 		/*
@@ -1492,7 +1557,7 @@ static krb5_error_code samba_kdc_validate_pac_blob(
 		 * SID in the LOGON_INFO PAC buffer.
 		 */
 		code = kerberos_pac_to_user_info_dc(frame,
-						    pac,
+						    client.pac,
 						    context,
 						    &pac_user_info,
 						    AUTH_EXCLUDE_RESOURCE_GROUPS,
@@ -1513,9 +1578,9 @@ static krb5_error_code samba_kdc_validate_pac_blob(
 		goto out;
 	}
 
-	code = samdb_result_dom_sid_buf(client_skdc_entry->msg,
-					      "objectSid",
-					      &client_sid);
+	code = samdb_result_dom_sid_buf(client.entry->msg,
+					"objectSid",
+					&client_sid);
 	if (code) {
 		goto out;
 	}
@@ -1637,6 +1702,8 @@ krb5_error_code samba_kdc_allowed_to_authenticate_to(TALLOC_CTX *mem_ctx,
 						     struct loadparm_context *lp_ctx,
 						     const struct samba_kdc_entry *client,
 						     const struct auth_user_info_dc *client_info,
+						     const struct auth_user_info_dc *device_info,
+						     const struct auth_claims auth_claims,
 						     const struct samba_kdc_entry *server,
 						     struct authn_audit_info **server_audit_info_out,
 						     NTSTATUS *status_out)
@@ -1688,7 +1755,10 @@ krb5_error_code samba_kdc_allowed_to_authenticate_to(TALLOC_CTX *mem_ctx,
 						      lp_ctx,
 						      AUTHN_POLICY_AUTH_TYPE_KERBEROS,
 						      client_info,
+						      device_info,
+						      auth_claims,
 						      server_policy,
+						      (struct authn_policy_flags) { .force_compounded_authentication = true },
 						      server_audit_info_out);
 	if (!NT_STATUS_IS_OK(status)) {
 		if (status_out != NULL) {
@@ -2033,6 +2103,8 @@ static krb5_error_code samba_kdc_create_device_info_blob(TALLOC_CTX *mem_ctx,
 }
 
 static krb5_error_code samba_kdc_get_device_info_blob(TALLOC_CTX *mem_ctx,
+						      krb5_context context,
+						      struct ldb_context *samdb,
 						      struct samba_kdc_entry *device,
 						      DATA_BLOB **device_info_blob)
 {
@@ -2040,7 +2112,8 @@ static krb5_error_code samba_kdc_get_device_info_blob(TALLOC_CTX *mem_ctx,
 	krb5_error_code code = EINVAL;
 	NTSTATUS nt_status;
 
-	struct auth_user_info_dc *device_info_dc = NULL;
+	const struct auth_user_info_dc *device_info_dc_const = NULL;
+	struct auth_user_info_dc *device_info_dc_shallow_copy = NULL;
 	struct netr_SamInfo3 *info3 = NULL;
 	struct PAC_DOMAIN_GROUP_MEMBERSHIP *resource_groups = NULL;
 
@@ -2048,20 +2121,52 @@ static krb5_error_code samba_kdc_get_device_info_blob(TALLOC_CTX *mem_ctx,
 
 	frame = talloc_stackframe();
 
-	nt_status = samba_kdc_get_user_info_dc(frame,
+	code = samba_kdc_get_user_info_from_db(frame,
+					       samdb,
 					       device,
-					       SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
-					       SAMBA_CLAIMS_VALID_INCLUDE,
-					       SAMBA_COMPOUNDED_AUTH_EXCLUDE,
-					       &device_info_dc);
+					       device->msg,
+					       &device_info_dc_const);
+	if (code) {
+		const char *krb5_err = krb5_get_error_message(context, code);
+		DBG_ERR("samba_kdc_get_user_info_from_db failed: %s\n",
+			krb5_err != NULL ? krb5_err : "<unknown>");
+		krb5_free_error_message(context, krb5_err);
+
+		talloc_free(frame);
+		return KRB5KDC_ERR_TGT_REVOKED;
+	}
+
+	/* Make a shallow copy of the user_info_dc structure. */
+	nt_status = authsam_shallow_copy_user_info_dc(frame,
+						      device_info_dc_const,
+						      &device_info_dc_shallow_copy);
+	device_info_dc_const = NULL;
+
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("samba_kdc_get_user_info_dc failed: %s\n",
+		DBG_ERR("Failed to allocate user_info_dc SIDs: %s\n",
+			nt_errstr(nt_status));
+		talloc_free(frame);
+		return map_errno_from_nt_status(nt_status);
+	}
+
+	nt_status = samba_kdc_add_asserted_identity(SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
+						    device_info_dc_shallow_copy);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DBG_ERR("Failed to add asserted identity: %s\n",
 			nt_errstr(nt_status));
 		talloc_free(frame);
 		return KRB5KDC_ERR_TGT_REVOKED;
 	}
 
-	nt_status = auth_convert_user_info_dc_saminfo3(frame, device_info_dc,
+	nt_status = samba_kdc_add_claims_valid(device_info_dc_shallow_copy);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DBG_ERR("Failed to add Claims Valid: %s\n",
+			nt_errstr(nt_status));
+		talloc_free(frame);
+		return KRB5KDC_ERR_TGT_REVOKED;
+	}
+
+	nt_status = auth_convert_user_info_dc_saminfo3(frame, device_info_dc_shallow_copy,
 						       AUTH_INCLUDE_RESOURCE_GROUPS_COMPRESSED,
 						       &info3,
 						       &resource_groups);
@@ -2096,36 +2201,26 @@ static krb5_error_code samba_kdc_get_device_info_blob(TALLOC_CTX *mem_ctx,
  *
  * @param context   A krb5 context
  *
+ * @param samdb     An open samdb connection.
+ *
  * @param flags     Bitwise OR'ed flags
  *
- * @param client    The client samba kdc entry.
+ * @param client    The client samba kdc PAC entry.
 
  * @param krbtgt    The krbtgt samba kdc entry.
  *
- * @param device    The computer's samba kdc entry; used for compound
- *                  authentication.
-
- * @param device_pac        The PAC from the computer's TGT; used
- *                          for compound authentication.
-
- * @param pac                       The PAC
-
  * @return A Kerberos error code.
  */
 krb5_error_code samba_kdc_verify_pac(TALLOC_CTX *mem_ctx,
 				     krb5_context context,
+				     struct ldb_context *samdb,
 				     uint32_t flags,
-				     struct samba_kdc_entry *client,
-				     const struct samba_kdc_entry *krbtgt,
-				     const struct samba_kdc_entry *device,
-				     const krb5_const_pac *device_pac,
-				     const krb5_const_pac pac)
+				     const struct samba_kdc_entry_pac client,
+				     const struct samba_kdc_entry *krbtgt)
 {
 	TALLOC_CTX *tmp_ctx = NULL;
 	struct pac_blobs *pac_blobs = NULL;
 	krb5_error_code code = EINVAL;
-	NTSTATUS nt_status;
-	bool is_trusted = flags & SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED;
 
 	tmp_ctx = talloc_new(mem_ctx);
 	if (tmp_ctx == NULL) {
@@ -2133,50 +2228,40 @@ krb5_error_code samba_kdc_verify_pac(TALLOC_CTX *mem_ctx,
 		goto done;
 	}
 
-	if (client != NULL) {
+	if (client.entry != NULL) {
 		/*
 		 * Check the objectSID of the client and pac data are the same.
 		 * Does a parse and SID check, but no crypto.
 		 */
-		code = samba_kdc_validate_pac_blob(context,
-						   client,
-						   pac);
+		code = samba_kdc_validate_pac_blob(context, client);
 		if (code != 0) {
 			goto done;
 		}
 	}
 
-	if (device != NULL) {
-		SMB_ASSERT(*device_pac != NULL);
-
-		/*
-		 * Check the objectSID of the device and pac data are the same.
-		 * Does a parse and SID check, but no crypto.
-		 */
-		code = samba_kdc_validate_pac_blob(context,
-						   device,
-						   *device_pac);
-		if (code != 0) {
-			goto done;
-		}
-	}
-
-	if (!is_trusted) {
+	if (!samba_krb5_pac_is_trusted(client)) {
 		const struct auth_user_info_dc *user_info_dc = NULL;
 		WERROR werr;
 
 		struct dom_sid *object_sids = NULL;
 		uint32_t j;
 
-		if (client == NULL) {
+		if (client.entry == NULL) {
 			code = KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
 			goto done;
 		}
 
-		nt_status = samba_kdc_get_user_info_from_db(client, client->msg, &user_info_dc);
-		if (!NT_STATUS_IS_OK(nt_status)) {
+		code = samba_kdc_get_user_info_from_db(tmp_ctx,
+						       samdb,
+						       client.entry,
+						       client.entry->msg,
+						       &user_info_dc);
+		if (code) {
+			const char *krb5_err = krb5_get_error_message(context, code);
 			DBG_ERR("Getting user info for PAC failed: %s\n",
-				nt_errstr(nt_status));
+				krb5_err != NULL ? krb5_err : "<unknown>");
+			krb5_free_error_message(context, krb5_err);
+
 			code = KRB5KDC_ERR_TGT_REVOKED;
 			goto done;
 		}
@@ -2198,7 +2283,7 @@ krb5_error_code samba_kdc_verify_pac(TALLOC_CTX *mem_ctx,
 		werr = samba_rodc_confirm_user_is_allowed(user_info_dc->num_sids,
 							  object_sids,
 							  krbtgt,
-							  client);
+							  client.entry);
 		if (!W_ERROR_IS_OK(werr)) {
 			code = KRB5KDC_ERR_TGT_REVOKED;
 			if (W_ERROR_EQUAL(werr,
@@ -2229,7 +2314,7 @@ krb5_error_code samba_kdc_verify_pac(TALLOC_CTX *mem_ctx,
 
 	code = pac_blobs_from_krb5_pac(tmp_ctx,
 				       context,
-				       pac,
+				       client.pac,
 				       &pac_blobs);
 	if (code != 0) {
 		goto done;
@@ -2292,9 +2377,7 @@ done:
  * @param device_pac_is_trusted Whether the device's PAC was issued by a trusted server,
  *                              as opposed to an RODC.
  *
- * @param client    The client samba kdc entry.
- *
- * @param client_krbtgt     The krbtgt samba kdc entry that verified the client
+ * @param client    The client samba kdc PAC entry.
  *
  * @param server_principal  The server principal
  *
@@ -2304,21 +2387,10 @@ done:
  *                                  updating the constrained delegation PAC
  *                                  buffer.
  *
- * @param delegated_proxy   The delegated proxy kdc entry.
+ * @param delegated_proxy   The delegated proxy kdc PAC entry.
  *
- * @param delegated_proxy_pac       The PAC from the primary TGT (i.e., that of
- *                                  the delegating service) during a constrained
- *                                  delegation request.
- *
- * @param device    The computer's samba kdc entry; used for compound
+ * @param device    The computer's samba kdc PAC entry; used for compound
  *                  authentication.
- *
- * @param device_krbtgt     The krbtgt samba kdc entry that verified the device
- *
- * @param device_pac        The PAC from the computer's TGT; used
- *                          for compound authentication.
- *
- * @param old_pac                   The old PAC
  *
  * @param new_pac                   The new already allocated PAC
  *
@@ -2330,17 +2402,12 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 				     struct ldb_context *samdb,
 				     struct loadparm_context *lp_ctx,
 				     uint32_t flags,
-				     const struct samba_kdc_entry *client_krbtgt,
-				     struct samba_kdc_entry *client,
+				     const struct samba_kdc_entry_pac client,
 				     const krb5_const_principal server_principal,
 				     const struct samba_kdc_entry *server,
 				     const krb5_const_principal delegated_proxy_principal,
-				     struct samba_kdc_entry *delegated_proxy,
-				     const krb5_const_pac delegated_proxy_pac,
-				     const struct samba_kdc_entry *device_krbtgt,
-				     struct samba_kdc_entry *device,
-				     const krb5_const_pac device_pac,
-				     const krb5_const_pac old_pac,
+				     const struct samba_kdc_entry_pac delegated_proxy,
+				     const struct samba_kdc_entry_pac device,
 				     krb5_pac new_pac,
 				     struct authn_audit_info **server_audit_info_out,
 				     NTSTATUS *status_out)
@@ -2353,17 +2420,18 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 	DATA_BLOB *deleg_blob = NULL;
 	DATA_BLOB *requester_sid_blob = NULL;
 	const DATA_BLOB *client_claims_blob = NULL;
-	bool client_pac_is_trusted = flags & SAMBA_KDC_FLAG_KRBTGT_IS_TRUSTED;
-	bool device_pac_is_trusted = flags & SAMBA_KDC_FLAG_DEVICE_KRBTGT_IS_TRUSTED;
-	bool delegated_proxy_pac_is_trusted = flags & SAMBA_KDC_FLAG_DELEGATED_PROXY_IS_TRUSTED;
-	const DATA_BLOB *device_claims_blob = NULL;
+	DATA_BLOB device_claims_blob = {};
+	const DATA_BLOB *device_claims_blob_ptr = NULL;
+	struct auth_claims auth_claims = {};
 	DATA_BLOB *device_info_blob = NULL;
 	bool is_tgs = false;
+	bool server_restrictions_present = false;
 	struct pac_blobs *pac_blobs = NULL;
-	struct auth_user_info_dc *user_info_dc = NULL;
-	struct PAC_DOMAIN_GROUP_MEMBERSHIP *_resource_groups = NULL;
+	const struct auth_user_info_dc *user_info_dc_const = NULL;
+	struct auth_user_info_dc *user_info_dc_shallow_copy = NULL;
+	const struct PAC_DOMAIN_GROUP_MEMBERSHIP *_resource_groups = NULL;
 	enum auth_group_inclusion group_inclusion;
-	enum samba_compounded_auth compounded_auth;
+	bool compounded_auth;
 	size_t i = 0;
 
 	if (server_audit_info_out != NULL) {
@@ -2390,6 +2458,8 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		is_tgs = result;
 	}
 
+	server_restrictions_present = !is_tgs && authn_policy_restrictions_present(server->server_policy);
+
 	/* Only include resource groups in a service ticket. */
 	if (is_tgs) {
 		group_inclusion = AUTH_EXCLUDE_RESOURCE_GROUPS;
@@ -2399,86 +2469,55 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		group_inclusion = AUTH_INCLUDE_RESOURCE_GROUPS_COMPRESSED;
 	}
 
-	if (device != NULL && !is_tgs) {
-		compounded_auth = SAMBA_COMPOUNDED_AUTH_INCLUDE;
-	} else {
-		compounded_auth = SAMBA_COMPOUNDED_AUTH_EXCLUDE;
-	}
+	compounded_auth = device.entry != NULL && !is_tgs
+		&& server->supported_enctypes & KERB_ENCTYPE_COMPOUND_IDENTITY_SUPPORTED;
 
-	if (device != NULL && !is_tgs) {
-		SMB_ASSERT(device_pac != NULL);
+	if (compounded_auth || (server_restrictions_present && device.entry != NULL)) {
+		/*
+		 * [MS-KILE] 3.3.5.7.4 Compound Identity: the client claims from
+		 * the device PAC become the device claims in the new PAC.
+		 */
+		code = samba_kdc_get_claims_data(tmp_ctx,
+						 context,
+						 samdb,
+						 device,
+						 &auth_claims.device_claims);
+		if (code) {
+			goto done;
+		}
 
-		if (device_pac_is_trusted) {
-			krb5_data device_claims_data;
-
-			/*
-			 * [MS-KILE] 3.3.5.7.4 Compound Identity: the client
-			 * claims from the device PAC become the device claims
-			 * in the new PAC.
-			 */
-			code = krb5_pac_get_buffer(context, device_pac,
-						   PAC_TYPE_CLIENT_CLAIMS_INFO,
-						   &device_claims_data);
-			if (code == ENOENT) {
-				/* no-op */
-			} else if (code != 0) {
-				goto done;
-			} else if (device_krbtgt->is_trust) {
-				/*
-				 * TODO: we need claim translation over trusts,
-				 * for now we just clear them...
-				 */
-				device_claims_blob = &data_blob_null;
-			} else {
-				DATA_BLOB *device_claims = NULL;
-
-				device_claims = talloc_zero(tmp_ctx, DATA_BLOB);
-				if (device_claims == NULL) {
-					smb_krb5_free_data_contents(context, &device_claims_data);
-					code = ENOMEM;
-					goto done;
-				}
-
-				*device_claims = data_blob_talloc(tmp_ctx,
-								  device_claims_data.data,
-								  device_claims_data.length);
-				if (device_claims->data == NULL && device_claims_data.length != 0) {
-					smb_krb5_free_data_contents(context, &device_claims_data);
-					code = ENOMEM;
-					goto done;
-				}
-
-				smb_krb5_free_data_contents(context, &device_claims_data);
-
-				device_claims_blob = device_claims;
-			}
-
-			code = samba_kdc_create_device_info_blob(tmp_ctx,
-								 context,
-								 samdb,
-								 device_pac,
-								 &device_info_blob);
-			if (code != 0) {
-				goto done;
-			}
-		} else {
-			/* Don't trust RODC-issued claims. Regenerate them. */
-			nt_status = samba_kdc_get_claims_blob(tmp_ctx,
-							      device,
-							      &device_claims_blob);
+		if (compounded_auth) {
+			nt_status = claims_data_encoded_claims_set(tmp_ctx,
+								   auth_claims.device_claims,
+								   &device_claims_blob);
 			if (!NT_STATUS_IS_OK(nt_status)) {
-				DBG_ERR("samba_kdc_get_claims_blob failed: %s\n",
+				DBG_ERR("claims_data_encoded_claims_set failed: %s\n",
 					nt_errstr(nt_status));
 				code = map_errno_from_nt_status(nt_status);
 				goto done;
 			}
 
-			/* Also regenerate device info. */
-			code = samba_kdc_get_device_info_blob(tmp_ctx,
-							      device,
-							      &device_info_blob);
-			if (code != 0) {
-				goto done;
+			device_claims_blob_ptr = &device_claims_blob;
+
+			if (samba_krb5_pac_is_trusted(device)) {
+				code = samba_kdc_create_device_info_blob(tmp_ctx,
+									 context,
+									 samdb,
+									 device.pac,
+									 &device_info_blob);
+				if (code != 0) {
+					goto done;
+				}
+			} else {
+				/* Don't trust an RODC‐issued PAC; regenerate the device info. */
+				code = samba_kdc_get_device_info_blob(tmp_ctx,
+								      context,
+								      samdb,
+								      device.entry,
+								      &device_info_blob);
+				if (code != 0) {
+					goto done;
+				}
 			}
 		}
 	}
@@ -2493,7 +2532,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		nt_status = samba_kdc_update_delegation_info_blob(
 				deleg_blob,
 				context,
-				old_pac,
+				client.pac,
 				server_principal,
 				delegated_proxy_principal,
 				deleg_blob);
@@ -2505,18 +2544,20 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	code = samba_kdc_obtain_user_info_dc(tmp_ctx,
-					     context,
-					     samdb,
-					     group_inclusion,
-					     client,
-					     old_pac,
-					     client_pac_is_trusted,
-					     &user_info_dc,
-					     &_resource_groups);
+	/*
+	 * If we are creating a TGT, resource groups from our domain are not to
+	 * be put into the PAC. Instead, we take the resource groups directly
+	 * from the original PAC and copy them unmodified into the new one.
+	 */
+	code = samba_kdc_get_user_info_dc(tmp_ctx,
+					  context,
+					  samdb,
+					  client,
+					  &user_info_dc_const,
+					  is_tgs ? &_resource_groups : NULL);
 	if (code != 0) {
 		const char *err_str = krb5_get_error_message(context, code);
-		DBG_ERR("samba_kdc_obtain_user_info_dc failed: %s\n",
+		DBG_ERR("samba_kdc_get_user_info_dc failed: %s\n",
 			err_str != NULL ? err_str : "<unknown>");
 		krb5_free_error_message(context, err_str);
 
@@ -2527,35 +2568,61 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 	 * Enforce the AllowedToAuthenticateTo part of an authentication policy,
 	 * if one is present.
 	 */
-	if (!is_tgs && authn_policy_restrictions_present(server->server_policy)) {
-		const struct samba_kdc_entry *auth_entry = NULL;
-		struct auth_user_info_dc *auth_user_info_dc = NULL;
+	if (server_restrictions_present) {
+		struct samba_kdc_entry_pac auth_entry;
+		const struct auth_user_info_dc *auth_user_info_dc = NULL;
+		const struct auth_user_info_dc *device_info = NULL;
 
-		if (delegated_proxy != NULL) {
+		if (delegated_proxy.entry != NULL) {
 			auth_entry = delegated_proxy;
 
-			code = samba_kdc_obtain_user_info_dc(tmp_ctx,
-							     context,
-							     samdb,
-							     AUTH_INCLUDE_RESOURCE_GROUPS,
-							     delegated_proxy,
-							     delegated_proxy_pac,
-							     delegated_proxy_pac_is_trusted,
-							     &auth_user_info_dc,
-							     NULL);
+			code = samba_kdc_get_user_info_dc(tmp_ctx,
+							  context,
+							  samdb,
+							  delegated_proxy,
+							  &auth_user_info_dc,
+							  NULL /* resource_groups_out */);
 			if (code) {
 				goto done;
 			}
 		} else {
 			auth_entry = client;
-			auth_user_info_dc = user_info_dc;
+			auth_user_info_dc = user_info_dc_const;
 		}
 
+		/* Fetch the user’s claims. */
+		code = samba_kdc_get_claims_data(tmp_ctx,
+						 context,
+						 samdb,
+						 auth_entry,
+						 &auth_claims.user_claims);
+		if (code) {
+			goto done;
+		}
+
+		if (device.entry != NULL) {
+			code = samba_kdc_get_user_info_dc(tmp_ctx,
+							  context,
+							  samdb,
+							  device,
+							  &device_info,
+							  NULL /* resource_groups_out */);
+			if (code) {
+				goto done;
+			}
+		}
+
+		/*
+		 * Allocate the audit info and output status on to the parent
+		 * mem_ctx, not the temporary context.
+		 */
 		code = samba_kdc_allowed_to_authenticate_to(mem_ctx,
 							    samdb,
 							    lp_ctx,
-							    auth_entry,
+							    auth_entry.entry,
 							    auth_user_info_dc,
+							    device_info,
+							    auth_claims,
 							    server,
 							    server_audit_info_out,
 							    status_out);
@@ -2564,17 +2631,35 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	nt_status = samba_kdc_add_compounded_auth(compounded_auth,
-						  user_info_dc);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_ERR("Failed to add Compounded Authentication: %s\n",
-			nt_errstr(nt_status));
+	if (compounded_auth) {
+		/* Make a shallow copy of the user_info_dc structure. */
+		nt_status = authsam_shallow_copy_user_info_dc(tmp_ctx,
+							      user_info_dc_const,
+							      &user_info_dc_shallow_copy);
+		user_info_dc_const = NULL;
 
-		code = KRB5KDC_ERR_TGT_REVOKED;
-		goto done;
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			DBG_ERR("Failed to copy user_info_dc: %s\n",
+				nt_errstr(nt_status));
+
+			code = KRB5KDC_ERR_TGT_REVOKED;
+			goto done;
+		}
+
+		nt_status = samba_kdc_add_compounded_auth(user_info_dc_shallow_copy);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			DBG_ERR("Failed to add Compounded Authentication: %s\n",
+				nt_errstr(nt_status));
+
+			code = KRB5KDC_ERR_TGT_REVOKED;
+			goto done;
+		}
+
+		/* We can now set back to the const, it will not be modified */
+		user_info_dc_const = user_info_dc_shallow_copy;
 	}
 
-	if (client_pac_is_trusted) {
+	if (samba_krb5_pac_is_trusted(client)) {
 		pac_blob = talloc_zero(tmp_ctx, DATA_BLOB);
 		if (pac_blob == NULL) {
 			code = ENOMEM;
@@ -2582,7 +2667,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		}
 
 		nt_status = samba_get_logon_info_pac_blob(tmp_ctx,
-							  user_info_dc,
+							  user_info_dc_const,
 							  _resource_groups,
 							  group_inclusion,
 							  pac_blob);
@@ -2598,14 +2683,14 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		 * TODO: we need claim translation over trusts,
 		 * for now we just clear them...
 		 */
-		if (client_krbtgt->is_trust) {
+		if (samba_kdc_entry_pac_issued_by_trust(client)) {
 			client_claims_blob = &data_blob_null;
 		}
 	} else {
 		nt_status = samba_kdc_get_logon_info_blob(tmp_ctx,
-						       user_info_dc,
-						       group_inclusion,
-						       &pac_blob);
+							  user_info_dc_const,
+							  group_inclusion,
+							  &pac_blob);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			DBG_ERR("samba_kdc_get_logon_info_blob failed: %s\n",
 				nt_errstr(nt_status));
@@ -2614,7 +2699,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		}
 
 		nt_status = samba_kdc_get_upn_info_blob(tmp_ctx,
-							user_info_dc,
+							user_info_dc_const,
 							&upn_blob);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			DBG_ERR("samba_kdc_get_upn_info_blob failed: %s\n",
@@ -2623,19 +2708,21 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 			goto done;
 		}
 
-		nt_status = samba_kdc_get_requester_sid_blob(tmp_ctx,
-							     user_info_dc,
-							     &requester_sid_blob);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			DBG_ERR("samba_kdc_get_requester_sid_blob failed: %s\n",
-				nt_errstr(nt_status));
-			code = KRB5KDC_ERR_TGT_REVOKED;
-			goto done;
+		if (is_tgs) {
+			nt_status = samba_kdc_get_requester_sid_blob(tmp_ctx,
+								     user_info_dc_const,
+								     &requester_sid_blob);
+			if (!NT_STATUS_IS_OK(nt_status)) {
+				DBG_ERR("samba_kdc_get_requester_sid_blob failed: %s\n",
+					nt_errstr(nt_status));
+				code = KRB5KDC_ERR_TGT_REVOKED;
+				goto done;
+			}
 		}
 
 		/* Don't trust RODC-issued claims. Regenerate them. */
 		nt_status = samba_kdc_get_claims_blob(tmp_ctx,
-						      client,
+						      client.entry,
 						      &client_claims_blob);
 		if (!NT_STATUS_IS_OK(nt_status)) {
 			DBG_ERR("samba_kdc_get_claims_blob failed: %s\n",
@@ -2648,7 +2735,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 	/* Check the types of the given PAC */
 	code = pac_blobs_from_krb5_pac(tmp_ctx,
 				       context,
-				       old_pac,
+				       client.pac,
 				       &pac_blobs);
 	if (code != 0) {
 		goto done;
@@ -2715,12 +2802,12 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 
 	code = pac_blobs_add_blob(pac_blobs,
 				  PAC_TYPE_DEVICE_CLAIMS_INFO,
-				  device_claims_blob);
+				  device_claims_blob_ptr);
 	if (code != 0) {
 		goto done;
 	}
 
-	if (!client_pac_is_trusted || !is_tgs) {
+	if (!samba_krb5_pac_is_trusted(client) || !is_tgs) {
 		pac_blobs_remove_blob(pac_blobs,
 				      PAC_TYPE_ATTRIBUTES_INFO);
 	}
@@ -2728,13 +2815,13 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 	if (!is_tgs) {
 		pac_blobs_remove_blob(pac_blobs,
 				      PAC_TYPE_REQUESTER_SID);
-	} else {
-		code = pac_blobs_add_blob(pac_blobs,
-					  PAC_TYPE_REQUESTER_SID,
-					  requester_sid_blob);
-		if (code != 0) {
-			goto done;
-		}
+	}
+
+	code = pac_blobs_add_blob(pac_blobs,
+				  PAC_TYPE_REQUESTER_SID,
+				  requester_sid_blob);
+	if (code != 0) {
+		goto done;
 	}
 
 	/*
@@ -2753,7 +2840,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		goto done;
 	}
 
-	if (client_pac_is_trusted && !is_tgs) {
+	if (samba_krb5_pac_is_trusted(client) && !is_tgs) {
 		/*
 		 * The client may have requested no PAC when obtaining the
 		 * TGT.
@@ -2761,7 +2848,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 		bool requested_pac = false;
 
 		code = samba_client_requested_pac(context,
-						  old_pac,
+						  client.pac,
 						  tmp_ctx,
 						  &requested_pac);
 		if (code != 0 || !requested_pac) {
@@ -2805,7 +2892,7 @@ krb5_error_code samba_kdc_update_pac(TALLOC_CTX *mem_ctx,
 						   (type_data.data != NULL) ? &type_data : &null_data);
 		} else {
 			code = krb5_pac_get_buffer(context,
-						   old_pac,
+						   client.pac,
 						   type,
 						   &type_data);
 			if (code != 0) {
@@ -2833,13 +2920,188 @@ done:
 	return code;
 }
 
+krb5_error_code samba_kdc_get_claims_data(TALLOC_CTX *mem_ctx,
+					  krb5_context context,
+					  struct ldb_context *samdb,
+					  struct samba_kdc_entry_pac entry,
+					  struct claims_data **claims_data_out)
+{
+	if (samba_kdc_entry_pac_issued_by_trust(entry)) {
+		NTSTATUS status;
+
+		/*
+		 * TODO: we need claim translation over trusts; for now we just
+		 * clear them…
+		 */
+		status = claims_data_from_encoded_claims_set(mem_ctx,
+							     NULL,
+							     claims_data_out);
+		if (!NT_STATUS_IS_OK(status)) {
+			return map_errno_from_nt_status(status);
+		}
+
+		return 0;
+	}
+
+	if (samba_krb5_pac_is_trusted(entry)) {
+		return samba_kdc_get_claims_data_from_pac(mem_ctx,
+							  context,
+							  entry,
+							  claims_data_out);
+	}
+
+	return samba_kdc_get_claims_data_from_db(samdb,
+						 entry.entry,
+						 claims_data_out);
+}
+
+krb5_error_code samba_kdc_get_claims_data_from_pac(TALLOC_CTX *mem_ctx,
+						   krb5_context context,
+						   struct samba_kdc_entry_pac entry,
+						   struct claims_data **claims_data_out)
+{
+	TALLOC_CTX *frame = NULL;
+	krb5_data claims_info = {};
+	struct claims_data *claims_data = NULL;
+	NTSTATUS status = NT_STATUS_OK;
+	krb5_error_code code;
+
+	if (!samba_krb5_pac_is_trusted(entry)) {
+		code = EINVAL;
+		goto out;
+	}
+
+	if (samba_kdc_entry_pac_issued_by_trust(entry)) {
+		code = EINVAL;
+		goto out;
+	}
+
+	if (claims_data_out == NULL) {
+		code = EINVAL;
+		goto out;
+	}
+
+	*claims_data_out = NULL;
+
+	if (entry.entry != NULL && entry.entry->claims_from_pac_are_initialized) {
+		/* Note: the caller does not own this! */
+		*claims_data_out = entry.entry->claims_from_pac;
+		return 0;
+	}
+
+	frame = talloc_stackframe();
+
+	/* Fetch the claims from the PAC. */
+	code = krb5_pac_get_buffer(context, entry.pac,
+				   PAC_TYPE_CLIENT_CLAIMS_INFO,
+				   &claims_info);
+	if (code == ENOENT) {
+		/* OK. */
+	} else if (code != 0) {
+		DBG_ERR("Error getting CLIENT_CLAIMS_INFO from PAC\n");
+		goto out;
+	} else if (claims_info.length) {
+		DATA_BLOB claims_blob = data_blob_const(claims_info.data,
+							claims_info.length);
+
+		status = claims_data_from_encoded_claims_set(frame,
+							     &claims_blob,
+							     &claims_data);
+		if (!NT_STATUS_IS_OK(status)) {
+			code = map_errno_from_nt_status(status);
+			goto out;
+		}
+	}
+
+	if (entry.entry != NULL) {
+		/* Note: the caller does not own this! */
+		entry.entry->claims_from_pac = talloc_steal(entry.entry,
+							    claims_data);
+		entry.entry->claims_from_pac_are_initialized = true;
+	} else {
+		talloc_steal(mem_ctx, claims_data);
+	}
+
+	*claims_data_out = claims_data;
+
+out:
+	smb_krb5_free_data_contents(context, &claims_info);
+	talloc_free(frame);
+	return code;
+}
+
+krb5_error_code samba_kdc_get_claims_data_from_db(struct ldb_context *samdb,
+						  struct samba_kdc_entry *entry,
+						  struct claims_data **claims_data_out)
+{
+	TALLOC_CTX *frame = NULL;
+
+	struct claims_data *claims_data = NULL;
+	struct CLAIMS_SET *claims_set = NULL;
+	NTSTATUS status = NT_STATUS_OK;
+	krb5_error_code code;
+
+	if (samdb == NULL) {
+		code = EINVAL;
+		goto out;
+	}
+
+	if (claims_data_out == NULL) {
+		code = EINVAL;
+		goto out;
+	}
+
+	if (entry == NULL) {
+		code = KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN;
+		goto out;
+	}
+
+	*claims_data_out = NULL;
+
+	if (entry->claims_from_db_are_initialized) {
+		/* Note: the caller does not own this! */
+		*claims_data_out = entry->claims_from_db;
+		return 0;
+	}
+
+	frame = talloc_stackframe();
+
+	code = get_claims_set_for_principal(samdb,
+					    frame,
+					    entry->msg,
+					    &claims_set);
+	if (code) {
+		DBG_ERR("Failed to fetch claims\n");
+		goto out;
+	}
+
+	if (claims_set != NULL) {
+		status = claims_data_from_claims_set(claims_data,
+						     claims_set,
+						     &claims_data);
+		if (!NT_STATUS_IS_OK(status)) {
+			code = map_errno_from_nt_status(status);
+			goto out;
+		}
+	}
+
+	entry->claims_from_db = talloc_steal(entry,
+					     claims_data);
+	entry->claims_from_db_are_initialized = true;
+
+	/* Note: the caller does not own this! */
+	*claims_data_out = entry->claims_from_db;
+
+out:
+	talloc_free(frame);
+	return code;
+}
+
 krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 				       krb5_context context,
 				       struct ldb_context *samdb,
 				       struct loadparm_context *lp_ctx,
-				       struct samba_kdc_entry *device,
-				       const krb5_const_pac device_pac,
-				       const bool device_pac_is_trusted,
+				       const struct samba_kdc_entry_pac device,
 				       const struct authn_kerberos_client_policy *client_policy,
 				       struct authn_audit_info **client_audit_info_out,
 				       NTSTATUS *status_out)
@@ -2847,8 +3109,10 @@ krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 	TALLOC_CTX *frame = NULL;
 	krb5_error_code code = 0;
 	NTSTATUS nt_status;
-	struct auth_user_info_dc *device_info = NULL;
+	const struct auth_user_info_dc *device_info_const = NULL;
+	struct auth_user_info_dc *device_info_shallow_copy = NULL;
 	struct authn_audit_info *client_audit_info = NULL;
+	struct auth_claims auth_claims = {};
 
 	if (status_out != NULL) {
 		*status_out = NT_STATUS_OK;
@@ -2858,7 +3122,7 @@ krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 		return 0;
 	}
 
-	if (device == NULL || device_pac == NULL) {
+	if (device.entry == NULL || device.pac == NULL) {
 		NTSTATUS out_status = NT_STATUS_INVALID_WORKSTATION;
 
 		nt_status = authn_kerberos_client_policy_audit_info(mem_ctx,
@@ -2886,88 +3150,61 @@ krb5_error_code samba_kdc_check_device(TALLOC_CTX *mem_ctx,
 
 	frame = talloc_stackframe();
 
-	if (device_pac_is_trusted) {
-		krb5_data device_logon_info;
+	code = samba_kdc_get_user_info_dc(frame,
+					  context,
+					  samdb,
+					  device,
+					  &device_info_const,
+					  NULL);
+	if (code) {
+		goto out;
+	}
 
-		enum ndr_err_code ndr_err;
-		DATA_BLOB device_logon_info_blob;
+	if (!samba_krb5_pac_is_trusted(device)) {
+		/* Make a shallow copy of the user_info_dc structure. */
+		nt_status = authsam_shallow_copy_user_info_dc(frame,
+							      device_info_const,
+							      &device_info_shallow_copy);
+		device_info_const = NULL;
 
-		union PAC_INFO pac_logon_info;
-		union netr_Validation validation;
-
-		code = krb5_pac_get_buffer(context, device_pac,
-					   PAC_TYPE_LOGON_INFO,
-					   &device_logon_info);
-		if (code != 0) {
-			if (code == ENOENT) {
-				DBG_ERR("Device PAC is missing LOGON_INFO\n");
-			} else {
-				DBG_ERR("Error getting LOGON_INFO from device PAC\n");
-			}
-
-			goto out;
-		}
-
-		device_logon_info_blob = data_blob_const(device_logon_info.data,
-							 device_logon_info.length);
-
-		ndr_err = ndr_pull_union_blob(&device_logon_info_blob, frame, &pac_logon_info,
-					      PAC_TYPE_LOGON_INFO,
-					      (ndr_pull_flags_fn_t)ndr_pull_PAC_INFO);
-		smb_krb5_free_data_contents(context, &device_logon_info);
-		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-			nt_status = ndr_map_error2ntstatus(ndr_err);
-			DBG_ERR("can't parse device PAC LOGON_INFO: %s\n",
-				nt_errstr(nt_status));
-
-			code = ndr_map_error2errno(ndr_err);
-			goto out;
-		}
-
-		/*
-		 * This does a bit of unnecessary work, setting up fields we
-		 * don’t care about — we only want the SIDs.
-		 */
-		validation.sam3 = &pac_logon_info.logon_info.info->info3;
-		nt_status = make_user_info_dc_netlogon_validation(frame, "", 3, &validation,
-								  true, /* This user was authenticated */
-								  &device_info);
 		if (!NT_STATUS_IS_OK(nt_status)) {
-			code = map_errno_from_nt_status(nt_status);
-			goto out;
-		}
-
-		/*
-		 * We need to expand group memberships within our local domain,
-		 * as the token might be generated by a trusted domain.
-		 */
-		nt_status = authsam_update_user_info_dc(frame,
-							samdb,
-							device_info);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			code = map_errno_from_nt_status(nt_status);
-			goto out;
-		}
-	} else {
-		nt_status = samba_kdc_get_user_info_dc(frame,
-						       device,
-						       SAMBA_ASSERTED_IDENTITY_AUTHENTICATION_AUTHORITY,
-						       SAMBA_CLAIMS_VALID_INCLUDE,
-						       SAMBA_COMPOUNDED_AUTH_EXCLUDE,
-						       &device_info);
-		if (!NT_STATUS_IS_OK(nt_status)) {
-			DBG_ERR("samba_kdc_get_user_info_dc failed: %s\n",
+			DBG_ERR("Failed to copy user_info_dc: %s\n",
 				nt_errstr(nt_status));
 
 			code = KRB5KDC_ERR_TGT_REVOKED;
 			goto out;
 		}
+
+		nt_status = samba_kdc_add_claims_valid(device_info_shallow_copy);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			DBG_ERR("Failed to add Claims Valid: %s\n",
+				nt_errstr(nt_status));
+
+			code = KRB5KDC_ERR_TGT_REVOKED;
+			goto out;
+		}
+		/* no more modification required so we can assign to const now */
+		device_info_const = device_info_shallow_copy;
+	}
+
+	/*
+	 * The device claims become the *user* claims for the purpose of
+	 * evaluating a conditional ACE expression.
+	 */
+	code = samba_kdc_get_claims_data(frame,
+					 context,
+					 samdb,
+					 device,
+					 &auth_claims.user_claims);
+	if (code) {
+		goto out;
 	}
 
 	nt_status = authn_policy_authenticate_from_device(frame,
 							  samdb,
 							  lp_ctx,
-							  device_info,
+							  device_info_const,
+							  auth_claims,
 							  client_policy,
 							  &client_audit_info);
 	if (client_audit_info != NULL) {

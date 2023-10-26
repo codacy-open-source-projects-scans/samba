@@ -456,13 +456,13 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 				  const char *netbios_name,
 				  const char *ntds_guid)
 {
-	int ret, princ_size;
+	krb5_error_code ret, princ_size;
 	krb5_context krb_ctx;
 	krb5_error_code kerr;
 	krb5_principal principal;
-	char *instanceName;
-	char *serviceType;
-	char *serviceName;
+	char *instanceName = NULL;
+	char *serviceType = NULL;
+	char *serviceName = NULL;
 	const char *spn_value_str = NULL;
 	size_t account_name_len;
 	const char *forest_name = samdb_forest_name(ldb, mem_ctx);
@@ -509,15 +509,22 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 		goto fail;
 	}
 
-	instanceName = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-							  principal, 1);
-	serviceType = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-							 principal, 0);
+	ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+							  principal, 1, &instanceName);
+	if (ret) {
+		goto fail;
+	}
+	ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+						 principal, 0, &serviceType);
+	if (ret) {
+		goto fail;
+	}
 	if (krb5_princ_size(krb_ctx, principal) == 3) {
-		serviceName = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
-								 principal, 2);
-	} else {
-		serviceName = NULL;
+		ret = smb_krb5_principal_get_comp_string(mem_ctx, krb_ctx,
+							 principal, 2, &serviceName);
+		if (ret) {
+			goto fail;
+		}
 	}
 
 	if (serviceName) {
@@ -576,7 +583,7 @@ static int acl_validate_spn_value(TALLOC_CTX *mem_ctx,
 		goto success;
 	}
 	if (is_dc) {
-		const char *guid_str;
+		const char *guid_str = NULL;
 		guid_str = talloc_asprintf(mem_ctx,"%s._msdcs.%s",
 					   ntds_guid,
 					   forest_name);

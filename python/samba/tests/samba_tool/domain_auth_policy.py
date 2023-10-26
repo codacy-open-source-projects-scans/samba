@@ -24,7 +24,8 @@ import json
 from optparse import OptionValueError
 from unittest.mock import patch
 
-from samba.netcmd import CommandError
+from samba.dcerpc import security
+from samba.ndr import ndr_unpack
 from samba.netcmd.domain.models.exceptions import ModelError
 from samba.samdb import SamDB
 from samba.sd_utils import SDUtils
@@ -39,8 +40,10 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         result, out, err = self.runcmd("domain", "auth", "policy", "list")
         self.assertIsNone(result, msg=err)
 
-        # Check each authentication policy we created is there.
-        for policy in self.policies:
+        expected_policies = [
+            "Single Policy", "User Policy", "Service Policy", "Computer Policy"]
+
+        for policy in expected_policies:
             self.assertIn(policy, out)
 
     def test_authentication_policy_list_json(self):
@@ -52,8 +55,10 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         # we should get valid json
         policies = json.loads(out)
 
-        # each policy in self.policies must be present
-        for name in self.policies:
+        expected_policies = [
+            "Single Policy", "User Policy", "Service Policy", "Computer Policy"]
+
+        for name in expected_policies:
             policy = policies[name]
             self.assertIn("name", policy)
             self.assertIn("msDS-AuthNPolicy", list(policy["objectClass"]))
@@ -89,6 +94,9 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
 
     def test_authentication_policy_create(self):
         """Test creating a new authentication policy."""
+        self.addCleanup(self.delete_authentication_policy,
+                        name="createTest", force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                        "--name", "createTest")
         self.assertIsNone(result, msg=err)
@@ -100,6 +108,9 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
 
     def test_authentication_policy_create_description(self):
         """Test creating a new authentication policy with description set."""
+        self.addCleanup(self.delete_authentication_policy,
+                        name="descriptionTest", force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                        "--name", "descriptionTest",
                                        "--description", "Custom Description")
@@ -115,6 +126,9 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
 
         Also checks the upper and lower bounds are handled.
         """
+        self.addCleanup(self.delete_authentication_policy,
+                        name="userTGTLifetime", force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                        "--name", "userTGTLifetime",
                                        "--user-tgt-lifetime", "60")
@@ -126,28 +140,29 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         self.assertEqual(str(policy["msDS-UserTGTLifetime"]), "60")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "userTGTLifetimeLower",
-                        "--user-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "userTGTLifetimeLower",
+                                       "--user-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--user-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "userTGTLifetimeUpper",
-                        "--user-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "userTGTLifetimeUpper",
+                                       "--user-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("--user-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
     def test_authentication_policy_create_service_tgt_lifetime(self):
         """Test create a new authentication policy with --service-tgt-lifetime.
 
         Also checks the upper and lower bounds are handled.
         """
+        self.addCleanup(self.delete_authentication_policy,
+                        name="serviceTGTLifetime", force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                        "--name", "serviceTGTLifetime",
                                        "--service-tgt-lifetime", "60")
@@ -159,28 +174,29 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         self.assertEqual(str(policy["msDS-ServiceTGTLifetime"]), "60")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "serviceTGTLifetimeLower",
-                        "--service-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "serviceTGTLifetimeLower",
+                                       "--service-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--service-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "serviceTGTLifetimeUpper",
-                        "--service-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "serviceTGTLifetimeUpper",
+                                       "--service-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("--service-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
     def test_authentication_policy_create_computer_tgt_lifetime(self):
         """Test create a new authentication policy with --computer-tgt-lifetime.
 
         Also checks the upper and lower bounds are handled.
         """
+        self.addCleanup(self.delete_authentication_policy,
+                        name="computerTGTLifetime", force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                        "--name", "computerTGTLifetime",
                                        "--computer-tgt-lifetime", "60")
@@ -192,22 +208,50 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         self.assertEqual(str(policy["msDS-ComputerTGTLifetime"]), "60")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "computerTGTLifetimeLower",
-                        "--computer-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "computerTGTLifetimeLower",
+                                       "--computer-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--computer-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "create",
-                        "--name", "computerTGTLifetimeUpper",
-                        "--computer-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "computerTGTLifetimeUpper",
+                                       "--computer-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("--computer-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
+
+    def test_authentication_policy_create_valid_sddl(self):
+        """Test creating a new authentication policy with valid SDDL in a field."""
+        expected = "O:SYG:SYD:(XA;OICI;CR;;;WD;(Member_of {SID(AO)}))"
+
+        self.addCleanup(self.delete_authentication_policy,
+                        name="validSDDLPolicy", force=True)
+
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "validSDDLPolicy",
+                                       "--user-allowed-to-authenticate-from",
+                                       expected)
+        self.assertIsNone(result, msg=err)
+
+        # Check policy fields.
+        policy = self.get_authentication_policy("validSDDLPolicy")
+        self.assertEqual(str(policy["cn"]), "validSDDLPolicy")
+        desc = policy["msDS-UserAllowedToAuthenticateFrom"][0]
+        sddl = ndr_unpack(security.descriptor, desc).as_sddl()
+        self.assertEqual(sddl, expected)
+
+    def test_authentication_policy_create_invalid_sddl(self):
+        """Test creating a new authentication policy with invalid SDDL in a field."""
+        result, out, err = self.runcmd("domain", "auth", "policy", "create",
+                                       "--name", "invalidSDDLPolicy",
+                                       "--user-allowed-to-authenticate-from",
+                                       "*INVALID SDDL*")
+        self.assertEqual(result, -1)
+        self.assertIn(
+            "msDS-UserAllowedToAuthenticateFrom: Unable to parse SDDL", err)
 
     def test_authentication_policy_create_already_exists(self):
         """Test creating a new authentication policy that already exists."""
@@ -268,34 +312,47 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
             result, out, err = self.runcmd("domain", "auth", "policy", "create",
                                            "--name", "createFails")
             self.assertEqual(result, -1)
-            self.assertIn("ERROR: Custom error message", err)
+            self.assertIn("Custom error message", err)
 
     def test_authentication_policy_modify_description(self):
         """Test modifying an authentication policy description."""
+        # Create a policy to modify for this test.
+        name = "modifyDescription"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
+        # Change the policy description.
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--description", "NewDescription")
         self.assertIsNone(result, msg=err)
 
         # Verify fields were changed.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["description"]), "NewDescription")
 
     def test_authentication_policy_modify_strong_ntlm_policy(self):
         """Test modify strong ntlm policy on the authentication policy."""
+        # Create a policy to modify for this test.
+        name = "modifyStrongNTLMPolicy"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--strong-ntlm-policy", "Required")
         self.assertIsNone(result, msg=err)
 
         # Verify fields were changed.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-StrongNTLMPolicy"]), "2")
 
         # Check an invalid choice.
         with self.assertRaises((OptionValueError, SystemExit)):
             self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
+                        "--name", name,
                         "--strong-ntlm-policy", "Invalid")
 
         # It is difficult to test the error message text for invalid
@@ -303,100 +360,112 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         # followed by raising SystemExit(2).
 
     def test_authentication_policy_modify_user_tgt_lifetime(self):
-        """Test modifying a authentication policy --user-tgt-lifetime.
+        """Test modifying an authentication policy --user-tgt-lifetime.
 
         This includes checking the upper and lower bounds.
         """
+        # Create a policy to modify for this test.
+        name = "modifyUserTGTLifetime"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--user-tgt-lifetime", "120")
         self.assertIsNone(result, msg=err)
 
         # Verify field was changed.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-UserTGTLifetime"]), "120")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--user-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--user-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--user-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--user-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--user-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("-user-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
     def test_authentication_policy_modify_service_tgt_lifetime(self):
-        """Test modifying a authentication policy --service-tgt-lifetime.
+        """Test modifying an authentication policy --service-tgt-lifetime.
 
         This includes checking the upper and lower bounds.
         """
+        # Create a policy to modify for this test.
+        name = "modifyServiceTGTLifetime"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--service-tgt-lifetime", "120")
         self.assertIsNone(result, msg=err)
 
         # Verify field was changed.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-ServiceTGTLifetime"]), "120")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--service-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--service-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--service-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--service-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--service-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("--service-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
     def test_authentication_policy_modify_computer_tgt_lifetime(self):
-        """Test modifying a authentication policy --computer-tgt-lifetime.
+        """Test modifying an authentication policy --computer-tgt-lifetime.
 
         This includes checking the upper and lower bounds.
         """
+        # Create a policy to modify for this test.
+        name = "modifyComputerTGTLifetime"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--computer-tgt-lifetime", "120")
         self.assertIsNone(result, msg=err)
 
         # Verify field was changed.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-ComputerTGTLifetime"]), "120")
 
         # check lower bounds (45)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--computer-tgt-lifetime", "44")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--computer-tgt-lifetime", "44")
+        self.assertEqual(result, -1)
         self.assertIn("--computer-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
         # check upper bounds (2147483647)
-        with self.assertRaises(CommandError) as e:
-            self.runcmd("domain", "auth", "policy", "modify",
-                        "--name", "Single Policy",
-                        "--computer-tgt-lifetime", "2147483648")
-
+        result, out, err = self.runcmd("domain", "auth", "policy", "modify",
+                                       "--name", name,
+                                       "--computer-tgt-lifetime", "2147483648")
+        self.assertEqual(result, -1)
         self.assertIn("--computer-tgt-lifetime must be between 45 and 2147483647",
-                      str(e.exception))
+                      err)
 
     def test_authentication_policy_modify_name_missing(self):
         """Test modify authentication but the --name argument is missing."""
@@ -411,50 +480,61 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
                                        "--name", "doesNotExist",
                                        "--description", "NewDescription")
         self.assertEqual(result, -1)
-        self.assertIn("ERROR: Authentication policy doesNotExist not found.",
-                      err)
+        self.assertIn("Authentication policy doesNotExist not found.", err)
 
     def test_authentication_policy_modify_audit_enforce(self):
         """Test modify authentication policy using --audit and --enforce."""
+        # Create a policy to modify for this test.
+        name = "modifyEnforce"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         # Change to audit, the default is --enforce.
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--audit")
         self.assertIsNone(result, msg=err)
 
         # Check that the policy was changed to --audit.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-AuthNPolicyEnforced"]), "FALSE")
 
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--enforce")
         self.assertIsNone(result, msg=err)
 
         # Check if the policy was changed back to --enforce.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         self.assertEqual(str(policy["msDS-AuthNPolicyEnforced"]), "TRUE")
 
     def test_authentication_policy_modify_protect_unprotect(self):
         """Test modify authentication policy using --protect and --unprotect."""
+        # Create a policy to modify for this test.
+        name = "modifyProtect"
+        self.runcmd("domain", "auth", "policy", "create", "--name", name)
+        self.addCleanup(self.delete_authentication_policy,
+                        name=name, force=True)
+
         utils = SDUtils(self.samdb)
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--protect")
         self.assertIsNone(result, msg=err)
 
         # Check that claim type was protected.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         desc = utils.get_sd_as_sddl(policy["dn"])
         self.assertIn("(D;;DTSD;;;WD)", desc)
 
         result, out, err = self.runcmd("domain", "auth", "policy", "modify",
-                                       "--name", "Single Policy",
+                                       "--name", name,
                                        "--unprotect")
         self.assertIsNone(result, msg=err)
 
         # Check that claim type was unprotected.
-        policy = self.get_authentication_policy("Single Policy")
+        policy = self.get_authentication_policy(name)
         desc = utils.get_sd_as_sddl(policy["dn"])
         self.assertNotIn("(D;;DTSD;;;WD)", desc)
 
@@ -483,7 +563,7 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
                                            "--name", "Single Policy",
                                            "--description", "New description")
             self.assertEqual(result, -1)
-            self.assertIn("ERROR: Custom error message", err)
+            self.assertIn("Custom error message", err)
 
     def test_authentication_policy_delete(self):
         """Test deleting an authentication policy that is not protected."""
@@ -562,7 +642,7 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
                                            "--name", "deleteForceFail",
                                            "--force")
             self.assertEqual(result, -1)
-            self.assertIn("ERROR: Custom error message", err)
+            self.assertIn("Custom error message", err)
 
     def test_authentication_policy_delete_fails(self):
         """Test deleting an authentication policy, but it fails."""
@@ -579,7 +659,7 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
             result, out, err = self.runcmd("domain", "auth", "policy", "delete",
                                            "--name", "regularPolicy")
             self.assertEqual(result, -1)
-            self.assertIn("ERROR: Custom error message", err)
+            self.assertIn("Custom error message", err)
 
             # When not using --force we get a hint.
             self.assertIn("Try --force", err)
@@ -601,7 +681,7 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
                                            "--name", "protectedPolicy",
                                            "--force")
             self.assertEqual(result, -1)
-            self.assertIn("ERROR: Custom error message", err)
+            self.assertIn("Custom error message", err)
 
             # When using --force we don't get the hint.
             self.assertNotIn("Try --force", err)

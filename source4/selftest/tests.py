@@ -533,6 +533,15 @@ plantestsuite_loadlist("samba.tests.sddl",
                         "samba.tests.sddl"
                        ])
 
+plantestsuite_loadlist("samba.tests.sddl_conditional_ace",
+                       "none",
+                       [python,
+                        '-msamba.subunit.run',
+                        '$LOADLIST',
+                        "$LISTOPT"
+                        "samba.tests.sddl_conditional_ace"
+                       ])
+
 for t in smbtorture4_testsuites("dns_internal."):
     plansmbtorture4testsuite(t, "ad_dc_default:local", '//$SERVER/whavever')
 
@@ -1583,7 +1592,7 @@ for env in ['offlinebackupdc', 'restoredc', 'renamedc', 'labdc']:
 # we also test joining backupfromdc here, as it's a bit special in that it
 # doesn't have Default-First-Site-Name
 for env in ['backupfromdc', 'offlinebackupdc', 'restoredc', 'renamedc',
-	    'labdc']:
+            'labdc']:
     # basic test that we can join the testenv DC
     plantestsuite("samba4.blackbox.join_ldapcmp", env,
                   ["PYTHON=%s" % python, os.path.join(bbdir, "join_ldapcmp.sh")])
@@ -1612,7 +1621,7 @@ planoldpythontestsuite("rodc:local", "replica_sync_rodc",
                        extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
                        name="samba4.drs.replica_sync_rodc.python(rodc)",
                        environ={'DC1': '$DC_SERVER', 'DC2': '$SERVER'},
-		       extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
+                       extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
 
 planoldpythontestsuite("ad_dc_default_smb1", "password_settings",
                        extra_path=[os.path.join(samba4srcdir, 'dsdb/tests/python')],
@@ -1809,7 +1818,7 @@ for env in ['vampire_dc', 'promoted_dc']:
                            extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
                            name="samba4.drs.link_conflicts.python(%s)" % env,
                            environ={'DC1': "$DC_SERVER", 'DC2': '$SERVER'},
-			   extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
+                           extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
 
 # Environment chgdcpass has the Samba 4.5 GET_ANC behaviour, which we
 # set a knownfail to expect
@@ -1835,7 +1844,7 @@ for env in ['vampire_dc', 'promoted_dc']:
                            extra_path=[os.path.join(samba4srcdir, 'torture/drs/python')],
                            name="samba4.drs.getncchanges.python(%s)" % env,
                            environ={'DC1': "$DC_SERVER", 'DC2': '$SERVER'},
-			   extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
+                           extra_args=['-U$DOMAIN/$DC_USERNAME%$DC_PASSWORD'])
 
 for env in ['ad_dc_ntvfs']:
     planoldpythontestsuite(env, "repl_rodc",
@@ -2008,6 +2017,10 @@ planoldpythontestsuite(
 planoldpythontestsuite(
     'ad_dc',
     'samba.tests.krb5.pkinit_tests',
+    environ=krb5_environ)
+planoldpythontestsuite(
+    'ad_dc',
+    'samba.tests.krb5.conditional_ace_tests',
     environ=krb5_environ)
 
 for env in [

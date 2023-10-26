@@ -52,7 +52,6 @@ c = libsmb.Conn("127.0.0.1",
 #include "libcli/smb/smbXcli_base.h"
 #include "libcli/smb/smb2_negotiate_context.h"
 #include "libcli/smb/reparse.h"
-#include "libcli/smb/reparse_symlink.h"
 #include "libsmb/libsmb.h"
 #include "libcli/security/security.h"
 #include "system/select.h"
@@ -1210,26 +1209,10 @@ static PyObject *py_cli_create_ex(
 		goto nomem;
 	}
 
-	v = PyTuple_New(3);
-	if (v == NULL) {
-		goto nomem;
-	}
-	ret = PyTuple_SetItem(v, 0, Py_BuildValue("I", (unsigned)fnum));
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-	ret = PyTuple_SetItem(v, 1, py_cr);
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-	ret = PyTuple_SetItem(v, 2, py_create_contexts_out);
-	if (ret == -1) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto fail;
-	}
-
+	v = Py_BuildValue("(IOO)",
+			  (unsigned)fnum,
+			  py_cr,
+			  py_create_contexts_out);
 	return v;
 nomem:
 	status = NT_STATUS_NO_MEMORY;
@@ -1259,13 +1242,14 @@ static PyObject *py_cli_close(struct py_cli_state *self, PyObject *args)
 {
 	struct tevent_req *req;
 	int fnum;
+	int flags = 0;
 	NTSTATUS status;
 
-	if (!PyArg_ParseTuple(args, "i", &fnum)) {
+	if (!PyArg_ParseTuple(args, "i|i", &fnum, &flags)) {
 		return NULL;
 	}
 
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, flags);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return NULL;
 	}
@@ -1387,7 +1371,7 @@ static PyObject *py_smb_savefile(struct py_cli_state *self, PyObject *args)
 	PyErr_NTSTATUS_NOT_OK_RAISE(status);
 
 	/* close the file handle */
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return NULL;
 	}
@@ -1509,7 +1493,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	}
 
 	/* close the file handle */
-	req = cli_close_send(NULL, self->ev, self->cli, fnum);
+	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		Py_XDECREF(result);
 		return NULL;
@@ -1876,7 +1860,7 @@ static PyMethodDef py_cli_notify_state_methods[] = {
 			   "\t\tList contents of a directory. The keys are, \n"
 			   "\t\t\tname: name of changed object\n"
 			   "\t\t\taction: type of the change\n"
-			   "None is returned if there's no response jet and "
+			   "None is returned if there's no response yet and "
 			   "wait=False is passed"
 	},
 	{
@@ -3030,6 +3014,8 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(FILE_OVERWRITE);
 	ADD_FLAGS(FILE_OVERWRITE_IF);
 	ADD_FLAGS(FILE_DIRECTORY_FILE);
+
+	ADD_FLAGS(SMB2_CLOSE_FLAGS_FULL_INFORMATION);
 
 	return m;
 }

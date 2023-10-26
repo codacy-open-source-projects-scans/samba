@@ -36,6 +36,11 @@ static size_t lsad_interfaces(
 		&ndr_table_lsarpc,
 		&ndr_table_samr,
 		&ndr_table_dssetup,
+		/*
+		 * This last item is truncated from the list by the
+		 * num_ifaces -= 1 below for the fileserver.  Take
+		 * care when adding new services.
+		 */
 		&ndr_table_netlogon,
 	};
 	size_t num_ifaces = ARRAY_SIZE(ifaces);
@@ -46,6 +51,14 @@ static size_t lsad_interfaces(
 		/* no netlogon for non-dc */
 		num_ifaces -= 1;
 		break;
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		/*
+		 * All these services are provided by the 'samba'
+		 * binary from source4, not this code which is the
+		 * source3 / NT4-like "classic" DC implementation
+		 */
+		num_ifaces = 0;
+		break;
 	default:
 		break;
 	}
@@ -54,13 +67,15 @@ static size_t lsad_interfaces(
 	return num_ifaces;
 }
 
-static size_t lsad_servers(
+static NTSTATUS lsad_servers(
 	struct dcesrv_context *dce_ctx,
 	const struct dcesrv_endpoint_server ***_ep_servers,
+	size_t *_num_ep_servers,
 	void *private_data)
 {
 	static const struct dcesrv_endpoint_server *ep_servers[4] = { NULL, };
 	size_t num_servers = ARRAY_SIZE(ep_servers);
+	NTSTATUS status;
 	bool ok;
 
 	ep_servers[0] = lsarpc_get_ep_server();
@@ -74,18 +89,42 @@ static size_t lsad_servers(
 		exit(1);
 	}
 
+	status = dcesrv_register_default_auth_types_machine_principal(dce_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
 	switch(lp_server_role()) {
 	case ROLE_STANDALONE:
 	case ROLE_DOMAIN_MEMBER:
 		/* no netlogon for non-dc */
 		num_servers -= 1;
 		break;
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		/*
+		 * All these services are provided by the 'samba'
+		 * binary from source4, not this code which is the
+		 * source3 / NT4-like "classic" DC implementation
+		 */
+		num_servers = 0;
+		break;
 	default:
+		/*
+		 * As DC we also register schannel with an
+		 * empty principal
+		 */
+		status = dcesrv_auth_type_principal_register(dce_ctx,
+							     DCERPC_AUTH_TYPE_SCHANNEL,
+							     "");
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 		break;
 	}
 
 	*_ep_servers = ep_servers;
-	return num_servers;
+	*_num_ep_servers = num_servers;
+	return NT_STATUS_OK;
 }
 
 int main(int argc, const char *argv[])

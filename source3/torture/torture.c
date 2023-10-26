@@ -3177,7 +3177,7 @@ static void deferred_close_waited(struct tevent_req *subreq)
 		return;
 	}
 
-	subreq = cli_close_send(state, state->ev, state->cli, state->fnum);
+	subreq = cli_close_send(state, state->ev, state->cli, state->fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -4534,8 +4534,16 @@ static bool run_trans2test(int dummy)
 	cli_openx(cli, fname, 
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
 	cli_close(cli, fnum);
-	status = cli_qpathinfo2(cli, fname, &c_time_ts, &a_time_ts, &w_time_ts,
-				&m_time_ts, &size, NULL, &ino);
+	status = cli_qpathinfo2(cli,
+				fname,
+				&c_time_ts,
+				&a_time_ts,
+				&w_time_ts,
+				&m_time_ts,
+				&size,
+				NULL,
+				&ino,
+				NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("ERROR: qpathinfo2 failed (%s)\n", nt_errstr(status));
 		correct = False;
@@ -4571,8 +4579,16 @@ static bool run_trans2test(int dummy)
 		correct = False;
 	}
 	sleep(3);
-	status = cli_qpathinfo2(cli, "\\trans2\\", &c_time_ts, &a_time_ts,
-				&w_time_ts, &m_time_ts, &size, NULL, NULL);
+	status = cli_qpathinfo2(cli,
+				"\\trans2\\",
+				&c_time_ts,
+				&a_time_ts,
+				&w_time_ts,
+				&m_time_ts,
+				&size,
+				NULL,
+				NULL,
+				NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("ERROR: qpathinfo2 failed (%s)\n", nt_errstr(status));
 		correct = False;
@@ -4582,8 +4598,16 @@ static bool run_trans2test(int dummy)
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
 	cli_writeall(cli, fnum,  0, (uint8_t *)&fnum, 0, sizeof(fnum), NULL);
 	cli_close(cli, fnum);
-	status = cli_qpathinfo2(cli, "\\trans2\\", &c_time_ts, &a_time_ts,
-				&w_time_ts, &m_time2_ts, &size, NULL, NULL);
+	status = cli_qpathinfo2(cli,
+				"\\trans2\\",
+				&c_time_ts,
+				&a_time_ts,
+				&w_time_ts,
+				&m_time2_ts,
+				&size,
+				NULL,
+				NULL,
+				NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("ERROR: qpathinfo2 failed (%s)\n", nt_errstr(status));
 		correct = False;
@@ -5945,7 +5969,7 @@ static struct tevent_req *delete_stream_send(
 	}
 	tevent_req_set_callback(subreq, delete_stream_unlinked, req);
 
-	subreq = cli_close_send(state, ev, cli, stream_fnum);
+	subreq = cli_close_send(state, ev, cli, stream_fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -10318,8 +10342,13 @@ static bool run_error_map_extract(int dummy) {
 	}
 	disable_spnego = false;
 
-	status = smbXcli_negprot(c_nt->conn, c_nt->timeout, PROTOCOL_CORE,
-				 PROTOCOL_NT1);
+	status = smbXcli_negprot(c_nt->conn,
+				 c_nt->timeout,
+				 PROTOCOL_CORE,
+				 PROTOCOL_NT1,
+				 NULL,
+				 NULL,
+				 NULL);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("%s rejected the NT-error negprot (%s)\n", host,
@@ -10346,8 +10375,13 @@ static bool run_error_map_extract(int dummy) {
 	disable_spnego = false;
 	force_dos_errors = false;
 
-	status = smbXcli_negprot(c_dos->conn, c_dos->timeout, PROTOCOL_CORE,
-				 PROTOCOL_NT1);
+	status = smbXcli_negprot(c_dos->conn,
+				 c_dos->timeout,
+				 PROTOCOL_CORE,
+				 PROTOCOL_NT1,
+				 NULL,
+				 NULL,
+				 NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("%s rejected the DOS-error negprot (%s)\n", host,
 		       nt_errstr(status));
@@ -10688,7 +10722,7 @@ static void torture_createdel_created(struct tevent_req *subreq)
 		return;
 	}
 
-	subreq = cli_close_send(state, state->ev, state->cli, fnum);
+	subreq = cli_close_send(state, state->ev, state->cli, fnum, 0);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -11525,7 +11559,10 @@ static bool run_large_readx(int dummy)
 		status = smbXcli_negprot(cli2->conn,
 					 cli2->timeout,
 					 runs[i].protocol,
-					 runs[i].protocol);
+					 runs[i].protocol,
+					 NULL,
+					 NULL,
+					 NULL);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto out;
 		}
@@ -12458,8 +12495,16 @@ static bool run_dir_createtime(int dummy)
 		goto out;
 	}
 
-	status = cli_qpathinfo2(cli, dname, &create_time, NULL, NULL, NULL,
-				NULL, NULL, &ino);
+	status = cli_qpathinfo2(cli,
+				dname,
+				&create_time,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				&ino,
+				NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("cli_qpathinfo2 returned %s\n",
 		       nt_errstr(status));
@@ -12490,8 +12535,16 @@ static bool run_dir_createtime(int dummy)
 		goto out;
 	}
 
-	status = cli_qpathinfo2(cli, dname, &create_time1, NULL, NULL, NULL,
-				NULL, NULL, NULL);
+	status = cli_qpathinfo2(cli,
+				dname,
+				&create_time1,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("cli_qpathinfo2 (2) returned %s\n",
 		       nt_errstr(status));
@@ -14865,7 +14918,13 @@ static bool run_smb1_truncated_sesssetup(int dummy)
 		return false;
 	}
 
-	status = smbXcli_negprot(conn, 0, PROTOCOL_NT1, PROTOCOL_NT1);
+	status = smbXcli_negprot(conn,
+				 0,
+				 PROTOCOL_NT1,
+				 PROTOCOL_NT1,
+				 NULL,
+				 NULL,
+				 NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr, "smbXcli_negprot failed!\n");
 		return false;
@@ -15048,7 +15107,13 @@ static bool run_smb1_negotiate_exit(int dummy)
 		return false;
 	}
 
-	status = smbXcli_negprot(conn, 0, PROTOCOL_NT1, PROTOCOL_NT1);
+	status = smbXcli_negprot(conn,
+				 0,
+				 PROTOCOL_NT1,
+				 PROTOCOL_NT1,
+				 NULL,
+				 NULL,
+				 NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr, "smbXcli_negprot failed!\n");
 		return false;
@@ -15094,7 +15159,13 @@ static bool run_smb1_negotiate_tcon(int dummy)
 	}
 	smbXcli_conn_set_sockopt(cli->conn, sockops);
 
-	status = smbXcli_negprot(cli->conn, 0, PROTOCOL_NT1, PROTOCOL_NT1);
+	status = smbXcli_negprot(cli->conn,
+				 0,
+				 PROTOCOL_NT1,
+				 PROTOCOL_NT1,
+				 NULL,
+				 NULL,
+				 NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr, "smbXcli_negprot failed %s!\n",
 			nt_errstr(status));
@@ -15147,7 +15218,13 @@ static bool run_ign_bad_negprot(int dummy)
 		return false;
 	}
 
-	status = smbXcli_negprot(conn, 0, PROTOCOL_CORE, PROTOCOL_CORE);
+	status = smbXcli_negprot(conn,
+				 0,
+				 PROTOCOL_CORE,
+				 PROTOCOL_CORE,
+				 NULL,
+				 NULL,
+				 NULL);
 	if (NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr, "smbXcli_negprot succeeded!\n");
 		return false;
@@ -15806,6 +15883,10 @@ static struct {
 	{
 		.name  = "SMB2-QUOTA1",
 		.fn    = run_smb2_quota1,
+	},
+	{
+		.name  = "SMB2-INVALID-PIPENAME",
+		.fn    = run_smb2_invalid_pipename,
 	},
 	{
 		.name  = "SMB2-STREAM-ACL",

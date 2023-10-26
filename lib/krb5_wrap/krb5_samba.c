@@ -261,13 +261,10 @@ krb5_error_code smb_krb5_mk_error(krb5_context context,
 
 	errpkt.text.length = 0;
 	if (e_text != NULL) {
-		errpkt.text.length = strlen(e_text);
-		errpkt.text.data = discard_const_p(char, e_text);
+		errpkt.text = smb_krb5_make_data(discard_const_p(char, e_text), strlen(e_text));
 	}
 
-	errpkt.e_data.magic = KV5M_DATA;
-	errpkt.e_data.length = 0;
-	errpkt.e_data.data = NULL;
+	errpkt.e_data = smb_krb5_make_data(NULL, 0);
 	if (e_data != NULL) {
 		errpkt.e_data = *e_data;
 	}
@@ -429,8 +426,7 @@ int smb_krb5_get_pw_salt(krb5_context context,
 		return ret;
 	}
 
-	psalt->data = salt.saltvalue.data;
-	psalt->length = salt.saltvalue.length;
+	*psalt = salt.saltvalue;
 
 	return ret;
 }
@@ -1051,32 +1047,50 @@ done:
  * @param[in] context		The krb5_context
  * @param[in] principal		The principal
  * @param[in] component		The component
- * @return string component
+ * @param[out] out			The output string
+ * @return krb5_error_code
  *
  * Caller must talloc_free if the return value is not NULL.
  *
  */
-char *smb_krb5_principal_get_comp_string(TALLOC_CTX *mem_ctx,
-					 krb5_context context,
-					 krb5_const_principal principal,
-					 unsigned int component)
+krb5_error_code smb_krb5_principal_get_comp_string(TALLOC_CTX *mem_ctx,
+						   krb5_context context,
+						   krb5_const_principal principal,
+						   unsigned int component,
+						   char **out)
 {
+	char *out_str = NULL;
 #if defined(HAVE_KRB5_PRINCIPAL_GET_COMP_STRING)
-	return talloc_strdup(mem_ctx, krb5_principal_get_comp_string(context, principal, component));
+	const char *str = NULL;
+
+	str = krb5_principal_get_comp_string(context, principal, component);
+	if (str == NULL) {
+		return ENOENT;
+	}
+
+	out_str = talloc_strdup(mem_ctx, str);
+	if (out_str == NULL) {
+		return ENOMEM;
+	}
 #else
 	krb5_data *data;
 
 	if (component >= krb5_princ_size(context, principal)) {
-		return NULL;
+		return ENOENT;
 	}
 
 	data = krb5_princ_component(context, principal, component);
 	if (data == NULL) {
-		return NULL;
+		return ENOENT;
 	}
 
-	return talloc_strndup(mem_ctx, data->data, data->length);
+	out_str = talloc_strndup(mem_ctx, data->data, data->length);
+	if (out_str == NULL) {
+		return ENOMEM;
+	}
 #endif
+	*out = out_str;
+	return 0;
 }
 
 /**
@@ -3438,14 +3452,20 @@ int smb_krb5_principal_is_tgs(krb5_context context,
 {
 	char *p = NULL;
 	int eq = 1;
+	krb5_error_code ret = 0;
 
-	p = smb_krb5_principal_get_comp_string(NULL, context, principal, 0);
-	if (p == NULL) {
+	if (krb5_princ_size(context, principal) > 2) {
+		return 0;
+	}
+
+	ret = smb_krb5_principal_get_comp_string(NULL, context, principal, 0, &p);
+	if (ret == ENOENT) {
+		return 0;
+	} else if (ret) {
 		return -1;
 	}
 
-	eq = krb5_princ_size(context, principal) == 2 &&
-	     (strcmp(p, KRB5_TGS_NAME) == 0);
+	eq = strcmp(p, KRB5_TGS_NAME) == 0;
 
 	talloc_free(p);
 

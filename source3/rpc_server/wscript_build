@@ -38,6 +38,7 @@ bld.SAMBA3_BINARY('rpcd_rpcecho',
                   RPC_WORKER
                   RPC_RPCECHO
                   ''',
+                  for_selftest=True,
                   install_path='${SAMBA_LIBEXECDIR}')
 
 bld.SAMBA3_BINARY('rpcd_classic',
@@ -199,6 +200,7 @@ bld.SAMBA3_SUBSYSTEM('RPC_IREMOTEWINSPOOL',
                     source='''
                     spoolss/srv_iremotewinspool_nt.c
                     spoolss/srv_iremotewinspool.c
+                    spoolss/iremotewinspool_util.c
                     ''',
                     deps='RPC_SPOOLSS')
 

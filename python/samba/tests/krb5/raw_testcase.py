@@ -79,9 +79,9 @@ from samba.tests.krb5.rfc4120_constants import (
     KRB_TGS_REP,
     KRB_TGS_REQ,
     KU_AP_REQ_AUTH,
+    KU_AP_REQ_ENC_PART,
     KU_AS_FRESHNESS,
     KU_AS_REP_ENC_PART,
-    KU_AP_REQ_ENC_PART,
     KU_AS_REQ,
     KU_ENC_CHALLENGE_KDC,
     KU_FAST_ENC,
@@ -117,10 +117,11 @@ from samba.tests.krb5.rfc4120_constants import (
     PADATA_PAC_REQUEST,
     PADATA_PKINIT_KX,
     PADATA_PK_AS_REP,
-    PADATA_PK_AS_REQ,
     PADATA_PK_AS_REP_19,
+    PADATA_PK_AS_REQ,
+    PADATA_PW_SALT,
+    PADATA_REQ_ENC_PA_REP,
     PADATA_SUPPORTED_ETYPES,
-    PADATA_REQ_ENC_PA_REP
 )
 import samba.tests.krb5.kcrypto as kcrypto
 
@@ -789,6 +790,12 @@ class RawKerberosTest(TestCase):
             expect_nt_status = '1'
         cls.expect_nt_status = bool(int(expect_nt_status))
 
+        crash_windows = samba.tests.env_get_var_value('CRASH_WINDOWS',
+                                                      allow_missing=True)
+        if crash_windows is None:
+            crash_windows = '1'
+        cls.crash_windows = bool(int(crash_windows))
+
     def setUp(self):
         super().setUp()
         self.do_asn1_print = False
@@ -827,9 +834,6 @@ class RawKerberosTest(TestCase):
             self.s.settimeout(10)
             self.s.connect(self.a[0][4])
         except socket.error:
-            self.s.close()
-            raise
-        except IOError:
             self.s.close()
             raise
 
@@ -1135,9 +1139,6 @@ class RawKerberosTest(TestCase):
         except socket.error as e:
             self._disconnect("send_msg: %s" % e)
             raise
-        except IOError as e:
-            self._disconnect("send_msg: %s" % e)
-            raise
 
     def recv_raw(self, num_recv=0xffff, hexdump=None, timeout=None):
         rep_pdu = None
@@ -1154,9 +1155,6 @@ class RawKerberosTest(TestCase):
             self.s.settimeout(10)
             sys.stderr.write("recv_raw: TIMEOUT\n")
         except socket.error as e:
-            self._disconnect("recv_raw: %s" % e)
-            raise
-        except IOError as e:
             self._disconnect("recv_raw: %s" % e)
             raise
         return rep_pdu
@@ -3000,6 +2998,7 @@ class RawKerberosTest(TestCase):
                          expected_sid=None,
                          expected_requester_sid=None,
                          expected_domain_sid=None,
+                         expected_device_domain_sid=None,
                          expected_supported_etypes=None,
                          expected_flags=None,
                          unexpected_flags=None,
@@ -3078,6 +3077,7 @@ class RawKerberosTest(TestCase):
             'expected_sid': expected_sid,
             'expected_requester_sid': expected_requester_sid,
             'expected_domain_sid': expected_domain_sid,
+            'expected_device_domain_sid': expected_device_domain_sid,
             'expected_supported_etypes': expected_supported_etypes,
             'expected_flags': expected_flags,
             'unexpected_flags': unexpected_flags,
@@ -4567,9 +4567,9 @@ class RawKerberosTest(TestCase):
                     continue
 
                 if expected_claims:
-                    empty_msg = ', and {claims_type} were expected'
+                    empty_msg = f', and {claims_type} were expected'
                 else:
-                    empty_msg = ' for {claims_type} (should be missing)'
+                    empty_msg = f' for {claims_type} (should be missing)'
 
                 claims_metadata_ndr = ndr_unpack(claims.CLAIMS_SET_METADATA_NDR,
                                                  remaining)
@@ -5045,7 +5045,8 @@ class RawKerberosTest(TestCase):
 
             got_patypes = tuple(pa['padata-type'] for pa in rep_padata)
             self.assertSequenceElementsEqual(expected_patypes, got_patypes,
-                                             require_strict=require_strict)
+                                             require_strict=require_strict,
+                                             unchecked={PADATA_PW_SALT})
 
             if not expected_patypes:
                 return None
@@ -5546,7 +5547,7 @@ class RawKerberosTest(TestCase):
                         modify_pac_fn=None,
                         exclude_pac=False,
                         allow_empty_authdata=False,
-                        update_pac_checksums=True,
+                        update_pac_checksums=None,
                         checksum_keys=None,
                         include_checksums=None):
         if checksum_keys is None:
@@ -5570,16 +5571,18 @@ class RawKerberosTest(TestCase):
         self.assertLessEqual(checksum_keys.keys(), self.pac_checksum_types)
         self.assertLessEqual(include_checksums.keys(), self.pac_checksum_types)
 
+        if update_pac_checksums is None:
+            update_pac_checksums = not exclude_pac
+
         if exclude_pac:
             self.assertIsNone(modify_pac_fn)
-
-            update_pac_checksums = False
+            self.assertFalse(update_pac_checksums)
 
         if not update_pac_checksums:
             self.assertFalse(checksum_keys)
             self.assertFalse(include_checksums)
 
-        expect_pac = modify_pac_fn is not None
+        expect_pac = bool(modify_pac_fn)
 
         key = ticket.decryption_key
 
@@ -5620,15 +5623,23 @@ class RawKerberosTest(TestCase):
             enc_part, asn1Spec=krb5_asn1.EncTicketPart())
 
         # Modify the ticket here.
-        if modify_fn is not None:
+        if callable(modify_fn):
             enc_part = modify_fn(enc_part)
+        elif modify_fn:
+            for fn in modify_fn:
+                enc_part = fn(enc_part)
 
         auth_data = enc_part.get('authorization-data')
         if expect_pac:
             self.assertIsNotNone(auth_data)
         if auth_data is not None:
             new_pac = None
-            if not exclude_pac:
+            if exclude_pac:
+                need_to_call_replace_pac = True
+            elif not modify_pac_fn and not update_pac_checksums:
+                need_to_call_replace_pac = False
+            else:
+                need_to_call_replace_pac = True
                 # Get a copy of the authdata with an empty PAC, and the
                 # existing PAC (if present).
                 empty_pac = self.get_empty_pac()
@@ -5641,8 +5652,11 @@ class RawKerberosTest(TestCase):
                     pac = ndr_unpack(krb5pac.PAC_DATA, pac_data)
 
                     # Modify the PAC here.
-                    if modify_pac_fn is not None:
+                    if callable(modify_pac_fn):
                         pac = modify_pac_fn(pac)
+                    elif modify_pac_fn:
+                        for fn in modify_pac_fn:
+                            pac = fn(pac)
 
                     if update_pac_checksums:
                         # Get the enc-part with an empty PAC, which is needed
@@ -5666,11 +5680,12 @@ class RawKerberosTest(TestCase):
 
             # Replace the PAC in the authorization data and re-add it to the
             # ticket enc-part.
-            auth_data, _ = self.replace_pac(
-                auth_data, new_pac,
-                expect_pac=expect_pac,
-                allow_empty_authdata=allow_empty_authdata)
-            enc_part['authorization-data'] = auth_data
+            if need_to_call_replace_pac:
+                auth_data, _ = self.replace_pac(
+                    auth_data, new_pac,
+                    expect_pac=expect_pac,
+                    allow_empty_authdata=allow_empty_authdata)
+                enc_part['authorization-data'] = auth_data
 
         # Re-encrypt the ticket enc-part with the new key.
         enc_part_new = self.der_encode(enc_part,
@@ -5887,8 +5902,11 @@ class RawKerberosTest(TestCase):
         return name in ('kadmin', b'kadmin')
 
     def is_tgs(self, principal):
-        name = principal['name-string'][0]
-        return name in ('krbtgt', b'krbtgt')
+        name_string = principal['name-string']
+        if 1 <= len(name_string) <= 2:
+            return name_string[0] in ('krbtgt', b'krbtgt')
+
+        return False
 
     def is_tgt(self, ticket):
         sname = ticket.ticket['sname']

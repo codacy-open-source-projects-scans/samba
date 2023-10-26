@@ -1049,7 +1049,7 @@ static ssize_t write_compressed_bytes(uint16_t symbol_values[512],
 			}
 
 			len = intermediate[i + 1];
-			len |= intermediate[i + 2] << 16U;
+			len |= (uint32_t)intermediate[i + 2] << 16;
 			distance = intermediate[i + 3];
 			i += 3;
 		} else if (c == 0xffff) {
@@ -1514,7 +1514,7 @@ static bool fill_decomp_table(struct bitstream *input)
 	uint16_t sort_mem[512];
 	size_t i, n_symbols;
 	ssize_t code;
-	uint16_t len, prev_len;
+	uint16_t len = 0, prev_len;
 	const uint8_t *table_bytes = input->bytes + input->byte_pos;
 
 	if (input->byte_pos + 260 > input->byte_size) {
