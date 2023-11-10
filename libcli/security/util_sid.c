@@ -383,12 +383,11 @@ NTSTATUS add_sid_to_array(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 NTSTATUS add_sid_to_array_unique(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 				 struct dom_sid **sids, uint32_t *num_sids)
 {
-	uint32_t i;
+	bool contains;
 
-	for (i=0; i<(*num_sids); i++) {
-		if (dom_sid_equal(sid, &(*sids)[i])) {
-			return NT_STATUS_OK;
-		}
+	contains = sids_contains_sid(*sids, *num_sids, sid);
+	if (contains) {
+		return NT_STATUS_OK;
 	}
 
 	return add_sid_to_array(mem_ctx, sid, sids, num_sids);
@@ -437,23 +436,17 @@ NTSTATUS add_sid_to_array_attrs(TALLOC_CTX *mem_ctx,
  * @param [in] sid	The SID to append.
  * @param [in] attrs	SE_GROUP_* flags to go with the SID.
  * @param [inout] sids	A pointer to the auth_SidAttr array.
- * @param [inout] num	A pointer to the size of the auth_SidArray array.
+ * @param [inout] num_sids	A pointer to the size of the auth_SidArray array.
  * @returns NT_STATUS_OK on success.
  */
 NTSTATUS add_sid_to_array_attrs_unique(TALLOC_CTX *mem_ctx,
 				       const struct dom_sid *sid, uint32_t attrs,
 				       struct auth_SidAttr **sids, uint32_t *num_sids)
 {
-	uint32_t i;
+	bool contains;
 
-	for (i=0; i<(*num_sids); i++) {
-		if (attrs != (*sids)[i].attrs) {
-			continue;
-		}
-		if (!dom_sid_equal(sid, &(*sids)[i].sid)) {
-			continue;
-		}
-
+	contains = sids_contains_sid_attrs(*sids, *num_sids, sid, attrs);
+	if (contains) {
 		return NT_STATUS_OK;
 	}
 
@@ -487,8 +480,6 @@ void del_sid_from_array(const struct dom_sid *sid, struct dom_sid **sids,
 	for ( ; i<*num; i++ ) {
 		sid_copy( &sid_list[i], &sid_list[i+1] );
 	}
-
-	return;
 }
 
 bool add_rid_to_array_unique(TALLOC_CTX *mem_ctx,
@@ -517,6 +508,80 @@ bool is_null_sid(const struct dom_sid *sid)
 {
 	static const struct dom_sid null_sid = {0};
 	return dom_sid_equal(sid, &null_sid);
+}
+
+/**
+ * Return true if an array of SIDs contains a certain SID.
+ *
+ * @param [in] sids	The SID array.
+ * @param [in] num_sids	The size of the SID array.
+ * @param [in] sid	The SID in question.
+ * @returns true if the array contains the SID.
+ */
+bool sids_contains_sid(const struct dom_sid *sids,
+		       const uint32_t num_sids,
+		       const struct dom_sid *sid)
+{
+	uint32_t i;
+
+	for (i = 0; i < num_sids; i++) {
+		if (dom_sid_equal(&sids[i], sid)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Return true if an array of auth_SidAttr contains a certain SID.
+ *
+ * @param [in] sids	The auth_SidAttr array.
+ * @param [in] num_sids	The size of the auth_SidArray array.
+ * @param [in] sid	The SID in question.
+ * @returns true if the array contains the SID.
+ */
+bool sid_attrs_contains_sid(const struct auth_SidAttr *sids,
+			    const uint32_t num_sids,
+			    const struct dom_sid *sid)
+{
+	uint32_t i;
+
+	for (i = 0; i < num_sids; i++) {
+		if (dom_sid_equal(&sids[i].sid, sid)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Return true if an array of auth_SidAttr contains a certain SID with certain
+ * attributes.
+ *
+ * @param [in] sids	The auth_SidAttr array.
+ * @param [in] num_sids	The size of the auth_SidArray array.
+ * @param [in] sid	The SID in question.
+ * @param [in] attrs	The attributes of the SID.
+ * @returns true if the array contains the SID.
+ */
+bool sids_contains_sid_attrs(const struct auth_SidAttr *sids,
+			     const uint32_t num_sids,
+			     const struct dom_sid *sid,
+			     uint32_t attrs)
+{
+	uint32_t i;
+
+	for (i = 0; i < num_sids; i++) {
+		if (attrs != sids[i].attrs) {
+			continue;
+		}
+		if (!dom_sid_equal(&sids[i].sid, sid)) {
+			continue;
+		}
+
+		return true;
+	}
+	return false;
 }
 
 /*

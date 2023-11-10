@@ -21,6 +21,11 @@
 #ifndef _CONDITIONAL_ACE_H_
 #define _CONDITIONAL_ACE_H_
 
+#include <talloc.h>
+#include "lib/util/data_blob.h"
+
+#include "librpc/gen_ndr/conditional_ace.h"
+
 
 struct ace_condition_script *parse_conditional_ace(TALLOC_CTX *mem_ctx,
 						   DATA_BLOB data);
@@ -41,6 +46,7 @@ bool conditional_ace_encode_binary(TALLOC_CTX *mem_ctx,
 				   DATA_BLOB *dest);
 
 struct ace_condition_script * ace_conditions_compile_sddl(TALLOC_CTX *mem_ctx,
+							  const enum ace_condition_flags ace_condition_flags,
 							  const char *sddl,
 							  const char **message,
 							  size_t *message_offset,

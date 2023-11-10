@@ -1213,86 +1213,54 @@ static NTSTATUS fd_open_atomic(struct files_struct *dirfsp,
 	return status;
 }
 
-static NTSTATUS reopen_from_procfd(struct files_struct *fsp,
-				   const struct vfs_open_how *how)
-{
-	struct smb_filename proc_fname;
-	const char *p = NULL;
-	char buf[PATH_MAX];
-	int old_fd;
-	int new_fd;
-	NTSTATUS status;
-
-	if (!fsp->fsp_flags.have_proc_fds) {
-		return NT_STATUS_MORE_PROCESSING_REQUIRED;
-	}
-
-	old_fd = fsp_get_pathref_fd(fsp);
-	if (old_fd == -1) {
-		return NT_STATUS_MORE_PROCESSING_REQUIRED;
-	}
-
-	if (!fsp->fsp_flags.is_pathref) {
-		DBG_ERR("[%s] is not a pathref\n",
-			fsp_str_dbg(fsp));
-#ifdef DEVELOPER
-		smb_panic("Not a pathref");
-#endif
-		return NT_STATUS_INVALID_HANDLE;
-	}
-
-	p = sys_proc_fd_path(old_fd, buf, sizeof(buf));
-	if (p == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	proc_fname = (struct smb_filename) {
-		.base_name = discard_const_p(char, p),
-	};
-
-	fsp->fsp_flags.is_pathref = false;
-
-	new_fd = SMB_VFS_OPENAT(fsp->conn,
-				fsp->conn->cwd_fsp,
-				&proc_fname,
-				fsp,
-				how);
-	if (new_fd == -1) {
-		status = map_nt_error_from_unix(errno);
-		fd_close(fsp);
-		return status;
-	}
-
-	status = fd_close(fsp);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-
-	fsp_set_fd(fsp, new_fd);
-	return NT_STATUS_OK;
-}
-
 static NTSTATUS reopen_from_fsp(struct files_struct *dirfsp,
 				struct smb_filename *smb_fname,
 				struct files_struct *fsp,
 				const struct vfs_open_how *how,
 				bool *p_file_created)
 {
-	bool __unused_file_created = false;
 	NTSTATUS status;
+	int old_fd;
 
-	if (p_file_created == NULL) {
-		p_file_created = &__unused_file_created;
-	}
+	if (fsp->fsp_flags.have_proc_fds &&
+	    ((old_fd = fsp_get_pathref_fd(fsp)) != -1)) {
 
-	/*
-	 * TODO: should we move this to the VFS layer?
-	 *       SMB_VFS_REOPEN_FSP()?
-	 */
+		struct sys_proc_fd_path_buf buf;
+		struct smb_filename proc_fname = (struct smb_filename){
+			.base_name = sys_proc_fd_path(old_fd, &buf),
+		};
+		mode_t mode = fsp->fsp_name->st.st_ex_mode;
+		int new_fd;
 
-	status = reopen_from_procfd(fsp, how);
-	if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
-		return status;
+		SMB_ASSERT(fsp->fsp_flags.is_pathref);
+
+		if (S_ISLNK(mode)) {
+			return NT_STATUS_STOPPED_ON_SYMLINK;
+		}
+		if (!(S_ISREG(mode) || S_ISDIR(mode))) {
+			return NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+		}
+
+		fsp->fsp_flags.is_pathref = false;
+
+		new_fd = SMB_VFS_OPENAT(fsp->conn,
+					fsp->conn->cwd_fsp,
+					&proc_fname,
+					fsp,
+					how);
+		if (new_fd == -1) {
+			status = map_nt_error_from_unix(errno);
+			fd_close(fsp);
+			return status;
+		}
+
+		status = fd_close(fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+
+		fsp_set_fd(fsp, new_fd);
+		return NT_STATUS_OK;
 	}
 
 	/*
@@ -3768,6 +3736,42 @@ static void open_ntcreate_lock_cleanup_entry(struct share_mode_lock *lck,
 	}
 }
 
+static void possibly_set_archive(struct connection_struct *conn,
+				 struct files_struct *fsp,
+				 struct smb_filename *smb_fname,
+				 struct smb_filename *parent_dir_fname,
+				 int info,
+				 uint32_t dosattrs,
+				 mode_t *unx_mode)
+{
+	bool set_archive = false;
+	int ret;
+
+	if (info == FILE_WAS_OPENED) {
+		return;
+	}
+
+	/* Overwritten files should be initially set as archive */
+	if ((info == FILE_WAS_OVERWRITTEN && lp_map_archive(SNUM(conn)))) {
+		set_archive = true;
+	} else if (lp_store_dos_attributes(SNUM(conn))) {
+		set_archive = true;
+	}
+	if (!set_archive) {
+		return;
+	}
+
+	ret = file_set_dosmode(conn,
+			       smb_fname,
+			       dosattrs | FILE_ATTRIBUTE_ARCHIVE,
+			       parent_dir_fname,
+			       true);
+	if (ret != 0) {
+		return;
+	}
+	*unx_mode = smb_fname->st.st_ex_mode;
+}
+
 /****************************************************************************
  Open a file with a share mode. Passed in an already created files_struct *.
 ****************************************************************************/
@@ -4450,20 +4454,13 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		fsp->fsp_flags.initial_delete_on_close = true;
 	}
 
-	if (info != FILE_WAS_OPENED) {
-		/* Overwritten files should be initially set as archive */
-		if ((info == FILE_WAS_OVERWRITTEN && lp_map_archive(SNUM(conn))) ||
-		    lp_store_dos_attributes(SNUM(conn))) {
-			(void)fdos_mode(fsp);
-			if (!posix_open) {
-				if (file_set_dosmode(conn, smb_fname,
-					    new_dos_attributes | FILE_ATTRIBUTE_ARCHIVE,
-					    parent_dir_fname, true) == 0) {
-					unx_mode = smb_fname->st.st_ex_mode;
-				}
-			}
-		}
-	}
+	possibly_set_archive(conn,
+			     fsp,
+			     smb_fname,
+			     parent_dir_fname,
+			     info,
+			     new_dos_attributes,
+			     &smb_fname->st.st_ex_mode);
 
 	/* Determine sparse flag. */
 	if (posix_open) {
@@ -4635,7 +4632,7 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 		return NT_STATUS_NOT_A_DIRECTORY;
 	}
 
-	if (lp_store_dos_attributes(SNUM(conn)) && !posix_open) {
+	if (lp_store_dos_attributes(SNUM(conn))) {
 		file_set_dosmode(conn,
 				 smb_dname,
 				 file_attributes | FILE_ATTRIBUTE_DIRECTORY,
@@ -4924,12 +4921,13 @@ static NTSTATUS open_directory(connection_struct *conn,
 		struct vfs_open_how how = {
 			.flags = O_RDONLY | O_DIRECTORY,
 		};
+		bool file_created;
 
 		status = reopen_from_fsp(fsp->conn->cwd_fsp,
 					 fsp->fsp_name,
 					 fsp,
 					 &how,
-					 NULL);
+					 &file_created);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_INFO("Could not open fd for [%s]: %s\n",
 				 smb_fname_str_dbg(smb_dname),
@@ -5961,6 +5959,31 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 	if (create_options & NTCREATEX_OPTIONS_INVALID_PARAM_MASK) {
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto fail;
+	}
+
+	if (!(create_options & FILE_OPEN_REPARSE_POINT) &&
+	    (smb_fname->fsp != NULL) && /* new files don't have an fsp */
+	    VALID_STAT(smb_fname->fsp->fsp_name->st))
+	{
+		mode_t type = (smb_fname->fsp->fsp_name->st.st_ex_mode &
+			       S_IFMT);
+
+		switch (type) {
+		case S_IFREG:
+			FALL_THROUGH;
+		case S_IFDIR:
+			break;
+		case S_IFLNK:
+			/*
+			 * We should never get this far with a symlink
+			 * "as such". Report as not existing.
+			 */
+			status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+			goto fail;
+		default:
+			status = NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+			goto fail;
+		}
 	}
 
 	if (req == NULL) {

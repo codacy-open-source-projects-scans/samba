@@ -37,8 +37,10 @@
 #define SDDL_FLAG_EXPECTING_NON_LOCAL_ATTR   16
 #define SDDL_FLAG_EXPECTING_LITERAL          32
 #define SDDL_FLAG_EXPECTING_PAREN            64
-#define SDDL_FLAG_EXPECTING_PAREN_LITERAL   256
-#define SDDL_FLAG_NOT_EXPECTING_END_PAREN   512
+#define SDDL_FLAG_EXPECTING_PAREN_LITERAL   128
+#define SDDL_FLAG_NOT_EXPECTING_END_PAREN   256
+
+#define SDDL_FLAG_DEVICE                    512
 
 #define SDDL_FLAG_IS_UNARY_OP               (1 << 20)
 #define SDDL_FLAG_IS_BINARY_OP              (1 << 21)
@@ -114,6 +116,7 @@ struct ace_condition_sddl_compiler_context {
 	struct dom_sid *domain_sid;
 	uint32_t state;
 	uint8_t last_token_type;
+	bool allow_device;
 };
 
 struct sddl_data {
@@ -123,7 +126,7 @@ struct sddl_data {
 	uint8_t nargs;
 };
 
-static struct sddl_data sddl_strings[256] = {
+static const struct sddl_data sddl_strings[256] = {
 	/* operators */
 	[CONDITIONAL_ACE_TOKEN_MEMBER_OF] = {
 		"Member_of",
@@ -133,7 +136,7 @@ static struct sddl_data sddl_strings[256] = {
 	},
 	[CONDITIONAL_ACE_TOKEN_DEVICE_MEMBER_OF] = {
 		"Device_Member_of",
-		SDDL_FLAGS_MEMBER_OP,
+		SDDL_FLAGS_MEMBER_OP|SDDL_FLAG_DEVICE,
 		SDDL_PRECEDENCE_COMMON,
 		1
 	},
@@ -146,7 +149,7 @@ static struct sddl_data sddl_strings[256] = {
 	},
 	[CONDITIONAL_ACE_TOKEN_DEVICE_MEMBER_OF_ANY] = {
 		"Device_Member_of_Any",
-		SDDL_FLAGS_MEMBER_OP,
+		SDDL_FLAGS_MEMBER_OP|SDDL_FLAG_DEVICE,
 		SDDL_PRECEDENCE_COMMON,
 		1
 	},
@@ -158,7 +161,7 @@ static struct sddl_data sddl_strings[256] = {
 	},
 	[CONDITIONAL_ACE_TOKEN_NOT_DEVICE_MEMBER_OF] = {
 		"Not_Device_Member_of",
-		SDDL_FLAGS_MEMBER_OP,
+		SDDL_FLAGS_MEMBER_OP|SDDL_FLAG_DEVICE,
 		SDDL_PRECEDENCE_COMMON,
 		1
 	},
@@ -170,7 +173,7 @@ static struct sddl_data sddl_strings[256] = {
 	},
 	[CONDITIONAL_ACE_TOKEN_NOT_DEVICE_MEMBER_OF_ANY] = {
 		"Not_Device_Member_of_Any",
-		SDDL_FLAGS_MEMBER_OP,
+		SDDL_FLAGS_MEMBER_OP|SDDL_FLAG_DEVICE,
 		SDDL_PRECEDENCE_COMMON,
 		1
 	},
@@ -356,7 +359,7 @@ static struct sddl_data sddl_strings[256] = {
 	},
 	[CONDITIONAL_ACE_DEVICE_ATTRIBUTE] = {
 		"device attribute",
-		SDDL_FLAGS_ATTRIBUTE,
+		SDDL_FLAGS_ATTRIBUTE|SDDL_FLAG_DEVICE,
 		SDDL_NOT_AN_OP,
 		0
 	},
@@ -390,7 +393,7 @@ struct sddl_attr_type{
  * styles them in title case ("@User."), but Windows itself seems to
  * prefer all-caps, so that is how we render them.
  */
-static struct sddl_attr_type sddl_attr_types[] = {
+static const struct sddl_attr_type sddl_attr_types[] = {
 	{"USER.", CONDITIONAL_ACE_USER_ATTRIBUTE},
 	{"RESOURCE.", CONDITIONAL_ACE_RESOURCE_ATTRIBUTE},
 	{"DEVICE.", CONDITIONAL_ACE_DEVICE_ATTRIBUTE},
@@ -1268,7 +1271,6 @@ static void comp_error(struct ace_condition_sddl_compiler_context *comp,
 	if (msg == NULL) {
 		goto fail;
 	}
-	comp->message_offset = comp->offset;
 
 	if (comp->message == NULL) {
 		/*
@@ -1276,13 +1278,8 @@ static void comp_error(struct ace_condition_sddl_compiler_context *comp,
 		 *
 		 * This is the common case.
 		 */
-		comp->message = talloc_asprintf(comp->mem_ctx,
-						"%"PRIu32": %s",
-						comp->offset, msg);
-		TALLOC_FREE(msg);
-		if (comp->message == NULL) {
-			goto fail;
-		}
+		comp->message_offset = comp->offset;
+		comp->message = msg;
 		return;
 	}
 	/*
@@ -1290,8 +1287,8 @@ static void comp_error(struct ace_condition_sddl_compiler_context *comp,
 	 * This is unlikely to happen.
 	 */
 	comp->message = talloc_asprintf(comp->mem_ctx,
-					"%s AND THEN %"PRIu32": %s",
-					comp->message, comp->offset,
+					"%s AND THEN %s",
+					comp->message,
 					msg);
 	TALLOC_FREE(msg);
 	if (comp->message == NULL) {
@@ -1299,7 +1296,8 @@ static void comp_error(struct ace_condition_sddl_compiler_context *comp,
 	}
 	return;
 fail:
-	comp->message = "failed to set error message";
+	comp->message = talloc_strdup(comp->mem_ctx,
+				      "failed to set error message");
 }
 
 
@@ -2192,7 +2190,7 @@ static bool parse_word(struct ace_condition_sddl_compiler_context *comp)
 		 */
 		int uc = toupper(c);
 		for (i = 0; i < 256; i++) {
-			struct sddl_data *d = &sddl_strings[i];
+			const struct sddl_data *d = &sddl_strings[i];
 			if (sddl_strings[i].op_precedence != SDDL_NOT_AN_OP &&
 			    uc == toupper((unsigned char)d->name[0])) {
 				if (d->flags & SDDL_FLAG_IS_UNARY_OP) {
@@ -2261,6 +2259,20 @@ static bool parse_word(struct ace_condition_sddl_compiler_context *comp)
 			size_t o = candidates[j];
 			if (sddl_strings[o].name[i] == '\0') {
 				/* it is this one */
+
+				if (!comp->allow_device &&
+				    (sddl_strings[o].flags & SDDL_FLAG_DEVICE))
+				{
+					comp_error(
+						comp,
+						"a device‐relative expression "
+						"will never evaluate to true "
+						"in this context (did you "
+						"intend a user‐relative "
+						"expression?)");
+					return false;
+				}
+
 				token.type = o;
 				token.data.sddl_op.start = comp->offset;
 				comp->offset += i;
@@ -2332,7 +2344,19 @@ static bool parse_attr2(struct ace_condition_sddl_compiler_context *comp)
 				  (const char *) (comp->sddl + comp->offset),
 				  attr_len);
 		if (ret == 0) {
-			token.type = sddl_attr_types[i].code;
+			const uint8_t code = sddl_attr_types[i].code;
+
+			if (!comp->allow_device &&
+			    (sddl_strings[code].flags & SDDL_FLAG_DEVICE))
+			{
+				comp_error(comp,
+					   "a device attribute is not "
+					   "applicable in this context (did "
+					   "you intend a user attribute?)");
+				return false;
+			}
+
+			token.type = code;
 			comp->offset += attr_len;
 			break;
 		}
@@ -2414,6 +2438,7 @@ static bool parse_composite(struct ace_condition_sddl_compiler_context *comp)
 	 * where write_sddl_token() writes.
 	 */
 	bool ok;
+	bool first = true;
 	struct ace_condition_token token = {
 		.type = CONDITIONAL_ACE_TOKEN_COMPOSITE
 	};
@@ -2456,9 +2481,9 @@ static bool parse_composite(struct ace_condition_sddl_compiler_context *comp)
 	 * in this loop we are looking for:
 	 *
 	 * a) possible whitespace.
-	 * b) a literal, which may recurse into another composite
+	 * b) a comma (or terminating '}')
 	 * c) more possible whitespace
-	 * d) a comma (or terminating '}')
+	 * d) a literal
 	 *
 	 * Failures use a goto to reset comp->target, just in case we ever try
 	 * continuing after error.
@@ -2469,6 +2494,25 @@ static bool parse_composite(struct ace_condition_sddl_compiler_context *comp)
 		if (! ok) {
 			goto fail;
 		}
+		c = comp->sddl[comp->offset];
+		if (c == '}') {
+			comp->offset++;
+			break;
+		}
+		if (!first) {
+			if (c != ',') {
+				comp_error(comp,
+					   "malformed composite (expected comma)");
+				goto fail;
+			}
+			comp->offset++;
+
+			ok = eat_whitespace(comp, false);
+			if (! ok) {
+				goto fail;
+			}
+		}
+		first = false;
 		if (*comp->target_len >= alloc_size) {
 			comp_error(comp,
 				   "Too many tokens in composite "
@@ -2480,21 +2524,6 @@ static bool parse_composite(struct ace_condition_sddl_compiler_context *comp)
 		if (!ok) {
 			goto fail;
 		}
-		ok = eat_whitespace(comp, false);
-		if (! ok) {
-			goto fail;
-		}
-		c = comp->sddl[comp->offset];
-		if (c == '}') {
-			comp->offset++;
-			break;
-		}
-		if (c != ',') {
-			comp_error(comp,
-				   "malformed composite (expected comma)");
-			goto fail;
-		}
-		comp->offset++;
 	}
 	comp->target = old_target;
 	comp->target_len = old_target_len;
@@ -2676,6 +2705,7 @@ static bool parse_expression(struct ace_condition_sddl_compiler_context *comp)
 static bool init_compiler_context(
 	TALLOC_CTX *mem_ctx,
 	struct ace_condition_sddl_compiler_context *comp,
+	const enum ace_condition_flags ace_condition_flags,
 	const char *sddl,
 	size_t max_length,
 	size_t max_stack)
@@ -2713,6 +2743,7 @@ static bool init_compiler_context(
 	comp->target_len = &program->length;
 	comp->length = strlen(sddl);
 	comp->state =  SDDL_FLAG_EXPECTING_PAREN;
+	comp->allow_device = ace_condition_flags & ACE_CONDITION_FLAG_ALLOW_DEVICE;
 	return true;
 }
 
@@ -2721,6 +2752,7 @@ static bool init_compiler_context(
  *
  * @param mem_ctx
  * @param sddl - the string to be parsed
+ * @param ace_condition_flags - flags controlling compiler behaviour
  * @param message - on error, a pointer to a compiler message
  * @param message_offset - where the error occurred
  * @param consumed_length - how much of the SDDL was used
@@ -2728,6 +2760,7 @@ static bool init_compiler_context(
  */
 struct ace_condition_script * ace_conditions_compile_sddl(
 	TALLOC_CTX *mem_ctx,
+	const enum ace_condition_flags ace_condition_flags,
 	const char *sddl,
 	const char **message,
 	size_t *message_offset,
@@ -2736,12 +2769,12 @@ struct ace_condition_script * ace_conditions_compile_sddl(
 	bool ok;
 	struct ace_condition_sddl_compiler_context comp = {};
 
-	/* just in case, a message for the next few tallocs */
-	*message = "allocation error";
+	*message = NULL;
 	*message_offset = 0;
 
 	ok = init_compiler_context(mem_ctx,
 				   &comp,
+				   ace_condition_flags,
 				   sddl,
 				   CONDITIONAL_ACE_MAX_LENGTH,
 				   CONDITIONAL_ACE_MAX_TOKENS);
@@ -2875,6 +2908,7 @@ static bool parse_resource_attr_list(
 	 * - SIDs are not written with SID(...) around them.
 	 */
 	bool ok;
+	bool first = true;
 	struct ace_condition_token composite = {
 		.type = CONDITIONAL_ACE_TOKEN_COMPOSITE
 	};
@@ -2910,9 +2944,9 @@ static bool parse_resource_attr_list(
 	 * in this loop we are looking for:
 	 *
 	 * a) possible whitespace.
-	 * b) a literal, of the right type (checked after)
+	 * b) a comma (or terminating ')')
 	 * c) more possible whitespace
-	 * d) a comma
+	 * d) a literal, of the right type (checked after)
 	 *
 	 * Failures use a goto to reset comp->target, just in case we ever try
 	 * continuing after error.
@@ -2923,6 +2957,24 @@ static bool parse_resource_attr_list(
 		if (! ok) {
 			goto fail;
 		}
+		c = comp->sddl[comp->offset];
+		if (c == ')') {
+			break;
+		}
+		if (!first) {
+			if (c != ',') {
+				comp_error(comp,
+					   "malformed composite (expected comma)");
+				goto fail;
+			}
+			comp->offset++;
+
+			ok = eat_whitespace(comp, false);
+			if (! ok) {
+				goto fail;
+			}
+		}
+		first = false;
 		if (*comp->target_len >= alloc_size) {
 			comp_error(comp,
 				   "Too many tokens in composite "
@@ -2945,21 +2997,6 @@ static bool parse_resource_attr_list(
 		if (! ok) {
 			goto fail;
 		}
-
-		ok = eat_whitespace(comp, false);
-		if (! ok) {
-			goto fail;
-		}
-		c = comp->sddl[comp->offset];
-		if (c == ')') {
-			break;
-		}
-		if (c != ',') {
-			comp_error(comp,
-				   "malformed composite (expected comma)");
-			goto fail;
-		}
-		comp->offset++;
 	}
 	comp->target = old_target;
 	comp->target_len = old_target_len;
@@ -3023,7 +3060,12 @@ struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *sddl_decode_resource_attr (
 	size_t len;
 	struct ace_condition_unicode attr_name = {};
 
-	ok = init_compiler_context(mem_ctx, &comp, str, 3, 3);
+	ok = init_compiler_context(mem_ctx,
+				   &comp,
+				   ACE_CONDITION_FLAG_ALLOW_DEVICE,
+				   str,
+				   3,
+				   3);
 	if (!ok) {
 		return NULL;
 	}
@@ -3299,7 +3341,12 @@ struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *parse_sddl_literal_as_claim(
 	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim = NULL;
 	struct ace_condition_sddl_compiler_context comp = {};
 
-	ok = init_compiler_context(mem_ctx, &comp, str, 2, 2);
+	ok = init_compiler_context(mem_ctx,
+				   &comp,
+				   ACE_CONDITION_FLAG_ALLOW_DEVICE,
+				   str,
+				   2,
+				   2);
 	if (!ok) {
 		return NULL;
 	}

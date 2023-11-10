@@ -343,13 +343,6 @@ char *get_original_lcomp(TALLOC_CTX *ctx,
 			connection_struct *conn,
 			const char *filename_in,
 			uint32_t ucf_flags);
-NTSTATUS filename_convert_smb1_search_path(TALLOC_CTX *ctx,
-					   connection_struct *conn,
-					   char *name_in,
-					   uint32_t ucf_flags,
-					   struct files_struct **_dirfsp,
-					   struct smb_filename **_smb_fname_out,
-					   char **_mask_out);
 NTSTATUS get_real_filename_at(struct files_struct *dirfsp,
 			      const char *name,
 			      TALLOC_CTX *mem_ctx,
@@ -438,6 +431,11 @@ struct open_symlink_err {
 	struct symlink_reparse_struct *reparse;
 };
 
+NTSTATUS create_open_symlink_err(TALLOC_CTX *mem_ctx,
+				 files_struct *dirfsp,
+				 struct smb_filename *smb_relname,
+				 struct open_symlink_err **_err);
+
 NTSTATUS openat_pathref_fsp_nosymlink(TALLOC_CTX *mem_ctx,
 				      struct connection_struct *conn,
 				      struct files_struct *dirfsp,
@@ -446,6 +444,9 @@ NTSTATUS openat_pathref_fsp_nosymlink(TALLOC_CTX *mem_ctx,
 				      bool posix,
 				      struct smb_filename **_smb_fname,
 				      struct open_symlink_err **_symlink_err);
+NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
+				  struct smb_filename *smb_fname_rel,
+				  uint32_t ucf_flags);
 NTSTATUS readlink_talloc(
 	TALLOC_CTX *mem_ctx,
 	struct files_struct *dirfsp,

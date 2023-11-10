@@ -249,6 +249,13 @@ krb5_asn1.KerbErrorDataType.prettyPrint =\
 
 
 class Krb5EncryptionKey:
+    __slots__ = [
+        'ctype',
+        'etype',
+        'key',
+        'kvno',
+    ]
+
     def __init__(self, key, kvno):
         EncTypeChecksum = {
             kcrypto.Enctype.AES256: kcrypto.Cksumtype.SHA1_AES256,
@@ -305,6 +312,8 @@ class Krb5EncryptionKey:
 
 
 class RodcPacEncryptionKey(Krb5EncryptionKey):
+    __slots__ = ['rodc_id']
+
     def __init__(self, key, kvno, rodc_id=None):
         super().__init__(key, kvno)
 
@@ -352,6 +361,8 @@ class ZeroedChecksumKey(RodcPacEncryptionKey):
 
 
 class WrongLengthChecksumKey(RodcPacEncryptionKey):
+    __slots__ = ['_length']
+
     def __init__(self, key, kvno, length):
         super().__init__(key, kvno)
 
@@ -383,6 +394,20 @@ class WrongLengthChecksumKey(RodcPacEncryptionKey):
 
 
 class KerberosCredentials(Credentials):
+    __slots__ = [
+        '_private_key',
+        'account_type',
+        'ap_supported_enctypes',
+        'as_supported_enctypes',
+        'dn',
+        'forced_keys',
+        'forced_salt',
+        'kvno',
+        'sid',
+        'spn',
+        'tgs_supported_enctypes',
+        'upn',
+    ]
 
     non_etype_bits = (
         security.KERB_ENCTYPE_FAST_SUPPORTED) | (
@@ -586,6 +611,18 @@ class KerberosCredentials(Credentials):
 
 
 class KerberosTicketCreds:
+    __slots__ = [
+        'cname',
+        'crealm',
+        'decryption_key',
+        'encpart_private',
+        'session_key',
+        'sname',
+        'srealm',
+        'ticket_private',
+        'ticket',
+    ]
+
     def __init__(self, ticket, session_key,
                  crealm=None, cname=None,
                  srealm=None, sname=None,
@@ -3051,6 +3088,7 @@ class RawKerberosTest(TestCase):
                          unexpected_device_claims=None,
                          expect_resource_groups_flag=None,
                          expected_device_groups=None,
+                         expected_extra_pac_buffers=None,
                          to_rodc=False):
         if expected_error_mode == 0:
             expected_error_mode = ()
@@ -3130,6 +3168,7 @@ class RawKerberosTest(TestCase):
             'unexpected_device_claims': unexpected_device_claims,
             'expect_resource_groups_flag': expect_resource_groups_flag,
             'expected_device_groups': expected_device_groups,
+            'expected_extra_pac_buffers': expected_extra_pac_buffers,
             'to_rodc': to_rodc
         }
         if callback_dict is None:
@@ -3204,6 +3243,7 @@ class RawKerberosTest(TestCase):
                           unexpected_device_claims=None,
                           expect_resource_groups_flag=None,
                           expected_device_groups=None,
+                          expected_extra_pac_buffers=None,
                           to_rodc=False):
         if expected_error_mode == 0:
             expected_error_mode = ()
@@ -3282,6 +3322,7 @@ class RawKerberosTest(TestCase):
             'unexpected_device_claims': unexpected_device_claims,
             'expect_resource_groups_flag': expect_resource_groups_flag,
             'expected_device_groups': expected_device_groups,
+            'expected_extra_pac_buffers': expected_extra_pac_buffers,
             'to_rodc': to_rodc
         }
         if callback_dict is None:
@@ -4444,6 +4485,10 @@ class RawKerberosTest(TestCase):
             self.sent_pk_as_req_win2k(kdc_exchange_dict))
         if sent_pk_as_req:
             expected_types.append(krb5pac.PAC_TYPE_CREDENTIAL_INFO)
+
+        expected_extra_pac_buffers = kdc_exchange_dict['expected_extra_pac_buffers']
+        if expected_extra_pac_buffers is not None:
+            expected_types.extend(expected_extra_pac_buffers)
 
         buffer_types = [pac_buffer.type
                         for pac_buffer in pac.buffers]

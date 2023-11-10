@@ -21,7 +21,6 @@
 #
 
 import json
-from collections import defaultdict
 from unittest.mock import patch
 
 from samba.netcmd.domain.models.exceptions import ModelError
@@ -33,7 +32,7 @@ from .domain_auth_base import BaseAuthCmdTest
 
 class AuthSiloCmdTestCase(BaseAuthCmdTest):
 
-    def test_authentication_silo_list(self):
+    def test_list(self):
         """Test listing authentication silos in list format."""
         result, out, err = self.runcmd("domain", "auth", "silo", "list")
         self.assertIsNone(result, msg=err)
@@ -43,7 +42,7 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
         for silo in expected_silos:
             self.assertIn(silo, out)
 
-    def test_authentication_silo_list_json(self):
+    def test_list___json(self):
         """Test listing authentication silos in JSON format."""
         result, out, err = self.runcmd("domain", "auth", "silo",
                                        "list", "--json")
@@ -58,12 +57,10 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
             silo = silos[name]
             self.assertIn("msDS-AuthNPolicySilo", list(silo["objectClass"]))
             self.assertIn("description", silo)
-            self.assertIn("msDS-ComputerAuthNPolicy", silo)
-            self.assertIn("msDS-ServiceAuthNPolicy", silo)
             self.assertIn("msDS-UserAuthNPolicy", silo)
             self.assertIn("objectGUID", silo)
 
-    def test_authentication_silo_view(self):
+    def test_view(self):
         """Test viewing a single authentication silo."""
         result, out, err = self.runcmd("domain", "auth", "silo", "view",
                                        "--name", "Developers")
@@ -74,168 +71,180 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
 
         # check a few fields only
         self.assertEqual(silo["cn"], "Developers")
-        self.assertEqual(silo["description"], "Developers, Developers")
+        self.assertEqual(silo["description"],
+                         "Developers, Developers, Developers!")
 
-    def test_authentication_silo_view_notfound(self):
+    def test_view__notfound(self):
         """Test viewing an authentication silo that doesn't exist."""
         result, out, err = self.runcmd("domain", "auth", "silo", "view",
                                        "--name", "doesNotExist")
         self.assertEqual(result, -1)
         self.assertIn("Authentication silo doesNotExist not found.", err)
 
-    def test_authentication_silo_view_name_required(self):
+    def test_view__name_required(self):
         """Test view authentication silo without --name argument."""
         result, out, err = self.runcmd("domain", "auth", "silo", "view")
         self.assertEqual(result, -1)
         self.assertIn("Argument --name is required.", err)
 
-    def test_authentication_silo_create_single_policy(self):
+    def test_create__single_policy(self):
         """Test creating a new authentication silo with a single policy."""
-        self.addCleanup(self.delete_authentication_silo,
-                        name="singlePolicy", force=True)
+        name = self.unique_name()
 
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "singlePolicy",
-                                       "--policy", "Single Policy")
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy")
         self.assertIsNone(result, msg=err)
 
         # Check silo that was created
-        silo = self.get_authentication_silo("singlePolicy")
-        self.assertEqual(str(silo["cn"]), "singlePolicy")
-        self.assertIn("Single Policy", str(silo["msDS-UserAuthNPolicy"]))
-        self.assertIn("Single Policy", str(silo["msDS-ServiceAuthNPolicy"]))
-        self.assertIn("Single Policy", str(silo["msDS-ComputerAuthNPolicy"]))
+        silo = self.get_authentication_silo(name)
+        self.assertEqual(str(silo["cn"]), name)
+        self.assertIn("User Policy", str(silo["msDS-UserAuthNPolicy"]))
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "TRUE")
 
-    def test_authentication_silo_create_multiple_policies(self):
+    def test_create__multiple_policies(self):
         """Test creating a new authentication silo with multiple policies."""
-        self.addCleanup(self.delete_authentication_silo,
-                        name="multiplePolicies", force=True)
+        name = self.unique_name()
 
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "multiplePolicies",
-                                       "--user-policy", "User Policy",
-                                       "--service-policy", "Service Policy",
-                                       "--computer-policy", "Computer Policy")
+                                       "--name", name,
+                                       "--user-authentication-policy",
+                                       "User Policy",
+                                       "--service-authentication-policy",
+                                       "Service Policy",
+                                       "--computer-authentication-policy",
+                                       "Computer Policy")
         self.assertIsNone(result, msg=err)
 
         # Check silo that was created.
-        silo = self.get_authentication_silo("multiplePolicies")
-        self.assertEqual(str(silo["cn"]), "multiplePolicies")
+        silo = self.get_authentication_silo(name)
+        self.assertEqual(str(silo["cn"]), name)
         self.assertIn("User Policy", str(silo["msDS-UserAuthNPolicy"]))
         self.assertIn("Service Policy", str(silo["msDS-ServiceAuthNPolicy"]))
         self.assertIn("Computer Policy", str(silo["msDS-ComputerAuthNPolicy"]))
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "TRUE")
 
-    def test_authentication_silo_create_policy_dn(self):
+    def test_create__policy_dn(self):
         """Test creating a new authentication silo when policy is a dn."""
-        policy = self.get_authentication_policy("Single Policy")
+        name = self.unique_name()
+        policy = self.get_authentication_policy("User Policy")
 
-        self.addCleanup(self.delete_authentication_silo,
-                        name="singlePolicyDN", force=True)
-
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "singlePolicyDN",
-                                       "--policy", policy["dn"])
+                                       "--name", name,
+                                       "--user-authentication-policy", policy["dn"])
         self.assertIsNone(result, msg=err)
 
         # Check silo that was created
-        silo = self.get_authentication_silo("singlePolicyDN")
-        self.assertEqual(str(silo["cn"]), "singlePolicyDN")
+        silo = self.get_authentication_silo(name)
+        self.assertEqual(str(silo["cn"]), name)
         self.assertIn(str(policy["name"]), str(silo["msDS-UserAuthNPolicy"]))
-        self.assertIn(str(policy["name"]), str(silo["msDS-ServiceAuthNPolicy"]))
-        self.assertIn(str(policy["name"]), str(silo["msDS-ComputerAuthNPolicy"]))
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "TRUE")
 
-    def test_authentication_silo_create_already_exists(self):
+    def test_create__already_exists(self):
         """Test creating a new authentication silo that already exists."""
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
                                        "--name", "Developers",
-                                       "--policy", "Single Policy")
+                                       "--user-authentication-policy", "User Policy")
         self.assertEqual(result, -1)
         self.assertIn("Authentication silo Developers already exists.", err)
 
-    def test_authentication_silo_create_name_missing(self):
+    def test_create__name_missing(self):
         """Test create authentication silo without --name argument."""
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--policy", "Single Policy")
+                                       "--user-authentication-policy", "User Policy")
         self.assertEqual(result, -1)
         self.assertIn("Argument --name is required.", err)
 
-    def test_authentication_silo_create_audit(self):
+    def test_create__audit(self):
         """Test create authentication silo with --audit flag."""
-        self.addCleanup(self.delete_authentication_silo,
-                        name="auditPolicies", force=True)
+        name = self.unique_name()
 
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
                                        "--name", "auditPolicies",
-                                       "--policy", "Single Policy",
+                                       "--user-authentication-policy", "User Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--audit")
         self.assertIsNone(result, msg=err)
 
         # fetch and check silo
-        silo = self.get_authentication_silo("auditPolicies")
+        silo = self.get_authentication_silo(name)
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "FALSE")
 
-    def test_authentication_silo_create_enforce(self):
+    def test_create__enforce(self):
         """Test create authentication silo with --enforce flag."""
-        self.addCleanup(self.delete_authentication_silo,
-                        name="enforcePolicies", force=True)
+        name = self.unique_name()
 
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "enforcePolicies",
-                                       "--policy", "Single Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--enforce")
         self.assertIsNone(result, msg=err)
 
         # fetch and check silo
-        silo = self.get_authentication_silo("enforcePolicies")
+        silo = self.get_authentication_silo(name)
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "TRUE")
 
-    def test_authentication_silo_create_audit_enforce_together(self):
+    def test_create__audit_enforce_together(self):
         """Test create authentication silo using both --audit and --enforce."""
+        name = self.unique_name()
+
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "enforceTogether",
-                                       "--policy", "Single Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--audit", "--enforce")
+
         self.assertEqual(result, -1)
         self.assertIn("--audit and --enforce cannot be used together.", err)
 
-    def test_authentication_silo_create_protect_unprotect_together(self):
+    def test_create__protect_unprotect_together(self):
         """Test create authentication silo using --protect and --unprotect."""
-        result, out, err = self.runcmd("domain", "auth", "silo",
-                                       "create", "--name", "protectTogether",
-                                       "--policy", "Single Policy",
+        name = self.unique_name()
+
+        result, out, err = self.runcmd("domain", "auth", "silo", "create",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--protect", "--unprotect")
+
         self.assertEqual(result, -1)
         self.assertIn("--protect and --unprotect cannot be used together.", err)
 
-    def test_authentication_silo_create_policy_notfound(self):
+    def test_create__policy_notfound(self):
         """Test create authentication silo with a policy that doesn't exist."""
+        name = self.unique_name()
+
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name", "policyNotFound",
-                                       "--policy", "Invalid Policy")
+                                       "--name", name,
+                                       "--user-authentication-policy", "Invalid Policy")
+
         self.assertEqual(result, -1)
         self.assertIn("Authentication policy Invalid Policy not found.", err)
 
-    def test_authentication_silo_create_fails(self):
+    def test_create__fails(self):
         """Test creating an authentication silo, but it fails."""
+        name = self.unique_name()
+
         # Raise ModelError when ldb.add() is called.
         with patch.object(SamDB, "add") as add_mock:
             add_mock.side_effect = ModelError("Custom error message")
             result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                           "--name", "createFails",
-                                           "--policy", "Single Policy")
+                                           "--name", name,
+                                           "--user-authentication-policy", "User Policy")
             self.assertEqual(result, -1)
             self.assertIn("Custom error message", err)
 
-    def test_authentication_silo_modify_description(self):
+    def test_modify__description(self):
         """Test modify authentication silo changing the description field."""
+        name = self.unique_name()
+
         # Create a silo to modify for this test.
-        name = "modifyDescription"
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         self.runcmd("domain", "auth", "silo", "create", "--name", name)
-        self.addCleanup(self.delete_authentication_silo,
-                        name=name, force=True)
 
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
                                        "--name", name,
@@ -246,13 +255,13 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
         silo = self.get_authentication_silo(name)
         self.assertEqual(str(silo["description"]), "New Description")
 
-    def test_authentication_silo_modify_audit_enforce(self):
+    def test_modify__audit_enforce(self):
         """Test modify authentication silo setting --audit and --enforce."""
+        name = self.unique_name()
+
         # Create a silo to modify for this test.
-        name = "modifyEnforce"
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         self.runcmd("domain", "auth", "silo", "create", "--name", name)
-        self.addCleanup(self.delete_authentication_silo,
-                        name=name, force=True)
 
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
                                        "--name", name,
@@ -272,13 +281,13 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
         silo = self.get_authentication_silo(name)
         self.assertEqual(str(silo["msDS-AuthNPolicySiloEnforced"]), "TRUE")
 
-    def test_authentication_silo_modify_protect_unprotect(self):
+    def test_modify__protect_unprotect(self):
         """Test modify un-protecting and protecting an authentication silo."""
+        name = self.unique_name()
+
         # Create a silo to modify for this test.
-        name = "modifyProtect"
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         self.runcmd("domain", "auth", "silo", "create", "--name", name)
-        self.addCleanup(self.delete_authentication_silo,
-                        name=name, force=True)
 
         utils = SDUtils(self.samdb)
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
@@ -301,23 +310,24 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
         desc = utils.get_sd_as_sddl(silo["dn"])
         self.assertNotIn("(D;;DTSD;;;WD)", desc)
 
-    def test_authentication_silo_modify_audit_enforce_together(self):
+    def test_modify__audit_enforce_together(self):
         """Test modify silo doesn't allow both --audit and --enforce."""
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
-                                       "--name", "qa",
+                                       "--name", "QA",
                                        "--audit", "--enforce")
+
         self.assertEqual(result, -1)
         self.assertIn("--audit and --enforce cannot be used together.", err)
 
-    def test_authentication_silo_modify_protect_unprotect_together(self):
+    def test_modify__protect_unprotect_together(self):
         """Test modify silo using both --protect and --unprotect."""
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
-                                       "--name", "developers",
+                                       "--name", "Developers",
                                        "--protect", "--unprotect")
         self.assertEqual(result, -1)
         self.assertIn("--protect and --unprotect cannot be used together.", err)
 
-    def test_authentication_silo_modify_notfound(self):
+    def test_modify__notfound(self):
         """Test modify an authentication silo that doesn't exist."""
         result, out, err = self.runcmd("domain", "auth", "silo", "modify",
                                        "--name", "doesNotExist",
@@ -325,142 +335,161 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
         self.assertEqual(result, -1)
         self.assertIn("Authentication silo doesNotExist not found.", err)
 
-    def test_authentication_silo_modify_name_missing(self):
+    def test_modify__name_missing(self):
         """Test modify authentication silo without --name argument."""
         result, out, err = self.runcmd("domain", "auth", "silo", "modify")
         self.assertEqual(result, -1)
         self.assertIn("Argument --name is required.", err)
 
-    def test_authentication_silo_modify_fails(self):
+    def test_modify__fails(self):
         """Test modify authentication silo, but it fails."""
         # Raise ModelError when ldb.modify() is called.
         with patch.object(SamDB, "modify") as add_mock:
             add_mock.side_effect = ModelError("Custom error message")
             result, out, err = self.runcmd("domain", "auth", "silo", "modify",
-                                           "--name", "developers",
+                                           "--name", "Developers",
                                            "--description", "Devs")
             self.assertEqual(result, -1)
             self.assertIn("Custom error message", err)
 
     def test_authentication_silo_delete(self):
         """Test deleting an authentication silo that is not protected."""
+        name = self.unique_name()
+
         # Create non-protected authentication silo.
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name=deleteTest",
-                                       "--policy", "User Policy")
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy")
         self.assertIsNone(result, msg=err)
-        silo = self.get_authentication_silo("deleteTest")
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
         # Do the deletion.
         result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                       "--name", "deleteTest")
+                                       "--name", name)
         self.assertIsNone(result, msg=err)
 
         # Authentication silo shouldn't exist anymore.
-        silo = self.get_authentication_silo("deleteTest")
+        silo = self.get_authentication_silo(name)
         self.assertIsNone(silo)
 
-    def test_authentication_silo_delete_protected(self):
+    def test_delete__protected(self):
         """Test deleting a protected auth silo, with and without --force."""
+        name = self.unique_name()
+
         # Create protected authentication silo.
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name=deleteProtected",
-                                       "--policy", "User Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--protect")
         self.assertIsNone(result, msg=err)
-        silo = self.get_authentication_silo("deleteProtected")
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
         # Do the deletion.
         result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                       "--name=deleteProtected")
+                                       "--name", name)
         self.assertEqual(result, -1)
 
         # Authentication silo should still exist.
-        silo = self.get_authentication_silo("deleteProtected")
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
         # Try a force delete instead.
         result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                       "--name=deleteProtected", "--force")
+                                       "--name", name, "--force")
         self.assertIsNone(result, msg=err)
 
         # Authentication silo shouldn't exist anymore.
-        silo = self.get_authentication_silo("deleteProtected")
+        silo = self.get_authentication_silo(name)
         self.assertIsNone(silo)
 
-    def test_authentication_silo_delete_notfound(self):
+    def test_delete__notfound(self):
         """Test deleting an authentication silo that doesn't exist."""
         result, out, err = self.runcmd("domain", "auth", "silo", "delete",
                                        "--name", "doesNotExist")
         self.assertEqual(result, -1)
         self.assertIn("Authentication silo doesNotExist not found.", err)
 
-    def test_authentication_silo_delete_name_required(self):
+    def test_delete__name_required(self):
         """Test deleting an authentication silo without --name argument."""
         result, out, err = self.runcmd("domain", "auth", "silo", "delete")
         self.assertEqual(result, -1)
         self.assertIn("Argument --name is required.", err)
 
-    def test_authentication_silo_delete_force_fails(self):
+    def test_delete__force_fails(self):
         """Test deleting an authentication silo with --force, but it fails."""
+        name = self.unique_name()
+
         # Create protected authentication silo.
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name=deleteForceFail",
-                                       "--policy", "User Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--protect")
         self.assertIsNone(result, msg=err)
-        silo = self.get_authentication_silo("deleteForceFail")
+
+        # Silo exists
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
-        # Try delete with --force.
+        # Try doing delete with --force.
         # Patch SDUtils.dacl_delete_aces with a Mock that raises ModelError.
         with patch.object(SDUtils, "dacl_delete_aces") as delete_mock:
             delete_mock.side_effect = ModelError("Custom error message")
             result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                           "--name", "deleteForceFail",
+                                           "--name", name,
                                            "--force")
             self.assertEqual(result, -1)
             self.assertIn("Custom error message", err)
 
-    def test_authentication_silo_delete_fails(self):
+    def test_delete__fails(self):
         """Test deleting an authentication silo, but it fails."""
+        name = self.unique_name()
+
         # Create regular authentication silo.
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name=regularSilo",
-                                       "--policy", "User Policy")
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy")
         self.assertIsNone(result, msg=err)
-        silo = self.get_authentication_silo("regularSilo")
+
+        # Silo exists
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
         # Raise ModelError when ldb.delete() is called.
         with patch.object(SamDB, "delete") as delete_mock:
             delete_mock.side_effect = ModelError("Custom error message")
             result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                           "--name", "regularSilo")
+                                           "--name", name)
             self.assertEqual(result, -1)
             self.assertIn("Custom error message", err)
 
             # When not using --force we get a hint.
             self.assertIn("Try --force", err)
 
-    def test_authentication_silo_delete_protected_fails(self):
+    def test_delete__protected_fails(self):
         """Test deleting an authentication silo, but it fails."""
+        name = self.unique_name()
+
         # Create protected authentication silo.
+        self.addCleanup(self.delete_authentication_silo, name=name, force=True)
         result, out, err = self.runcmd("domain", "auth", "silo", "create",
-                                       "--name=protectedSilo",
-                                       "--policy", "User Policy",
+                                       "--name", name,
+                                       "--user-authentication-policy", "User Policy",
                                        "--protect")
         self.assertIsNone(result, msg=err)
-        silo = self.get_authentication_silo("protectedSilo")
+
+        # Silo exists
+        silo = self.get_authentication_silo(name)
         self.assertIsNotNone(silo)
 
         # Raise ModelError when ldb.delete() is called.
         with patch.object(SamDB, "delete") as delete_mock:
             delete_mock.side_effect = ModelError("Custom error message")
             result, out, err = self.runcmd("domain", "auth", "silo", "delete",
-                                           "--name", "protectedSilo",
+                                           "--name", name,
                                            "--force")
             self.assertEqual(result, -1)
             self.assertIn("Custom error message", err)
@@ -473,28 +502,17 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
 
     def setUp(self):
         super().setUp()
-        self.members = defaultdict(list)
 
         # Create an organisational unit to test in.
         self.ou = self.samdb.get_default_basedn()
         self.ou.add_child("OU=Domain Auth Tests")
         self.samdb.create_ou(self.ou)
+        self.addCleanup(self.samdb.delete, self.ou, ["tree_delete:1"])
 
         # Assign members to silos
         self.add_silo_member("Developers", "bob")
         self.add_silo_member("Developers", "jane")
         self.add_silo_member("Managers", "alice")
-
-    def tearDown(self):
-        # Remove organisational unit.
-        self.samdb.delete(self.ou, ["tree_delete:1"])
-
-        # Remove members from silos.
-        for silo, members in self.members.items():
-            for member in members:
-                self.remove_silo_member(silo, member)
-
-        super().tearDown()
 
     def create_computer(self, name):
         """Create a Computer and return the dn."""
@@ -510,9 +528,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
 
         self.assertIsNone(result, msg=err)
         self.assertIn(f"User '{member}' added to the {silo} silo.", out)
-
-        # Ensure that tearDown cleans up the silo members.
-        self.members[silo].append(member)
+        self.addCleanup(self.remove_silo_member, silo, member)
 
     def remove_silo_member(self, silo, member):
         """Remove a member to an authentication silo."""
@@ -522,7 +538,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
 
         self.assertIsNone(result, msg=err)
 
-    def test_authentication_silo_member_list(self):
+    def test_member_list(self):
         """Test listing authentication policy members in list format."""
         alice = self.get_user("alice")
         jane = self.get_user("jane")
@@ -537,7 +553,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.assertIn(str(jane.dn), out)
         self.assertNotIn(str(alice.dn), out)
 
-    def test_authentication_silo_member_list_json(self):
+    def test_member_list___json(self):
         """Test listing authentication policy members list in json format."""
         alice = self.get_user("alice")
         jane = self.get_user("jane")
@@ -554,7 +570,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.assertIn(str(jane.dn), members_dn)
         self.assertNotIn(str(alice.dn), members_dn)
 
-    def test_authentication_silo_member_list_name_missing(self):
+    def test_member_list__name_missing(self):
         """Test list authentication policy members without the name argument."""
         result, out, err = self.runcmd("domain", "auth", "silo",
                                        "member", "list")
@@ -562,7 +578,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.assertIsNotNone(result)
         self.assertIn("Argument --name is required.", err)
 
-    def test_authentication_silo_member_add_user(self):
+    def test_member_add__user(self):
         """Test adding a user to an authentication silo."""
         self.add_silo_member("Developers", "joe")
 
@@ -572,7 +588,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         members = [str(member) for member in silo["msDS-AuthNPolicySiloMembers"]]
         self.assertIn(str(user.dn), members)
 
-    def test_authentication_silo_member_add_computer(self):
+    def test_member_add__computer(self):
         """Test adding a computer to an authentication silo"""
         name = "AUTH_SILO_CMP"
         computer = self.create_computer(name)
@@ -587,7 +603,7 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.assertIsNone(result, msg=err)
         self.assertIn(f"User '{name}' added to the {silo} silo.", out)
 
-    def test_authentication_silo_member_add_unknown_user(self):
+    def test_member_add__unknown_user(self):
         """Test adding an unknown user to an authentication silo."""
         result, out, err = self.runcmd("domain", "auth", "silo",
                                        "member", "add",

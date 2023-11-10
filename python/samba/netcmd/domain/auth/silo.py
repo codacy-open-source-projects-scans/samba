@@ -115,18 +115,15 @@ class cmd_domain_auth_silo_create(Command):
         Option("--description",
                help="Optional description for authentication silo.",
                dest="description", action="store", type=str),
-        Option("--policy",
-               help="Use single policy for all principals in this silo.",
-               dest="policy", action="store", type=str),
-        Option("--user-policy",
-               help="User account policy.",
-               dest="user_policy", action="store", type=str),
-        Option("--service-policy",
-               help="Managed Service Account policy.",
-               dest="service_policy", action="store", type=str),
-        Option("--computer-policy",
-               help="Computer account policy.",
-               dest="computer_policy", action="store", type=str),
+        Option("--user-authentication-policy",
+               help="User account authentication policy.",
+               dest="user_authentication_policy", action="store", type=str),
+        Option("--service-authentication-policy",
+               help="Managed service account authentication policy.",
+               dest="service_authentication_policy", action="store", type=str),
+        Option("--computer-authentication-policy",
+               help="Computer authentication policy.",
+               dest="computer_authentication_policy", action="store", type=str),
         Option("--protect",
                help="Protect authentication silo from accidental deletion.",
                dest="protect", action="store_true"),
@@ -153,22 +150,18 @@ class cmd_domain_auth_silo_create(Command):
         except (LookupError, ValueError) as e:
             raise CommandError(e)
 
-    def run(self, hostopts=None, sambaopts=None, credopts=None, name=None,
-            description=None, policy=None, user_policy=None,
-            service_policy=None, computer_policy=None, protect=None,
-            unprotect=None, audit=None, enforce=None):
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
+            name=None, description=None,
+            user_authentication_policy=None,
+            service_authentication_policy=None,
+            computer_authentication_policy=None,
+            protect=None, unprotect=None,
+            audit=None, enforce=None):
 
         if protect and unprotect:
             raise CommandError("--protect and --unprotect cannot be used together.")
         if audit and enforce:
             raise CommandError("--audit and --enforce cannot be used together.")
-
-        # If --policy is present start with that as the base. Then optionally
-        # --user-policy, --service-policy, --computer-policy can override this.
-        if policy is not None:
-            user_policy = user_policy or policy
-            service_policy = service_policy or policy
-            computer_policy = computer_policy or policy
 
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
@@ -185,16 +178,19 @@ class cmd_domain_auth_silo_create(Command):
         silo = AuthenticationSilo(cn=name, description=description)
 
         # Set user policy
-        if user_policy:
-            silo.user_policy = self.get_policy(ldb, user_policy).dn
+        if user_authentication_policy:
+            silo.user_authentication_policy = \
+                self.get_policy(ldb, user_authentication_policy).dn
 
         # Set service policy
-        if service_policy:
-            silo.service_policy = self.get_policy(ldb, service_policy).dn
+        if service_authentication_policy:
+            silo.service_authentication_policy = \
+                self.get_policy(ldb, service_authentication_policy).dn
 
         # Set computer policy
-        if computer_policy:
-            silo.computer_policy = self.get_policy(ldb, computer_policy).dn
+        if computer_authentication_policy:
+            silo.computer_authentication_policy = \
+                self.get_policy(ldb, computer_authentication_policy).dn
 
         # Either --enforce will be set or --audit but never both.
         # The default if both are missing is enforce=True.
@@ -233,18 +229,15 @@ class cmd_domain_auth_silo_modify(Command):
         Option("--description",
                help="Optional description for authentication silo.",
                dest="description", action="store", type=str),
-        Option("--policy",
-               help="Set single policy for all principals in this silo.",
-               dest="policy", action="store", type=str),
-        Option("--user-policy",
-               help="Set User account policy.",
-               dest="user_policy", action="store", type=str),
-        Option("--service-policy",
-               help="Set Managed Service Account policy.",
-               dest="service_policy", action="store", type=str),
-        Option("--computer-policy",
-               help="Set Computer Account policy.",
-               dest="computer_policy", action="store", type=str),
+        Option("--user-authentication-policy",
+               help="User account authentication policy.",
+               dest="user_authentication_policy", action="store", type=str),
+        Option("--service-authentication-policy",
+               help="Managed service account authentication policy.",
+               dest="service_authentication_policy", action="store", type=str),
+        Option("--computer-authentication-policy",
+               help="Computer authentication policy.",
+               dest="computer_authentication_policy", action="store", type=str),
         Option("--protect",
                help="Protect authentication silo from accidental deletion.",
                dest="protect", action="store_true"),
@@ -271,22 +264,18 @@ class cmd_domain_auth_silo_modify(Command):
         except (LookupError, ModelError, ValueError) as e:
             raise CommandError(e)
 
-    def run(self, hostopts=None, sambaopts=None, credopts=None, name=None,
-            description=None, policy=None, user_policy=None,
-            service_policy=None, computer_policy=None, protect=None,
-            unprotect=None, audit=None, enforce=None):
+    def run(self, hostopts=None, sambaopts=None, credopts=None,
+            name=None, description=None,
+            user_authentication_policy=None,
+            service_authentication_policy=None,
+            computer_authentication_policy=None,
+            protect=None, unprotect=None,
+            audit=None, enforce=None):
 
         if audit and enforce:
             raise CommandError("--audit and --enforce cannot be used together.")
         if protect and unprotect:
             raise CommandError("--protect and --unprotect cannot be used together.")
-
-        # If --policy is set then start with that for all policies.
-        # They can be individually overridden as well after that.
-        if policy is not None:
-            user_policy = user_policy or policy
-            service_policy = service_policy or policy
-            computer_policy = computer_policy or policy
 
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
@@ -310,22 +299,25 @@ class cmd_domain_auth_silo_modify(Command):
             silo.description = description
 
         # Set or unset user policy.
-        if user_policy == "":
-            silo.user_policy = None
-        elif user_policy:
-            silo.user_policy = self.get_policy(ldb, user_policy).dn
+        if user_authentication_policy == "":
+            silo.user_authentication_policy = None
+        elif user_authentication_policy:
+            silo.user_authentication_policy = \
+                self.get_policy(ldb, user_authentication_policy).dn
 
         # Set or unset service policy.
-        if service_policy == "":
-            silo.service_policy = None
-        elif service_policy:
-            silo.service_policy = self.get_policy(ldb, service_policy).dn
+        if service_authentication_policy == "":
+            silo.service_authentication_policy = None
+        elif service_authentication_policy:
+            silo.service_authentication_policy = \
+                self.get_policy(ldb, service_authentication_policy).dn
 
         # Set or unset computer policy.
-        if computer_policy == "":
-            silo.computer_policy = None
-        elif computer_policy:
-            silo.computer_policy = self.get_policy(ldb, computer_policy).dn
+        if computer_authentication_policy == "":
+            silo.computer_authentication_policy = None
+        elif computer_authentication_policy:
+            silo.computer_authentication_policy = \
+                self.get_policy(ldb, computer_authentication_policy).dn
 
         # Update silo
         try:

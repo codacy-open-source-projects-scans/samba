@@ -552,7 +552,7 @@ bool init_connectin_request(TALLOC_CTX *ctx,
 	struct connectin_extpropsets *ext_props = NULL;
 	DATA_BLOB props_blob = data_blob_null;
 	struct ndr_push *ndr_props = NULL;
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
 	bool result;
 	struct wsp_cpmconnectin *connectin =
 		&request->message.cpmconnect;
@@ -767,7 +767,7 @@ static bool extract_rowbuf_variable_type(TALLOC_CTX *ctx,
 {
 	enum ndr_err_code err;
 	struct ndr_pull *ndr_pull = NULL;
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
 	DATA_BLOB variant_blob = data_blob_null;
 	if (offset >= rows_buf->length) {
 		DBG_ERR("offset %d outside buffer range (buf len - %zu)",
@@ -810,7 +810,7 @@ static bool convert_variant_array_to_vector(TALLOC_CTX *ctx,
 		struct wsp_cbasestoragevariant **variant_array,
 		struct wsp_cbasestoragevariant *outval)
 {
-	int i;
+	uint64_t i;
 	uint16_t vtype;
 	union variant_types vvalue = {0};
 	vtype = variant_array[0]->vtype;
@@ -901,7 +901,7 @@ static enum ndr_err_code extract_variant_addresses(TALLOC_CTX *ctx,
 			       struct wsp_ctablevariant *tablevar,
 			       bool is_64bit,
 			       struct ndr_pull *ndr_pull,
-			       int flags,
+			       ndr_flags_type flags,
 			       uint32_t offset,
 			       DATA_BLOB *rows_buf,
 			       uint64_t *pcount,
@@ -981,7 +981,7 @@ static enum ndr_err_code extract_variant_addresses(TALLOC_CTX *ctx,
 		vec_address[0] = addr;
 	} else {
 		uint64_t array_addr = addr;
-		int i;
+		uint64_t i;
 		for (i = 0; i < count; i++) {
 			if (is_64bit) {
 				vec_address[i] =
@@ -1009,7 +1009,7 @@ static enum ndr_err_code extract_crowvariant_variable(TALLOC_CTX *ctx,
 	struct wsp_ctablevariant *tablevar,
 	bool is_64bit,
 	struct ndr_pull *ndr_pull,
-	int flags,
+	ndr_flags_type flags,
 	uint32_t offset,
 	DATA_BLOB *rows_buf,
 	uint32_t len,
@@ -1115,7 +1115,7 @@ static enum ndr_err_code extract_crowvariant(TALLOC_CTX *ctx,
 			       struct wsp_ctablevariant *tablevar,
 			       bool is_64bit,
 			       struct ndr_pull *ndr_pull,
-			       int flags,
+			       ndr_flags_type flags,
 			       uint32_t offset,
 			       DATA_BLOB *rows_buf, uint32_t len,
 			       struct wsp_cbasestoragevariant *val)
@@ -1169,8 +1169,8 @@ static enum ndr_err_code process_columns(TALLOC_CTX *ctx,
 	uint32_t i;
 	enum ndr_err_code err  = NDR_ERR_SUCCESS;
 	struct ndr_pull *ndr_pull = NULL;
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
-	uint64_t nrow_offset = nrow * bindingin->brow;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	uint64_t nrow_offset = (uint64_t)nrow * bindingin->brow;
 
 	if (nrow_offset >= rows_buf->length) {
 		DBG_ERR("offset %"PRIu64" outside buffer range (buf len - %zu)\n",
@@ -1309,7 +1309,7 @@ enum ndr_err_code extract_rowsarray(
 			uint32_t rows,
 			struct wsp_cbasestoragevariant **rowsarray)
 {
-	int i;
+	uint32_t i;
 	enum ndr_err_code err  = NDR_ERR_SUCCESS;
 
 	for (i = 0; i < rows; i++ ) {
@@ -1413,6 +1413,7 @@ static bool process_query_node(TALLOC_CTX *ctx,
 			break;
 		case eVALUE:
 			process_value_node(ctx, crestriction, node);
+			break;
 		default:
 			break;
 	}
@@ -1869,7 +1870,7 @@ static enum ndr_err_code parse_blob(TALLOC_CTX *ctx, DATA_BLOB *blob,
 {
 	struct ndr_pull *ndr = NULL;
 	enum ndr_err_code err;
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
 	uint32_t status = 0;
 
 	ndr = ndr_pull_init_blob(blob, ctx);
@@ -1943,7 +1944,7 @@ static enum ndr_err_code insert_header_and_checksum(TALLOC_CTX *ctx,
 		struct wsp_header *header)
 {
 	enum ndr_err_code err;
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
 	struct ndr_push *header_ndr = ndr_push_init_ctx(ctx);
 
 	if (header_ndr == NULL) {
@@ -1976,7 +1977,7 @@ NTSTATUS wsp_request_response(TALLOC_CTX* ctx,
 	struct rpc_pipe_client *p = wsp_ctx->rpccli;
 	NTSTATUS status = NT_STATUS_OK;
 
-	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
+	ndr_flags_type ndr_flags = NDR_SCALARS | NDR_BUFFERS;
 	struct ndr_push* push_ndr = NULL;
 
 	enum ndr_err_code err;

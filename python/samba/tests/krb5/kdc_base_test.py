@@ -137,6 +137,8 @@ class GroupType(Enum):
 
 # This simple class encapsulates the DN and SID of a Principal.
 class Principal:
+    __slots__ = ['dn', 'sid']
+
     def __init__(self, dn, sid):
         if dn is not None and not isinstance(dn, ldb.Dn):
             raise AssertionError(f'expected {dn} to be an ldb.Dn')
@@ -1486,16 +1488,17 @@ class KDCBaseTest(TestCaseInTempDir, RawKerberosTest):
         return mapped_sids
 
     def issued_by_rodc(self, ticket):
-        krbtgt_creds = self.get_mock_rodc_krbtgt_creds()
+        rodc_krbtgt_creds = self.get_mock_rodc_krbtgt_creds()
+        rodc_krbtgt_key = self.TicketDecryptionKey_from_creds(
+            rodc_krbtgt_creds)
 
-        krbtgt_key = self.TicketDecryptionKey_from_creds(krbtgt_creds)
         checksum_keys = {
-            krb5pac.PAC_TYPE_KDC_CHECKSUM: krbtgt_key,
+            krb5pac.PAC_TYPE_KDC_CHECKSUM: rodc_krbtgt_key,
         }
 
         return self.modified_ticket(
             ticket,
-            new_ticket_key=krbtgt_key,
+            new_ticket_key=rodc_krbtgt_key,
             checksum_keys=checksum_keys)
 
     def signed_by_rodc(self, ticket):
@@ -1921,6 +1924,29 @@ class KDCBaseTest(TestCaseInTempDir, RawKerberosTest):
             pac_buffers.append(pac_buffer)
 
         pac_buffer.info.remaining = ndr_pack(metadata_ndr)
+
+        pac.buffers = pac_buffers
+        pac.num_buffers = len(pac_buffers)
+
+        return pac
+
+    def add_extra_pac_buffers(self, pac, *, buffers=None):
+        if buffers is None:
+            buffers = []
+
+        pac_buffers = pac.buffers
+        for pac_buffer_type in buffers:
+            info = krb5pac.DATA_BLOB_REM()
+            # Having an empty PAC buffer will trigger an assertion failure in
+            # the MIT KDC’s k5_pac_locate_buffer(), so we need at least one
+            # byte.
+            info.remaining = b'0'
+
+            pac_buffer = krb5pac.PAC_BUFFER()
+            pac_buffer.type = pac_buffer_type
+            pac_buffer.info = info
+
+            pac_buffers.append(pac_buffer)
 
         pac.buffers = pac_buffers
         pac.num_buffers = len(pac_buffers)

@@ -964,7 +964,8 @@ NTSTATUS unlink_internals(connection_struct *conn,
 		 DELETE_ACCESS,		/* access_mask */
 		 FILE_SHARE_NONE,	/* share_access */
 		 FILE_OPEN,		/* create_disposition*/
-		 FILE_NON_DIRECTORY_FILE, /* create_options */
+		 FILE_NON_DIRECTORY_FILE |
+			FILE_OPEN_REPARSE_POINT, /* create_options */
 		 FILE_ATTRIBUTE_NORMAL,	/* file_attributes */
 		 0,			/* oplock_request */
 		 NULL,			/* lease */
@@ -1761,7 +1762,6 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 				  smb_fname_dst);
 
 		if (!fsp->fsp_flags.is_directory &&
-		    !(fsp->posix_flags & FSP_POSIX_FLAGS_PATHNAMES) &&
 		    (lp_map_archive(SNUM(conn)) ||
 		     lp_store_dos_attributes(SNUM(conn))))
 		{
@@ -1854,7 +1854,7 @@ NTSTATUS rename_internals(TALLOC_CTX *ctx,
 			uint32_t access_mask)
 {
 	NTSTATUS status = NT_STATUS_OK;
-	int create_options = 0;
+	int create_options = FILE_OPEN_REPARSE_POINT;
 	struct smb2_create_blobs *posx = NULL;
 	struct files_struct *fsp = NULL;
 	bool posix_pathname = (smb_fname_src->flags & SMB_FILENAME_POSIX_PATH);

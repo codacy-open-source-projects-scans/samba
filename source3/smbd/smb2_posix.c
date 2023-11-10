@@ -34,11 +34,13 @@ void smb3_file_posix_information_init(
 	*dst = (struct smb3_file_posix_information) {
 		.end_of_file = get_file_size_stat(st),
 		.allocation_size = SMB_VFS_GET_ALLOC_SIZE(conn,NULL,st),
+		.inode = SMB_VFS_FS_FILE_ID(conn, st),
 		.device = st->st_ex_dev,
 		.creation_time = unix_timespec_to_nt_time(st->st_ex_btime),
 		.last_access_time = unix_timespec_to_nt_time(st->st_ex_atime),
 		.last_write_time = unix_timespec_to_nt_time(st->st_ex_mtime),
 		.change_time = unix_timespec_to_nt_time(st->st_ex_ctime),
+		.cc.nlinks = st->st_ex_nlink,
 		.cc.reparse_tag = reparse_tag,
 		.cc.posix_perms = unix_perms_to_wire(st->st_ex_mode & ~S_IFMT),
 		.cc.owner = global_sid_NULL,
@@ -49,7 +51,7 @@ void smb3_file_posix_information_init(
 		uid_to_sid(&dst->cc.owner, st->st_ex_uid);
 	}
 	if (st->st_ex_gid != (uid_t)-1) {
-		uid_to_sid(&dst->cc.owner, st->st_ex_gid);
+		gid_to_sid(&dst->cc.group, st->st_ex_gid);
 	}
 
 	switch (st->st_ex_mode & S_IFMT) {

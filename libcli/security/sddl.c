@@ -208,7 +208,7 @@ static struct dom_sid *sddl_transition_decode_sid(TALLOC_CTX *mem_ctx, const cha
 	size_t i;
 
 	/* see if its in the numeric format */
-	if (strncmp(sddl, "S-", 2) == 0) {
+	if (strncasecmp(sddl, "S-", 2) == 0) {
 		struct dom_sid *sid = NULL;
 		char *sid_str = NULL;
 		const char *end = NULL;
@@ -229,6 +229,13 @@ static struct dom_sid *sddl_transition_decode_sid(TALLOC_CTX *mem_ctx, const cha
 		sid_str = talloc_strndup(mem_ctx, sddl, len);
 		if (sid_str == NULL) {
 			return NULL;
+		}
+		if (sid_str[0] == 's') {
+			/*
+			 * In SDDL, but not in the dom_sid parsers, a
+			 * lowercase "s-1-1-0" is accepted.
+			 */
+			sid_str[0] = 'S';
 		}
 		sid = talloc(mem_ctx, struct dom_sid);
 		if (sid == NULL) {
@@ -288,7 +295,7 @@ struct dom_sid *sddl_decode_sid(TALLOC_CTX *mem_ctx, const char **sddlp,
 {
 	struct sddl_transition_state state = {
 		/*
-		 * TODO: verify .machine_rid values really belong to
+		 * TODO: verify .machine_rid values really belong
 		 * to the machine_sid on a member, once
 		 * we pass machine_sid from the caller...
 		 */
@@ -480,17 +487,19 @@ static bool sddl_decode_guid(const char *str, struct GUID *guid)
 
 
 static DATA_BLOB sddl_decode_conditions(TALLOC_CTX *mem_ctx,
+					const enum ace_condition_flags ace_condition_flags,
 					const char *conditions,
-					const char **message,
-					size_t *length)
+					size_t *length,
+					const char **msg,
+					size_t *msg_offset)
 {
 	DATA_BLOB blob = {0};
 	struct ace_condition_script *script = NULL;
-	size_t message_offset;
 	script = ace_conditions_compile_sddl(mem_ctx,
+					     ace_condition_flags,
 					     conditions,
-					     message,
-					     &message_offset,
+					     msg,
+					     msg_offset,
 					     length);
 	if (script != NULL) {
 		bool ok = conditional_ace_encode_binary(mem_ctx,
@@ -498,10 +507,6 @@ static DATA_BLOB sddl_decode_conditions(TALLOC_CTX *mem_ctx,
 							&blob);
 		if (! ok) {
 			DBG_ERR("could not blobify '%s'\n", conditions);
-		}
-		if (*message) {
-			DBG_ERR("                  %*c", (int)message_offset, '^');
-			DBG_ERR("error '%s'\n", *message);
 		}
 	}
 	return blob;
@@ -515,8 +520,10 @@ static DATA_BLOB sddl_decode_conditions(TALLOC_CTX *mem_ctx,
 */
 static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 			    struct security_ace *ace,
+			    const enum ace_condition_flags ace_condition_flags,
 			    char **sddl_copy,
-			    struct sddl_transition_state *state)
+			    struct sddl_transition_state *state,
+			    const char **msg, size_t *msg_offset)
 {
 	const char *tok[7];
 	const char *s;
@@ -664,13 +671,19 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 		 * conditional ACE compiler.
 		 */
 		size_t length;
-		const char *message = NULL;
 		DATA_BLOB conditions = {0};
 		s = tok[6];
 
-		conditions = sddl_decode_conditions(mem_ctx, s, &message, &length);
+		conditions = sddl_decode_conditions(mem_ctx,
+						    ace_condition_flags,
+						    s,
+						    &length,
+						    msg,
+						    msg_offset);
 		if (conditions.data == NULL) {
-			DBG_WARNING("Conditional ACE compilation failure: %s\n", message);
+			DBG_WARNING("Conditional ACE compilation failure at %zu: %s\n",
+				    *msg_offset, *msg);
+			*msg_offset += s - *sddl_copy;
 			return false;
 		}
 		ace->coda.conditions = conditions;
@@ -728,8 +741,10 @@ static const struct flag_map acl_flags[] = {
   decode an ACL
 */
 static struct security_acl *sddl_decode_acl(struct security_descriptor *sd,
+					    const enum ace_condition_flags ace_condition_flags,
 					    const char **sddlp, uint32_t *flags,
-					    struct sddl_transition_state *state)
+					    struct sddl_transition_state *state,
+					    const char **msg, size_t *msg_offset)
 {
 	const char *sddl = *sddlp;
 	char *sddl_copy = NULL;
@@ -789,8 +804,11 @@ static struct security_acl *sddl_decode_acl(struct security_descriptor *sd,
 			return NULL;
 		}
 		ok = sddl_decode_ace(acl->aces, &acl->aces[acl->num_aces],
-				     &sddl_copy, state);
+				     ace_condition_flags,
+				     &sddl_copy, state, msg, msg_offset);
 		if (!ok) {
+			*msg_offset += sddl_copy - aces_start;
+			talloc_steal(sd, *msg);
 			talloc_free(acl);
 			return NULL;
 		}
@@ -803,14 +821,19 @@ static struct security_acl *sddl_decode_acl(struct security_descriptor *sd,
 }
 
 /*
-  decode a security descriptor in SDDL format
-*/
-struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
-					const struct dom_sid *domain_sid)
+ * Decode a security descriptor in SDDL format, catching compilation
+ * error messages, if any.
+ *
+ * The message will be a direct talloc child of mem_ctx or NULL.
+ */
+struct security_descriptor *sddl_decode_err_msg(TALLOC_CTX *mem_ctx, const char *sddl,
+						const struct dom_sid *domain_sid,
+						const enum ace_condition_flags ace_condition_flags,
+						const char **msg, size_t *msg_offset)
 {
 	struct sddl_transition_state state = {
 		/*
-		 * TODO: verify .machine_rid values really belong to
+		 * TODO: verify .machine_rid values really belong
 		 * to the machine_sid on a member, once
 		 * we pass machine_sid from the caller...
 		 */
@@ -818,11 +841,23 @@ struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
 		.domain_sid = domain_sid,
 		.forest_sid = domain_sid,
 	};
+	const char *start = sddl;
 	struct security_descriptor *sd;
 	sd = talloc_zero(mem_ctx, struct security_descriptor);
-
+	if (sd == NULL) {
+		goto failed;
+	}
 	sd->revision = SECURITY_DESCRIPTOR_REVISION_1;
 	sd->type     = SEC_DESC_SELF_RELATIVE;
+
+	if (msg != NULL) {
+		if (msg_offset == NULL) {
+			DBG_ERR("Programmer misbehaviour\n");
+			goto failed;
+		}
+		*msg = NULL;
+		*msg_offset = 0;
+	}
 
 	while (*sddl) {
 		uint32_t flags;
@@ -833,13 +868,13 @@ struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
 		switch (c) {
 		case 'D':
 			if (sd->dacl != NULL) goto failed;
-			sd->dacl = sddl_decode_acl(sd, &sddl, &flags, &state);
+			sd->dacl = sddl_decode_acl(sd, ace_condition_flags, &sddl, &flags, &state, msg, msg_offset);
 			if (sd->dacl == NULL) goto failed;
 			sd->type |= flags | SEC_DESC_DACL_PRESENT;
 			break;
 		case 'S':
 			if (sd->sacl != NULL) goto failed;
-			sd->sacl = sddl_decode_acl(sd, &sddl, &flags, &state);
+			sd->sacl = sddl_decode_acl(sd, ace_condition_flags, &sddl, &flags, &state, msg, msg_offset);
 			if (sd->sacl == NULL) goto failed;
 			/* this relies on the SEC_DESC_SACL_* flags being
 			   1 bit shifted from the SEC_DESC_DACL_* flags */
@@ -859,13 +894,45 @@ struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
 			goto failed;
 		}
 	}
-
 	return sd;
-
 failed:
+	if (msg != NULL) {
+		if (*msg != NULL) {
+			*msg = talloc_steal(mem_ctx, *msg);
+		}
+		/*
+		 * The actual message (*msg) might still be NULL, but the
+		 * offset at least provides a clue.
+		 */
+		*msg_offset += sddl - start;
+	}
 	DEBUG(2,("Badly formatted SDDL '%s'\n", sddl));
 	talloc_free(sd);
 	return NULL;
+}
+
+
+/*
+  decode a security descriptor in SDDL format
+*/
+struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
+					const struct dom_sid *domain_sid)
+{
+	const char *msg = NULL;
+	size_t msg_offset = 0;
+	struct security_descriptor *sd = sddl_decode_err_msg(mem_ctx,
+							     sddl,
+							     domain_sid,
+							     ACE_CONDITION_FLAG_ALLOW_DEVICE,
+							     &msg,
+							     &msg_offset);
+	DBG_NOTICE("could not decode '%s'\n", sddl);
+	if (msg != NULL) {
+		DBG_NOTICE("                  %*c\n", (int)msg_offset, '^');
+		DBG_NOTICE("error '%s'\n", msg);
+		talloc_free(discard_const(msg));
+	}
+	return sd;
 }
 
 /*
@@ -960,7 +1027,7 @@ char *sddl_encode_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 {
 	struct sddl_transition_state state = {
 		/*
-		 * TODO: verify .machine_rid values really belong to
+		 * TODO: verify .machine_rid values really belong
 		 * to the machine_sid on a member, once
 		 * we pass machine_sid from the caller...
 		 */
@@ -1084,7 +1151,7 @@ char *sddl_encode_ace(TALLOC_CTX *mem_ctx, const struct security_ace *ace,
 {
 	struct sddl_transition_state state = {
 		/*
-		 * TODO: verify .machine_rid values really belong to
+		 * TODO: verify .machine_rid values really belong
 		 * to the machine_sid on a member, once
 		 * we pass machine_sid from the caller...
 		 */
@@ -1133,7 +1200,7 @@ char *sddl_encode(TALLOC_CTX *mem_ctx, const struct security_descriptor *sd,
 {
 	struct sddl_transition_state state = {
 		/*
-		 * TODO: verify .machine_rid values really belong to
+		 * TODO: verify .machine_rid values really belong
 		 * to the machine_sid on a member, once
 		 * we pass machine_sid from the caller...
 		 */

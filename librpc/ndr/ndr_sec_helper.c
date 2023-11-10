@@ -32,7 +32,7 @@
  * to work out where the coda starts (and in ndr_size_security_ace()
  * just below).
  */
-static size_t ndr_size_security_ace_core(const struct security_ace *ace, int flags)
+static size_t ndr_size_security_ace_core(const struct security_ace *ace, libndr_flags flags)
 {
 	size_t ret;
 
@@ -55,7 +55,7 @@ static size_t ndr_size_security_ace_core(const struct security_ace *ace, int fla
 /*
   return the wire size of a security_ace
 */
-size_t ndr_size_security_ace(const struct security_ace *ace, int flags)
+size_t ndr_size_security_ace(const struct security_ace *ace, libndr_flags flags)
 {
 	size_t base = ndr_size_security_ace_core(ace, flags);
 	size_t ret = base;
@@ -87,7 +87,7 @@ size_t ndr_size_security_ace(const struct security_ace *ace, int flags)
  */
 size_t ndr_subcontext_size_of_ace_coda(const struct security_ace *ace,
 				       size_t ace_size,
-				       int flags)
+				       libndr_flags flags)
 {
 	size_t core_size;
 	if (ace_size == 0) {
@@ -103,7 +103,7 @@ size_t ndr_subcontext_size_of_ace_coda(const struct security_ace *ace,
 /*
   return the wire size of a security_acl
 */
-size_t ndr_size_security_acl(const struct security_acl *theacl, int flags)
+size_t ndr_size_security_acl(const struct security_acl *theacl, libndr_flags flags)
 {
 	size_t ret;
 	int i;
@@ -118,7 +118,7 @@ size_t ndr_size_security_acl(const struct security_acl *theacl, int flags)
 /*
   return the wire size of a security descriptor
 */
-size_t ndr_size_security_descriptor(const struct security_descriptor *sd, int flags)
+size_t ndr_size_security_descriptor(const struct security_descriptor *sd, libndr_flags flags)
 {
 	size_t ret;
 	if (!sd) return 0;
@@ -134,13 +134,13 @@ size_t ndr_size_security_descriptor(const struct security_descriptor *sd, int fl
 /*
   return the wire size of a dom_sid
 */
-size_t ndr_size_dom_sid(const struct dom_sid *sid, int flags)
+size_t ndr_size_dom_sid(const struct dom_sid *sid, libndr_flags flags)
 {
 	if (!sid) return 0;
 	return 8 + 4*sid->num_auths;
 }
 
-size_t ndr_size_dom_sid28(const struct dom_sid *sid, int flags)
+size_t ndr_size_dom_sid28(const struct dom_sid *sid, libndr_flags flags)
 {
 	if (all_zero((const uint8_t *)sid, sizeof(struct dom_sid))) {
 		return 0;
@@ -148,7 +148,7 @@ size_t ndr_size_dom_sid28(const struct dom_sid *sid, int flags)
 	return ndr_size_dom_sid(sid, flags);
 }
 
-size_t ndr_size_dom_sid0(const struct dom_sid *sid, int flags)
+size_t ndr_size_dom_sid0(const struct dom_sid *sid, libndr_flags flags)
 {
 	return ndr_size_dom_sid28(sid, flags);
 }
@@ -181,7 +181,7 @@ void ndr_print_dom_sid0(struct ndr_print *ndr, const char *name, const struct do
 /*
   parse a dom_sid2 - this is a dom_sid but with an extra copy of the num_auths field
 */
-enum ndr_err_code ndr_pull_dom_sid2(struct ndr_pull *ndr, int ndr_flags, struct dom_sid *sid)
+enum ndr_err_code ndr_pull_dom_sid2(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct dom_sid *sid)
 {
 	uint32_t num_auths;
 	if (!(ndr_flags & NDR_SCALARS)) {
@@ -200,7 +200,7 @@ enum ndr_err_code ndr_pull_dom_sid2(struct ndr_pull *ndr, int ndr_flags, struct 
 /*
   parse a dom_sid2 - this is a dom_sid but with an extra copy of the num_auths field
 */
-enum ndr_err_code ndr_push_dom_sid2(struct ndr_push *ndr, int ndr_flags, const struct dom_sid *sid)
+enum ndr_err_code ndr_push_dom_sid2(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct dom_sid *sid)
 {
 	if (!(ndr_flags & NDR_SCALARS)) {
 		return NDR_ERR_SUCCESS;
@@ -212,7 +212,7 @@ enum ndr_err_code ndr_push_dom_sid2(struct ndr_push *ndr, int ndr_flags, const s
 /*
   parse a dom_sid28 - this is a dom_sid in a fixed 28 byte buffer, so we need to ensure there are only up to 5 sub_auth
 */
-enum ndr_err_code ndr_pull_dom_sid28(struct ndr_pull *ndr, int ndr_flags, struct dom_sid *sid)
+enum ndr_err_code ndr_pull_dom_sid28(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct dom_sid *sid)
 {
 	enum ndr_err_code status;
 	struct ndr_pull *subndr;
@@ -251,7 +251,7 @@ enum ndr_err_code ndr_pull_dom_sid28(struct ndr_pull *ndr, int ndr_flags, struct
 /*
   push a dom_sid28 - this is a dom_sid in a 28 byte fixed buffer
 */
-enum ndr_err_code ndr_push_dom_sid28(struct ndr_push *ndr, int ndr_flags, const struct dom_sid *sid)
+enum ndr_err_code ndr_push_dom_sid28(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct dom_sid *sid)
 {
 	uint32_t old_offset;
 	uint32_t padding;
@@ -281,7 +281,7 @@ enum ndr_err_code ndr_push_dom_sid28(struct ndr_push *ndr, int ndr_flags, const 
 /*
   parse a dom_sid0 - this is a dom_sid in a variable byte buffer, which is maybe empty
 */
-enum ndr_err_code ndr_pull_dom_sid0(struct ndr_pull *ndr, int ndr_flags, struct dom_sid *sid)
+enum ndr_err_code ndr_pull_dom_sid0(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct dom_sid *sid)
 {
 	if (!(ndr_flags & NDR_SCALARS)) {
 		return NDR_ERR_SUCCESS;
@@ -298,7 +298,7 @@ enum ndr_err_code ndr_pull_dom_sid0(struct ndr_pull *ndr, int ndr_flags, struct 
 /*
   push a dom_sid0 - this is a dom_sid in a variable byte buffer, which is maybe empty
 */
-enum ndr_err_code ndr_push_dom_sid0(struct ndr_push *ndr, int ndr_flags, const struct dom_sid *sid)
+enum ndr_err_code ndr_push_dom_sid0(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct dom_sid *sid)
 {
 	if (!(ndr_flags & NDR_SCALARS)) {
 		return NDR_ERR_SUCCESS;
@@ -315,7 +315,7 @@ enum ndr_err_code ndr_push_dom_sid0(struct ndr_push *ndr, int ndr_flags, const s
 	return ndr_push_dom_sid(ndr, ndr_flags, sid);
 }
 
-_PUBLIC_ enum ndr_err_code ndr_push_dom_sid(struct ndr_push *ndr, int ndr_flags, const struct dom_sid *r)
+_PUBLIC_ enum ndr_err_code ndr_push_dom_sid(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct dom_sid *r)
 {
 	uint32_t cntr_sub_auths_0;
 	if (ndr_flags & NDR_SCALARS) {
@@ -333,7 +333,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_dom_sid(struct ndr_push *ndr, int ndr_flags,
 	return NDR_ERR_SUCCESS;
 }
 
-_PUBLIC_ enum ndr_err_code ndr_pull_dom_sid(struct ndr_pull *ndr, int ndr_flags, struct dom_sid *r)
+_PUBLIC_ enum ndr_err_code ndr_pull_dom_sid(struct ndr_pull *ndr, ndr_flags_type ndr_flags, struct dom_sid *r)
 {
 	uint32_t cntr_sub_auths_0;
 	if (ndr_flags & NDR_SCALARS) {

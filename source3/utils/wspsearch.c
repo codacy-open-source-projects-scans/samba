@@ -256,7 +256,7 @@ static NTSTATUS print_rowsreturned(
 				uint32_t *rows_processed)
 {
 	NTSTATUS status;
-	int row;
+	uint32_t row = 0;
 	TALLOC_CTX *local_ctx = NULL;
 	struct wsp_cbasestoragevariant **rowsarray = NULL;
 	enum ndr_err_code err;
@@ -350,7 +350,6 @@ static NTSTATUS create_getrows(TALLOC_CTX *ctx,
 	uint32_t INITIAL_ROWS = 32;
 	uint32_t requested_rows = INITIAL_ROWS;
 	uint32_t rows_printed;
-	uint32_t current_row = 0;
 	TALLOC_CTX *row_ctx;
 	bool loop_again;
 
@@ -426,12 +425,11 @@ static NTSTATUS create_getrows(TALLOC_CTX *ctx,
 			if (!NT_STATUS_IS_OK(status)) {
 				goto out;
 			}
-			current_row += rows_printed;
 			data_blob_free(&unread);
 		}
 
 		/*
-		 * response is a talloc child of row_ctz so we need to
+		 * response is a talloc child of row_ctx so we need to
 		 * assign loop_again before we delete row_ctx
 		 */
 		loop_again = response->message.cpmgetrows.rowsreturned;
@@ -593,10 +591,16 @@ int main(int argc, char **argv)
 	struct dcerpc_binding_handle *h = NULL;
 	struct cli_state *c = NULL;
 	uint32_t flags = CLI_FULL_CONNECTION_IPC;
+	bool ok;
 
-	samba_cmdline_init(frame,
-			   SAMBA_CMDLINE_CONFIG_CLIENT,
-			   false /* require_smbconf */);
+	ok = samba_cmdline_init(frame,
+				SAMBA_CMDLINE_CONFIG_CLIENT,
+				false /* require_smbconf */);
+	if (!ok) {
+		DBG_ERR("Failed to set up cmdline parser\n");
+		result = -1;
+		goto out;
+	}
 
 	pc = samba_popt_get_context("wspsearch",
 			argc,
@@ -614,7 +618,7 @@ int main(int argc, char **argv)
 	}
 
 	path = talloc_strdup(talloc_tos(), poptGetArg(pc));
-	if (!path || limit < 0) {
+	if (!path) {
 		DBG_ERR("Invalid argument\n");
 		result = -1;
 		goto out;

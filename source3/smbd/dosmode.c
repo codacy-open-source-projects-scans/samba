@@ -688,7 +688,7 @@ uint32_t fdos_mode(struct files_struct *fsp)
 
 	if (fsp == NULL) {
 		/*
-		 * The pathological case where a callers does
+		 * The pathological case where a caller does
 		 * fdos_mode(smb_fname->fsp) passing a pathref fsp. But as
 		 * smb_fname points at a symlink in POSIX context smb_fname->fsp
 		 * is NULL.
@@ -710,7 +710,7 @@ uint32_t fdos_mode(struct files_struct *fsp)
 		return FILE_ATTRIBUTE_NORMAL;
 	}
 
-	if (fsp->fsp_name->st.cached_dos_attributes != FILE_ATTRIBUTES_INVALID) {
+	if (fsp->fsp_name->st.cached_dos_attributes != FILE_ATTRIBUTE_INVALID) {
 		return fsp->fsp_name->st.cached_dos_attributes;
 	}
 
@@ -903,6 +903,11 @@ int file_set_dosmode(connection_struct *conn,
 		return -1;
 	}
 
+	if (S_ISLNK(smb_fname->st.st_ex_mode)) {
+		/* A symlink in POSIX context, ignore */
+		return 0;
+	}
+
 	if ((S_ISDIR(smb_fname->st.st_ex_mode)) &&
 	    (dosmode & FILE_ATTRIBUTE_TEMPORARY))
 	{
@@ -915,26 +920,30 @@ int file_set_dosmode(connection_struct *conn,
 	DEBUG(10,("file_set_dosmode: setting dos mode 0x%x on file %s\n",
 		  dosmode, smb_fname_str_dbg(smb_fname)));
 
+	if (smb_fname->fsp == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	if (smb_fname->fsp->posix_flags & FSP_POSIX_FLAGS_OPEN &&
+	    !lp_store_dos_attributes(SNUM(conn)))
+	{
+		return 0;
+	}
+
 	unixmode = smb_fname->st.st_ex_mode;
 
-	if (smb_fname->fsp != NULL) {
-		get_acl_group_bits(
-			conn, smb_fname->fsp, &smb_fname->st.st_ex_mode);
-	}
+	get_acl_group_bits(conn, smb_fname->fsp, &smb_fname->st.st_ex_mode);
 
 	if (S_ISDIR(smb_fname->st.st_ex_mode))
 		dosmode |= FILE_ATTRIBUTE_DIRECTORY;
 	else
 		dosmode &= ~FILE_ATTRIBUTE_DIRECTORY;
 
-	if (smb_fname->fsp != NULL) {
-		/* Store the DOS attributes in an EA by preference. */
-		status = SMB_VFS_FSET_DOS_ATTRIBUTES(
-			conn, metadata_fsp(smb_fname->fsp), dosmode);
-	} else {
-		status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
-	}
-
+	/* Store the DOS attributes in an EA by preference. */
+	status = SMB_VFS_FSET_DOS_ATTRIBUTES(conn,
+					     metadata_fsp(smb_fname->fsp),
+					     dosmode);
 	if (NT_STATUS_IS_OK(status)) {
 		smb_fname->st.cached_dos_attributes = dosmode;
 		ret = 0;

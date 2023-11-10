@@ -20,11 +20,20 @@ from samba import NTSTATUSError,ntstatus
 import samba.tests.libsmb
 from samba.dcerpc import security
 from samba.common import get_string
+from samba.dcerpc import smb3posix
+from samba.ndr import ndr_unpack
+from samba.dcerpc.security import dom_sid
+import os
 
 def posix_context(mode):
     return (libsmb.SMB2_CREATE_TAG_POSIX, mode.to_bytes(4, 'little'))
 
 class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
+
+    def setUp(self):
+        super(Smb3UnixTests, self).setUp()
+
+        self.samsid = os.environ["SAMSID"]
 
     def test_negotiate_context_posix(self):
         c = libsmb.Conn(
@@ -119,8 +128,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             self.assertNotEqual(expected_count, 0, 'No files were found')
 
             actual_count = len(c.list('',
-                                info_level=libsmb.SMB2_FIND_POSIX_INFORMATION,
-                                posix=True))
+                                info_level=libsmb.SMB2_FIND_POSIX_INFORMATION))
             self.assertEqual(actual_count-2, expected_count,
                              'SMB2_FIND_POSIX_INFORMATION failed to list contents')
 
@@ -225,9 +233,11 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                 fname = 'testfile%04o' % perm
                 test_files[fname] = perm
                 f,_,cc_out = c.create_ex('\\%s' % fname,
-                                DesiredAccess=security.SEC_STD_ALL,
+                                DesiredAccess=security.SEC_FILE_ALL,
                                 CreateDisposition=libsmb.FILE_CREATE,
                                 CreateContexts=[posix_context(perm)])
+                if perm & 0o200 == 0o200:
+                    c.write(f, buffer=b"data", offset=0)
                 c.close(f)
 
                 dname = 'testdir%04o' % perm
@@ -239,14 +249,34 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                                 CreateContexts=[posix_context(perm)])
                 c.close(f)
 
-            res = c.list("", info_level=100, posix=True)
-            found_files = {get_string(i['name']): i['perms'] for i in res}
-            for fname, perm in test_files.items():
+            res = c.list("", info_level=libsmb.SMB2_FIND_POSIX_INFORMATION)
+
+            found_files = {get_string(i['name']): i for i in res}
+            for fname,perm in test_files.items():
                 self.assertIn(get_string(fname), found_files.keys(),
                               'Test file not found')
-                self.assertEqual(test_files[fname], found_files[fname],
+                self.assertEqual(test_files[fname], found_files[fname]['perms'],
                                  'Requested %04o, Received %04o' % \
-                                         (test_files[fname], found_files[fname]))
+                                         (test_files[fname], found_files[fname]['perms']))
+
+                self.assertEqual(found_files[fname]['reparse_tag'],
+                                 libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
+                self.assertEqual(found_files[fname]['perms'], perm)
+                self.assertEqual(found_files[fname]['owner_sid'],
+                                 self.samsid + "-1000")
+                self.assertTrue(found_files[fname]['group_sid'].startswith("S-1-22-2-"))
+
+                if fname.startswith("testfile"):
+                    self.assertEqual(found_files[fname]['nlink'], 1)
+                    self.assertEqual(found_files[fname]['size'], 4)
+                    self.assertEqual(found_files[fname]['allocaction_size'],
+                                     4096)
+                    self.assertEqual(found_files[fname]['attrib'],
+                                     libsmb.FILE_ATTRIBUTE_ARCHIVE)
+                else:
+                    self.assertEqual(found_files[fname]['nlink'], 2)
+                    self.assertEqual(found_files[fname]['attrib'],
+                                     libsmb.FILE_ATTRIBUTE_DIRECTORY)
 
         finally:
             if len(test_files) > 0:
@@ -262,7 +292,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             posix=True)
         self.assertTrue(c.have_posix())
 
-        res = c.list("", info_level=100, posix=True)
+        res = c.list("", info_level=libsmb.SMB2_FIND_POSIX_INFORMATION)
         found_files = {get_string(i['name']): i for i in res}
         dotdot = found_files['..']
         self.assertEqual('S-1-0-0', dotdot['owner_sid'],
@@ -271,3 +301,53 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                          'The group sid for .. was not NULL')
         self.assertEqual(0, dotdot['ino'], 'The ino for .. was not 0')
         self.assertEqual(0, dotdot['dev'], 'The dev for .. was not 0')
+
+    def test_create_context_basic1(self):
+        '''
+        Check basic CreateContexts response
+        '''
+        try:
+            c = libsmb.Conn(
+                self.server_ip,
+                "smb3_posix_share",
+                self.lp,
+                self.creds,
+                posix=True)
+            self.assertTrue(c.have_posix())
+
+            f,_,cc_out = c.create_ex('\\test_create_context_basic1_file',
+                                     DesiredAccess=security.SEC_STD_ALL,
+                                     CreateDisposition=libsmb.FILE_CREATE,
+                                     CreateContexts=[posix_context(0o600)])
+            c.close(f)
+
+            cc = ndr_unpack(smb3posix.smb3_posix_cc_info, cc_out[0][1])
+
+            self.assertEqual(cc.nlinks, 1)
+            self.assertEqual(cc.reparse_tag, libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
+            self.assertEqual(cc.posix_perms, 0o600)
+            self.assertEqual(cc.owner, dom_sid(self.samsid + "-1000"))
+            self.assertTrue(str(cc.group).startswith("S-1-22-2-"))
+
+            f,_,cc_out = c.create_ex('\\test_create_context_basic1_dir',
+                                     DesiredAccess=security.SEC_STD_ALL,
+                                     CreateDisposition=libsmb.FILE_CREATE,
+                                     CreateOptions=libsmb.FILE_DIRECTORY_FILE,
+                                     CreateContexts=[posix_context(0o700)])
+
+            c.close(f)
+
+            cc = ndr_unpack(smb3posix.smb3_posix_cc_info, cc_out[0][1])
+
+            # Note: this fails on btrfs which always reports the link
+            # count of directories as one.
+            self.assertEqual(cc.nlinks, 2)
+
+            self.assertEqual(cc.reparse_tag, libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
+            self.assertEqual(cc.posix_perms, 0o700)
+            self.assertEqual(cc.owner, dom_sid(self.samsid + "-1000"))
+            self.assertTrue(str(cc.group).startswith("S-1-22-2-"))
+
+        finally:
+            self.delete_test_file(c, '\\test_create_context_basic1_file')
+            self.delete_test_file(c, '\\test_create_context_basic1_dir')

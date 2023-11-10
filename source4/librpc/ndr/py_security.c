@@ -1,26 +1,32 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Samba utility functions
 
    Copyright (C) Jelmer Vernooij <jelmer@samba.org> 2008-2010
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include <Python.h>
+#include "gen_ndr/conditional_ace.h"
 #include "py3compat.h"
 #include "libcli/security/sddl.h"
 #include "libcli/security/security.h"
+
+
+/* Set up in py_mod_security_patch() */
+static PyObject *PyExc_SDDLValueError = NULL;
+
 
 static void PyType_AddMethods(PyTypeObject *type, PyMethodDef *methods)
 {
@@ -31,11 +37,11 @@ static void PyType_AddMethods(PyTypeObject *type, PyMethodDef *methods)
 	dict = type->tp_dict;
 	for (i = 0; methods[i].ml_name; i++) {
 		PyObject *descr;
-		if (methods[i].ml_flags & METH_CLASS) 
+		if (methods[i].ml_flags & METH_CLASS)
 			descr = PyCFunction_New(&methods[i], (PyObject *)type);
-		else 
+		else
 			descr = PyDescr_NewMethod(type, &methods[i]);
-		PyDict_SetItemString(dict, methods[i].ml_name, 
+		PyDict_SetItemString(dict, methods[i].ml_name,
 				     descr);
 		Py_CLEAR(descr);
 	}
@@ -265,14 +271,27 @@ static PyObject *py_descriptor_new(PyTypeObject *self, PyObject *args, PyObject 
 	return pytalloc_steal(self, security_descriptor_initialise(NULL));
 }
 
-static PyObject *py_descriptor_from_sddl(PyObject *self, PyObject *args)
+static PyObject *py_descriptor_from_sddl(PyObject *self, PyObject *args, PyObject *kwargs)
 {
+	TALLOC_CTX *tmp_ctx = NULL;
+	static const char *kwnames[] = { "", "", "allow_device_in_sddl", NULL };
 	struct security_descriptor *secdesc;
 	char *sddl;
 	PyObject *py_sid;
+	int allow_device_in_sddl = 1;
 	struct dom_sid *sid;
+	const char *err_msg = NULL;
+	size_t err_msg_offset = 0;
+	enum ace_condition_flags ace_condition_flags = 0;
 
-	if (!PyArg_ParseTuple(args, "sO!", &sddl, &dom_sid_Type, &py_sid))
+	if (!PyArg_ParseTupleAndKeywords(args,
+					 kwargs,
+					 "sO!|$p",
+					 discard_const_p(char *, kwnames),
+					 &sddl,
+					 &dom_sid_Type,
+					 &py_sid,
+					 &allow_device_in_sddl))
 		return NULL;
 
 	if (!PyObject_TypeCheck(py_sid, &dom_sid_Type)) {
@@ -284,11 +303,53 @@ static PyObject *py_descriptor_from_sddl(PyObject *self, PyObject *args)
 
 	sid = pytalloc_get_ptr(py_sid);
 
-	secdesc = sddl_decode(NULL, sddl, sid);
-	if (secdesc == NULL) {
-		PyErr_SetString(PyExc_ValueError, "Unable to parse SDDL");
+	if (allow_device_in_sddl) {
+		ace_condition_flags |= ACE_CONDITION_FLAG_ALLOW_DEVICE;
+	}
+
+	tmp_ctx = talloc_new(NULL);
+	if (tmp_ctx == NULL) {
+		PyErr_NoMemory();
 		return NULL;
 	}
+
+	secdesc = sddl_decode_err_msg(tmp_ctx, sddl, sid,
+				      ace_condition_flags,
+				      &err_msg, &err_msg_offset);
+	if (secdesc == NULL) {
+		PyObject *exc = NULL;
+		if (err_msg == NULL) {
+			err_msg = "unknown error";
+		}
+		/*
+		 * Some notes about this exception value:
+		 *
+		 * We don't want to add the offset first, so as not to
+		 * confuse those who are used to the integer error
+		 * code coming first.
+		 *
+		 * The errant sddl is added so that the exception can
+		 * be caught some distance away from the call and we
+		 * still know what the messages refer to.
+		 */
+		exc = Py_BuildValue("(s, s, i, s)",
+				    "Unable to parse SDDL",
+				    err_msg,
+				    err_msg_offset,
+				    sddl);
+		if (exc == NULL) {
+			talloc_free(tmp_ctx);
+			/* an exception was set by Py_BuildValue() */
+			return NULL;
+		}
+		PyErr_SetObject(PyExc_SDDLValueError, exc);
+		Py_DECREF(exc);
+		talloc_free(tmp_ctx);
+		return NULL;
+	}
+
+	secdesc = talloc_steal(NULL, secdesc);
+	talloc_free(tmp_ctx);
 
 	return pytalloc_steal((PyTypeObject *)self, secdesc);
 }
@@ -336,7 +397,7 @@ static PyMethodDef py_descriptor_extra_methods[] = {
 		NULL },
 	{ "sacl_del_ace", (PyCFunction)py_descriptor_sacl_del_ace, METH_VARARGS,
 		NULL },
-	{ "from_sddl", (PyCFunction)py_descriptor_from_sddl, METH_VARARGS|METH_CLASS,
+	{ "from_sddl", (PyCFunction)py_descriptor_from_sddl, METH_VARARGS|METH_KEYWORDS|METH_CLASS,
 		NULL },
 	{ "as_sddl", (PyCFunction)py_descriptor_as_sddl, METH_VARARGS,
 		NULL },
@@ -418,7 +479,7 @@ static PyObject *py_token_is_anonymous(PyObject *self,
 	PyObject *Py_UNUSED(ignored))
 {
 	struct security_token *token = pytalloc_get_ptr(self);
-	
+
 	return PyBool_FromLong(security_token_is_anonymous(token));
 }
 
@@ -426,7 +487,7 @@ static PyObject *py_token_is_system(PyObject *self,
 	PyObject *Py_UNUSED(ignored))
 {
 	struct security_token *token = pytalloc_get_ptr(self);
-	
+
 	return PyBool_FromLong(security_token_is_system(token));
 }
 
@@ -434,7 +495,7 @@ static PyObject *py_token_has_builtin_administrators(PyObject *self,
 	PyObject *Py_UNUSED(ignored))
 {
 	struct security_token *token = pytalloc_get_ptr(self);
-	
+
 	return PyBool_FromLong(security_token_has_builtin_administrators(token));
 }
 
@@ -442,7 +503,7 @@ static PyObject *py_token_has_nt_authenticated_users(PyObject *self,
 	PyObject *Py_UNUSED(ignored))
 {
 	struct security_token *token = pytalloc_get_ptr(self);
-	
+
 	return PyBool_FromLong(security_token_has_nt_authenticated_users(token));
 }
 
@@ -564,17 +625,44 @@ static PyMethodDef py_mod_security_extra_methods[] = {
 	{0}
 };
 
-static void py_mod_security_patch(PyObject *m)
+static bool py_mod_security_patch(PyObject *m)
 {
+	int ret;
 	int i;
 	for (i = 0; py_mod_security_extra_methods[i].ml_name; i++) {
 		PyObject *descr = PyCFunction_New(&py_mod_security_extra_methods[i], NULL);
-		PyModule_AddObject(m, py_mod_security_extra_methods[i].ml_name,
-				   descr);
+		ret = PyModule_AddObject(m, py_mod_security_extra_methods[i].ml_name,
+					 descr);
+		if (ret != 0) {
+			return false;
+		}
 	}
+	/*
+	 * I wanted to make this a subclass of ValueError, but it
+	 * seems there isn't an easy way to do that using the API.
+	 * (c.f. SimpleExtendsException in cpython:Objects/exceptions.c)
+	 */
+	PyExc_SDDLValueError = PyErr_NewException("security.SDDLValueError",
+						  NULL, NULL);
+
+	if (PyExc_SDDLValueError == NULL) {
+		return false;
+	}
+	ret = PyModule_AddObject(m, "SDDLValueError", PyExc_SDDLValueError);
+	if (ret != 0) {
+		return false;
+	}
+	return true;
 }
 
-#define PY_MOD_SECURITY_PATCH py_mod_security_patch
+#define PY_MOD_SECURITY_PATCH(m)			\
+	do {						\
+		bool _ok = py_mod_security_patch(m);	\
+		if (! _ok) {				\
+			Py_XDECREF(m);			\
+			return NULL;			\
+		}					\
+	} while(0)
 
 static PyObject *py_security_ace_equal(PyObject *py_self, PyObject *py_other, int op)
 {

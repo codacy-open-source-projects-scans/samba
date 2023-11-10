@@ -31,8 +31,9 @@ from string import Formatter
 import ldb
 
 from samba import dsdb, ntstatus
-from samba.dcerpc import claims, krb5pac, security
+from samba.dcerpc import claims, krb5pac, netlogon, security
 from samba.ndr import ndr_pack, ndr_unpack
+from samba.sd_utils import escaped_claim_id
 
 from samba.tests import DynamicTestCase, env_get_var_value
 from samba.tests.krb5.authn_policy_tests import (
@@ -44,7 +45,6 @@ from samba.tests.krb5.raw_testcase import RawKerberosTest
 from samba.tests.krb5.rfc4120_constants import (
     KDC_ERR_BADOPTION,
     KDC_ERR_GENERIC,
-    KDC_ERR_MODIFIED,
     KDC_ERR_POLICY,
     NT_PRINCIPAL,
 )
@@ -89,6 +89,11 @@ class ConditionalAceBaseTests(AuthnPolicyBaseTests):
             cls._mach_creds = self.get_cached_creds(
                 account_type=self.AccountType.COMPUTER)
 
+            # Create an account with which to perform SamLogon.
+            cls._mach_creds_ntlm = self._get_creds(
+                account_type=self.AccountType.USER,
+                ntlm=True)
+
             # Create some new groups.
 
             group0_name = self.get_new_username()
@@ -109,6 +114,13 @@ class ConditionalAceBaseTests(AuthnPolicyBaseTests):
             cls._member_of_one_creds = self.get_cached_creds(
                 account_type=self.AccountType.COMPUTER,
                 opts={'member_of': (group1_dn,)})
+
+            cls._member_of_both_creds_ntlm = self.get_cached_creds(
+                account_type=self.AccountType.USER,
+                opts={
+                    'member_of': (group0_dn, group1_dn),
+                    'kerberos_enabled': False,
+                })
 
             # Create some authentication silos.
             cls._unenforced_silo = self.create_authn_silo(enforced=False)
@@ -131,6 +143,16 @@ class ConditionalAceBaseTests(AuthnPolicyBaseTests):
                 assigned_silo=self._enforced_silo,
                 cached=True)
             self.add_to_group(str(self._member_of_enforced_silo.get_dn()),
+                              self._enforced_silo.dn,
+                              'msDS-AuthNPolicySiloMembers',
+                              expect_attr=False)
+
+            cls._member_of_enforced_silo_ntlm = self._get_creds(
+                account_type=self.AccountType.USER,
+                assigned_silo=self._enforced_silo,
+                ntlm=True,
+                cached=True)
+            self.add_to_group(str(self._member_of_enforced_silo_ntlm.get_dn()),
                               self._enforced_silo.dn,
                               'msDS-AuthNPolicySiloMembers',
                               expect_attr=False)
@@ -200,14 +222,6 @@ class ConditionalAceBaseTests(AuthnPolicyBaseTests):
 
     def allow_if(self, condition):
         return f'O:SYD:(XA;;CR;;;WD;({condition}))'
-
-    @staticmethod
-    def escaped_claim_id(claim_id):
-        escapes = '\x00\t\n\x0b\x0c\r !"%&()<=>|'
-        return ''.join(c
-                       if c not in escapes
-                       else f'%{ord(c):04x}'
-                       for c in claim_id)
 
 
 @DynamicTestCase
@@ -1042,13 +1056,18 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         # String comparisons also work against literals.
         ('foo bar', '==', '"foo bar"', True),
         # Composites can be compared with literals.
+        ((), '==', '{{}}', None),
+        ('foo', '!=', '{{}}', True),
         ('bar', '==', '{{"bar"}}', True),
         (('apple', 'banana'), '==', '{{"APPLE", "BANANA"}}', True),
         (('apple', 'banana'), '==', '{{"BANANA", "APPLE"}}', True),
         (('apple', 'banana'), '==', '{{"apple", "banana", "apple"}}', False),
         # We can test for containment.
+        ((), 'Contains', '{{}}', False),
+        ((), 'Not_Contains', '{{}}', True),
         ((), 'Contains', '{{"foo"}}', None),
         ((), 'Not_Contains', '{{"foo", "bar"}}', None),
+        ('foo', 'Contains', '{{}}', False),
         ('bar', 'Contains', '{{"bar"}}', True),
         (('foo', 'bar'), 'Contains', '{{"foo", "bar"}}', True),
         (('foo', 'bar'), 'Contains', '{{"foo", "bar", "baz"}}', False),
@@ -1059,6 +1078,10 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         # It’s fine if the right‐hand side contains duplicate elements.
         (('foo', 'bar'), 'Contains', '{{"foo", "bar", "bar"}}', True),
         # We can test whether the operands have any elements in common.
+        ((), 'Any_of', '{{}}', None),
+        ((), 'Not_Any_of', '{{}}', None),
+        ('foo', 'Any_of', '{{}}', False),
+        ('foo', 'Not_Any_of', '{{}}', True),
         ('bar', 'Any_of', '{{"bar"}}', True),
         (('foo', 'bar'), 'Any_of', '{{"bar", "baz"}}', True),
         (('foo', 'bar'), 'Any_of', '{{"baz"}}', False),
@@ -1637,7 +1660,7 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                                     'a field name should be specified')
 
                     claim_id = get_claim_id(field_name)
-                    claim_id = self.escaped_claim_id(claim_id)
+                    claim_id = escaped_claim_id(claim_id)
                     result.append(f'@User.{claim_id}')
 
             return ''.join(result)
@@ -2427,7 +2450,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
               device_sids=None,
               device_claims=None,
               expected_groups=None,
-              expected_device_groups=None,
               expected_claims=None):
         try:
             code, crashes_windows = code
@@ -2573,7 +2595,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         ]
 
         expected_groups = self.map_sids(expected_groups, None, domain_sid_str)
-        expected_device_groups = self.map_sids(expected_device_groups, None, domain_sid_str)
 
         # Show that obtaining a service ticket with RBCD is allowed.
         self._tgs_req(service_tgt, code, service_creds, target_creds,
@@ -2586,9 +2607,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                       decryption_key=target_decryption_key,
                       expected_sid=client_sid,
                       expected_groups=expected_groups,
-                      expect_device_info=bool(expected_device_groups) or None,
-                      expected_device_domain_sid=domain_sid_str,
-                      expected_device_groups=expected_device_groups,
                       expect_client_claims=bool(expected_claims) or None,
                       expected_client_claims=expected_claims,
                       expected_supported_etypes=target_etypes,
@@ -2608,6 +2626,204 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                            status=status,
                            event=event,
                            reason=reason)
+
+    def test_tgs_claims_valid_missing(self):
+        """Test that the Claims Valid SID is not added to the PAC when
+        performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_claims_valid_missing_from_rodc(self):
+        """Test that the Claims Valid SID *is* added to the PAC when
+        performing a TGS‐REQ with an RODC‐issued TGT."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        expected_groups = client_sids | {
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=expected_groups)
+
+    def test_tgs_aa_asserted_identity(self):
+        """Test performing a TGS‐REQ with the Authentication Identity Asserted
+        Identity SID present."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_aa_asserted_identity_no_attrs(self):
+        """Test performing a TGS‐REQ with the Authentication Identity Asserted
+        Identity SID present, albeit without any attributes."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            # Put the Asserted Identity SID in the PAC without any flags set.
+            (self.aa_asserted_identity, SidType.EXTRA_SID, 0),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_aa_asserted_identity_from_rodc(self):
+        """Test that the Authentication Identity Asserted Identity SID in an
+        RODC‐issued PAC is preserved when performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_aa_asserted_identity_from_rodc_no_attrs_from_rodc(self):
+        """Test that the Authentication Identity Asserted Identity SID without
+        attributes in an RODC‐issued PAC is preserved when performing a
+        TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            # Put the Asserted Identity SID in the PAC without any flags set.
+            (self.aa_asserted_identity, SidType.EXTRA_SID, 0),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        expected_groups = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            # The SID in the resulting PAC has the default attributes.
+            (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=expected_groups)
+
+    def test_tgs_compound_authentication(self):
+        """Test performing a TGS‐REQ with the Compounded Authentication SID
+        present."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_COMPOUNDED_AUTHENTICATION, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_compound_authentication_from_rodc(self):
+        """Test that the Compounded Authentication SID in an
+        RODC‐issued PAC is not preserved when performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_COMPOUNDED_AUTHENTICATION, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        expected_groups = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=expected_groups)
+
+    def test_tgs_asserted_identity_missing(self):
+        """Test that the Authentication Identity Asserted Identity SID is not
+        added to the PAC when performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_asserted_identity_missing_from_rodc(self):
+        """Test that the Authentication Identity Asserted Identity SID is not
+        added to an RODC‐issued PAC when performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_service_asserted_identity(self):
+        """Test performing a TGS‐REQ with the Service Asserted Identity SID
+        present."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.service_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_sids=client_sids,
+                  expected_groups=client_sids)
+
+    def test_tgs_service_asserted_identity_from_rodc(self):
+        """Test that the Service Asserted Identity SID in an
+        RODC‐issued PAC is not preserved when performing a TGS‐REQ."""
+        client_sids = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            (self.service_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        expected_groups = {
+            (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+            (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+            # Don’t expect the Service Asserted Identity SID.
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
+        self._tgs(use_fast=False,
+                  client_from_rodc=True,
+                  client_sids=client_sids,
+                  expected_groups=expected_groups)
 
     def test_tgs_without_aa_asserted_identity(self):
         client_sids = {
@@ -2687,10 +2903,14 @@ class ConditionalAceTests(ConditionalAceBaseTests):
             (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
         }
 
+        expected_groups = client_sids | {
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
         self._tgs(f'Member_of SID({self.aa_asserted_identity})',
                   client_from_rodc=True,
                   client_sids=client_sids,
-                  expected_groups=client_sids)
+                  expected_groups=expected_groups)
 
     def test_tgs_with_aa_asserted_identity_device_from_rodc(self):
         client_sids = {
@@ -2712,11 +2932,15 @@ class ConditionalAceTests(ConditionalAceBaseTests):
             (self.aa_asserted_identity, SidType.EXTRA_SID, self.default_attrs),
         }
 
+        expected_groups = client_sids | {
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
         self._tgs(f'Member_of SID({self.aa_asserted_identity})',
                   client_from_rodc=True,
                   device_from_rodc=True,
                   client_sids=client_sids,
-                  expected_groups=client_sids,
+                  expected_groups=expected_groups,
                   code=(0, CRASHES_WINDOWS))
 
     def test_tgs_without_service_asserted_identity(self):
@@ -2800,7 +3024,11 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         self._tgs(f'Member_of SID({self.service_asserted_identity})',
                   client_from_rodc=True,
                   client_sids=client_sids,
-                  expected_groups=client_sids)
+                  code=KDC_ERR_POLICY,
+                  status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+                  event=AuditEvent.KERBEROS_SERVER_RESTRICTION,
+                  reason=AuditReason.ACCESS_DENIED,
+                  edata=self.expect_padata_outer)
 
     def test_tgs_with_service_asserted_identity_device_from_rodc(self):
         client_sids = {
@@ -2826,8 +3054,11 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                   client_from_rodc=True,
                   device_from_rodc=True,
                   client_sids=client_sids,
-                  expected_groups=client_sids,
-                  code=(0, CRASHES_WINDOWS))
+                  code=(KDC_ERR_POLICY, CRASHES_WINDOWS),
+                  status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+                  event=AuditEvent.KERBEROS_SERVER_RESTRICTION,
+                  reason=AuditReason.ACCESS_DENIED,
+                  edata=self.expect_padata_outer)
 
     def test_tgs_without_claims_valid(self):
         client_sids = {
@@ -2849,14 +3080,14 @@ class ConditionalAceTests(ConditionalAceBaseTests):
             (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
         }
 
+        expected_groups = client_sids | {
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
         self._tgs(f'Member_of SID({security.SID_CLAIMS_VALID})',
                   client_from_rodc=True,
                   client_sids=client_sids,
-                  code=KDC_ERR_POLICY,
-                  status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
-                  event=AuditEvent.KERBEROS_SERVER_RESTRICTION,
-                  reason=AuditReason.ACCESS_DENIED,
-                  edata=self.expect_padata_outer)
+                  expected_groups=expected_groups)
 
     def test_tgs_without_claims_valid_device_from_rodc(self):
         client_sids = {
@@ -2879,15 +3110,16 @@ class ConditionalAceTests(ConditionalAceBaseTests):
             (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
         }
 
+        expected_groups = client_sids | {
+            (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
+        }
+
         self._tgs(f'Member_of SID({security.SID_CLAIMS_VALID})',
                   client_from_rodc=True,
                   device_from_rodc=True,
                   client_sids=client_sids,
-                  code=(KDC_ERR_POLICY, CRASHES_WINDOWS),
-                  status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
-                  event=AuditEvent.KERBEROS_SERVER_RESTRICTION,
-                  reason=AuditReason.ACCESS_DENIED,
-                  edata=self.expect_padata_outer)
+                  expected_groups=expected_groups,
+                  code=(0, CRASHES_WINDOWS))
 
     def test_tgs_with_claims_valid(self):
         client_sids = {
@@ -2955,7 +3187,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
              device_sids=None,
              device_claims=None,
              expected_groups=None,
-             expected_device_groups=None,
              expected_claims=None):
         try:
             code, crashes_windows = code
@@ -2969,7 +3200,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
             self.assertIsNone(device_from_rodc)
             self.assertIsNone(device_sids)
             self.assertIsNone(device_claims)
-            self.assertIsNone(expected_device_groups)
 
         if client_from_rodc is None:
             client_from_rodc = False
@@ -3064,7 +3294,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         domain_sid_str = samdb.get_domain_sid()
 
         expected_groups = self.map_sids(expected_groups, None, domain_sid_str)
-        expected_device_groups = self.map_sids(expected_device_groups, None, domain_sid_str)
 
         # Show that obtaining a service ticket is allowed.
         self._tgs_req(client_tgt, code, client_creds, target_creds,
@@ -3074,9 +3303,6 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                       decryption_key=target_decryption_key,
                       expected_sid=client_sid,
                       expected_groups=expected_groups,
-                      expect_device_info=bool(expected_device_groups) or None,
-                      expected_device_domain_sid=domain_sid_str,
-                      expected_device_groups=expected_device_groups,
                       expect_client_claims=bool(expected_claims) or None,
                       expected_client_claims=expected_claims,
                       expected_supported_etypes=target_etypes,
@@ -3090,6 +3316,34 @@ class ConditionalAceTests(ConditionalAceBaseTests):
                            event=event,
                            reason=reason)
 
+    def test_conditional_ace_allowed_from_user_allow(self):
+        # Create a machine account with which to perform FAST.
+        mach_creds = self.get_cached_creds(
+            account_type=self.AccountType.COMPUTER)
+        mach_tgt = self.get_tgt(mach_creds)
+
+        # Create an authentication policy that explicitly allows the machine
+        # account for a user.
+        allowed = (f'O:SYD:(XA;;CR;;;{mach_creds.get_sid()};'
+                   f'(Member_of SID({mach_creds.get_sid()})))')
+        denied = 'O:SYD:(D;;CR;;;WD)'
+        policy = self.create_authn_policy(enforced=True,
+                                          user_allowed_from=allowed,
+                                          service_allowed_from=denied)
+
+        # Create a user account with the assigned policy.
+        client_creds = self._get_creds(account_type=self.AccountType.USER,
+                                       assigned_policy=policy)
+
+        # Show that authentication succeeds.
+        self._get_tgt(client_creds, armor_tgt=mach_tgt,
+                      expected_error=0)
+
+        self.check_as_log(
+            client_creds,
+            armor_creds=mach_creds,
+            client_policy=policy)
+
     def test_conditional_ace_allowed_from_user_deny(self):
         # Create a machine account with which to perform FAST.
         mach_creds = self.get_cached_creds(
@@ -3099,7 +3353,9 @@ class ConditionalAceTests(ConditionalAceBaseTests):
         # Create an authentication policy that explicitly denies the machine
         # account for a user.
         allowed = 'O:SYD:(A;;CR;;;WD)'
-        denied = f'O:SYD:(XD;;CR;;;{mach_creds.get_sid()};(abc))'
+        denied = (f'O:SYD:(XD;;CR;;;{mach_creds.get_sid()};'
+                  f'(Member_of SID({mach_creds.get_sid()})))'
+                  f'(A;;CR;;;WD)')
         policy = self.create_authn_policy(enforced=True,
                                           user_allowed_from=denied,
                                           service_allowed_from=allowed)
@@ -3204,16 +3460,10 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
         client_creds = self._get_creds(account_type=self.AccountType.USER,
                                        assigned_policy=client_policy)
 
-        # FIXME: we need to pass this parameter only because Samba doesn’t
-        # handle ‘krbtgt@REALM’ principals correctly (see
-        # https://bugzilla.samba.org/show_bug.cgi?id=15482).
-        krbtgt_sname = self.get_krbtgt_sname()
-
         # Show that authentication succeeds.
         self._armored_as_req(client_creds,
                              self.get_krbtgt_creds(),
-                             mach_tgt,
-                             target_sname=krbtgt_sname)
+                             mach_tgt)
 
         self.check_as_log(client_creds,
                           armor_creds=mach_creds,
@@ -3531,7 +3781,7 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         client_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         client_policy = self.create_authn_policy(
             enforced=True, user_allowed_from=client_policy_sddl)
 
@@ -3584,7 +3834,7 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         client_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         client_policy = self.create_authn_policy(
             enforced=True, user_allowed_from=client_policy_sddl)
 
@@ -3592,16 +3842,10 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
         client_creds = self._get_creds(account_type=self.AccountType.USER,
                                        assigned_policy=client_policy)
 
-        # FIXME: we need to pass this parameter only because Samba doesn’t
-        # handle ‘krbtgt@REALM’ principals correctly (see
-        # https://bugzilla.samba.org/show_bug.cgi?id=15482).
-        krbtgt_sname = self.get_krbtgt_sname()
-
         # Show that authentication succeeds.
         self._armored_as_req(client_creds,
                              self.get_krbtgt_creds(),
-                             mach_tgt,
-                             target_sname=krbtgt_sname)
+                             mach_tgt)
 
         self.check_as_log(client_creds,
                           armor_creds=mach_creds,
@@ -3644,7 +3888,7 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         client_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         client_policy = self.create_authn_policy(
             enforced=True, user_allowed_from=client_policy_sddl)
 
@@ -3718,17 +3962,11 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
 
         krbtgt_creds = self.get_krbtgt_creds()
 
-        # FIXME: we need to pass this parameter only because Samba doesn’t
-        # handle ‘krbtgt@REALM’ principals correctly (see
-        # https://bugzilla.samba.org/show_bug.cgi?id=15482).
-        krbtgt_sname = self.get_krbtgt_sname()
-
         # Test whether authentication succeeds or fails.
         self._armored_as_req(
             client_creds,
             krbtgt_creds,
             mach_tgt,
-            target_sname=krbtgt_sname,
             expected_error=0 if expect_in_group else KDC_ERR_POLICY)
 
         policy_success_args = {}
@@ -3760,7 +3998,6 @@ class DeviceRestrictionTests(ConditionalAceBaseTests):
             client_creds,
             krbtgt_creds,
             mach_tgt,
-            target_sname=krbtgt_sname,
             expected_error=KDC_ERR_POLICY if expect_in_group else 0)
 
         self.check_as_log(client_creds,
@@ -4059,13 +4296,236 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
     def test_pac_device_info(self):
         self._run_pac_device_info_test()
 
+    def test_pac_device_info_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy)
+
+    def test_pac_device_info_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True)
+
+    def test_pac_device_info_existing_device_info(self):
+        self._run_pac_device_info_test(existing_device_info=True)
+
+    def test_pac_device_info_existing_device_info_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_existing_device_info_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_existing_device_claims(self):
+        self._run_pac_device_info_test(existing_device_claims=True)
+
+    def test_pac_device_info_existing_device_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_existing_device_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_existing_device_info_and_claims(self):
+        self._run_pac_device_info_test(existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_existing_device_info_and_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_existing_device_info_and_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
     def test_pac_device_info_no_compound_id_support(self):
         self._run_pac_device_info_test(compound_id_support=False)
+
+    def test_pac_device_info_no_compound_id_support_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       compound_id_support=False)
+
+    def test_pac_device_info_no_compound_id_support_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       compound_id_support=False)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info(self):
+        self._run_pac_device_info_test(compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_claims(self):
+        self._run_pac_device_info_test(compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info_and_claims(self):
+        self._run_pac_device_info_test(compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info_and_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_existing_device_info_and_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_claims(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info_and_claims(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info_and_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_compound_id_support_no_claims_valid_existing_device_info_and_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       compound_id_support=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
 
     def test_pac_device_info_no_claims_valid(self):
         self._run_pac_device_info_test(device_claims_valid=False)
 
-    def _run_pac_device_info_test(self, compound_id_support=True, device_claims_valid=True):
+    def test_pac_device_info_no_claims_valid_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False)
+
+    def test_pac_device_info_no_claims_valid_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_claims(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       existing_device_claims=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info_and_claims(self):
+        self._run_pac_device_info_test(device_claims_valid=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info_and_claims_target_policy(self):
+        target_policy = self.allow_if('Device_Member_of {{SID({device_0})}}')
+        self._run_pac_device_info_test(target_policy=target_policy,
+                                       device_claims_valid=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def test_pac_device_info_no_claims_valid_existing_device_info_and_claims_rodc_issued(self):
+        self._run_pac_device_info_test(rodc_issued=True,
+                                       device_claims_valid=False,
+                                       existing_device_claims=True,
+                                       existing_device_info=True)
+
+    def _run_pac_device_info_test(self, *,
+                                  target_policy=None,
+                                  rodc_issued=False,
+                                  compound_id_support=True,
+                                  device_claims_valid=True,
+                                  existing_device_claims=False,
+                                  existing_device_info=False):
         """Test the groups of the client and the device after performing a
         FAST‐armored TGS‐REQ.
         """
@@ -4079,13 +4539,16 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
             ]),
         ]
 
-        expected_client_claims = {
-            client_claim_id: {
-                'source_type': claims.CLAIMS_SOURCE_TYPE_AD,
-                'type': claims.CLAIM_TYPE_STRING,
-                'values': (client_claim_value,),
-            },
-        }
+        if not rodc_issued:
+            expected_client_claims = {
+                client_claim_id: {
+                    'source_type': claims.CLAIMS_SOURCE_TYPE_AD,
+                    'type': claims.CLAIM_TYPE_STRING,
+                    'values': (client_claim_value,),
+                },
+            }
+        else:
+            expected_client_claims = None
 
         device_claim_id = 'the name of the device’s client claim'
         device_claim_value = 'the value of the device’s client claim'
@@ -4096,7 +4559,26 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
             ]),
         ]
 
-        if compound_id_support:
+        existing_claim_id = 'the name of an existing device claim'
+        existing_claim_value = 'the value of an existing device claim'
+
+        existing_claims = [
+            (claims.CLAIMS_SOURCE_TYPE_CERTIFICATE, [
+                (existing_claim_id, claims.CLAIM_TYPE_STRING, [existing_claim_value]),
+            ]),
+        ]
+
+        if rodc_issued:
+            expected_device_claims = None
+        elif existing_device_info and existing_device_claims:
+            expected_device_claims = {
+                existing_claim_id: {
+                    'source_type': claims.CLAIMS_SOURCE_TYPE_CERTIFICATE,
+                    'type': claims.CLAIM_TYPE_STRING,
+                    'values': (existing_claim_value,),
+                },
+            }
+        elif compound_id_support and not existing_device_info and not existing_device_claims:
             expected_device_claims = {
                 device_claim_id: {
                     'source_type': claims.CLAIMS_SOURCE_TYPE_AD,
@@ -4122,15 +4604,25 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
             ('S-1-2-3-4', SidType.EXTRA_SID, self.default_attrs),
         }
 
+        device_sid_0 = 'S-1-3-4-5'
+        device_sid_1 = 'S-1-4-5-6'
+
+        policy_sids = {
+            'device_0': device_sid_0,
+            'device_1': device_sid_1,
+        }
+
         device_sids = {
             (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
             (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
-            ('S-1-2-3-4', SidType.EXTRA_SID, self.resource_attrs),
-            ('S-1-3-4-5', SidType.EXTRA_SID, self.resource_attrs),
+            (device_sid_0, SidType.EXTRA_SID, self.resource_attrs),
+            (device_sid_1, SidType.EXTRA_SID, self.resource_attrs),
         }
 
         if device_claims_valid:
             device_sids.add((security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs))
+
+        checksum_key = self.get_krbtgt_checksum_key()
 
         # Modify the machine account’s TGT to contain only the SID of the
         # machine account’s primary group.
@@ -4141,42 +4633,109 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
                         new_sids=device_sids),
                 partial(self.set_pac_claims, client_claims=device_claims),
             ],
-            checksum_keys=self.get_krbtgt_checksum_key())
+            checksum_keys=checksum_key)
 
         # Create a user account.
-        client_creds = self._get_creds(account_type=self.AccountType.USER)
+        client_creds = self.get_cached_creds(
+            account_type=self.AccountType.USER,
+            opts={
+                'allowed_replication_mock': rodc_issued,
+                'revealed_to_mock_rodc': rodc_issued,
+            })
         client_tgt = self.get_tgt(client_creds)
+
+        client_modify_pac_fns = [
+            partial(self.set_pac_sids,
+                    new_sids=client_sids),
+            partial(self.set_pac_claims, client_claims=client_claims),
+        ]
+
+        if existing_device_claims:
+            client_modify_pac_fns.append(
+                partial(self.set_pac_claims, device_claims=existing_claims))
+        if existing_device_info:
+            # These are different from the SIDs in the device’s TGT.
+            existing_sid_0 = 'S-1-7-8-9'
+            existing_sid_1 = 'S-1-9-8-7'
+
+            policy_sids.update({
+                'existing_0': existing_sid_0,
+                'existing_1': existing_sid_1,
+            })
+
+            existing_sids = {
+                (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+                (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+                (existing_sid_0, SidType.EXTRA_SID, self.resource_attrs),
+                (existing_sid_1, SidType.EXTRA_SID, self.resource_attrs),
+            }
+
+            client_modify_pac_fns.append(partial(
+                self.set_pac_device_sids, new_sids=existing_sids, user_rid=mach_creds.get_rid()))
+
+        if rodc_issued:
+            rodc_krbtgt_creds = self.get_mock_rodc_krbtgt_creds()
+            rodc_krbtgt_key = self.TicketDecryptionKey_from_creds(rodc_krbtgt_creds)
+            rodc_checksum_key = {
+                krb5pac.PAC_TYPE_KDC_CHECKSUM: rodc_krbtgt_key,
+            }
 
         # Modify the client’s TGT to contain only the SID of the client’s
         # primary group.
         client_tgt = self.modified_ticket(
             client_tgt,
-            modify_pac_fn=[
-                partial(self.set_pac_sids,
-                        new_sids=client_sids),
-                partial(self.set_pac_claims, client_claims=client_claims),
-            ],
-            checksum_keys=self.get_krbtgt_checksum_key())
+            modify_pac_fn=client_modify_pac_fns,
+            new_ticket_key=rodc_krbtgt_key if rodc_issued else None,
+            checksum_keys=rodc_checksum_key if rodc_issued else checksum_key)
 
-        # Indicate that Compound Identity is supported.
-        target_creds, _ = self.get_target(to_krbtgt=False, compound_id=compound_id_support)
+        if target_policy is None:
+            policy = None
+            assigned_policy = None
+        else:
+            policy = self.create_authn_policy(
+                enforced=True,
+                computer_allowed_to=target_policy.format_map(policy_sids))
+            assigned_policy = str(policy.dn)
+
+        target_creds = self.get_cached_creds(
+            account_type=self.AccountType.COMPUTER,
+            opts={
+                'supported_enctypes':
+                    security.KERB_ENCTYPE_RC4_HMAC_MD5
+                    | security.KERB_ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                # Indicate that Compound Identity is supported.
+                'compound_id_support': compound_id_support,
+                'assigned_policy': assigned_policy,
+            })
 
         expected_sids = {
             (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
             (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
-            ('S-1-2-3-4', SidType.EXTRA_SID, self.default_attrs),
             # The client’s groups are not to include the Asserted Identity and
             # Claims Valid SIDs.
         }
+        if rodc_issued:
+            expected_sids.add((security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs))
+        else:
+            expected_sids.add(('S-1-2-3-4', SidType.EXTRA_SID, self.default_attrs))
 
-        if compound_id_support:
+        if rodc_issued:
+            expected_device_sids = None
+        elif existing_device_info:
+            expected_device_sids = {
+                (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
+                (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
+                ('S-1-7-8-9', SidType.EXTRA_SID, self.resource_attrs),
+                ('S-1-9-8-7', SidType.EXTRA_SID, self.resource_attrs),
+            }
+        elif compound_id_support and not existing_device_claims:
             expected_sids.add((security.SID_COMPOUNDED_AUTHENTICATION, SidType.EXTRA_SID, self.default_attrs))
 
             expected_device_sids = {
                 (security.DOMAIN_RID_USERS, SidType.BASE_SID, self.default_attrs),
                 (security.DOMAIN_RID_USERS, SidType.PRIMARY_GID, None),
-                ('S-1-2-3-4', SidType.EXTRA_SID, self.resource_attrs),
                 ('S-1-3-4-5', SidType.EXTRA_SID, self.resource_attrs),
+                ('S-1-4-5-6', SidType.EXTRA_SID, self.resource_attrs),
             }
 
             if device_claims_valid:
@@ -4194,15 +4753,15 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Show that authorization succeeds.
         self._tgs_req(client_tgt, 0, client_creds, target_creds, armor_tgt=mach_tgt,
                       expected_groups=expected_sids,
-                      expect_device_info=bool(expected_device_sids) or None,
+                      expect_device_info=bool(expected_device_sids),
                       expected_device_domain_sid=domain_sid_str,
                       expected_device_groups=expected_device_sids,
-                      expect_client_claims=bool(expected_client_claims) or None,
+                      expect_client_claims=True,
                       expected_client_claims=expected_client_claims,
-                      expect_device_claims=bool(expected_device_claims) or None,
+                      expect_device_claims=bool(expected_device_claims),
                       expected_device_claims=expected_device_claims)
 
-        self.check_tgs_log(client_creds, target_creds)
+        self.check_tgs_log(client_creds, target_creds, policy=policy)
 
     def test_pac_extra_sids_behaviour(self):
         """Test the groups of the client and the device after performing a
@@ -4271,7 +4830,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         target_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4323,7 +4882,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the user to have a
         # certain claim.
         target_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4377,7 +4936,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         target_policy_sddl = self.allow_if(
-            f'@User.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@User.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4431,7 +4990,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain device claim.
         target_policy_sddl = self.allow_if(
-            f'@Device.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@Device.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4489,7 +5048,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain device claim.
         target_policy_sddl = self.allow_if(
-            f'@Device.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@Device.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4544,7 +5103,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         target_policy_sddl = self.allow_if(
-            f'@Device.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@Device.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4612,7 +5171,7 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
         # Create an authentication policy that requires the device to have a
         # certain claim.
         target_policy_sddl = self.allow_if(
-            f'@Device.{self.escaped_claim_id(claim_id)} == "{claim_value}"')
+            f'@Device.{escaped_claim_id(claim_id)} == "{claim_value}"')
         target_policy = self.create_authn_policy(
             enforced=True, computer_allowed_to=target_policy_sddl)
 
@@ -4804,21 +5363,222 @@ class TgsReqServicePolicyTests(ConditionalAceBaseTests):
             (security.SID_CLAIMS_VALID, SidType.EXTRA_SID, self.default_attrs),
         }
 
-        # FIXME: we need to pass this parameter only because Samba doesn’t
-        # handle ‘krbtgt@REALM’ principals correctly (see
-        # https://bugzilla.samba.org/show_bug.cgi?id=15482).
-        krbtgt_sname = self.get_krbtgt_sname()
-
         # Show that obtaining a service ticket with an AS‐REQ is allowed.
         self._armored_as_req(client_creds,
                           self.get_krbtgt_creds(),
                           mach_tgt,
-                          target_sname=krbtgt_sname,
                           expected_groups=expected_groups)
 
         self.check_as_log(client_creds,
                           armor_creds=mach_creds,
                           client_policy=client_policy)
+
+
+class SamLogonTests(ConditionalAceBaseTests):
+    # These tests show that although conditional ACEs work with SamLogon,
+    # claims do not appear to be used at all.
+
+    def test_samlogon_allowed_to_computer_member_of(self):
+        # Create an authentication policy that applies to a computer and
+        # requires that the account should belong to both groups.
+        allowed = (f'O:SYD:(XA;;CR;;;WD;(Member_of '
+                   f'{{SID({self._group0_sid}), SID({self._group1_sid})}}))')
+        policy = self.create_authn_policy(enforced=True,
+                                          computer_allowed_to=allowed)
+
+        # Create a computer account with the assigned policy.
+        target_creds = self._get_creds(account_type=self.AccountType.COMPUTER,
+                                       assigned_policy=policy)
+
+        # When the account is a member of both groups, network SamLogon
+        # succeeds.
+        self._test_samlogon(creds=self._member_of_both_creds_ntlm,
+                            domain_joined_mach_creds=target_creds,
+                            logon_type=netlogon.NetlogonNetworkInformation)
+
+        self.check_samlogon_network_log(self._member_of_both_creds_ntlm,
+                                        server_policy=policy)
+
+        # Interactive SamLogon also succeeds.
+        self._test_samlogon(creds=self._member_of_both_creds_ntlm,
+                            domain_joined_mach_creds=target_creds,
+                            logon_type=netlogon.NetlogonInteractiveInformation)
+
+        self.check_samlogon_interactive_log(self._member_of_both_creds_ntlm,
+                                            server_policy=policy)
+
+        # When the account is a member of neither group, network SamLogon
+        # fails.
+        self._test_samlogon(
+            creds=self._mach_creds_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonNetworkInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_network_log(
+            self._mach_creds_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+        # Interactive SamLogon also fails.
+        self._test_samlogon(
+            creds=self._mach_creds_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_interactive_log(
+            self._mach_creds_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+    def test_samlogon_allowed_to_service_member_of(self):
+        # Create an authentication policy that applies to a managed service and
+        # requires that the account should belong to both groups.
+        allowed = (f'O:SYD:(XA;;CR;;;WD;(Member_of '
+                   f'{{SID({self._group0_sid}), SID({self._group1_sid})}}))')
+        policy = self.create_authn_policy(enforced=True,
+                                          service_allowed_to=allowed)
+
+        # Create a managed service account with the assigned policy.
+        target_creds = self._get_creds(
+            account_type=self.AccountType.MANAGED_SERVICE,
+            assigned_policy=policy)
+
+        # When the account is a member of both groups, network SamLogon
+        # succeeds.
+        self._test_samlogon(creds=self._member_of_both_creds_ntlm,
+                            domain_joined_mach_creds=target_creds,
+                            logon_type=netlogon.NetlogonNetworkInformation)
+
+        self.check_samlogon_network_log(self._member_of_both_creds_ntlm,
+                                        server_policy=policy)
+
+        # Interactive SamLogon also succeeds.
+        self._test_samlogon(creds=self._member_of_both_creds_ntlm,
+                            domain_joined_mach_creds=target_creds,
+                            logon_type=netlogon.NetlogonInteractiveInformation)
+
+        self.check_samlogon_interactive_log(self._member_of_both_creds_ntlm,
+                                            server_policy=policy)
+
+        # When the account is a member of neither group, network SamLogon
+        # fails.
+        self._test_samlogon(
+            creds=self._mach_creds_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonNetworkInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_network_log(
+            self._mach_creds_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+        # Interactive SamLogon also fails.
+        self._test_samlogon(
+            creds=self._mach_creds_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_interactive_log(
+            self._mach_creds_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+    def test_samlogon_allowed_to_computer_silo(self):
+        # Create an authentication policy that applies to a computer and
+        # requires that the account belong to the enforced silo.
+        allowed = (f'O:SYD:(XA;;CR;;;WD;'
+                   f'(@User.ad://ext/AuthenticationSilo == '
+                   f'"{self._enforced_silo}"))')
+        policy = self.create_authn_policy(enforced=True,
+                                          computer_allowed_to=allowed)
+
+        # Create a computer account with the assigned policy.
+        target_creds = self._get_creds(account_type=self.AccountType.COMPUTER,
+                                       assigned_policy=policy)
+
+        # Even though the account is a member of the silo, its claims are
+        # ignored, and network SamLogon fails.
+        self._test_samlogon(
+            creds=self._member_of_enforced_silo_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonNetworkInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_network_log(
+            self._member_of_enforced_silo_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+        # Interactive SamLogon also fails.
+        self._test_samlogon(
+            creds=self._member_of_enforced_silo_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_interactive_log(
+            self._member_of_enforced_silo_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+    def test_samlogon_allowed_to_service_silo(self):
+        # Create an authentication policy that applies to a managed service and
+        # requires that the account belong to the enforced silo.
+        allowed = (f'O:SYD:(XA;;CR;;;WD;'
+                   f'(@User.ad://ext/AuthenticationSilo == '
+                   f'"{self._enforced_silo}"))')
+        policy = self.create_authn_policy(enforced=True,
+                                          service_allowed_to=allowed)
+
+        # Create a managed service account with the assigned policy.
+        target_creds = self._get_creds(
+            account_type=self.AccountType.MANAGED_SERVICE,
+            assigned_policy=policy)
+
+        # Even though the account is a member of the silo, its claims are
+        # ignored, and network SamLogon fails.
+        self._test_samlogon(
+            creds=self._member_of_enforced_silo_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonNetworkInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_network_log(
+            self._member_of_enforced_silo_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
+
+        # Interactive SamLogon also fails.
+        self._test_samlogon(
+            creds=self._member_of_enforced_silo_ntlm,
+            domain_joined_mach_creds=target_creds,
+            logon_type=netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED)
+
+        self.check_samlogon_interactive_log(
+            self._member_of_enforced_silo_ntlm,
+            server_policy=policy,
+            server_policy_status=ntstatus.NT_STATUS_AUTHENTICATION_FIREWALL_FAILED,
+            event=AuditEvent.NTLM_SERVER_RESTRICTION,
+            reason=AuditReason.ACCESS_DENIED)
 
 
 if __name__ == '__main__':
