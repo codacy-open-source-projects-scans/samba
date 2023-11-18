@@ -536,7 +536,9 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	bool has_extra_data = false;
 	ZERO_STRUCTP(ace);
 
+	*msg_offset = 1;
 	if (*str != '(') {
+		*msg = talloc_strdup(mem_ctx, "Not an ACE");
 		return false;
 	}
 	str++;
@@ -585,18 +587,22 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	}
 	if (count != 6) {
 		/* we hit the '\0' or ')' before all of ';;;;;)' */
-		DBG_WARNING("malformed ACE with only %zu ';'\n", count);
+		*msg = talloc_asprintf(mem_ctx,
+				       "malformed ACE with only %zu ';'",
+				       MIN(count - 1, count));
 		return false;
 	}
 
 	/* parse ace type */
 	ok = sddl_map_flag(ace_types, tok[0], &len, &v);
 	if (!ok) {
-		DBG_WARNING("Unknown ACE type - %s\n", tok[0]);
+		*msg = talloc_asprintf(mem_ctx,
+				       "Unknown ACE type - %s", tok[0]);
 		return false;
 	}
 	if (tok[0][len] != '\0') {
-		DBG_WARNING("Garbage after ACE type - %s\n", tok[0]);
+		*msg = talloc_asprintf(mem_ctx,
+				       "Garbage after ACE type - %s", tok[0]);
 		return false;
 	}
 
@@ -607,22 +613,34 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	 */
 	if (sec_ace_callback(ace->type)) {
 		if (! has_extra_data) {
-			DBG_WARNING("callback ACE has no trailing data\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"callback ACE has no trailing data");
+			*msg_offset = str - *sddl_copy;
 			return false;
 		}
 	} else if (sec_ace_resource(ace->type)) {
 		if (! has_extra_data) {
-			DBG_WARNING("resource ACE has no trailing data\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"resource attribute ACE has no trailing data");
+			*msg_offset = str - *sddl_copy;
 			return false;
 		}
 	} else if (has_extra_data) {
-		DBG_WARNING("ACE has trailing section but is not a "
-			    "callback or resource ACE\n");
+		*msg = talloc_strdup(
+			mem_ctx,
+			"ACE has trailing section but is not a "
+			"callback or resource ACE");
+		*msg_offset = str - *sddl_copy;
 		return false;
 	}
 
 	/* ace flags */
 	if (!sddl_map_flags(ace_flags, tok[1], &v, NULL, false)) {
+		*msg = talloc_strdup(mem_ctx,
+				     "could not parse flags");
+		*msg_offset = tok[1] - *sddl_copy;
 		return false;
 	}
 	ace->flags = v;
@@ -630,6 +648,9 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	/* access mask */
 	ok = sddl_decode_access(tok[2], &ace->access_mask);
 	if (!ok) {
+		*msg = talloc_strdup(mem_ctx,
+				     "could not parse access string");
+		*msg_offset = tok[2] - *sddl_copy;
 		return false;
 	}
 
@@ -637,6 +658,9 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	if (tok[3][0] != 0) {
 		ok = sddl_decode_guid(tok[3], &ace->object.object.type.type);
 		if (!ok) {
+			*msg = talloc_strdup(mem_ctx,
+					     "could not parse object GUID");
+			*msg_offset = tok[3] - *sddl_copy;
 			return false;
 		}
 		ace->object.object.flags |= SEC_ACE_OBJECT_TYPE_PRESENT;
@@ -647,6 +671,10 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 		ok = sddl_decode_guid(tok[4],
 				      &ace->object.object.inherited_type.inherited_type);
 		if (!ok) {
+			*msg = talloc_strdup(
+				mem_ctx,
+				"could not parse inherited object GUID");
+			*msg_offset = tok[4] - *sddl_copy;
 			return false;
 		}
 		ace->object.object.flags |= SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT;
@@ -656,11 +684,19 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 	s = tok[5];
 	sid = sddl_transition_decode_sid(mem_ctx, &s, state);
 	if (sid == NULL) {
+		*msg = talloc_strdup(
+			mem_ctx,
+			"could not parse trustee SID");
+		*msg_offset = tok[5] - *sddl_copy;
 		return false;
 	}
 	ace->trustee = *sid;
 	talloc_free(sid);
 	if (*s != '\0') {
+		*msg = talloc_strdup(
+			mem_ctx,
+			"garbage after trustee SID");
+		*msg_offset = s - *sddl_copy;
 		return false;
 	}
 
@@ -681,8 +717,8 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 						    msg,
 						    msg_offset);
 		if (conditions.data == NULL) {
-			DBG_WARNING("Conditional ACE compilation failure at %zu: %s\n",
-				    *msg_offset, *msg);
+			DBG_NOTICE("Conditional ACE compilation failure at %zu: %s\n",
+				   *msg_offset, *msg);
 			*msg_offset += s - *sddl_copy;
 			return false;
 		}
@@ -693,7 +729,10 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 		 * next character should be the ')' to end the ACE.
 		 */
 		if (s[length] != ')') {
-			DBG_WARNING("Conditional ACE has trailing bytes\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"Conditional ACE has trailing bytes");
+			*msg_offset = s + length - *sddl_copy;
 			return false;
 		}
 		str = discard_const_p(char, s + length + 1);
@@ -703,15 +742,21 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 
 		if (! dom_sid_equal(&ace->trustee, &global_sid_World)) {
 			/* these are just the rules */
-			DBG_WARNING("Resource Attribute ACE trustee must be "
-				    "'S-1-1-0' or 'WD'.\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"Resource Attribute ACE trustee must be "
+				"'S-1-1-0' or 'WD'.");
+			*msg_offset = tok[5] - *sddl_copy;
 			return false;
 		}
 
 		s = tok[6];
 		claim = sddl_decode_resource_attr(mem_ctx, s, &length);
 		if (claim == NULL) {
-			DBG_WARNING("Resource Attribute ACE parse failure\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"Resource Attribute ACE parse failure");
+			*msg_offset = s - *sddl_copy;
 			return false;
 		}
 		ace->coda.claim = *claim;
@@ -720,7 +765,10 @@ static bool sddl_decode_ace(TALLOC_CTX *mem_ctx,
 		 * We want a ')' to end the ACE.
 		 */
 		if (s[length] != ')') {
-			DBG_WARNING("Resource ACE has trailing bytes\n");
+			*msg = talloc_strdup(
+				mem_ctx,
+				"Resource Attribute ACE has trailing bytes");
+			*msg_offset = s + length - *sddl_copy;
 			return false;
 		}
 		str = discard_const_p(char, s + length + 1);
@@ -766,13 +814,19 @@ static struct security_acl *sddl_decode_acl(struct security_descriptor *sd,
 
 	/* work out the ACL flags */
 	if (!sddl_map_flags(acl_flags, sddl, flags, &len, true)) {
+		*msg = talloc_strdup(sd, "bad ACL flags");
+		*msg_offset = 0;
 		talloc_free(acl);
 		return NULL;
 	}
 	sddl += len;
 
 	if (sddl[0] != '(') {
-		/* it is empty apart from the flags. */
+		/*
+		 * it is empty apart from the flags
+		 * (or the flags are bad, and we will find out when
+		 * we try to parse the next bit as a top-level fragment)
+		 */
 		*sddlp = sddl;
 		return acl;
 	}
@@ -842,28 +896,32 @@ struct security_descriptor *sddl_decode_err_msg(TALLOC_CTX *mem_ctx, const char 
 		.forest_sid = domain_sid,
 	};
 	const char *start = sddl;
-	struct security_descriptor *sd;
+	struct security_descriptor *sd = NULL;
+
+	if (msg == NULL || msg_offset == NULL) {
+		DBG_ERR("Programmer misbehaviour: use sddl_decode() "
+			"or provide msg pointers.\n");
+		return NULL;
+	}
+	*msg = NULL;
+	*msg_offset = 0;
+
 	sd = talloc_zero(mem_ctx, struct security_descriptor);
 	if (sd == NULL) {
-		goto failed;
+		return NULL;
 	}
 	sd->revision = SECURITY_DESCRIPTOR_REVISION_1;
 	sd->type     = SEC_DESC_SELF_RELATIVE;
 
-	if (msg != NULL) {
-		if (msg_offset == NULL) {
-			DBG_ERR("Programmer misbehaviour\n");
-			goto failed;
-		}
-		*msg = NULL;
-		*msg_offset = 0;
-	}
-
 	while (*sddl) {
 		uint32_t flags;
 		char c = sddl[0];
-		if (sddl[1] != ':') goto failed;
-
+		if (sddl[1] != ':') {
+			*msg = talloc_strdup(mem_ctx,
+					     "expected '[OGDS]:' section start "
+					     "(or the previous section ended prematurely)");
+			goto failed;
+		}
 		sddl += 2;
 		switch (c) {
 		case 'D':
@@ -891,20 +949,31 @@ struct security_descriptor *sddl_decode_err_msg(TALLOC_CTX *mem_ctx, const char 
 			if (sd->group_sid == NULL) goto failed;
 			break;
 		default:
+			*msg = talloc_strdup(mem_ctx, "unexpected character (expected [OGDS])");
 			goto failed;
 		}
 	}
 	return sd;
 failed:
-	if (msg != NULL) {
-		if (*msg != NULL) {
-			*msg = talloc_steal(mem_ctx, *msg);
-		}
+	if (*msg != NULL) {
+		*msg = talloc_steal(mem_ctx, *msg);
+	}
+	/*
+	 * The actual message (*msg) might still be NULL, but the
+	 * offset at least provides a clue.
+	 */
+	*msg_offset += sddl - start;
+
+	if (*msg_offset > strlen(sddl)) {
 		/*
-		 * The actual message (*msg) might still be NULL, but the
-		 * offset at least provides a clue.
+		 * It's not that we *don't* trust our pointer difference
+		 * arithmetic, just that we *shouldn't*. Let's render it
+		 * harmless, before Python tries printing 18 quadrillion
+		 * spaces.
 		 */
-		*msg_offset += sddl - start;
+		DBG_WARNING("sddl error message offset %zu is too big\n",
+			    *msg_offset);
+		*msg_offset = 0;
 	}
 	DEBUG(2,("Badly formatted SDDL '%s'\n", sddl));
 	talloc_free(sd);
@@ -926,11 +995,14 @@ struct security_descriptor *sddl_decode(TALLOC_CTX *mem_ctx, const char *sddl,
 							     ACE_CONDITION_FLAG_ALLOW_DEVICE,
 							     &msg,
 							     &msg_offset);
-	DBG_NOTICE("could not decode '%s'\n", sddl);
-	if (msg != NULL) {
-		DBG_NOTICE("                  %*c\n", (int)msg_offset, '^');
-		DBG_NOTICE("error '%s'\n", msg);
-		talloc_free(discard_const(msg));
+	if (sd == NULL) {
+		DBG_NOTICE("could not decode '%s'\n", sddl);
+		if (msg != NULL) {
+			DBG_NOTICE("                  %*c\n",
+				   (int)msg_offset, '^');
+			DBG_NOTICE("error '%s'\n", msg);
+			talloc_free(discard_const(msg));
+		}
 	}
 	return sd;
 }

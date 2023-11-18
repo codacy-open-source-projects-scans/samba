@@ -1,6 +1,6 @@
 # Unix SMB/CIFS implementation.
 #
-# Model and ORM exceptions.
+# manage assigned authentication policies and silos on a user
 #
 # Copyright (C) Catalyst.Net Ltd. 2023
 #
@@ -20,45 +20,16 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-class ModelError(Exception):
-    pass
+from samba.netcmd import SuperCommand
+
+from .policy import cmd_user_auth_policy
+from .silo import cmd_user_auth_silo
 
 
-class FieldError(ModelError):
-    """A ModelError on a specific field."""
+class cmd_user_auth(SuperCommand):
+    """Manage authentication policies and silos on a user."""
 
-    def __init__(self, *args, field=None):
-        self.field = field
-        super().__init__(*args)
-
-    def __str__(self):
-        message = super().__str__()
-        return f"{self.field.name}: {message}"
-
-
-class MultipleObjectsReturned(ModelError):
-    pass
-
-
-class DoesNotExist(ModelError):
-    pass
-
-
-class GrantMemberError(ModelError):
-    pass
-
-
-class RevokeMemberError(ModelError):
-    pass
-
-
-class ProtectError(ModelError):
-    pass
-
-
-class UnprotectError(ModelError):
-    pass
-
-
-class DeleteError(ModelError):
-    pass
+    subcommands = {
+        "policy": cmd_user_auth_policy(),
+        "silo": cmd_user_auth_silo(),
+    }

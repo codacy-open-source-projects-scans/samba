@@ -517,12 +517,6 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 					    const char *dname,
 					    const char *mask,
 					    char **_fname),
-			   bool (*mode_fn)(TALLOC_CTX *ctx,
-					   void *private_data,
-					   struct files_struct *dirfsp,
-					   struct smb_filename *smb_fname,
-					   bool get_dosmode,
-					   uint32_t *_mode),
 			   void *private_data,
 			   char **_fname,
 			   struct smb_filename **_smb_fname,
@@ -532,7 +526,7 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 	struct smb_Dir *dir_hnd = dirptr->dir_hnd;
 	struct smb_filename *dir_fname = dir_hnd->dir_smb_fname;
 	bool posix = (dir_fname->flags & SMB_FILENAME_POSIX_PATH);
-	const char *dpath = dir_fname->base_name;
+	const bool toplevel = ISDOT(dir_fname->base_name);
 	NTSTATUS status;
 
 	*_smb_fname = NULL;
@@ -557,9 +551,10 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 		char *dname = NULL;
 		char *fname = NULL;
 		struct smb_filename *smb_fname = NULL;
-		struct open_symlink_err *symlink_err = NULL;
 		uint32_t mode = 0;
 		bool get_dosmode = get_dosmode_in;
+		bool toplevel_dotdot;
+		bool visible;
 		bool ok;
 
 		dname = dptr_ReadDirName(ctx, dirptr);
@@ -592,183 +587,116 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			continue;
 		}
 
-		if (ISDOT(dname) || ISDOTDOT(dname)) {
+		toplevel_dotdot = toplevel && ISDOTDOT(dname);
 
-			const char *dotname = dname;
+		smb_fname = synthetic_smb_fname(talloc_tos(),
+						toplevel_dotdot ? "." : dname,
+						NULL,
+						NULL,
+						dir_fname->twrp,
+						dir_fname->flags);
+		if (smb_fname == NULL) {
+			TALLOC_FREE(dname);
+			return false;
+		}
 
-			if (ISDOTDOT(dname) && ISDOT(dpath)) {
-				/*
-				 * Handle ".." in toplevel like "." to not
-				 * leak info from outside the share.
-				 */
-				dotname = ".";
-			}
+		/*
+		 * UCF_POSIX_PATHNAMES to avoid the readdir fallback
+		 * if we get raced between readdir and unlink.
+		 */
+		status = openat_pathref_fsp_lcomp(dir_hnd->fsp,
+						  smb_fname,
+						  UCF_POSIX_PATHNAMES);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("Could not open %s: %s\n",
+				  dname,
+				  nt_errstr(status));
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(fname);
+			TALLOC_FREE(dname);
+			continue;
+		}
 
-			smb_fname = synthetic_smb_fname(talloc_tos(),
-							dotname,
-							NULL,
-							NULL,
-							dir_fname->twrp,
-							dir_fname->flags);
-			if (smb_fname == NULL) {
-				TALLOC_FREE(dname);
-				return false;
-			}
+		visible = is_visible_fsp(smb_fname->fsp);
+		if (!visible) {
+			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(fname);
+			TALLOC_FREE(dname);
+			continue;
+		}
 
-			status = openat_pathref_fsp(dir_hnd->fsp, smb_fname);
-			if (!NT_STATUS_IS_OK(status)) {
-				DBG_INFO("Could not open \"..\": %s\n",
-					 nt_errstr(status));
-				TALLOC_FREE(smb_fname);
-				TALLOC_FREE(dname);
-				continue;
-			}
-
-			mode = fdos_mode(smb_fname->fsp);
-
-			/*
-			 * Don't leak INO/DEV/User SID/Group SID about
-			 * the containing directory of the share.
-			 */
-			if (ISDOT(dpath) && ISDOTDOT(dname)) {
-				/*
-				 * Ensure posix fileid and sids are hidden
-				 */
-				smb_fname->st.st_ex_ino = 0;
-				smb_fname->st.st_ex_dev = 0;
-				smb_fname->st.st_ex_uid = -1;
-				smb_fname->st.st_ex_gid = -1;
-			}
-
+		if (!S_ISLNK(smb_fname->st.st_ex_mode)) {
 			goto done;
 		}
 
-		status = openat_pathref_fsp_nosymlink(talloc_tos(),
-						      conn,
-						      dir_hnd->fsp,
-						      dname,
-						      dir_fname->twrp,
-						      posix,
-						      &smb_fname,
-						      &symlink_err);
+		if (lp_host_msdfs() && lp_msdfs_root(SNUM(conn)) &&
+		    is_msdfs_link(dir_hnd->fsp, smb_fname))
+		{
+			DBG_INFO("Masquerading msdfs link %s as a directory\n",
+				 smb_fname->base_name);
 
-		if (NT_STATUS_IS_OK(status)) {
-			bool visible = is_visible_fsp(smb_fname->fsp);
-			if (!visible) {
-				TALLOC_FREE(smb_fname);
-				TALLOC_FREE(dname);
-				TALLOC_FREE(fname);
-				continue;
-			}
-		} else if (NT_STATUS_EQUAL(status,
-					   NT_STATUS_STOPPED_ON_SYMLINK)) {
-			struct symlink_reparse_struct *reparse =
-				symlink_err->reparse;
-			const char *target = reparse->substitute_name;
-			bool is_msdfs_link;
+			smb_fname->st.st_ex_mode = (smb_fname->st.st_ex_mode &
+						    ~S_IFMT) |
+						   S_IFDIR;
 
-			is_msdfs_link = lp_host_msdfs();
-			is_msdfs_link &= lp_msdfs_root(SNUM(conn));
-			is_msdfs_link &= (strncmp(target, "msdfs:", 6) == 0);
+			mode = dos_mode_msdfs(conn, dname, &smb_fname->st);
+			get_dosmode = false;
+			ask_sharemode = false;
+			goto done;
+		}
 
-			if (is_msdfs_link) {
-				char *path = NULL;
+		if (posix) {
+			/*
+			 * Posix always wants to see symlinks,
+			 * dangling or not. We've done the
+			 * openat_pathref_fsp() to fill in
+			 * smb_fname->fsp just in case it's not
+			 * dangling.
+			 */
+			ask_sharemode = false;
+			goto done;
+		}
 
-				path = full_path_from_dirfsp_at_basename(
-					talloc_tos(),
-					dir_hnd->fsp,
-					dname);
-				if (path == NULL) {
-					return false;
-				}
-
-				smb_fname =
-					synthetic_smb_fname(talloc_tos(),
-							    path,
-							    NULL,
-							    &symlink_err->st,
-							    dir_fname->twrp,
-							    dir_fname->flags);
-				TALLOC_FREE(path);
-				if (smb_fname == NULL) {
-					return false;
-				}
-
-				DBG_INFO("Masquerading msdfs link %s as a"
-					 "directory\n",
-					 smb_fname->base_name);
-
-				smb_fname->st.st_ex_mode =
-					(smb_fname->st.st_ex_mode & ~S_IFMT) |
-					S_IFDIR;
-
-				mode = dos_mode_msdfs(conn,
-						      dname,
-						      &smb_fname->st);
-				get_dosmode = false;
-				ask_sharemode = false;
-				goto done;
-			}
-
-			smb_fname = synthetic_smb_fname(talloc_tos(),
-							dname,
-							NULL,
-							&symlink_err->st,
-							dir_fname->twrp,
-							dir_fname->flags);
-			if (smb_fname == NULL) {
-				return false;
-			}
-
-			status = openat_pathref_fsp(dir_hnd->fsp, smb_fname);
-
-			if (posix) {
-				/*
-				 * Posix always wants to see symlinks,
-				 * dangling or not. We've done the
-				 * openat_pathref_fsp() to fill in
-				 * smb_fname->fsp just in case it's
-				 * not dangling.
-				 */
-				mode = FILE_ATTRIBUTE_NORMAL;
-				get_dosmode = false;
-				ask_sharemode = false;
-				goto done;
-			}
-
-			if (!NT_STATUS_IS_OK(status)) {
-				/*
-				 * Dangling symlink. Hide.
-				 */
-				TALLOC_FREE(smb_fname);
-				TALLOC_FREE(fname);
-				TALLOC_FREE(dname);
-				continue;
-			}
-		} else {
-			DBG_NOTICE("Could not open %s: %s\n",
-				   dname,
-				   nt_errstr(status));
-			TALLOC_FREE(dname);
-			TALLOC_FREE(fname);
+		if (!lp_follow_symlinks(SNUM(conn))) {
+			/*
+			 * Hide symlinks not followed
+			 */
 			TALLOC_FREE(smb_fname);
+			TALLOC_FREE(fname);
+			TALLOC_FREE(dname);
 			continue;
 		}
 
-		ok = mode_fn(ctx,
-			     private_data,
-			     dir_hnd->fsp,
-			     smb_fname,
-			     get_dosmode,
-			     &mode);
-		if (!ok) {
+		/*
+		 * We have to find out if it's a dangling
+		 * symlink. Use the fat logic behind
+		 * openat_pathref_fsp().
+		 */
+
+		{
+			struct files_struct *fsp = smb_fname->fsp;
+			smb_fname_fsp_unlink(smb_fname);
+			fd_close(fsp);
+			file_free(NULL, fsp);
+		}
+
+		status = openat_pathref_fsp(dir_hnd->fsp, smb_fname);
+
+		if (!NT_STATUS_IS_OK(status)) {
+			/*
+			 * Dangling symlink. Hide.
+			 */
 			TALLOC_FREE(smb_fname);
-			TALLOC_FREE(dname);
 			TALLOC_FREE(fname);
+			TALLOC_FREE(dname);
 			continue;
 		}
 
-	done:
+done:
+		if (get_dosmode) {
+			mode = fdos_mode(smb_fname->fsp);
+			smb_fname->st = smb_fname->fsp->fsp_name->st;
+		}
 
 		if (!dir_check_ftype(mode, dirtype)) {
 			DBG_INFO("[%s] attribs 0x%" PRIx32 " didn't match "
@@ -795,6 +723,16 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			}
 		}
 
+		if (toplevel_dotdot) {
+			/*
+			 * Ensure posix fileid and sids are hidden
+			 */
+			smb_fname->st.st_ex_ino = 0;
+			smb_fname->st.st_ex_dev = 0;
+			smb_fname->st.st_ex_uid = -1;
+			smb_fname->st.st_ex_gid = -1;
+		}
+
 		DBG_NOTICE("mask=[%s] found %s fname=%s (%s)\n",
 			   mask,
 			   smb_fname_str_dbg(smb_fname),
@@ -804,9 +742,6 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 		TALLOC_FREE(dname);
 
 		*_smb_fname = talloc_move(ctx, &smb_fname);
-		if (*_smb_fname == NULL) {
-			return false;
-		}
 		*_fname = fname;
 		*_mode = mode;
 

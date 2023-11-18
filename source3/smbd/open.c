@@ -1054,11 +1054,11 @@ static void change_file_owner_to_parent_fsp(struct files_struct *parent_fsp,
                 return;
 	}
 
-	become_root();
+	set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	ret = SMB_VFS_FCHOWN(fsp,
 			     parent_fsp->fsp_name->st.st_ex_uid,
 			     (gid_t)-1);
-	unbecome_root();
+	drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	if (ret == -1) {
 		DBG_ERR("failed to fchown "
 			"file %s to parent directory uid %u. Error "
@@ -1091,11 +1091,11 @@ static NTSTATUS change_dir_owner_to_parent_fsp(struct files_struct *parent_fsp,
 		return NT_STATUS_OK;
 	}
 
-	become_root();
+	set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	ret = SMB_VFS_FCHOWN(fsp,
 			     parent_fsp->fsp_name->st.st_ex_uid,
 			     (gid_t)-1);
-	unbecome_root();
+	drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	if (ret == -1) {
 		status = map_nt_error_from_unix(errno);
 		DBG_ERR("failed to chown "
@@ -3906,7 +3906,10 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 			 */
 			uint32_t attr = 0;
 
-			status = vfs_fget_dos_attributes(smb_fname->fsp, &attr);
+			status = SMB_VFS_FGET_DOS_ATTRIBUTES(
+				conn,
+				metadata_fsp(smb_fname->fsp),
+				&attr);
 			if (NT_STATUS_IS_OK(status)) {
 				existing_dos_attributes = attr;
 			}
@@ -5555,13 +5558,13 @@ static NTSTATUS inherit_new_acl(files_struct *dirfsp, files_struct *fsp)
 
 	if (inherit_owner) {
 		/* We need to be root to force this. */
-		become_root();
+		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	}
 	status = SMB_VFS_FSET_NT_ACL(metadata_fsp(fsp),
 			security_info_sent,
 			psd);
 	if (inherit_owner) {
-		unbecome_root();
+		drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	}
 	TALLOC_FREE(frame);
 	return status;

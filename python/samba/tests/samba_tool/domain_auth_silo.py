@@ -27,10 +27,10 @@ from samba.netcmd.domain.models.exceptions import ModelError
 from samba.samdb import SamDB
 from samba.sd_utils import SDUtils
 
-from .domain_auth_base import BaseAuthCmdTest
+from .silo_base import SiloTest
 
 
-class AuthSiloCmdTestCase(BaseAuthCmdTest):
+class AuthSiloCmdTestCase(SiloTest):
 
     def test_list(self):
         """Test listing authentication silos in list format."""
@@ -498,7 +498,7 @@ class AuthSiloCmdTestCase(BaseAuthCmdTest):
             self.assertNotIn("Try --force", err)
 
 
-class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
+class AuthSiloMemberCmdTestCase(SiloTest):
 
     def setUp(self):
         super().setUp()
@@ -509,10 +509,10 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.samdb.create_ou(self.ou)
         self.addCleanup(self.samdb.delete, self.ou, ["tree_delete:1"])
 
-        # Assign members to silos
-        self.add_silo_member("Developers", "bob")
-        self.add_silo_member("Developers", "jane")
-        self.add_silo_member("Managers", "alice")
+        # Grant member access to silos
+        self.grant_silo_access("Developers", "bob")
+        self.grant_silo_access("Developers", "jane")
+        self.grant_silo_access("Managers", "alice")
 
     def create_computer(self, name):
         """Create a Computer and return the dn."""
@@ -520,20 +520,22 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.samdb.newcomputer(name, self.ou)
         return dn
 
-    def add_silo_member(self, silo, member):
-        """Add a member to an authentication silo."""
+    def grant_silo_access(self, silo, member):
+        """Grant a member access to an authentication silo."""
         result, out, err = self.runcmd("domain", "auth", "silo",
-                                       "member", "add",
+                                       "member", "grant",
                                        "--name", silo, "--member", member)
 
         self.assertIsNone(result, msg=err)
-        self.assertIn(f"User '{member}' added to the {silo} silo.", out)
-        self.addCleanup(self.remove_silo_member, silo, member)
+        self.assertIn(
+            f"User {member} granted access to the authentication silo {silo}",
+            out)
+        self.addCleanup(self.revoke_silo_access, silo, member)
 
-    def remove_silo_member(self, silo, member):
-        """Remove a member to an authentication silo."""
+    def revoke_silo_access(self, silo, member):
+        """Revoke a member from an authentication silo."""
         result, out, err = self.runcmd("domain", "auth", "silo",
-                                       "member", "remove",
+                                       "member", "revoke",
                                        "--name", silo, "--member", member)
 
         self.assertIsNone(result, msg=err)
@@ -578,9 +580,9 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         self.assertIsNotNone(result)
         self.assertIn("Argument --name is required.", err)
 
-    def test_member_add__user(self):
+    def test_member_grant__user(self):
         """Test adding a user to an authentication silo."""
-        self.add_silo_member("Developers", "joe")
+        self.grant_silo_access("Developers", "joe")
 
         # Check if member is in silo
         user = self.get_user("joe")
@@ -588,27 +590,29 @@ class AuthSiloMemberCmdTestCase(BaseAuthCmdTest):
         members = [str(member) for member in silo["msDS-AuthNPolicySiloMembers"]]
         self.assertIn(str(user.dn), members)
 
-    def test_member_add__computer(self):
+    def test_member_grant__computer(self):
         """Test adding a computer to an authentication silo"""
-        name = "AUTH_SILO_CMP"
+        name = self.unique_name()
         computer = self.create_computer(name)
         silo = "Developers"
 
-        # Don't use self.add_silo_member as it will try to clean up the user.
+        # Don't use self.grant_silo_member as it will try to clean up the user.
         result, out, err = self.runcmd("domain", "auth", "silo",
-                                       "member", "add",
+                                       "member", "grant",
                                        "--name", silo,
                                        "--member", computer)
 
         self.assertIsNone(result, msg=err)
-        self.assertIn(f"User '{name}' added to the {silo} silo.", out)
+        self.assertIn(
+            f"User {name}$ granted access to the authentication silo {silo} (unassigned).",
+            out)
 
-    def test_member_add__unknown_user(self):
+    def test_member_grant__unknown_user(self):
         """Test adding an unknown user to an authentication silo."""
         result, out, err = self.runcmd("domain", "auth", "silo",
-                                       "member", "add",
+                                       "member", "grant",
                                        "--name", "Developers",
                                        "--member", "does_not_exist")
 
         self.assertIsNotNone(result)
-        self.assertIn("User 'does_not_exist' not found.", err)
+        self.assertIn("User does_not_exist not found.", err)

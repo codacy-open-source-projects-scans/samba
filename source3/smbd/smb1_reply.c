@@ -1125,6 +1125,25 @@ static void make_dir_struct(TALLOC_CTX *ctx,
 	DEBUG(8,("put name [%s] from [%s] into dir struct\n",buf+30, fname));
 }
 
+/*******************************************************************
+ A wrapper that handles case sensitivity and the special handling
+ of the ".." name.
+*******************************************************************/
+
+static bool mask_match_search(const char *string,
+			      const char *pattern,
+			      bool is_case_sensitive)
+{
+	if (ISDOTDOT(string)) {
+		string = ".";
+	}
+	if (ISDOT(pattern)) {
+		return False;
+	}
+
+	return ms_fnmatch(pattern, string, True, is_case_sensitive) == 0;
+}
+
 static bool mangle_mask_match(connection_struct *conn,
 			      const char *filename,
 			      const char *mask)
@@ -1199,30 +1218,6 @@ static bool smbd_dirptr_8_3_match_fn(TALLOC_CTX *ctx,
 	return false;
 }
 
-static bool smbd_dirptr_8_3_mode_fn(TALLOC_CTX *ctx,
-				    void *private_data,
-				    struct files_struct *dirfsp,
-				    struct smb_filename *smb_fname,
-				    bool get_dosmode,
-				    uint32_t *_mode)
-{
-	if (*_mode & FILE_ATTRIBUTE_REPARSE_POINT) {
-		/*
-		 * Don't show symlinks/special files to old clients
-		 */
-		return false;
-	}
-
-	if (get_dosmode) {
-		SMB_ASSERT(smb_fname != NULL);
-		*_mode = fdos_mode(smb_fname->fsp);
-		if (smb_fname->fsp != NULL) {
-			smb_fname->st = smb_fname->fsp->fsp_name->st;
-		}
-	}
-	return true;
-}
-
 static bool get_dir_entry(TALLOC_CTX *ctx,
 			  connection_struct *conn,
 			  struct dptr_struct *dirptr,
@@ -1240,6 +1235,7 @@ static bool get_dir_entry(TALLOC_CTX *ctx,
 	uint32_t mode = 0;
 	bool ok;
 
+again:
 	ok = smbd_dirptr_get_entry(ctx,
 				   dirptr,
 				   mask,
@@ -1248,13 +1244,18 @@ static bool get_dir_entry(TALLOC_CTX *ctx,
 				   ask_sharemode,
 				   true,
 				   smbd_dirptr_8_3_match_fn,
-				   smbd_dirptr_8_3_mode_fn,
 				   conn,
 				   &fname,
 				   &smb_fname,
 				   &mode);
 	if (!ok) {
 		return false;
+	}
+	if (mode & FILE_ATTRIBUTE_REPARSE_POINT) {
+		/* hide reparse points from ancient clients */
+		TALLOC_FREE(fname);
+		TALLOC_FREE(smb_fname);
+		goto again;
 	}
 
 	*_fname = talloc_move(ctx, &fname);

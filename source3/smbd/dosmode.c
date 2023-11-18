@@ -387,12 +387,12 @@ NTSTATUS fget_ea_dos_attribute(struct files_struct *fsp,
 		   run because in cases like NFS, root might have even less
 		   rights than the real user
 		*/
-		become_root();
+		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 		sizeret = SMB_VFS_FGETXATTR(fsp,
 					    SAMBA_XATTR_DOS_ATTRIB,
 					    attrstr,
 					    sizeof(attrstr));
-		unbecome_root();
+		drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
 	}
 	if (sizeret == -1) {
 		DBG_INFO("Cannot get attribute "
@@ -507,14 +507,14 @@ NTSTATUS set_ea_dos_attribute(connection_struct *conn,
 			return NT_STATUS_ACCESS_DENIED;
 		}
 
-		become_root();
+		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 		ret = SMB_VFS_FSETXATTR(smb_fname->fsp,
 					SAMBA_XATTR_DOS_ATTRIB,
 					blob.data, blob.length, 0);
+		drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
 		if (ret == 0) {
 			status = NT_STATUS_OK;
 		}
-		unbecome_root();
 		if (!NT_STATUS_IS_OK(status)) {
 			return status;
 		}
@@ -686,16 +686,6 @@ uint32_t fdos_mode(struct files_struct *fsp)
 	uint32_t result = 0;
 	NTSTATUS status = NT_STATUS_OK;
 
-	if (fsp == NULL) {
-		/*
-		 * The pathological case where a caller does
-		 * fdos_mode(smb_fname->fsp) passing a pathref fsp. But as
-		 * smb_fname points at a symlink in POSIX context smb_fname->fsp
-		 * is NULL.
-		 */
-		return FILE_ATTRIBUTE_NORMAL;
-	}
-
 	DBG_DEBUG("%s\n", fsp_str_dbg(fsp));
 
 	if (fsp->fake_file_handle != NULL) {
@@ -715,7 +705,9 @@ uint32_t fdos_mode(struct files_struct *fsp)
 	}
 
 	/* Get the DOS attributes via the VFS if we can */
-	status = vfs_fget_dos_attributes(fsp, &result);
+	status = SMB_VFS_FGET_DOS_ATTRIBUTES(fsp->conn,
+					     metadata_fsp(fsp),
+					     &result);
 	if (!NT_STATUS_IS_OK(status)) {
 		/*
 		 * Only fall back to using UNIX modes if we get NOT_IMPLEMENTED.
@@ -1292,6 +1284,10 @@ struct timespec get_create_timespec(connection_struct *conn,
 				struct files_struct *fsp,
 				const struct smb_filename *smb_fname)
 {
+	if (fsp != NULL) {
+		struct files_struct *meta_fsp = metadata_fsp(fsp);
+		return meta_fsp->fsp_name->st.st_ex_btime;
+	}
 	return smb_fname->st.st_ex_btime;
 }
 

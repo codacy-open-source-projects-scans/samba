@@ -82,9 +82,6 @@ NTSTATUS vfs_at_fspcwd(TALLOC_CTX *mem_ctx,
 		       struct connection_struct *conn,
 		       struct files_struct **_fsp);
 
-NTSTATUS vfs_fget_dos_attributes(struct files_struct *fsp,
-				 uint32_t *dosmode);
-
 #include "source3/lib/interface.h"
 
 /* The following definitions come from lib/ldap_debug_handler.c  */
@@ -350,7 +347,6 @@ bool parent_dirname(TALLOC_CTX *mem_ctx, const char *dir, char **parent,
 bool ms_has_wild(const char *s);
 bool ms_has_wild_w(const smb_ucs2_t *s);
 bool mask_match(const char *string, const char *pattern, bool is_case_sensitive);
-bool mask_match_search(const char *string, const char *pattern, bool is_case_sensitive);
 bool mask_match_list(const char *string, char **list, int listLen, bool is_case_sensitive);
 #include "lib/util/unix_match.h"
 bool name_to_fqdn(fstring fqdn, const char *name);

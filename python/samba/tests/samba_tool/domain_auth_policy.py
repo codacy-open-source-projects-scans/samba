@@ -30,10 +30,10 @@ from samba.netcmd.domain.models.exceptions import ModelError
 from samba.samdb import SamDB
 from samba.sd_utils import SDUtils
 
-from .domain_auth_base import BaseAuthCmdTest
+from .silo_base import SiloTest
 
 
-class AuthPolicyCmdTestCase(BaseAuthCmdTest):
+class AuthPolicyCmdTestCase(SiloTest):
 
     def test_list(self):
         """Test listing authentication policies in list format."""
@@ -295,7 +295,7 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
 
         self.assertEqual(result, -1)
         self.assertIn("Unable to parse SDDL", err)
-        self.assertIn(" *INVALID SDDL*\n ^\n unknown error", err)
+        self.assertIn(" *INVALID SDDL*\n ^\n expected '[OGDS]:' section start ", err)
 
     def test_create__invalid_sddl_conditional_ace(self):
         """Test creating a new authentication policy with invalid SDDL in a field."""
@@ -335,8 +335,8 @@ class AuthPolicyCmdTestCase(BaseAuthCmdTest):
         self.assertEqual(result, -1)
         self.assertIn("Unable to parse SDDL", err)
         self.assertIn(sddl, err)
-        self.assertIn(f"\n{'^':>12}", err)
-        self.assertIn("unknown error", err)
+        self.assertIn(f"\n{'^':>13}", err)
+        self.assertIn("\n malformed ACE with only 4 ';'\n", err)
         self.assertNotIn("  File ", err)  # traceback marker
 
     def test_create__device_attribute_in_sddl_allowed_to(self):

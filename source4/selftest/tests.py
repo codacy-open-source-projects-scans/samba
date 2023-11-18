@@ -1138,6 +1138,8 @@ for env in ["ad_dc_ntvfs", "ad_dc"]:
 planpythontestsuite("ad_dc_default:local", "samba.tests.samba_tool.processes")
 
 planpythontestsuite("ad_dc_ntvfs:local", "samba.tests.samba_tool.user")
+planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.user_auth_policy")
+planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.user_auth_silo")
 for env in ["ad_dc_default:local", "ad_dc_no_ntlm:local"]:
     planpythontestsuite(env, "samba.tests.samba_tool.user_wdigest")
 for env, nt_hash in [("ad_dc:local", True),
@@ -1445,6 +1447,14 @@ planoldpythontestsuite("fileserver",
 # Run smbcacls_propagate_inhertance tests on non msdfs root share
 planoldpythontestsuite("fileserver",
                        "samba.tests.blackbox.smbcacls_propagate_inhertance")
+planoldpythontestsuite("fileserver",
+                       "samba.tests.blackbox.smbcacls_save_restore")
+planoldpythontestsuite("ad_member",
+                       "samba.tests.blackbox.smbcacls_save_restore",
+                       environ={'USER': '$DC_USERNAME',
+                                'PASSWORD' : '$DC_PASSWORD'}
+                       )
+
 #
 # A) Run the smbcacls_propagate_inhertance tests on a msdfs root share
 #    *without* any nested dfs links

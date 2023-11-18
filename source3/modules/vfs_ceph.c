@@ -21,13 +21,13 @@
 */
 
 /*
- * This VFS only works with the libceph.so user-space client. It is not needed
+ * This VFS only works with the libcephfs.so user-space client. It is not needed
  * if you are using the kernel client or the FUSE client.
  *
  * Add the following smb.conf parameter to each share that will be hosted on
  * Ceph:
  *
- *   vfs objects = ceph [any others you need go here]
+ *   vfs objects = [any others you need go here] ceph
  */
 
 #include "includes.h"
@@ -54,8 +54,8 @@
 #define llu(_var) ((long long unsigned)_var)
 
 /*
- * Note, libceph's return code model is to return -errno! So we have to convert
- * to what Samba expects, with is set errno to -return and return -1
+ * Note, libcephfs's return code model is to return -errno! So we have to
+ * convert to what Samba expects, with is set errno to -return and return -1
  */
 #define WRAP_RETURN(_res) \
 	errno = 0; \
@@ -327,7 +327,7 @@ static uint64_t cephwrap_disk_free(struct vfs_handle_struct *handle,
 				uint64_t *dfree,
 				uint64_t *dsize)
 {
-	struct statvfs statvfs_buf;
+	struct statvfs statvfs_buf = { 0 };
 	int ret;
 
 	if (!(ret = ceph_statfs(handle->data, smb_fname->base_name,
@@ -353,7 +353,7 @@ static int cephwrap_get_quota(struct vfs_handle_struct *handle,
 				unid_t id,
 				SMB_DISK_QUOTA *qt)
 {
-	/* libceph: Ceph does not implement this */
+	/* libcephfs: Ceph does not implement this */
 #if 0
 /* was ifdef HAVE_SYS_QUOTAS */
 	int ret;
@@ -374,7 +374,7 @@ static int cephwrap_get_quota(struct vfs_handle_struct *handle,
 
 static int cephwrap_set_quota(struct vfs_handle_struct *handle,  enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *qt)
 {
-	/* libceph: Ceph does not implement this */
+	/* libcephfs: Ceph does not implement this */
 #if 0
 /* was ifdef HAVE_SYS_QUOTAS */
 	int ret;
@@ -395,7 +395,7 @@ static int cephwrap_statvfs(struct vfs_handle_struct *handle,
 			    const struct smb_filename *smb_fname,
 			    struct vfs_statvfs_struct *statbuf)
 {
-	struct statvfs statvfs_buf;
+	struct statvfs statvfs_buf = { 0 };
 	int ret;
 
 	ret = ceph_statfs(handle->data, smb_fname->base_name, &statvfs_buf);
@@ -436,7 +436,7 @@ static DIR *cephwrap_fdopendir(struct vfs_handle_struct *handle,
 			       uint32_t attributes)
 {
 	int ret = 0;
-	struct ceph_dir_result *result;
+	struct ceph_dir_result *result = NULL;
 	DBG_DEBUG("[CEPH] fdopendir(%p, %p)\n", handle, fsp);
 
 	ret = ceph_opendir(handle->data, fsp->fsp_name->base_name, &result);
@@ -453,7 +453,7 @@ static struct dirent *cephwrap_readdir(struct vfs_handle_struct *handle,
 				       struct files_struct *dirfsp,
 				       DIR *dirp)
 {
-	struct dirent *result;
+	struct dirent *result = NULL;
 
 	DBG_DEBUG("[CEPH] readdir(%p, %p)\n", handle, dirp);
 	result = ceph_readdir(handle->data, (struct ceph_dir_result *) dirp);
@@ -719,7 +719,7 @@ static ssize_t cephwrap_sendfile(struct vfs_handle_struct *handle, int tofd, fil
 			off_t offset, size_t n)
 {
 	/*
-	 * We cannot support sendfile because libceph is in user space.
+	 * We cannot support sendfile because libcephfs is in user space.
 	 */
 	DBG_DEBUG("[CEPH] cephwrap_sendfile\n");
 	errno = ENOTSUP;
@@ -733,7 +733,7 @@ static ssize_t cephwrap_recvfile(struct vfs_handle_struct *handle,
 			size_t n)
 {
 	/*
-	 * We cannot support recvfile because libceph is in user space.
+	 * We cannot support recvfile because libcephfs is in user space.
 	 */
 	DBG_DEBUG("[CEPH] cephwrap_recvfile\n");
 	errno=ENOTSUP;
@@ -872,7 +872,7 @@ static int cephwrap_stat(struct vfs_handle_struct *handle,
 			struct smb_filename *smb_fname)
 {
 	int result = -1;
-	struct ceph_statx stx;
+	struct ceph_statx stx = { 0 };
 
 	DBG_DEBUG("[CEPH] stat(%p, %s)\n", handle, smb_fname_str_dbg(smb_fname));
 
@@ -896,7 +896,7 @@ static int cephwrap_stat(struct vfs_handle_struct *handle,
 static int cephwrap_fstat(struct vfs_handle_struct *handle, files_struct *fsp, SMB_STRUCT_STAT *sbuf)
 {
 	int result = -1;
-	struct ceph_statx stx;
+	struct ceph_statx stx = { 0 };
 	int fd = fsp_get_pathref_fd(fsp);
 
 	DBG_DEBUG("[CEPH] fstat(%p, %d)\n", handle, fd);
@@ -916,7 +916,7 @@ static int cephwrap_lstat(struct vfs_handle_struct *handle,
 			 struct smb_filename *smb_fname)
 {
 	int result = -1;
-	struct ceph_statx stx;
+	struct ceph_statx stx = { 0 };
 
 	DBG_DEBUG("[CEPH] lstat(%p, %s)\n", handle, smb_fname_str_dbg(smb_fname));
 
@@ -1028,7 +1028,7 @@ static int cephwrap_fchmod(struct vfs_handle_struct *handle, files_struct *fsp, 
 	DBG_DEBUG("[CEPH] fchmod(%p, %p, %d)\n", handle, fsp, mode);
 	if (!fsp->fsp_flags.is_pathref) {
 		/*
-		 * We can use an io_fd to remove xattrs.
+		 * We can use an io_fd to change permissions.
 		 */
 		result = ceph_fchmod(handle->data, fsp_get_io_fd(fsp), mode);
 	} else {
@@ -1048,7 +1048,24 @@ static int cephwrap_fchown(struct vfs_handle_struct *handle, files_struct *fsp, 
 	int result;
 
 	DBG_DEBUG("[CEPH] fchown(%p, %p, %d, %d)\n", handle, fsp, uid, gid);
-	result = ceph_fchown(handle->data, fsp_get_io_fd(fsp), uid, gid);
+	if (!fsp->fsp_flags.is_pathref) {
+		/*
+		 * We can use an io_fd to change ownership.
+		 */
+		result = ceph_fchown(handle->data,
+				     fsp_get_io_fd(fsp),
+				     uid,
+				     gid);
+	} else {
+		/*
+		 * This is no longer a handle based call.
+		 */
+		result = ceph_chown(handle->data,
+				    fsp->fsp_name->base_name,
+				    uid,
+				    gid);
+	}
+
 	DBG_DEBUG("[CEPH] fchown(...) = %d\n", result);
 	WRAP_RETURN(result);
 }
@@ -1207,7 +1224,7 @@ static bool cephwrap_getlock(struct vfs_handle_struct *handle, files_struct *fsp
 
 /*
  * We cannot let this fall through to the default, because the file might only
- * be accessible from libceph (which is a user-space client) but the fd might
+ * be accessible from libcephfs (which is a user-space client) but the fd might
  * be for some file the kernel knows about.
  */
 static int cephwrap_linux_setlease(struct vfs_handle_struct *handle, files_struct *fsp,
@@ -1337,7 +1354,7 @@ static int cephwrap_mknodat(struct vfs_handle_struct *handle,
 
 /*
  * This is a simple version of real-path ... a better version is needed to
- * ask libceph about symbolic links.
+ * ask libcephfs about symbolic links.
  */
 static struct smb_filename *cephwrap_realpath(struct vfs_handle_struct *handle,
 				TALLOC_CTX *ctx,
@@ -1589,7 +1606,7 @@ static NTSTATUS cephwrap_read_dfs_pathat(struct vfs_handle_struct *handle,
 #else
 	char link_target_buf[7];
 #endif
-	struct ceph_statx stx;
+	struct ceph_statx stx = { 0 };
 	struct smb_filename *full_fname = NULL;
 	int ret;
 

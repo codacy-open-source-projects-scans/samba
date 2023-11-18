@@ -1278,8 +1278,8 @@
 </refsect3>
 
 <refsect3>
-	<title>domain auth silo member add</title>
-	<para>Add a member to an authentication silo.</para>
+	<title>domain auth silo member grant</title>
+	<para>Grant a member access to an authentication silo.</para>
 	<variablelist>
 		<varlistentry>
 			<term>-H, --URL</term>
@@ -1296,7 +1296,7 @@
 		<varlistentry>
 			<term>--member</term>
 			<listitem><para>
-				Member to add to the silo (DN or account name).
+				Member to grant access to the silo (DN or account name).
 			</para></listitem>
 		</varlistentry>
 	</variablelist>
@@ -1328,8 +1328,8 @@
 </refsect3>
 
 <refsect3>
-	<title>domain auth silo member remove</title>
-	<para>Remove a member from an authentication silo.</para>
+	<title>domain auth silo member revoke</title>
+	<para>Revoke a member from an authentication silo.</para>
 	<variablelist>
 		<varlistentry>
 			<term>-H, --URL</term>
@@ -1346,7 +1346,7 @@
 		<varlistentry>
 			<term>--member</term>
 			<listitem><para>
-				Member to remove from the silo (DN or account name).
+				Member to revoke from the silo (DN or account name).
 			</para></listitem>
 		</varlistentry>
 	</variablelist>
@@ -2714,6 +2714,52 @@
 	<para>Syncs the passwords of all user accounts, using an optional script.</para>
 	<para>Note that this command should run on a single domain controller only
 	(typically the PDC-emulator).</para>
+</refsect3>
+
+<refsect3>
+	<title>user auth policy assign <replaceable>username</replaceable> [options]</title>
+	<para>Set assigned authentication policy for user.</para>
+	<variablelist>
+		<varlistentry>
+			<term>--policy</term>
+			<listitem><para>
+				Name of authentication policy to assign or leave empty to remove.
+			</para></listitem>
+		</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
+	<title>user auth policy remove <replaceable>username</replaceable></title>
+	<para>Remove assigned authentication policy from user.</para>
+</refsect3>
+
+<refsect3>
+	<title>user auth policy view <replaceable>username</replaceable></title>
+	<para>View the assigned authentication policy for user.</para>
+</refsect3>
+
+<refsect3>
+	<title>user auth silo assign <replaceable>username</replaceable> [options]</title>
+	<para>Set assigned authentication silo for user.</para>
+	<variablelist>
+		<varlistentry>
+			<term>--silo</term>
+			<listitem><para>
+				Name of authentication silo to assign or leave empty to remove.
+			</para></listitem>
+		</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
+	<title>user auth silo remove <replaceable>username</replaceable></title>
+	<para>Remove assigned authentication silo from user.</para>
+</refsect3>
+
+<refsect3>
+	<title>user auth silo view <replaceable>username</replaceable></title>
+	<para>View the assigned authentication silo for user.</para>
 </refsect3>
 
 <refsect2>

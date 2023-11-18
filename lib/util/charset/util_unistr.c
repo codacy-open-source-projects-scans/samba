@@ -1,19 +1,19 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Samba utility functions
    Copyright (C) Andrew Tridgell 1992-2001
    Copyright (C) Simo Sorce 2001
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -193,15 +193,36 @@ size_t ucs2_align(const void *base_ptr, const void *p, int flags)
 
 /**
 return the number of bytes occupied by a buffer in CH_UTF16 format
-the result includes the null termination
 **/
 size_t utf16_len(const void *buf)
 {
 	size_t len;
 
-	for (len = 0; SVAL(buf,len); len += 2) ;
+	for (len = 0; PULL_LE_U16(buf,len); len += 2) ;
 
-	return len + 2;
+	return len;
+}
+
+/**
+return the number of bytes occupied by a buffer in CH_UTF16 format
+the result includes the null termination
+**/
+size_t utf16_null_terminated_len(const void *buf)
+{
+	return utf16_len(buf) + 2;
+}
+
+/**
+return the number of bytes occupied by a buffer in CH_UTF16 format
+limited by 'n' bytes
+**/
+size_t utf16_len_n(const void *src, size_t n)
+{
+	size_t len;
+
+	for (len = 0; (len+2 <= n) && PULL_LE_U16(src, len); len += 2) ;
+
+	return len;
 }
 
 /**
@@ -209,11 +230,11 @@ return the number of bytes occupied by a buffer in CH_UTF16 format
 the result includes the null termination
 limited by 'n' bytes
 **/
-size_t utf16_len_n(const void *src, size_t n)
+size_t utf16_null_terminated_len_n(const void *src, size_t n)
 {
 	size_t len;
 
-	for (len = 0; (len+2 < n) && SVAL(src, len); len += 2) ;
+	len = utf16_len_n(src, n);
 
 	if (len+2 <= n) {
 		len += 2;
@@ -222,6 +243,50 @@ size_t utf16_len_n(const void *src, size_t n)
 	return len;
 }
 
+uint16_t *talloc_utf16_strlendup(TALLOC_CTX *mem_ctx, const char *str, size_t len)
+{
+	uint16_t *new_str = NULL;
+
+	/* Check for overflow. */
+	if (len > SIZE_MAX - 2) {
+		return NULL;
+	}
+
+	/*
+	 * Allocate the new string, including space for the
+	 * UTF‐16 null terminator.
+	 */
+	new_str = talloc_size(mem_ctx, len + 2);
+	if (new_str == NULL) {
+		return NULL;
+	}
+
+	memcpy(new_str, str, len);
+
+	{
+		/*
+		 * Ensure that the UTF‐16 string is
+		 * null‐terminated.
+		 */
+
+		char *new_bytes = (char *)new_str;
+
+		new_bytes[len] = '\0';
+		new_bytes[len + 1] = '\0';
+	}
+
+	return new_str;
+}
+
+uint16_t *talloc_utf16_strdup(TALLOC_CTX *mem_ctx, const char *str)
+{
+	return talloc_utf16_strlendup(mem_ctx, str, utf16_len(str));
+}
+
+uint16_t *talloc_utf16_strndup(TALLOC_CTX *mem_ctx, const char *str, size_t n)
+{
+	return talloc_utf16_strlendup(mem_ctx, str, utf16_len_n(str, n));
+}
 
 /**
  * Determine the length and validity of a utf-8 string.
@@ -501,9 +566,9 @@ static size_t pull_ucs2(char *dest, const void *src, size_t dest_len, size_t src
 
 	if (flags & STR_TERMINATE) {
 		if (src_len == (size_t)-1) {
-			src_len = utf16_len(src);
+			src_len = utf16_null_terminated_len(src);
 		} else {
-			src_len = utf16_len_n(src, src_len);
+			src_len = utf16_null_terminated_len_n(src, src_len);
 		}
 	}
 
@@ -521,7 +586,7 @@ static size_t pull_ucs2(char *dest, const void *src, size_t dest_len, size_t src
 
 /**
  Copy a string from a char* src to a unicode or ascii
- dos codepage destination choosing unicode or ascii based on the 
+ dos codepage destination choosing unicode or ascii based on the
  flags in the SMB buffer starting at base_ptr.
  Return the number of bytes occupied by the string in the destination.
  flags can have:
