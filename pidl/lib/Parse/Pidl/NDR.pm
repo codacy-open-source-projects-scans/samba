@@ -66,6 +66,7 @@ my $scalar_alignment = {
 	'udlongr' => 4,
 	'DATA_BLOB' => 4,
 	'string' => 4,
+	'u16string' => 4,
 	'string_array' => 4, #???
 	'time_t' => 4,
 	'uid_t' => 8,
@@ -608,7 +609,7 @@ sub ParseStruct($$$)
 		$surrounding = $e;
 	}
 
-	if (defined $e->{TYPE} && $e->{TYPE} eq "string"
+	if (defined $e->{TYPE} && Parse::Pidl::Typelist::is_string_type($e->{TYPE})
 	    &&  property_matches($e, "flag", ".*LIBNDR_FLAG_STR_CONFORMANT.*")) {
 		$surrounding = $struct->{ELEMENTS}[-1];
 	}

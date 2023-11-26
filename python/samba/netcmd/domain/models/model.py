@@ -117,14 +117,13 @@ class Model(metaclass=ModelMeta):
             return str(self.dn)
 
     @staticmethod
-    @abstractmethod
     def get_base_dn(ldb):
         """Return the base DN for the container of this model.
 
         :param ldb: Ldb connection
         :return: Dn to use for new objects
         """
-        pass
+        return ldb.get_default_basedn()
 
     @classmethod
     def get_search_dn(cls, ldb):
@@ -337,7 +336,7 @@ class Model(metaclass=ModelMeta):
 
             message = Message(dn=self.dn)
             for attr, field in self.fields.items():
-                if attr != "dn":
+                if attr != "dn" and not field.readonly:
                     value = getattr(self, attr)
                     try:
                         db_value = field.to_db_value(ldb, value, FLAG_MOD_ADD)
@@ -362,7 +361,7 @@ class Model(metaclass=ModelMeta):
             # Any fields that are set to None or an empty list get unset.
             message = Message(dn=self.dn)
             for attr, field in self.fields.items():
-                if attr != "dn":
+                if attr != "dn" and not field.readonly:
                     value = getattr(self, attr)
                     old_value = getattr(existing_obj, attr)
 

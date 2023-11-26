@@ -10,6 +10,7 @@ require Exporter;
 @EXPORT_OK = qw(hasType getType resolveType mapTypeName mapTypeSpecifier scalar_is_reference expandAlias
 	mapScalarType addType typeIs is_signed is_scalar enum_type_fn
 	bitmap_type_fn mapType typeHasBody is_fixed_size_scalar
+	is_string_type
 );
 use vars qw($VERSION);
 $VERSION = '0.01';
@@ -23,12 +24,13 @@ my %types = ();
 my @reference_scalars = (
 	"string", "string_array", "nbt_string", "dns_string",
 	"wrepl_nbt_name", "dnsp_name", "dnsp_string",
-	"ipv4address", "ipv6address"
+	"ipv4address", "ipv6address", "u16string"
 );
 
 my @non_fixed_size_scalars = (
 	"string", "string_array", "nbt_string", "dns_string",
-	"wrepl_nbt_name", "dnsp_name", "dnsp_string"
+	"wrepl_nbt_name", "dnsp_name", "dnsp_string",
+	"u16string"
 );
 
 # a list of known scalar types
@@ -54,6 +56,7 @@ my %scalars = (
 	"pointer"	=> "void*",
 	"DATA_BLOB"	=> "DATA_BLOB",
 	"string"	=> "const char *",
+	"u16string"	=> "const uint16_t *",
 	"string_array"	=> "const char **",
 	"time_t"	=> "time_t",
 	"uid_t"	        => "uid_t",
@@ -228,6 +231,13 @@ sub scalar_is_reference($)
 
 	return 1 if (grep(/^$name$/, @reference_scalars));
 	return 0;
+}
+
+sub is_string_type
+{
+	my ($t) = @_;
+
+	return ($t eq "string" or $t eq "u16string");
 }
 
 sub RegisterScalars()

@@ -20,7 +20,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <Python.h>
+#include "lib/replace/system/python.h"
 #include "python/py3compat.h"
 #include "includes.h"
 #include "python/modules.h"
@@ -445,6 +445,10 @@ uint16_t *PyUtf16String_FromBytes(TALLOC_CTX *mem_ctx, PyObject *value)
 
 	if (len < 0) {
 		PyErr_SetString(PyExc_ValueError, "bytes length is negative");
+		return NULL;
+	}
+	if (len & 1) {
+		PyErr_SetString(PyExc_ValueError, "bytes length is odd");
 		return NULL;
 	}
 
