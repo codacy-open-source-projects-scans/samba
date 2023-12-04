@@ -46,12 +46,6 @@
 #define SDDL_FLAG_IS_BINARY_OP              (1 << 21)
 
 
-/*
- * A resource attribute ACE has a slightly different syntax for SIDs.
- */
-#define SDDL_FLAG_IS_RESOURCE_ATTR_ACE      (1 << 30)
-
-
 #define SDDL_FLAGS_EXPR_START (SDDL_FLAG_EXPECTING_UNARY_OP | \
 			       SDDL_FLAG_EXPECTING_LOCAL_ATTR | \
 			       SDDL_FLAG_EXPECTING_NON_LOCAL_ATTR | \
@@ -623,7 +617,7 @@ struct sddl_node {
 };
 
 static bool sddl_write_int(struct sddl_write_context *ctx,
-			    struct ace_condition_token *tok)
+			   const struct ace_condition_token *tok)
 {
 	int64_t v = tok->data.int64.value;
 	uint8_t sign = tok->data.int64.sign;
@@ -827,7 +821,7 @@ static bool sddl_write_attr(struct sddl_write_context *ctx,
 
 
 static bool sddl_write_unicode(struct sddl_write_context *ctx,
-			       struct ace_condition_token *tok)
+			       const struct ace_condition_token *tok)
 {
 	char *quoted = NULL;
 	bool ok;
@@ -861,7 +855,7 @@ static bool sddl_write_unicode(struct sddl_write_context *ctx,
 }
 
 static bool sddl_write_octet_string(struct sddl_write_context *ctx,
-				    struct ace_condition_token *tok)
+				    const struct ace_condition_token *tok)
 {
 	bool ok;
 	char *hex  = hex_encode_talloc(ctx->mem_ctx,
@@ -876,9 +870,25 @@ static bool sddl_write_octet_string(struct sddl_write_context *ctx,
 	return ok;
 }
 
+/*
+ * For octet strings, the Resource attribute ACE SDDL differs from conditional
+ * ACE SDDL, lacking the leading '#'.
+ */
+static bool sddl_write_ra_octet_string(struct sddl_write_context *ctx,
+				       const struct ace_condition_token *tok)
+{
+	bool ok;
+	char *hex  = hex_encode_talloc(ctx->mem_ctx,
+				       tok->data.bytes.data,
+				       tok->data.bytes.length);
+	ok = sddl_write(ctx, hex);
+	talloc_free(hex);
+	return ok;
+}
+
 
 static bool sddl_write_sid(struct sddl_write_context *ctx,
-			   struct ace_condition_token *tok)
+			   const struct ace_condition_token *tok)
 {
 	bool ok;
 	char *sddl = NULL;
@@ -1294,10 +1304,12 @@ static void comp_error(struct ace_condition_sddl_compiler_context *comp,
 	if (comp->message == NULL) {
 		goto fail;
 	}
+	DBG_NOTICE("%s\n", comp->message);
 	return;
 fail:
 	comp->message = talloc_strdup(comp->mem_ctx,
 				      "failed to set error message");
+	DBG_WARNING("%s\n", comp->message);
 }
 
 
@@ -1935,49 +1947,108 @@ static bool parse_octet_string(struct ace_condition_sddl_compiler_context *comp)
 }
 
 
+static bool parse_ra_octet_string(struct ace_condition_sddl_compiler_context *comp)
+{
+	/*
+	 * Resource attribute octet strings resemble conditional ace octet
+	 * strings, but have some important differences:
+	 *
+	 * 1. The '#' at the start is optional, and if present is
+	 * counted as a zero.
+	 *
+	 * 2. An odd number of characters is implicitly left-padded with a zero.
+	 *
+	 * That is, "abc" means "0abc", "#12" means "0012", "f##"
+	 * means "0f00", and "##" means 00.
+	 */
+	struct ace_condition_token token = {};
+	size_t string_length, bytes_length, i, j;
+	bool ok;
+	char pair[2];
+
+	string_length = strspn((const char*)(comp->sddl + comp->offset),
+			"#0123456789abcdefABCDEF");
+
+	bytes_length = (string_length + 1) / 2;
+
+	if (bytes_length == 0) {
+		comp_error(comp, "zero length octet bytes");
+		return false;
+	}
+
+	token.data.bytes = data_blob_talloc_zero(comp->mem_ctx, bytes_length);
+	if (token.data.bytes.data == NULL) {
+		return false;
+	}
+	token.type = CONDITIONAL_ACE_TOKEN_OCTET_STRING;
+
+	j = comp->offset;
+	i = 0;
+	if (string_length & 1) {
+		/*
+		 * An odd number of characters means the first
+		 * character gains an implicit 0 for the high nybble.
+		 */
+		pair[0] = 0;
+		pair[1] = (comp->sddl[0] == '#') ? '0' : comp->sddl[0];
+
+		ok = hex_byte(pair, &token.data.bytes.data[i]);
+		if (!ok) {
+			goto fail;
+		}
+		j++;
+		i++;
+	}
+
+	for (; i < bytes_length; i++) {
+		/*
+		 * Why not just strhex_to_str() ?
+		 *
+		 * Because we need to treat '#' as '0' in octet string values.
+		 */
+		if (comp->length - j < 2) {
+			goto fail;
+		}
+
+		pair[0] = (comp->sddl[j]     == '#') ? '0' : comp->sddl[j];
+		pair[1] = (comp->sddl[j + 1] == '#') ? '0' : comp->sddl[j + 1];
+
+		ok = hex_byte(pair, &token.data.bytes.data[i]);
+		if (!ok) {
+			goto fail;
+		}
+		j += 2;
+	}
+	comp->offset = j;
+	return write_sddl_token(comp, token);
+
+fail:
+	comp_error(comp, "inexplicable error in octet string");
+	talloc_free(token.data.bytes.data);
+	return false;
+}
+
+
 static bool parse_sid(struct ace_condition_sddl_compiler_context *comp)
 {
 	struct dom_sid *sid = NULL;
 	const uint8_t *sidstr = NULL;
 	struct ace_condition_token token = {};
 	size_t end;
-	bool expecting_bare_sids =
-		comp->state & SDDL_FLAG_IS_RESOURCE_ATTR_ACE ? true : false;
-
-	if ((comp->state & SDDL_FLAG_EXPECTING_LITERAL) == 0) {
-		comp_error(comp, "did not expect a SID here");
+	if (comp->length - comp->offset < 7) {
+		/* minimum: "SID(AA)" */
+		comp_error(comp, "no room for a complete SID");
 		return false;
 	}
-	if (expecting_bare_sids) {
-		/*
-		 *  This flag is set for a resource ACE which doesn't have the
-		 *  SID() wrapper around the SID string, and not for a
-		 *  conditional ACE, which must have the "SID(...)".
-		 *
-		 * The resource ACE doesn't need this because there is no
-		 * ambiguity with local attribute names, besides which the
-		 * type has already been specified earlier in the ACE.
-		 */
-		if (comp->length - comp->offset < 2){
-			comp_error(comp, "no room for a complete SID");
-			return false;
-		}
+	/* conditional ACE SID string */
+	if (comp->sddl[comp->offset    ] != 'S' ||
+	    comp->sddl[comp->offset + 1] != 'I' ||
+	    comp->sddl[comp->offset + 2] != 'D' ||
+	    comp->sddl[comp->offset + 3] != '(') {
+		comp_error(comp, "malformed SID() constructor");
+		return false;
 	} else {
-		if (comp->length - comp->offset < 7){
-			/* minimum: "SID(AA)" */
-			comp_error(comp, "no room for a complete SID");
-			return false;
-		}
-		/* conditional ACE SID string */
-		if (comp->sddl[comp->offset    ] != 'S' ||
-		    comp->sddl[comp->offset + 1] != 'I' ||
-		    comp->sddl[comp->offset + 2] != 'D' ||
-		    comp->sddl[comp->offset + 3] != '(') {
-			comp_error(comp, "malformed SID() constructor");
-			return false;
-		} else {
-			comp->offset += 4;
-		}
+		comp->offset += 4;
 	}
 
 	sidstr = comp->sddl + comp->offset;
@@ -1996,19 +2067,64 @@ static bool parse_sid(struct ace_condition_sddl_compiler_context *comp)
 		return false;
 	}
 	comp->offset = end;
-	if (expecting_bare_sids) {
-		/* no trailing ')' in a resource attribute ACE */
-	} else {
-		/*
-		 * offset is now at the end of the SID, but we need to account
-		 * for the ')'.
-		 */
-		if (comp->sddl[comp->offset] != ')') {
-			comp_error(comp, "expected ')' to follow SID");
-			return false;
-		}
-		comp->offset++;
+	/*
+	 * offset is now at the end of the SID, but we need to account
+	 * for the ')'.
+	 */
+	if (comp->sddl[comp->offset] != ')') {
+		comp_error(comp, "expected ')' to follow SID");
+		return false;
 	}
+	comp->offset++;
+
+	token.type = CONDITIONAL_ACE_TOKEN_SID;
+	token.data.sid.sid = *sid;
+	return write_sddl_token(comp, token);
+}
+
+
+
+static bool parse_ra_sid(struct ace_condition_sddl_compiler_context *comp)
+{
+	struct dom_sid *sid = NULL;
+	const uint8_t *sidstr = NULL;
+	struct ace_condition_token token = {};
+	size_t end;
+
+	if ((comp->state & SDDL_FLAG_EXPECTING_LITERAL) == 0) {
+		comp_error(comp, "did not expect a SID here");
+		return false;
+	}
+	/*
+	 *  Here we are parsing a resource attribute ACE which doesn't
+	 *  have the SID() wrapper around the SID string (unlike a
+	 *  conditional ACE).
+	 *
+	 * The resource ACE doesn't need this because there is no
+	 * ambiguity with local attribute names, besides which the
+	 * type has already been specified earlier in the ACE.
+	 */
+	if (comp->length - comp->offset < 2){
+		comp_error(comp, "no room for a complete SID");
+		return false;
+	}
+
+	sidstr = comp->sddl + comp->offset;
+
+	sid = sddl_decode_sid(comp->mem_ctx,
+			      (const char **)&sidstr,
+			      comp->domain_sid);
+
+	if (sid == NULL) {
+		comp_error(comp, "could not parse SID");
+		return false;
+	}
+	end = sidstr - comp->sddl;
+	if (end >= comp->length || end < comp->offset) {
+		comp_error(comp, "apparent overflow in SID parsing");
+		return false;
+	}
+	comp->offset = end;
 	token.type = CONDITIONAL_ACE_TOKEN_SID;
 	token.data.sid.sid = *sid;
 	return write_sddl_token(comp, token);
@@ -2080,6 +2196,53 @@ static bool parse_int(struct ace_condition_sddl_compiler_context *comp)
 	token.data.int64.value = v;
 	token.type = CONDITIONAL_ACE_TOKEN_INT64;
 	return write_sddl_token(comp, token);
+}
+
+
+static bool parse_uint(struct ace_condition_sddl_compiler_context *comp)
+{
+	struct ace_condition_token *tok = NULL;
+	bool ok = parse_int(comp);
+	if (ok == false) {
+		return false;
+	}
+	/*
+	 * check that the token's value is positive.
+	 */
+	if (comp->target_len == 0) {
+		return false;
+	}
+	tok = &comp->target[*comp->target_len - 1];
+	if (tok->type != CONDITIONAL_ACE_TOKEN_INT64) {
+		return false;
+	}
+	if (tok->data.int64.value < 0) {
+		comp_error(comp, "invalid resource ACE value for unsigned TU claim");
+		return false;
+	}
+	return true;
+}
+
+
+static bool parse_bool(struct ace_condition_sddl_compiler_context *comp)
+{
+	struct ace_condition_token *tok = NULL;
+	bool ok = parse_int(comp);
+	if (ok == false || comp->target_len == 0) {
+		return false;
+	}
+	/*
+	 * check that the token is 0 or 1.
+	 */
+	tok = &comp->target[*comp->target_len - 1];
+	if (tok->type != CONDITIONAL_ACE_TOKEN_INT64) {
+		return false;
+	}
+	if (tok->data.int64.value != 0 && tok->data.int64.value != 1) {
+		comp_error(comp, "invalid resource ACE Boolean value");
+		return false;
+	}
+	return true;
 }
 
 
@@ -2411,10 +2574,6 @@ static bool parse_literal(struct ace_condition_sddl_compiler_context *comp,
 	default:
 		if (strchr("1234567890-+", c) != NULL) {
 			return parse_int(comp);
-		}
-		if ((comp->state & SDDL_FLAG_IS_RESOURCE_ATTR_ACE) &&
-		    isupper(c)) {
-			return parse_sid(comp);
 		}
 	}
 	if (c > 31 && c < 127) {
@@ -2805,94 +2964,6 @@ struct ace_condition_script * ace_conditions_compile_sddl(
 
 
 
-static bool check_resource_attr_type(struct ace_condition_token *tok, char c)
-{
-	/*
-	 * Check that a token matches the expected resource ace type (TU, TS,
-	 * etc).
-	 *
-	 * We're sticking to the [IUSDXB] codes rather than using converting
-	 * earlier to tok->type (whereby this whole thing becomes "if (tok->type
-	 * == type)") to enable bounds checks on the various integer types.
-	 */
-	switch(c) {
-	case 'I':
-		/* signed int */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_INT64) {
-			goto wrong_type;
-		}
-		return true;
-	case 'U':
-		/* unsigned int, let's check the range */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_INT64) {
-			goto wrong_type;
-		}
-		if (tok->data.int64.value < 0) {
-			DBG_WARNING(
-				"invalid resource ACE value for unsigned TU\n");
-			goto error;
-		}
-		return true;
-	case 'S':
-		/* unicode string */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_UNICODE) {
-			goto wrong_type;
-		}
-		return true;
-	case 'D':
-		/* SID */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_SID) {
-			goto wrong_type;
-		}
-		return true;
-	case 'X':
-		/* Octet string */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_OCTET_STRING) {
-			if (tok->type == CONDITIONAL_ACE_TOKEN_INT64)  {
-				/*
-				 * Windows 2022 will also accept even
-				 * numbers of digits, like "1234"
-				 * instead of "#1234". Samba does not.
-				 *
-				 * Fixing this is complicated by the
-				 * fact that a leading '0' will have
-				 * cast the integer to octal, while an
-				 * A-F character will have caused it
-				 * to not parse as a literal at all.
-				 *
-				 * This behaviour is not mentioned in
-				 * MS-DTYP or elsewhere.
-				 */
-				DBG_WARNING("Octet sequence uses bare digits, "
-					    "please prefix a '#'\n");
-			}
-			goto wrong_type;
-		}
-		return true;
-	case 'B':
-		/* Boolean, meaning an int that is 0 or 1 */
-		if (tok->type != CONDITIONAL_ACE_TOKEN_INT64) {
-			goto wrong_type;
-		}
-		if (tok->data.int64.value != 0 &&
-		    tok->data.int64.value != 1) {
-			DBG_WARNING("invalid resource ACE value for boolean TB "
-				    "(should be 0 or 1).\n");
-			goto error;
-		}
-		return true;
-	default:
-		DBG_WARNING("Unknown resource ACE type T%c\n", c);
-		goto error;
-	};
-  wrong_type:
-	DBG_WARNING("resource ace type T%c doesn't match value\n", c);
-  error:
-	return false;
-}
-
-
-
 static bool parse_resource_attr_list(
 	struct ace_condition_sddl_compiler_context *comp,
 	char attr_type_char)
@@ -2917,8 +2988,7 @@ static bool parse_resource_attr_list(
 	struct ace_condition_token *old_target = comp->target;
 	uint32_t *old_target_len = comp->target_len;
 
-	comp->state = (SDDL_FLAG_EXPECTING_LITERAL |
-		       SDDL_FLAG_IS_RESOURCE_ATTR_ACE);
+	comp->state = SDDL_FLAG_EXPECTING_LITERAL;
 
 	/*
 	 * the worst case is one token for every two bytes: {1,1,1}, and we
@@ -2964,7 +3034,8 @@ static bool parse_resource_attr_list(
 		if (!first) {
 			if (c != ',') {
 				comp_error(comp,
-					   "malformed composite (expected comma)");
+					   "malformed resource attribute ACE "
+					   "(expected comma)");
 				goto fail;
 			}
 			comp->offset++;
@@ -2977,24 +3048,42 @@ static bool parse_resource_attr_list(
 		first = false;
 		if (*comp->target_len >= alloc_size) {
 			comp_error(comp,
-				   "Too many tokens in composite "
+				   "Too many tokens in resource attribute ACE "
 				   "(>= %"PRIu32" tokens)",
 				   *comp->target_len);
 			goto fail;
 		}
-		ok = parse_literal(comp, true);
+		switch(attr_type_char) {
+		case 'X':
+			ok = parse_ra_octet_string(comp);
+			break;
+		case 'S':
+			ok = parse_unicode(comp);
+			break;
+		case 'U':
+			ok = parse_uint(comp);
+			break;
+		case 'B':
+			ok = parse_bool(comp);
+			break;
+		case 'I':
+			ok = parse_int(comp);
+			break;
+		case 'D':
+			ok = parse_ra_sid(comp);
+			break;
+		default:
+			/* it's a mystery we got this far */
+			comp_error(comp,
+				   "unknown attribute type T%c",
+				   attr_type_char);
+			goto fail;
+		}
 		if (!ok) {
 			goto fail;
 		}
 
 		if (*comp->target_len == 0) {
-			goto fail;
-		}
-
-		ok = check_resource_attr_type(
-			&comp->target[*comp->target_len - 1],
-			attr_type_char);
-		if (! ok) {
 			goto fail;
 		}
 	}
@@ -3044,7 +3133,9 @@ struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *sddl_decode_resource_attr (
 	 * TX-attr = "TX" "," attr-flags *("," octet-string)
 	 * TB-attr = "TB" "," attr-flags *("," ( "0" / "1" ) )
 	 *
-	 * and the data types are all parsed in the SDDL way.
+	 * and the data types are *mostly* parsed in the SDDL way,
+	 * though there are significant differences for octet-strings.
+	 *
 	 * At this point we only have the "(«attribute-data»)".
 	 *
 	 * What we do is set up a conditional ACE compiler to be expecting a
@@ -3190,7 +3281,7 @@ struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *sddl_decode_resource_attr (
 
 
 static bool write_resource_attr_from_token(struct sddl_write_context *ctx,
-					   struct ace_condition_token *tok)
+					   const struct ace_condition_token *tok)
 {
 	/*
 	 * this is a helper for sddl_resource_attr_from_claim(),
@@ -3199,7 +3290,7 @@ static bool write_resource_attr_from_token(struct sddl_write_context *ctx,
 	bool ok;
 	char *sid = NULL;
 	size_t i;
-	struct ace_condition_composite *c = NULL;
+	const struct ace_condition_composite *c = NULL;
 	switch (tok->type) {
 	case CONDITIONAL_ACE_TOKEN_INT64:
 		/*
@@ -3223,7 +3314,7 @@ static bool write_resource_attr_from_token(struct sddl_write_context *ctx,
 		return sddl_write(ctx, sid);
 
 	case CONDITIONAL_ACE_TOKEN_OCTET_STRING:
-		return sddl_write_octet_string(ctx, tok);
+		return sddl_write_ra_octet_string(ctx, tok);
 
 	case CONDITIONAL_ACE_TOKEN_COMPOSITE:
 		/*
@@ -3290,9 +3381,12 @@ char *sddl_resource_attr_from_claim(
 	}
 
 	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return NULL;
+	}
 	ctx.mem_ctx = tmp_ctx;
 
-	ok = claim_v1_to_ace_token(tmp_ctx, claim, &tok);
+	ok = claim_v1_to_ace_composite_unchecked(tmp_ctx, claim, &tok);
 	if (!ok) {
 		TALLOC_FREE(tmp_ctx);
 		return NULL;

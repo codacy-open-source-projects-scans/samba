@@ -5091,15 +5091,12 @@ def unstage_file(path):
 
 class GPOTests(tests.TestCase):
     def setUp(self):
-        super(GPOTests, self).setUp()
+        super().setUp()
         self.server = os.environ["SERVER"]
         self.dc_account = self.server.upper() + '$'
         self.lp = s3param.get_context()
         self.lp.load_default()
         self.creds = self.insta_creds(template=self.get_credentials())
-
-    def tearDown(self):
-        super(GPOTests, self).tearDown()
 
     def test_gpo_list(self):
         global poldir, dspath

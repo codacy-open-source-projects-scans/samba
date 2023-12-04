@@ -1692,6 +1692,7 @@ sub setup_simpleserver
 	vfs objects = xattr_tdb streams_depot
 	change notify = no
 	server smb encrypt = off
+        allow trusted domains = no
 
 [vfs_aio_pthread]
 	path = $prefix_abs/share
@@ -1855,6 +1856,7 @@ sub setup_fileserver
 
 	my $ip4 = Samba::get_ipv4_addr("FILESERVER");
 	my $fileserver_options = "
+        smb3 unix extensions = yes
 	kernel change notify = yes
 	spotlight backend = elasticsearch
 	elasticsearch:address = $ip4

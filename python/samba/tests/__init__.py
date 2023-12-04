@@ -26,13 +26,13 @@ import samba
 from samba import param
 from samba import credentials
 from samba.credentials import Credentials
-from samba import gensec
 import subprocess
 import sys
 import unittest
 import re
 from enum import IntEnum, unique
 import samba.auth
+import samba.gensec
 import samba.dcerpc.base
 from random import randint
 from random import SystemRandom
@@ -185,7 +185,7 @@ class TestCase(unittest.TestCase):
         return "".join([name[0].lower(), name[1:]])
 
     def setUp(self):
-        super(TestCase, self).setUp()
+        super().setUp()
         test_debug_level = os.getenv("TEST_DEBUG_LEVEL")
         if test_debug_level is not None:
             test_debug_level = int(test_debug_level)
@@ -256,7 +256,7 @@ class TestCase(unittest.TestCase):
         c.set_realm(template.get_realm())
         c.set_workstation(template.get_workstation())
         c.set_gensec_features(c.get_gensec_features()
-                              | gensec.FEATURE_SEAL)
+                              | samba.gensec.FEATURE_SEAL)
         c.set_kerberos_state(kerberos_state)
         if simple_bind_dn:
             c.set_bind_dn(simple_bind_dn)
@@ -326,7 +326,7 @@ class LdbTestCase(TestCase):
     """Trivial test case for running tests against a LDB."""
 
     def setUp(self):
-        super(LdbTestCase, self).setUp()
+        super().setUp()
         self.tempfile = tempfile.NamedTemporaryFile(delete=False)
         self.filename = self.tempfile.name
         self.ldb = samba.Ldb(self.filename)
@@ -345,7 +345,7 @@ class LdbTestCase(TestCase):
 class TestCaseInTempDir(TestCase):
 
     def setUp(self):
-        super(TestCaseInTempDir, self).setUp()
+        super().setUp()
         self.tempdir = tempfile.mkdtemp()
         self.addCleanup(self._remove_tempdir)
 

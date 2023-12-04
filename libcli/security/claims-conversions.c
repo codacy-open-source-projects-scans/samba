@@ -25,6 +25,7 @@
 #include "lib/util/tsort.h"
 #include "lib/util/debug.h"
 #include "lib/util/bytearray.h"
+#include "lib/util/stable_sort.h"
 
 #include "librpc/gen_ndr/conditional_ace.h"
 #include "librpc/gen_ndr/claims.h"
@@ -99,8 +100,52 @@ static bool claim_v1_octet_string_to_ace_octet_string(
 }
 
 
+static bool blob_string_sid_to_sid(DATA_BLOB *blob,
+				   struct dom_sid *sid)
+{
+	/*
+	 * Resource ACE claim SIDs are stored as SID strings in
+	 * CLAIM_SECURITY_ATTRIBUTE_OCTET_STRING_RELATIVE blobs. These are in
+	 * ACEs, which means we don't quite know who wrote them, and it is
+	 * unspecified whether the blob should contain a terminating NUL byte.
+	 * Therefore we accept either form, copying into a temporary buffer if
+	 * there is no '\0'. Apart from this special case, we don't accept
+	 * SIDs that are shorter than the blob.
+	 *
+	 * It doesn't seem like SDDL short SIDs ("WD") are accepted here. This
+	 * isn't SDDL.
+	 */
+	bool ok;
+	size_t len = blob->length;
+	char buf[DOM_SID_STR_BUFLEN + 1];   /* 191 + 1 */
+	const char *end = NULL;
+	char *str = NULL;
+
+	if (len < 5 || len >= DOM_SID_STR_BUFLEN) {
+		return false;
+	}
+	if (blob->data[len - 1] == '\0') {
+		str = (char *)blob->data;
+		len--;
+	} else {
+		memcpy(buf, blob->data, len);
+		buf[len] = 0;
+		str = buf;
+	}
+
+	ok = dom_sid_parse_endp(str, sid, &end);
+	if (!ok) {
+		return false;
+	}
+
+	if (end - str != len) {
+		return false;
+	}
+	return true;
+}
+
+
 static bool claim_v1_sid_to_ace_sid(
-	TALLOC_CTX *mem_ctx,
 	const struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim,
 	size_t offset,
 	struct ace_condition_token *result)
@@ -114,27 +159,19 @@ static bool claim_v1_sid_to_ace_sid(
 	 * There are no SIDs in ADTS claims, but there can be in
 	 * resource ACEs.
 	 */
-	struct dom_sid *sid = NULL;
 	DATA_BLOB *v = NULL;
+	bool ok;
 
 	v = claim->values[offset].sid_value;
 
-	if (v->length == 0 || v->length > CONDITIONAL_ACE_MAX_LENGTH) {
-		DBG_WARNING("claim has SID string of unexpected length %zu, "
-			    "(expected range 1 - %u)\n",
-			    v->length, CONDITIONAL_ACE_MAX_LENGTH);
-		return false;
-	}
-
-	sid = dom_sid_parse_length(mem_ctx, v);
-	if (sid == NULL) {
+	ok = blob_string_sid_to_sid(v, &result->data.sid.sid);
+	if (! ok) {
 		DBG_WARNING("claim has invalid SID string of length %zu.\n",
 			    v->length);
 		return false;
 	}
 
 	result->type = CONDITIONAL_ACE_TOKEN_SID;
-	result->data.sid.sid = *sid;
 	return true;
 }
 
@@ -238,7 +275,7 @@ static bool claim_v1_offset_to_ace_token(
 		return claim_v1_string_to_ace_string(mem_ctx, claim, offset,
 						     result);
 	case CLAIM_SECURITY_ATTRIBUTE_TYPE_SID:
-		return claim_v1_sid_to_ace_sid(mem_ctx, claim, offset, result);
+		return claim_v1_sid_to_ace_sid(claim, offset, result);
 	case CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN:
 		return claim_v1_bool_to_ace_int(claim, offset, result);
 	case CLAIM_SECURITY_ATTRIBUTE_TYPE_OCTET_STRING:
@@ -252,14 +289,76 @@ static bool claim_v1_offset_to_ace_token(
 }
 
 
+static bool claim_v1_copy(
+	TALLOC_CTX *mem_ctx,
+	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *dest,
+	const struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *src);
+
+
+
+bool claim_v1_to_ace_composite_unchecked(
+	TALLOC_CTX *mem_ctx,
+	const struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim,
+	struct ace_condition_token *result)
+{
+	/*
+	 * This converts a claim object into a conditional ACE
+	 * composite without checking whether it is a valid and sorted
+	 * claim. It is called in two places:
+	 *
+	 * 1. claim_v1_to_ace_token() below (which does do those
+	 * checks, and is the function you want).
+	 *
+	 * 2. sddl_resource_attr_from_claim() in which a resource
+	 * attribute claim needs to pass through a conditional ACE
+	 * composite structure on its way to becoming SDDL. In that
+	 * case we don't want to check validity.
+	 */
+	size_t i;
+	struct ace_condition_token *tokens = NULL;
+	bool ok;
+
+	tokens = talloc_array(mem_ctx,
+			      struct ace_condition_token,
+			      claim->value_count);
+	if (tokens == NULL) {
+		return false;
+	}
+
+	for (i = 0; i < claim->value_count; i++) {
+		ok = claim_v1_offset_to_ace_token(tokens,
+						  claim,
+						  i,
+						  &tokens[i]);
+		if (! ok) {
+			TALLOC_FREE(tokens);
+			return false;
+		}
+	}
+
+	result->type = CONDITIONAL_ACE_TOKEN_COMPOSITE;
+	result->data.composite.tokens = tokens;
+	result->data.composite.n_members = claim->value_count;
+	result->flags = claim->flags & CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
+	return true;
+}
+
+
 bool claim_v1_to_ace_token(TALLOC_CTX *mem_ctx,
 			   const struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim,
 			   struct ace_condition_token *result)
 {
-	size_t i;
-	struct ace_condition_token *tokens = NULL;
+	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim_copy = NULL;
+	const struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *sorted_claim = NULL;
+	NTSTATUS status;
+	bool ok;
+	bool case_sensitive = claim->flags &			\
+		CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
+
 	if (claim->value_count < 1 ||
 	    claim->value_count >= CONDITIONAL_ACE_MAX_TOKENS) {
+		DBG_WARNING("rejecting claim with %"PRIu32" tokens\n",
+			    claim->value_count);
 		return false;
 	}
 	/*
@@ -273,6 +372,53 @@ bool claim_v1_to_ace_token(TALLOC_CTX *mem_ctx,
 						    0,
 						    result);
 	}
+
+	if (claim->flags & CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED) {
+		/*
+		 * We can avoid making a sorted copy.
+		 *
+		 * This is normal case for wire claims, where the
+		 * sorting and duplicate checking happens earlier in
+		 * token_claims_to_claims_v1().
+		*/
+		sorted_claim = claim;
+	} else {
+		/*
+		 * This is presumably a resource attribute ACE, which
+		 * is stored in the ACE as struct
+		 * CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1, and we don't
+		 * really want to mutate that copy -- even if there
+		 * aren't currently realistic pathways that read an
+		 * ACE, trigger this, and write it back (outside of
+		 * tests).
+		 */
+		claim_copy = talloc(mem_ctx, struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1);
+		if (claim_copy == NULL) {
+			return false;
+		}
+
+		ok = claim_v1_copy(claim_copy, claim_copy, claim);
+		if (!ok) {
+			TALLOC_FREE(claim_copy);
+			return false;
+		}
+
+		status = claim_v1_check_and_sort(claim_copy, claim_copy,
+						 case_sensitive);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("resource attribute claim sort failed with %s\n",
+				    nt_errstr(status));
+			TALLOC_FREE(claim_copy);
+			return false;
+		}
+		sorted_claim = claim_copy;
+	}
+	ok = claim_v1_to_ace_composite_unchecked(mem_ctx, sorted_claim, result);
+	if (! ok) {
+		TALLOC_FREE(claim_copy);
+		return false;
+	}
+
 	/*
 	 * The multiple values will get turned into a composite
 	 * literal in the conditional ACE. Each element of the
@@ -281,32 +427,9 @@ bool claim_v1_to_ace_token(TALLOC_CTX *mem_ctx,
 	 * set here (at least the _FROM_ATTR flag) or the child values
 	 * will not be reached.
 	 */
-
-	result->flags = (
+	result->flags |= (
 		CONDITIONAL_ACE_FLAG_TOKEN_FROM_ATTR |
-		(claim->flags & CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE));
-
-	tokens = talloc_array(mem_ctx,
-			      struct ace_condition_token,
-			      claim->value_count);
-	if (tokens == NULL) {
-		return false;
-	}
-
-	for (i = 0; i < claim->value_count; i++) {
-		bool ok = claim_v1_offset_to_ace_token(tokens,
-						       claim,
-						       i,
-						       &tokens[i]);
-		if (! ok) {
-			TALLOC_FREE(tokens);
-			return false;
-		}
-	}
-
-	result->type = CONDITIONAL_ACE_TOKEN_COMPOSITE;
-	result->data.composite.tokens = tokens;
-	result->data.composite.n_members = claim->value_count;
+		CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED);
 
 	return true;
 }
@@ -631,6 +754,7 @@ bool add_claim_to_token(TALLOC_CTX *mem_ctx,
 			const char *claim_type)
 {
 	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *tmp = NULL;
+	NTSTATUS status;
 	uint32_t *n = NULL;
 	bool ok;
 	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 **list = NULL;
@@ -660,22 +784,218 @@ bool add_claim_to_token(TALLOC_CTX *mem_ctx,
 
 	ok = claim_v1_copy(mem_ctx, &tmp[*n], claim);
 	if (! ok ) {
+		TALLOC_FREE(tmp);
 		return false;
 	}
+
+	status = claim_v1_check_and_sort(tmp, &tmp[*n],
+					 claim->flags & CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("resource attribute claim sort failed with %s\n",
+			    nt_errstr(status));
+		TALLOC_FREE(tmp);
+		return false;
+	}
+
 	(*n)++;
 	*list = tmp;
 	return true;
 }
+
+
+static NTSTATUS claim_v1_check_and_sort_boolean(
+	TALLOC_CTX *mem_ctx,
+	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim)
+{
+	/*
+	 * There are so few valid orders in a boolean claim that we can
+	 * enumerate them all.
+	 */
+	switch (claim->value_count) {
+	case 0:
+		return NT_STATUS_OK;
+	case 1:
+		if (*claim->values[0].uint_value == 0 ||
+		    *claim->values[0].uint_value == 1) {
+			return NT_STATUS_OK;
+		}
+		break;
+	case 2:
+		if (*claim->values[0].uint_value == 1) {
+			/* switch the order. */
+			*claim->values[0].uint_value = *claim->values[1].uint_value;
+			*claim->values[1].uint_value = 1;
+		}
+		if (*claim->values[0].uint_value == 0 &&
+		    *claim->values[1].uint_value == 1) {
+			return NT_STATUS_OK;
+		}
+		break;
+	default:
+		/* 3 or more must have duplicates. */
+		break;
+	}
+	return NT_STATUS_INVALID_PARAMETER;
+}
+
+
+struct claim_sort_context {
+	uint16_t value_type;
+	bool failed;
+	bool case_sensitive;
+};
+
+static int claim_sort_cmp(const union claim_values *lhs,
+			  const union claim_values *rhs,
+			  struct claim_sort_context *ctx)
+{
+	/*
+	 * These comparisons have to match those used in
+	 * conditional_ace.c.
+	 */
+	int cmp;
+
+	switch (ctx->value_type) {
+	case CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64:
+	case CLAIM_SECURITY_ATTRIBUTE_TYPE_UINT64:
+	{
+		/*
+		 * We sort as signed integers, even for uint64,
+		 * because a) we don't actually care about the true
+		 * order, just uniqueness, and b) the conditional ACEs
+		 * only know of signed values.
+		 */
+		int64_t a, b;
+		if (ctx->value_type == CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64) {
+			a = *lhs->int_value;
+			b = *rhs->int_value;
+		} else {
+			a = (int64_t)*lhs->uint_value;
+			b = (int64_t)*rhs->uint_value;
+		}
+		if (a < b) {
+			return -1;
+		}
+		if (a == b) {
+			return 0;
+		}
+		return 1;
+	}
+	case CLAIM_SECURITY_ATTRIBUTE_TYPE_STRING:
+	{
+		const char *a = lhs->string_value;
+		const char *b = rhs->string_value;
+		if (ctx->case_sensitive) {
+			return strcmp(a, b);
+		}
+		return strcasecmp_m(a, b);
+	}
+
+	case CLAIM_SECURITY_ATTRIBUTE_TYPE_SID:
+	{
+		/*
+		 * The blobs in a claim are "S-1-.." strings, not struct
+		 * dom_sid as used in conditional ACEs, and to sort them the
+		 * same as ACEs we need to make temporary structs.
+		 *
+		 * We don't accept SID claims over the wire -- these
+		 * are resource attribute ACEs only.
+		 */
+		struct dom_sid a, b;
+		bool lhs_ok, rhs_ok;
+
+		lhs_ok = blob_string_sid_to_sid(lhs->sid_value, &a);
+		rhs_ok = blob_string_sid_to_sid(rhs->sid_value, &b);
+		if (!(lhs_ok && rhs_ok)) {
+			ctx->failed = true;
+			return -1;
+		}
+		cmp = dom_sid_compare(&a, &b);
+		return cmp;
+	}
+	case CLAIM_SECURITY_ATTRIBUTE_TYPE_OCTET_STRING:
+	{
+		const DATA_BLOB *a = lhs->octet_value;
+		const DATA_BLOB *b = rhs->octet_value;
+		return data_blob_cmp(a, b);
+	}
+	default:
+		ctx->failed = true;
+		break;
+	}
+	return -1;
+}
+
+
+NTSTATUS claim_v1_check_and_sort(TALLOC_CTX *mem_ctx,
+				 struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claim,
+				 bool case_sensitive)
+{
+	bool ok;
+	uint32_t i;
+	struct claim_sort_context sort_ctx = {
+		.failed = false,
+		.value_type = claim->value_type,
+		.case_sensitive = case_sensitive
+	};
+
+	if (claim->value_type == CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN) {
+		NTSTATUS status = claim_v1_check_and_sort_boolean(mem_ctx, claim);
+		if (NT_STATUS_IS_OK(status)) {
+			claim->flags |= CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED;
+		}
+		return status;
+	}
+
+	ok =  stable_sort_talloc_r(mem_ctx,
+				   claim->values,
+				   claim->value_count,
+				   sizeof(union claim_values),
+				   (samba_compare_with_context_fn_t)claim_sort_cmp,
+				   &sort_ctx);
+	if (!ok) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	if (sort_ctx.failed) {
+		/* this failure probably means a bad SID string */
+		DBG_WARNING("claim sort of %"PRIu32" members, type %"PRIu16" failed\n",
+			    claim->value_count,
+			    claim->value_type);
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	for (i = 1; i < claim->value_count; i++) {
+		int cmp = claim_sort_cmp(&claim->values[i - 1],
+					 &claim->values[i],
+					 &sort_ctx);
+		if (cmp == 0) {
+			DBG_WARNING("duplicate values in claim\n");
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+		if (cmp > 0) {
+			DBG_ERR("claim sort failed!\n");
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+	}
+	if (case_sensitive) {
+		claim->flags |= CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
+	}
+	claim->flags |= CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED;
+	return NT_STATUS_OK;
+}
+
 
 NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 				   const struct CLAIMS_SET *claims_set,
 				   struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 **out_claims,
 				   uint32_t *out_n_claims)
 {
-	TALLOC_CTX *tmp_ctx = NULL;
 	struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 *claims = NULL;
 	uint32_t n_claims = 0;
+	uint32_t expected_n_claims = 0;
 	uint32_t i;
+	NTSTATUS status;
 
 	if (out_claims == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -691,8 +1011,22 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_OK;
 	}
 
-	tmp_ctx = talloc_new(mem_ctx);
-	if (tmp_ctx == NULL) {
+	/*
+	 * The outgoing number of claims is (at most) the sum of the
+	 * claims_counts of each claims_array.
+	 */
+	for (i = 0; i < claims_set->claims_array_count; ++i) {
+		uint32_t count = claims_set->claims_arrays[i].claims_count;
+		expected_n_claims += count;
+		if (expected_n_claims < count) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+	}
+
+	claims = talloc_array(mem_ctx,
+			      struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1,
+			      expected_n_claims);
+	if (claims == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
 
@@ -721,6 +1055,7 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 			{
 				const struct CLAIM_INT64 *values = &claim_entry->values.claim_int64;
 				uint32_t k;
+				int64_t *claim_values_int64 = NULL;
 
 				n_values = values->value_count;
 				value_type = CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64;
@@ -729,34 +1064,20 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 							    union claim_values,
 							    n_values);
 				if (claim_values == NULL) {
-					talloc_free(tmp_ctx);
+					talloc_free(claims);
+					return NT_STATUS_NO_MEMORY;
+				}
+				claim_values_int64 = talloc_array(claims,
+								  int64_t,
+								  n_values);
+				if (claim_values_int64 == NULL) {
+					talloc_free(claims);
 					return NT_STATUS_NO_MEMORY;
 				}
 
 				for (k = 0; k < n_values; ++k) {
-					int64_t *value = NULL;
-					uint32_t m;
-
-					/*
-					 * Ensure that there are no duplicate
-					 * values (very inefficiently, in
-					 * O(n²)).
-					 */
-					for (m = 0; m < k; ++m) {
-						if (values->values[m] == values->values[k]) {
-							talloc_free(tmp_ctx);
-							return NT_STATUS_INVALID_PARAMETER;
-						}
-					}
-
-					value = talloc(mem_ctx, int64_t);
-					if (value == NULL) {
-						talloc_free(tmp_ctx);
-						return NT_STATUS_NO_MEMORY;
-					}
-
-					*value = values->values[k];
-					claim_values[k].int_value = value;
+					claim_values_int64[k] = values->values[k];
+					claim_values[k].int_value = &claim_values_int64[k];
 				}
 
 				break;
@@ -766,6 +1087,7 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 			{
 				const struct CLAIM_UINT64 *values = &claim_entry->values.claim_uint64;
 				uint32_t k;
+				uint64_t *claim_values_uint64 = NULL;
 
 				n_values = values->value_count;
 				value_type = (claim_entry->type == CLAIM_TYPE_UINT64)
@@ -776,34 +1098,21 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 							    union claim_values,
 							    n_values);
 				if (claim_values == NULL) {
-					talloc_free(tmp_ctx);
+					talloc_free(claims);
+					return NT_STATUS_NO_MEMORY;
+				}
+
+				claim_values_uint64 = talloc_array(claims,
+								   uint64_t,
+								   n_values);
+				if (claim_values_uint64 == NULL) {
+					talloc_free(claims);
 					return NT_STATUS_NO_MEMORY;
 				}
 
 				for (k = 0; k < n_values; ++k) {
-					uint64_t *value = NULL;
-					uint32_t m;
-
-					/*
-					 * Ensure that there are no duplicate
-					 * values (very inefficiently, in
-					 * O(n²)).
-					 */
-					for (m = 0; m < k; ++m) {
-						if (values->values[m] == values->values[k]) {
-							talloc_free(tmp_ctx);
-							return NT_STATUS_INVALID_PARAMETER;
-						}
-					}
-
-					value = talloc(mem_ctx, uint64_t);
-					if (value == NULL) {
-						talloc_free(tmp_ctx);
-						return NT_STATUS_NO_MEMORY;
-					}
-
-					*value = values->values[k];
-					claim_values[k].uint_value = value;
+					claim_values_uint64[k] = values->values[k];
+					claim_values[k].uint_value = &claim_values_uint64[k];
 				}
 
 				break;
@@ -811,8 +1120,8 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 			case CLAIM_TYPE_STRING:
 			{
 				const struct CLAIM_STRING *values = &claim_entry->values.claim_string;
-				uint32_t k;
-
+				uint32_t k, m;
+				bool seen_empty = false;
 				n_values = values->value_count;
 				value_type = CLAIM_SECURITY_ATTRIBUTE_TYPE_STRING;
 
@@ -820,45 +1129,40 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 							    union claim_values,
 							    n_values);
 				if (claim_values == NULL) {
-					talloc_free(tmp_ctx);
+					talloc_free(claims);
 					return NT_STATUS_NO_MEMORY;
 				}
 
+				m = 0;
 				for (k = 0; k < n_values; ++k) {
 					const char *string_value = NULL;
-					uint32_t m;
-
-					/*
-					 * Ensure that there are no duplicate
-					 * values (very inefficiently, in
-					 * O(n²)).
-					 */
-					for (m = 0; m < k; ++m) {
-						if (values->values[m] == NULL && values->values[k] == NULL) {
-							talloc_free(tmp_ctx);
-							return NT_STATUS_INVALID_PARAMETER;
-						}
-
-						if (values->values[m] != NULL &&
-						    values->values[k] != NULL &&
-						    strcasecmp_m(values->values[m], values->values[k]) == 0)
-						{
-							talloc_free(tmp_ctx);
-							return NT_STATUS_INVALID_PARAMETER;
-						}
-					}
 
 					if (values->values[k] != NULL) {
 						string_value = talloc_strdup(claim_values, values->values[k]);
 						if (string_value == NULL) {
-							talloc_free(tmp_ctx);
+							talloc_free(claims);
 							return NT_STATUS_NO_MEMORY;
 						}
+						claim_values[m].string_value = string_value;
+						m++;
+					} else {
+						/*
+						 * We allow one NULL string
+						 * per claim, but not two,
+						 * because two would be a
+						 * duplicate, and we don't
+						 * want those (duplicates in
+						 * actual values are checked
+						 * later).
+						 */
+						if (seen_empty) {
+							talloc_free(claims);
+							return NT_STATUS_INVALID_PARAMETER;
+						}
+						seen_empty = true;
 					}
-
-					claim_values[k].string_value = string_value;
 				}
-
+				n_values = m;
 				break;
 			}
 			default:
@@ -869,36 +1173,35 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 				continue;
 			}
 
-			claims = talloc_realloc(tmp_ctx,
-						claims,
-						struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1,
-						++n_claims);
-			if (claims == NULL) {
-				talloc_free(tmp_ctx);
-				return NT_STATUS_NO_MEMORY;
-			}
-
 			if (claim_entry->id != NULL) {
 				name = talloc_strdup(claims, claim_entry->id);
 				if (name == NULL) {
-					talloc_free(tmp_ctx);
+					talloc_free(claims);
 					return NT_STATUS_NO_MEMORY;
 				}
 			}
 
-			claims[n_claims - 1] = (struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1) {
+			claims[n_claims] = (struct CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1) {
 				.name = name,
 				.value_type = value_type,
 				.flags = 0,
 				.value_count = n_values,
 				.values = claim_values,
 			};
+
+			status = claim_v1_check_and_sort(claims, &claims[n_claims],
+							 false);
+			if (!NT_STATUS_IS_OK(status)) {
+				talloc_free(claims);
+				DBG_WARNING("claim sort and uniquess test failed with %s\n",
+					    nt_errstr(status));
+				return status;
+			}
+			n_claims++;
 		}
 	}
-
-	*out_claims = talloc_move(mem_ctx, &claims);
+	*out_claims = claims;
 	*out_n_claims = n_claims;
 
-	talloc_free(tmp_ctx);
 	return NT_STATUS_OK;
 }

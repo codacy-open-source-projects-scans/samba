@@ -292,7 +292,7 @@ def read_and_sub_file(file_name, subst_vars):
     """Read a file and sub in variables found in it
 
     :param file_name: File to be read (typically from setup directory)
-     param subst_vars: Optional variables to substitute in the file.
+    :param subst_vars: Optional variables to substitute in the file.
     """
     with open(file_name, 'r', encoding="utf-8") as data_file:
         data = data_file.read()
@@ -398,3 +398,6 @@ NTSTATUSError = _glue.NTSTATUSError
 HRESULTError = _glue.HRESULTError
 WERRORError = _glue.WERRORError
 DsExtendedError = _glue.DsExtendedError
+
+HRES_SEC_E_LOGON_DENIED = _glue.HRES_SEC_E_LOGON_DENIED
+HRES_SEC_E_INVALID_TOKEN = _glue.HRES_SEC_E_INVALID_TOKEN

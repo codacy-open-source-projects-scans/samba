@@ -1948,10 +1948,13 @@ static void samba_extended_info_version(struct smb_extended_info *extended_info)
 }
 
 static bool fsinfo_unix_valid_level(connection_struct *conn,
+				    struct files_struct *fsp,
 				    uint16_t info_level)
 {
 	if (conn->sconn->using_smb2 &&
-	    info_level == SMB2_FS_POSIX_INFORMATION_INTERNAL) {
+	    fsp->posix_flags == FSP_POSIX_FLAGS_OPEN &&
+	    info_level == SMB2_FS_POSIX_INFORMATION_INTERNAL)
+	{
 		return true;
 	}
 #if defined(SMB1SERVER)
@@ -1963,6 +1966,9 @@ static bool fsinfo_unix_valid_level(connection_struct *conn,
 	return false;
 }
 
+/*
+ * fsp is only valid for SMB2.
+ */
 NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 connection_struct *conn,
 			 TALLOC_CTX *mem_ctx,
@@ -1970,6 +1976,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 uint16_t flags2,
 			 unsigned int max_data_bytes,
 			 size_t *fixed_portion,
+			 struct files_struct *fsp,
 			 struct smb_filename *fname,
 			 char **ppdata,
 			 int *ret_data_len)
@@ -2311,14 +2318,14 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 			/* we need to fake up a fsp here,
 			 * because its not send in this call
 			 */
-			files_struct fsp;
+			files_struct tmpfsp;
 			SMB_NTQUOTA_STRUCT quotas;
 
-			ZERO_STRUCT(fsp);
+			ZERO_STRUCT(tmpfsp);
 			ZERO_STRUCT(quotas);
 
-			fsp.conn = conn;
-			fsp.fnum = FNUM_FIELD_INVALID;
+			tmpfsp.conn = conn;
+			tmpfsp.fnum = FNUM_FIELD_INVALID;
 
 			/* access check */
 			if (get_current_uid(conn) != 0) {
@@ -2329,7 +2336,7 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 				return NT_STATUS_ACCESS_DENIED;
 			}
 
-			status = vfs_get_ntquota(&fsp, SMB_USER_FS_QUOTA_TYPE,
+			status = vfs_get_ntquota(&tmpfsp, SMB_USER_FS_QUOTA_TYPE,
 						 NULL, &quotas);
 			if (!NT_STATUS_IS_OK(status)) {
 				DEBUG(0,("vfs_get_ntquota() failed for service [%s]\n",lp_servicename(talloc_tos(), lp_sub, SNUM(conn))));
@@ -2466,7 +2473,7 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 			int rc;
 			struct vfs_statvfs_struct svfs;
 
-			if (!fsinfo_unix_valid_level(conn, info_level)) {
+			if (!fsinfo_unix_valid_level(conn, fsp, info_level)) {
 				return NT_STATUS_INVALID_LEVEL;
 			}
 
@@ -2993,8 +3000,9 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 			ok = true;
 		}
 
-		if ((fsp != NULL) &&
-		    (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN)) {
+		if (conn->sconn->using_smb2 &&
+		    (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN))
+		{
 			DBG_DEBUG("SMB2 posix open\n");
 			ok = true;
 		}

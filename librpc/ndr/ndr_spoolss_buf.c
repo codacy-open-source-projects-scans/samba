@@ -527,7 +527,7 @@ enum ndr_err_code ndr_pull_spoolss_EnumPrintProcessors(struct ndr_pull *ndr, ndr
 	return NDR_ERR_SUCCESS;
 }
 
-uint32_t ndr_size_spoolss_EnumPrintProcessors_info(TALLOC_CTX *mem_ctx, 
+uint32_t ndr_size_spoolss_EnumPrintProcessors_info(TALLOC_CTX *mem_ctx,
 						   uint32_t level, uint32_t count, union spoolss_PrintProcessorInfo *info)
 {
 	NDR_SPOOLSS_SIZE_ENUM_LEVEL(spoolss_EnumPrintProcessors);
@@ -697,7 +697,7 @@ uint32_t ndr_size_spoolss_EnumPrinterDataEx_info(TALLOC_CTX *mem_ctx,
 	NDR_SPOOLSS_SIZE_ENUM(spoolss_EnumPrinterDataEx);
 }
 
-uint32_t _ndr_size_spoolss_DeviceMode(struct spoolss_DeviceMode *devmode, ndr_flags_type flags)
+uint32_t _ndr_size_spoolss_DeviceMode(struct spoolss_DeviceMode *devmode, libndr_flags flags)
 {
 	if (!devmode) return 0;
 	return ndr_size_spoolss_DeviceMode(devmode, flags);

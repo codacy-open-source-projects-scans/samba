@@ -55,9 +55,6 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
     users = []
     samdb = None
 
-    def setUp(self):
-        super(UserCmdCryptShaTestCase, self).setUp()
-
     def add_user(self, hashes=""):
         self.lp = samba.tests.env_loadparm()
 
@@ -78,7 +75,7 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
                        password)
 
     def tearDown(self):
-        super(UserCmdCryptShaTestCase, self).tearDown()
+        super().tearDown()
         self.runsubcmd("user", "delete", USER_NAME)
 
     def _get_password(self, attributes, decrypt=False):

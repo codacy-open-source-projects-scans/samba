@@ -616,14 +616,56 @@ interface security
 		CLAIM_SECURITY_ATTRIBUTE_DISABLED_BY_DEFAULT  = 8,
 		CLAIM_SECURITY_ATTRIBUTE_DISABLED          = 0x10, /*reserved*/
 		CLAIM_SECURITY_ATTRIBUTE_MANDATORY         = 0x20,
+
+		/*
+		 * These next two are curiously defined in [MS-DTYP] 2.4.10.1:
+		 *
+		 * > Flags: The upper two bytes of this DWORD are available for
+		 * > application-specific data. The two lowest-order bits in the
+		 * > lower of these two bytes are reserved. These two bytes
+		 * > MAY contain only one of the following values in those two
+		 * > bits:
+		 * >
+		 * >  FCI_CLAIM_SECURITY_ATTRIBUTE_MANUAL	   0x0001
+		 * >  FCI_CLAIM_SECURITY_ATTRIBUTE_POLICY_DERIVED  0x0002
+		 *
+		 * That is saying these mutually exclusive flags have offset
+		 * values that are measured from the middle of flags field. We
+		 * instead measure from the start.
+		 */
+		CLAIM_SECURITY_ATTRIBUTE_MANUAL                 =    1 << 16,
+		CLAIM_SECURITY_ATTRIBUTE_POLICY_DERIVED         =    1 << 17,
+
+		/*
+		 * As the quote from [MS-DTYP] 2.4.10.1 above says,
+		 * the upper 14 bits are for application-specific
+		 * data. In Samba's case, we have one application
+		 * specific flag to help us remember when we have
+		 * sorted a claim and checked that it contains no
+		 * duplicate values. We need to check this, and the
+		 * check can be expensive, so it helps to remember.
+		 * Having the values sorted is useful for comparisons
+		 * in conditional ACEs.
+		 *
+		 * We can't just sort every claim_v1 we see, because
+		 * resource attribute ACEs in SACLs contain them and
+		 * are not meant to be evaluated prematurely (i.e. you
+		 * can parse and reserialise a SACL even if it
+		 * contains an ACE that would cause an error when used
+		 * as a claim).
+		 *
+		 * In the case of string claims, evaluating uniqueness
+		 * depends on the _CASE_SENSITIVE flag.
+		 */
+		CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED     =    1 << 30,
 		/*
 		 * Conditional ACEs use some of the above flags in
-		 * combination with an internal one at the other end
-		 * of a 16 bit field (defined in conditional_ace.idl).
+		 * combination with an internal one defined in
+		 * conditional_ace.idl.
 		 * This next definition is warning us in case a clash
 		 * develops (which seems very unlikely).
 		 */
-		CLAIM_SECURITY_ATTRIBUTE_RESERVED_FOR_SAMBA = 0x8000
+		CLAIM_SECURITY_ATTRIBUTE_RESERVED_FOR_SAMBA   = 1UL << 31
 	} claim_flags;
 
 	/*

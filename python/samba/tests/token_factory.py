@@ -30,6 +30,43 @@ CLAIM_VAL_TYPES = {
 }
 
 
+def list_to_claim(k, v, case_sensitive=False):
+    if isinstance(v, security.CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1):
+        # make the name match
+        v.name = k
+        return v
+    if isinstance(v, (str, int)):
+        v = [v]
+    if not isinstance(v, list):
+        raise TypeError(f"expected list of claim values for '{k}', "
+                        f"not {v!r} of type {type(v)}")
+
+    c = security.CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1()
+
+    if len(v) != 0:
+        t = type(v[0])
+        c.value_type = CLAIM_VAL_TYPES[t]
+        for val in v[1:]:
+            if type(val) != t:
+                raise TypeError(f"claim values for '{k}' "
+                                "should all be the same type")
+    else:
+        # pick an arbitrary type
+        c.value_type = CLAIM_VAL_TYPES['uint']
+    c.name = k
+    c.values = v
+    c.value_count = len(v)
+    if case_sensitive:
+        c.flags |= security.CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE
+
+    # The claims made here will not have the
+    # CLAIM_SECURITY_ATTRIBUTE_UNIQUE_AND_SORTED flag set, which makes
+    # them like resource attribute claims rather than real wire
+    # claims. It shouldn't matter much, as they will just be sorted
+    # and checked as if they were resource attribute claims.
+    return c
+
+
 def _normalise_claims(args):
     if isinstance(args, security.CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1):
         return [args]
@@ -48,27 +85,7 @@ def _normalise_claims(args):
     if isinstance(args, dict):
         # the key is the name and the value is a list of claim values
         for k, v in args.items():
-            if not isinstance(k, str):
-                raise TypeError("expected str for claim name, "
-                                f"not {type(k)} (for {k!r})")
-            if isinstance(v, (str, int)):
-                v = [v]
-            if not isinstance(v, list):
-                raise TypeError(f"expected list of claim values for '{k}', "
-                                f"not {v!r} of type {type(v)}")
-            if len(v) == 0:
-                raise ValueError("empty claim lists are not valid"
-                                 f" (for {k})")
-            t = type(v[0])
-            for val in v[1:]:
-                if type(val) != t:
-                    raise TypeError(f"claim values for '{k}' "
-                                    "should all be the same type")
-            c = security.CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1()
-            c.name = k
-            c.value_type = CLAIM_VAL_TYPES[t]
-            c.values = v
-            c.value_count = len(v)
+            c = list_to_claim(k, v)
             claims_out.append(c)
 
     return claims_out

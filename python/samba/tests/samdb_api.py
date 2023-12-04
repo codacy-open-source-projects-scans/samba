@@ -24,13 +24,10 @@ import errno
 
 class SamDBApiTestCase(TestCaseInTempDir):
 
-    def setUp(self):
-        super(SamDBApiTestCase, self).setUp()
-
     def tearDown(self):
         self.rm_files("test.db", "existing.db", allow_missing=True)
 
-        super(SamDBApiTestCase, self).tearDown()
+        super().tearDown()
 
     # Attempt to open and existing non tdb file as a tdb file.
     # Don't create new db is set, the default

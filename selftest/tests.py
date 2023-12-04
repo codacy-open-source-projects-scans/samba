@@ -481,6 +481,8 @@ plantestsuite("samba.unittests.adouble", "none",
               [os.path.join(bindir(), "test_adouble")])
 plantestsuite("samba.unittests.gnutls_aead_aes_256_cbc_hmac_sha512", "none",
               [os.path.join(bindir(), "test_gnutls_aead_aes_256_cbc_hmac_sha512")])
+plantestsuite("samba.unittests.test_gnutls_sp800_108", "none",
+              [os.path.join(bindir(), "test_gnutls_sp800_108")])
 plantestsuite("samba.unittests.encode_decode", "none",
               [os.path.join(bindir(), "test_encode_decode")])
 
@@ -494,3 +496,5 @@ plantestsuite("samba.unittests.sddl_conditional_ace", "none",
               [os.path.join(bindir(), "test_sddl_conditional_ace")])
 plantestsuite("samba.unittests.run_conditional_ace", "none",
               [os.path.join(bindir(), "test_run_conditional_ace")])
+plantestsuite("samba.unittests.claim_conversion", "none",
+              [os.path.join(bindir(), "test_claim_conversion")])

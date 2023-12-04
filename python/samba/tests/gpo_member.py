@@ -22,15 +22,12 @@ from samba.gp.gp_sec_ext import gp_access_ext
 
 class GPOTests(tests.TestCase):
     def setUp(self):
-        super(GPOTests, self).setUp()
+        super().setUp()
         self.server = os.environ["SERVER"]
         self.dc_account = self.server.upper() + '$'
         self.lp = LoadParm()
         self.lp.load_default()
         self.creds = self.insta_creds(template=self.get_credentials())
-
-    def tearDown(self):
-        super(GPOTests, self).tearDown()
 
     def test_sec_ext_load_on_member(self):
         cache_dir = self.lp.get('cache directory')
