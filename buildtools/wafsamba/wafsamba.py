@@ -109,7 +109,6 @@ def SAMBA_LIBRARY(bld, libname, source,
                   ldflags='',
                   external_library=False,
                   realname=None,
-                  keep_underscore=False,
                   autoproto=None,
                   autoproto_extra_source='',
                   group='main',
@@ -141,7 +140,7 @@ def SAMBA_LIBRARY(bld, libname, source,
     '''define a Samba library'''
 
     # We support:
-    # - LIBRARY: this can be use to link via -llibname
+    # - LIBRARY: this can be used to link via -llibname
     # - MODULE:  this is module from SAMBA_MODULE()
     # - PLUGIN:  this is plugin for external consumers to be
     #            loaded via dlopen()
@@ -298,10 +297,7 @@ def SAMBA_LIBRARY(bld, libname, source,
     if bundled_name is not None:
         pass
     elif target_type == 'PYTHON' or realname or not private_library:
-        if keep_underscore:
-            bundled_name = libname
-        else:
-            bundled_name = libname.replace('_', '-')
+        bundled_name = libname.replace('_', '-')
     else:
         assert (private_library is True and realname is None)
         bundled_name = PRIVATE_NAME(bld, libname.replace('_', '-'))
@@ -654,7 +650,6 @@ def SAMBA_PLUGIN(bld, pluginname, source,
                  vars=None,
                  subdir=None,
                  realname=None,
-                 keep_underscore=False,
                  autoproto=None,
                  autoproto_extra_source='',
                  install_path=None,
@@ -1133,7 +1128,7 @@ def INSTALL_WILDCARD(bld, destdir, pattern, chmod=MODE_644, flat=False,
                   python_fixup=python_fixup, base_name=trim_path)
 Build.BuildContext.INSTALL_WILDCARD = INSTALL_WILDCARD
 
-def INSTALL_DIR(bld, path, chmod=0o755, env=None):
+def INSTALL_DIR(bld, path, chmod=0o755):
     """Install a directory if it doesn't exist, always set permissions."""
 
     if not path:
@@ -1154,12 +1149,12 @@ def INSTALL_DIR(bld, path, chmod=0o755, env=None):
                     raise Errors.WafError("Cannot create the folder '%s' (error: %s)" % (path, e))
 Build.BuildContext.INSTALL_DIR = INSTALL_DIR
 
-def INSTALL_DIRS(bld, destdir, dirs, chmod=0o755, env=None):
+def INSTALL_DIRS(bld, destdir, dirs, chmod=0o755):
     '''install a set of directories'''
     destdir = bld.EXPAND_VARIABLES(destdir)
     dirs = bld.EXPAND_VARIABLES(dirs)
     for d in TO_LIST(dirs):
-        INSTALL_DIR(bld, os.path.join(destdir, d), chmod, env)
+        INSTALL_DIR(bld, os.path.join(destdir, d), chmod)
 Build.BuildContext.INSTALL_DIRS = INSTALL_DIRS
 
 

@@ -10,12 +10,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -54,7 +54,7 @@
   primaryGroupToken: HIDDEN, CONSTRUCTED, SEARCHABLE
 
      contains the RID of a certain group object
-    
+
 
   attributeTypes: in schema only
   objectClasses: in schema only
@@ -70,11 +70,8 @@
 
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
-#include "param/param.h"
 #include "dsdb/samdb/samdb.h"
 #include "dsdb/samdb/ldb_modules/util.h"
-
-#include "libcli/security/security.h"
 
 #include "auth/auth.h"
 
@@ -130,7 +127,7 @@ static int construct_primary_group_token(struct ldb_module *module,
 {
 	struct ldb_context *ldb;
 	uint32_t primary_group_token;
-	
+
 	ldb = ldb_module_get_ctx(module);
 	if (ldb_match_msg_objectclass(msg, "group") == 1) {
 		primary_group_token
@@ -398,7 +395,7 @@ static int construct_parent_guid(struct ldb_module *module,
 	                            DSDB_SEARCH_SHOW_RECYCLED, parent);
 	/* not NC, so the object should have a parent*/
 	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
-		ret = ldb_error(ldb_module_get_ctx(module), LDB_ERR_OPERATIONS_ERROR, 
+		ret = ldb_error(ldb_module_get_ctx(module), LDB_ERR_OPERATIONS_ERROR,
 				 talloc_asprintf(msg, "Parent dn %s for %s does not exist",
 						 ldb_dn_get_linearized(parent_dn),
 						 ldb_dn_get_linearized(msg->dn)));
@@ -759,7 +756,7 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 					"userAccountControl",
 					0);
 	if (userAccountControl & _UF_NO_EXPIRY_ACCOUNTS) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
 	pwdLastSet = ldb_msg_find_attr_as_int64(msg, "pwdLastSet", 0);
@@ -771,14 +768,14 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 		/*
 		 * This can't really happen...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
-	if (pwdLastSet >= 0x7FFFFFFFFFFFFFFFLL) {
+	if (pwdLastSet >= INT64_MAX) {
 		/*
 		 * Somethings wrong with the clock...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
 	/*
@@ -788,7 +785,7 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 	 *
 	 * maxPwdAge: -864000000001
 	 * to
-	 * maxPwdAge: -9223372036854775808 (-0x8000000000000000ULL)
+	 * maxPwdAge: -9223372036854775808 (INT64_MIN)
 	 *
 	 */
 	maxPwdAge = get_user_max_pwd_age(module, msg, parent, domain_dn);
@@ -796,21 +793,21 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 		/*
 		 * This is not really possible...
 		 */
-		return 0x7FFFFFFFFFFFFFFFULL;
+		return INT64_MAX;
 	}
 
-	if (maxPwdAge == -0x8000000000000000LL) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+	if (maxPwdAge == INT64_MIN) {
+		return INT64_MAX;
 	}
 
 	/*
-	 * Note we already caught maxPwdAge == -0x8000000000000000ULL
-	 * and pwdLastSet >= 0x7FFFFFFFFFFFFFFFULL above.
+	 * Note we already caught maxPwdAge == INT64_MIN
+	 * and pwdLastSet >= INT64_MAX above.
 	 *
 	 * Remember maxPwdAge is a negative number,
 	 * so it results in the following.
 	 *
-	 * 0x7FFFFFFFFFFFFFFEULL + 0x7FFFFFFFFFFFFFFFULL
+	 * 0x7FFFFFFFFFFFFFFEULL + INT64_MAX
 	 * =
 	 * 0xFFFFFFFFFFFFFFFDULL
 	 *
@@ -818,8 +815,8 @@ static NTTIME get_msds_user_password_expiry_time_computed(struct ldb_module *mod
 	 * ever be more than 1<<64, therefore this result can't wrap.
 	 */
 	ret = (NTTIME)pwdLastSet - (NTTIME)maxPwdAge;
-	if (ret >= 0x7FFFFFFFFFFFFFFFULL) {
-		return 0x7FFFFFFFFFFFFFFFULL;
+	if (ret >= INT64_MAX) {
+		return INT64_MAX;
 	}
 
 	return ret;
@@ -1840,7 +1837,7 @@ static int operational_search(struct ldb_module *module, struct ldb_request *req
 				for (j = 0; search_sub[i].extra_attrs[j]; j++) {
 					search_attrs2 = ldb_attr_list_copy_add(req, search_attrs
 									       ? search_attrs
-									       : ac->attrs, 
+									       : ac->attrs,
 									       search_sub[i].extra_attrs[j]);
 					if (search_attrs2 == NULL) {
 						return ldb_operr(ldb);

@@ -184,7 +184,7 @@ bld.SAMBA_LIBRARY('dcerpc',
 	# If we just put header_path = 'gen_ndr' then all the public_headers will go
 	# in 'gen_ndr' and for dcerpc.h (at least) it will cause a problem as
 	# we have already a dcerpc.h installed by librpc/wscript_build
-	# and one will overright the other which is not what we expect.
+	# and one will overwrite the other which is not what we expect.
 	header_path=[ ('*gen_ndr*', 'gen_ndr') ],
 	vnum='0.0.1'
 	)
@@ -265,6 +265,13 @@ bld.SAMBA_PYTHON('python_claims',
         source='../../librpc/gen_ndr/py_claims.c',
         deps='NDR_CLAIMS %s %s' % (pytalloc_util, pyrpc_util),
         realname='samba/dcerpc/claims.so',
+        cflags_end=gen_cflags
+        )
+
+bld.SAMBA_PYTHON('python_gkdi',
+        source='../../librpc/gen_ndr/py_gkdi.c',
+        deps='RPC_NDR_GKDI %s %s' % (pytalloc_util, pyrpc_util),
+        realname='samba/dcerpc/gkdi.so',
         cflags_end=gen_cflags
         )
 

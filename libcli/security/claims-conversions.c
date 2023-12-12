@@ -19,12 +19,8 @@
 #include "replace.h"
 #include "librpc/gen_ndr/ndr_security.h"
 #include "librpc/gen_ndr/ndr_conditional_ace.h"
-#include "libcli/security/security.h"
-#include "libcli/security/conditional_ace.h"
 #include "libcli/security/claims-conversions.h"
-#include "lib/util/tsort.h"
 #include "lib/util/debug.h"
-#include "lib/util/bytearray.h"
 #include "lib/util/stable_sort.h"
 
 #include "librpc/gen_ndr/conditional_ace.h"
@@ -1193,7 +1189,7 @@ NTSTATUS token_claims_to_claims_v1(TALLOC_CTX *mem_ctx,
 							 false);
 			if (!NT_STATUS_IS_OK(status)) {
 				talloc_free(claims);
-				DBG_WARNING("claim sort and uniquess test failed with %s\n",
+				DBG_WARNING("claim sort and uniqueness test failed with %s\n",
 					    nt_errstr(status));
 				return status;
 			}
