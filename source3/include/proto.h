@@ -229,9 +229,6 @@ void register_msg_pool_usage(TALLOC_CTX *mem_ctx,
 
 /* The following definitions come from lib/time.c  */
 
-void push_dos_date(uint8_t *buf, int offset, time_t unixdate, int zone_offset);
-void push_dos_date2(uint8_t *buf,int offset,time_t unixdate, int zone_offset);
-void push_dos_date3(uint8_t *buf,int offset,time_t unixdate, int zone_offset);
 uint32_t convert_time_t_to_uint32_t(time_t t);
 time_t convert_uint32_t_to_time_t(uint32_t u);
 bool nt_time_is_zero(const NTTIME *nt);
@@ -241,7 +238,7 @@ int set_server_zone_offset(time_t t);
 char *timeval_string(TALLOC_CTX *ctx, const struct timeval *tp, bool hires);
 char *current_timestring(TALLOC_CTX *ctx, bool hires);
 void srv_put_dos_date(char *buf,int offset,time_t unixdate);
-void srv_put_dos_date2(char *buf,int offset, time_t unixdate);
+void srv_put_dos_date2_ts(char *buf, int offset, struct timespec unix_ts);
 void srv_put_dos_date3(char *buf,int offset,time_t unixdate);
 void round_timespec(enum timestamp_set_resolution res, struct timespec *ts);
 void put_long_date_timespec(enum timestamp_set_resolution res, char *p, struct timespec ts);
@@ -561,6 +558,7 @@ ssize_t full_path_tos(const char *dir, const char *name,
 /* The following definitions come from lib/version.c  */
 
 const char *samba_version_string(void);
+const char *samba_copyright_string(void);
 
 /* The following definitions come from lib/wins_srv.c  */
 
@@ -750,7 +748,6 @@ void unbecome_root(void);
 int find_service(TALLOC_CTX *ctx, const char *service_in, char **p_service_out);
 bool lp_allow_local_address(
 	int snum, const struct tsocket_address *local_address);
-NTSTATUS can_delete_directory_fsp(files_struct *fsp);
 bool change_to_root_user(void);
 bool become_authenticated_pipe_user(struct auth_session_info *session_info);
 bool unbecome_authenticated_pipe_user(void);

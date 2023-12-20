@@ -129,8 +129,9 @@ void srv_put_dos_date(char *buf,int offset,time_t unixdate)
 	push_dos_date((uint8_t *)buf, offset, unixdate, server_zone_offset);
 }
 
-void srv_put_dos_date2(char *buf,int offset, time_t unixdate)
+void srv_put_dos_date2_ts(char *buf, int offset, struct timespec unix_ts)
 {
+	time_t unixdate = convert_timespec_to_time_t(unix_ts);
 	push_dos_date2((uint8_t *)buf, offset, unixdate, server_zone_offset);
 }
 

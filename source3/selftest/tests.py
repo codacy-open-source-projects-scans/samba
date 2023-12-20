@@ -1106,7 +1106,7 @@ rpc = ["rpc.authcontext",
 
 local = ["local.nss"]
 
-idmap = ["idmap.rfc2307", "idmap.alloc", "idmap.rid", "idmap.ad"]
+idmap = ["idmap.rfc2307", "idmap.alloc", "idmap.rid", "idmap.ad", "idmap.nss"]
 
 rap = ["rap.basic", "rap.rpc", "rap.printing", "rap.sam"]
 
@@ -1217,6 +1217,8 @@ for t in tests:
                        '$DC_SERVER', '$DC_USERNAME', '$DC_PASSWORD'])
     elif t == "idmap.alloc":
         plantestsuite(t, "ad_member_rfc2307", [os.path.join(samba3srcdir, "../nsswitch/tests/test_idmap_nss.sh"), '$DOMAIN'])
+    elif t == "idmap.nss":
+        plantestsuite(t, "ad_member_idmap_nss:local", [os.path.join(samba3srcdir, "../nsswitch/tests/test_idmap_nss_use_upn.sh")])
     elif t == "idmap.rid":
         plantestsuite(t, "ad_member_idmap_rid", [os.path.join(samba3srcdir, "../nsswitch/tests/test_idmap_rid.sh"), '$DOMAIN', '2000000'])
         plantestsuite(t,
@@ -1675,7 +1677,13 @@ if have_cluster_support:
                   [os.path.join(samba3srcdir,
                                 "script/tests/test_smbXsrv_client_cross_node.sh"),
                    configuration,
-                   'ctdb0', 'ctdb1',
+                   '$CTDB_SERVER_NAME_NODE0', '$CTDB_SERVER_NAME_NODE1',
+                   "tmp"])
+    plantestsuite("samba3.blackbox.smbXsrv_client_ctdb_registered_ips", "clusteredmember:local",
+                  [os.path.join(samba3srcdir,
+                                "script/tests/test_smbXsrv_client_ctdb_registered_ips.sh"),
+                   configuration,
+                   '$CTDB_IFACE_IP',
                    "tmp"])
     plantestsuite("samba3.blackbox.registry_share", "clusteredmember",
                   [os.path.join(samba3srcdir,

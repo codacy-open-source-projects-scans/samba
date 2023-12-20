@@ -635,11 +635,11 @@ static bool sddl_write_int(struct sddl_write_context *ctx,
 	if (sign == CONDITIONAL_ACE_INT_SIGN_NONE) {
 		/* octal and hex will end up unsigned! */
 		if (base == CONDITIONAL_ACE_INT_BASE_8) {
-			snprintf(buf, sizeof(buf), "%#"PRIo64, v);
+			snprintf(buf, sizeof(buf), "0%"PRIo64, v);
 		} else if (base == CONDITIONAL_ACE_INT_BASE_10) {
 			snprintf(buf, sizeof(buf), "%"PRId64, v);
 		} else {
-			snprintf(buf, sizeof(buf), "%#"PRIx64, v);
+			snprintf(buf, sizeof(buf), "0x%"PRIx64, v);
 		}
 		return sddl_write(ctx, buf);
 	}
@@ -670,12 +670,12 @@ static bool sddl_write_int(struct sddl_write_context *ctx,
 		return sddl_write(ctx, "-0x8000000000000000");
 	}
 
-	buf[0] = (v < 0) ? '-' : '+';
+	buf[0] = (sign == CONDITIONAL_ACE_INT_SIGN_NEGATIVE) ? '-' : '+';
 
 	if (base == CONDITIONAL_ACE_INT_BASE_8) {
-		snprintf(buf + 1, sizeof(buf) - 1, "%#llo", llabs(v));
+		snprintf(buf + 1, sizeof(buf) - 1, "0%llo", llabs(v));
 	} else {
-		snprintf(buf + 1, sizeof(buf) - 1, "%#llx", llabs(v));
+		snprintf(buf + 1, sizeof(buf) - 1, "0x%llx", llabs(v));
 	}
 	return sddl_write(ctx, buf);
 }

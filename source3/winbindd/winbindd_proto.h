@@ -383,7 +383,7 @@ struct tevent_req *wb_parent_idmap_setup_send(TALLOC_CTX *mem_ctx,
 NTSTATUS wb_parent_idmap_setup_recv(struct tevent_req *req,
 				    const struct wb_parent_idmap_config **_cfg);
 
-void init_idmap_child(void);
+NTSTATUS init_idmap_child(TALLOC_CTX *mem_ctx);
 struct winbindd_child *idmap_child(void);
 bool is_idmap_child(const struct winbindd_child *child);
 pid_t idmap_child_pid(void);
@@ -404,7 +404,7 @@ bool lp_scan_idmap_domains(bool (*fn)(const char *domname,
 
 /* The following definitions come from winbindd/winbindd_locator.c  */
 
-void init_locator_child(void);
+NTSTATUS init_locator_child(TALLOC_CTX *mem_ctx);
 struct winbindd_child *locator_child(void);
 struct dcerpc_binding_handle *locator_child_handle(void);
 
