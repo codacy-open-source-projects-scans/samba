@@ -36,22 +36,28 @@ interface gkdi
 	 */
 	typedef [public] struct {
 		uint32 version;
-		[value(0x4b53444b)] uint32 magic; /* ‘KDSK’ */
+		[value(0x4b53444b), range(0x4b53444b, 0x4b53444b)] uint32 magic; /* ‘KDSK’ */
 		EnvelopeFlags flags;
 		uint32 l0_index;
 		[range(0, 31)] uint32 l1_index;
 		[range(0, 31)] uint32 l2_index;
 		GUID root_key_id;
-		uint32 unknown; /* This might be the length of a key that is rarely or never present. */
+		uint32 additional_info_len;
 		[value(2 * ndr_charset_length(domain_name, CH_UTF16))] uint32 domain_name_len;
 		[value(2 * ndr_charset_length(forest_name, CH_UTF16))] uint32 forest_name_len;
-		nstring domain_name;
-		nstring forest_name;
+		/*
+		 * https://lists.samba.org/archive/cifs-protocol/2023-December/004170.html
+		 * This is the public key blob of an ephemeral public key used in secret
+		 * agreement, or a random number used in deriving a symmetric key.
+		 */
+		[flag(NDR_SECRET)] uint8 additional_info[additional_info_len];
+		nstring domain_name; /* DNS name of the domain which generated the key. */
+		nstring forest_name; /* DNS name of the forest which generated the key. */
 	} KeyEnvelope;
 
 	typedef [public] struct {
 		uint32 version; /* The version (msKds-Version) of the root key ADM element. */
-		[value(0x4b53444b)] uint32 magic; /* ‘KDSK’ */
+		[value(0x4b53444b), range(0x4b53444b, 0x4b53444b)] uint32 magic; /* ‘KDSK’ */
 		EnvelopeFlags flags;
 		uint32 l0_index;
 		[range(0, 31)] uint32 l1_index;
@@ -71,8 +77,8 @@ interface gkdi
 		uint8 kdf_parameters[kdf_parameters_len];
 		nstring secret_agreement_algorithm;
 		uint8 secret_agreement_parameters[secret_agreement_parameters_len];
-		nstring domain_name;
-		nstring forest_name;
+		nstring domain_name; /* DNS name of the domain which generated the key. */
+		nstring forest_name; /* DNS name of the forest which generated the key. */
 		[flag(NDR_SECRET)] uint8 l1_key[l1_key_len];
 		[flag(NDR_SECRET)] uint8 l2_key[l2_key_len];
 	} GroupKeyEnvelope;
@@ -92,11 +98,19 @@ interface gkdi
 		 * ‘key_length’ bytes each.
 		 */
 		[value(12 + 2 * key_length)] uint32 length;
-		[value(0x4d504844)] uint32 magic; /* ‘DHPM’ */
+		[value(0x4d504844), range(0x4d504844, 0x4d504844)] uint32 magic; /* ‘DHPM’ */
 		uint32 key_length;
 		uint8 field_order[key_length];
 		uint8 generator[key_length];
 	} FfcDhParameters;
+
+	typedef [public] struct {
+		GUID guid;
+		int32 l0_idx;
+		int32 l1_idx;
+		int32 l2_idx;
+		[flag(NDR_REMAINING)] DATA_BLOB target_security_descriptor;
+	} GkdiDerivationCtx;
 
 	HRESULT gkdi_GetKey(
 		[in] uint32 target_sd_len,

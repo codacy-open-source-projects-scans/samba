@@ -30,7 +30,7 @@ import ldb
 from samba import credentials, nttime2float
 from samba.auth import system_session
 from samba.common import get_bytes, get_string
-from samba.dcerpc import drsblobs, security
+from samba.dcerpc import drsblobs, security, gmsa
 from samba.ndr import ndr_unpack
 from samba.netcmd import Command, CommandError
 from samba.samdb import SamDB
@@ -97,6 +97,9 @@ virtual_attributes = {
         "flags": ldb.ATTR_FLAG_FORCE_BASE64_LDIF,
     },
     "virtualSambaGPG": {
+        "flags": ldb.ATTR_FLAG_FORCE_BASE64_LDIF,
+    },
+    "unicodePwd": {
         "flags": ldb.ATTR_FLAG_FORCE_BASE64_LDIF,
     },
 }
@@ -188,23 +191,23 @@ class GetPasswordCommand(Command):
             flags = ldb.ATTR_FLAG_HIDDEN | virtual_attributes[a].get("flags", 0)
             samdb.schema_attribute_add(a, flags, ldb.SYNTAX_OCTET_STRING)
 
-    def connect_system_samdb(self, url, allow_local=False, verbose=False):
+    def connect_for_passwords(self, url,
+                              creds=None,
+                              require_ldapi=True,
+                              verbose=False):
 
         # using anonymous here, results in no authentication
         # which means we can get system privileges via
         # the privileged ldapi socket
-        creds = credentials.Credentials()
-        creds.set_anonymous()
+        anon_creds = credentials.Credentials()
+        anon_creds.set_anonymous()
 
-        if url is None and allow_local:
+        if url is None and not require_ldapi:
             pass
         elif url.lower().startswith("ldapi://"):
+            creds = anon_creds
             pass
-        elif url.lower().startswith("ldap://"):
-            raise CommandError("--url ldap:// is not supported for this command")
-        elif url.lower().startswith("ldaps://"):
-            raise CommandError("--url ldaps:// is not supported for this command")
-        elif not allow_local:
+        elif require_ldapi:
             raise CommandError("--url requires an ldapi:// url for this command")
 
         if verbose:
@@ -213,19 +216,20 @@ class GetPasswordCommand(Command):
         samdb = SamDB(url=url, session_info=system_session(),
                       credentials=creds, lp=self.lp)
 
-        try:
-            #
-            # Make sure we're connected as SYSTEM
-            #
-            res = samdb.search(base='', scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
-            assert len(res) == 1
-            sids = res[0].get("tokenGroups")
-            assert len(sids) == 1
-            sid = ndr_unpack(security.dom_sid, sids[0])
-            assert str(sid) == security.SID_NT_SYSTEM
-        except Exception as msg:
-            raise CommandError("You need to specify an URL that gives privileges as SID_NT_SYSTEM(%s)" %
-                               (security.SID_NT_SYSTEM))
+        if require_ldapi or url is None:
+            try:
+                #
+                # Make sure we're connected as SYSTEM
+                #
+                res = samdb.search(base='', scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
+                assert len(res) == 1
+                sids = res[0].get("tokenGroups")
+                assert len(sids) == 1
+                sid = ndr_unpack(security.dom_sid, sids[0])
+                assert str(sid) == security.SID_NT_SYSTEM
+            except Exception as msg:
+                raise CommandError("You need to specify an URL that gives privileges as SID_NT_SYSTEM(%s)" %
+                                   (security.SID_NT_SYSTEM))
 
         self.inject_virtual_attributes(samdb)
 
@@ -322,6 +326,7 @@ class GetPasswordCommand(Command):
                 required_attrs = [
                     "supplementalCredentials",
                     "unicodePwd",
+                    "msDS-ManagedPassword",
                 ]
                 for required_attr in required_attrs:
                     a = parse_raw_attr(required_attr, is_hidden=True)
@@ -349,6 +354,8 @@ class GetPasswordCommand(Command):
             raise CommandError("Failed to get password for user '%s': %s" % (username or filter, msg))
         obj = res[0]
 
+        calculated = {}
+
         sc = None
         unicodePwd = None
         if "supplementalCredentials" in obj:
@@ -356,14 +363,23 @@ class GetPasswordCommand(Command):
             sc = ndr_unpack(drsblobs.supplementalCredentialsBlob, sc_blob)
         if "unicodePwd" in obj:
             unicodePwd = obj["unicodePwd"][0]
+        if "msDS-ManagedPassword" in obj:
+            # unpack a GMSA managed password as if we could read the
+            # hidden password attributes.
+            managed_password = obj["msDS-ManagedPassword"][0]
+            unpacked_managed_password = ndr_unpack(gmsa.MANAGEDPASSWORD_BLOB,
+                                                   managed_password)
+            calculated["Primary:CLEARTEXT"] = \
+                unpacked_managed_password.passwords.current
+            calculated["OLDCLEARTEXT"] = \
+                unpacked_managed_password.passwords.previous
+
         account_name = str(obj["sAMAccountName"][0])
         if "userPrincipalName" in obj:
             account_upn = str(obj["userPrincipalName"][0])
         else:
             realm = samdb.domain_dns_name()
             account_upn = "%s@%s" % (account_name, realm.lower())
-
-        calculated = {}
 
         def get_package(name, min_idx=0):
             if name in calculated:
@@ -382,6 +398,17 @@ class GetPasswordCommand(Command):
 
                 return binascii.a2b_hex(p.data)
             return None
+
+        def get_cleartext(attr_opts):
+            param = get_option(attr_opts, "previous")
+            if param:
+                if param != "1":
+                    raise CommandError(
+                        f"Invalid attribute parameter ;previous={param}, "
+                        "only supported value is previous=1")
+                return calculated.get("OLDCLEARTEXT")
+            else:
+                return get_package("Primary:CLEARTEXT")
 
         def get_kerberos_ctr():
             primary_krb5 = get_package("Primary:Kerberos-Newer-Keys")
@@ -453,14 +480,14 @@ class GetPasswordCommand(Command):
                             username or account_name, e))
 
         def get_utf8(a, b, username):
-            try:
-                u = str(get_bytes(b), 'utf-16-le')
-            except UnicodeDecodeError as e:
-                self.outf.write("WARNING: '%s': CLEARTEXT is invalid UTF-16-LE unable to generate %s\n" % (
-                                username, a))
-                return None
-            u8 = u.encode('utf-8')
-            return u8
+            creds_for_charcnv = credentials.Credentials()
+            creds_for_charcnv.set_anonymous()
+            creds_for_charcnv.set_utf16_password(get_bytes(b))
+
+            # This can't fail due to character conversion issues as it
+            # includes a built-in fallback (UTF16_MUNGED) matching
+            # exactly what we need.
+            return creds_for_charcnv.get_password().encode()
 
         # Extract the WDigest hash for the value specified by i.
         # Builds an htdigest compatible value
@@ -582,7 +609,7 @@ class GetPasswordCommand(Command):
             if sv is None:
                 # No exact match on algorithm and number of rounds
                 # try and calculate one from the Primary:CLEARTEXT
-                b = get_package("Primary:CLEARTEXT")
+                b = get_cleartext(attr_opts)
                 if b is not None:
                     u8 = get_utf8(a, b, username or account_name)
                     if u8 is not None:
@@ -650,6 +677,14 @@ class GetPasswordCommand(Command):
             except ValueError:
                 return 0
 
+        def get_unicode_pwd_hash(pwd):
+            # We can't read unicodePwd directly, but we can regenerate
+            # it from msDS-ManagedPassword
+            tmp = credentials.Credentials()
+            tmp.set_anonymous()
+            tmp.set_utf16_password(pwd)
+            return tmp.get_nt_hash()
+
         # We use sort here in order to have a predictable processing order
         for a in sorted(virtual_attributes.keys()):
             vattr = None
@@ -665,7 +700,7 @@ class GetPasswordCommand(Command):
             attr_opts = vattr["opts"]
 
             if a == "virtualClearTextUTF8":
-                b = get_package("Primary:CLEARTEXT")
+                b = get_cleartext(attr_opts)
                 if b is None:
                     continue
                 u8 = get_utf8(a, b, username or account_name)
@@ -673,11 +708,11 @@ class GetPasswordCommand(Command):
                     continue
                 v = u8
             elif a == "virtualClearTextUTF16":
-                v = get_package("Primary:CLEARTEXT")
+                v = get_cleartext(attr_opts)
                 if v is None:
                     continue
             elif a == "virtualSSHA":
-                b = get_package("Primary:CLEARTEXT")
+                b = get_cleartext(attr_opts)
                 if b is None:
                     continue
                 u8 = get_utf8(a, b, username or account_name)
@@ -714,6 +749,13 @@ class GetPasswordCommand(Command):
                 v = kerberos_salt
                 if v is None:
                     continue
+            elif a == "unicodePwd" and unicodePwd is None:
+                if "Primary:CLEARTEXT" in calculated and not get_option(attr_opts, "previous"):
+                    v = get_unicode_pwd_hash(calculated["Primary:CLEARTEXT"])
+                elif "OLDCLEARTEXT" in calculated and get_option(attr_opts, "previous"):
+                    v = get_unicode_pwd_hash(calculated["OLDCLEARTEXT"])
+                else:
+                    continue
             elif a.startswith("virtualWDigest"):
                 primary_wdigest = get_package("Primary:WDigest")
                 if primary_wdigest is None:
@@ -730,7 +772,7 @@ class GetPasswordCommand(Command):
                     continue
             else:
                 continue
-            obj[a] = ldb.MessageElement(v, ldb.FLAG_MOD_REPLACE, a)
+            obj[a] = ldb.MessageElement(v, ldb.FLAG_MOD_REPLACE, vattr["raw_attr"])
 
         def get_src_attrname(srcattrg):
             srcattrl = srcattrg.lower()

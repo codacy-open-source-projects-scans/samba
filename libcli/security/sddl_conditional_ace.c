@@ -623,6 +623,7 @@ static bool sddl_write_int(struct sddl_write_context *ctx,
 	uint8_t sign = tok->data.int64.sign;
 	uint8_t base = tok->data.int64.base;
 	char buf[26]; /* oct(1<<63) + sign + \0 */
+	char sign_char;
 	if (sign > CONDITIONAL_ACE_INT_SIGN_NONE ||
 	    base > CONDITIONAL_ACE_INT_BASE_16) {
 		return false;
@@ -650,12 +651,18 @@ static bool sddl_write_int(struct sddl_write_context *ctx,
 		/* note we allow "-0", because we will parse it. */
 		return false;
 	}
+	sign_char = (sign == CONDITIONAL_ACE_INT_SIGN_NEGATIVE) ? '-' : '+';
 	/*
-	 * We can use "%+ld" for the decimal sign, but "%+lx" and "%+lo" are
-	 * invalid because %o and %x are unsigned.
+	 * We can use "%+ld" for the decimal sign (except -0), but
+	 * "%+lx" and "%+lo" are invalid because %o and %x are
+	 * unsigned.
 	 */
 	if (base == CONDITIONAL_ACE_INT_BASE_10) {
-		snprintf(buf, sizeof(buf), "%+"PRId64, v);
+		if (v == 0) {
+			snprintf(buf, sizeof(buf), "%c0", sign_char);
+		} else {
+			snprintf(buf, sizeof(buf), "%+"PRId64, v);
+		}
 		return sddl_write(ctx, buf);
 	}
 
@@ -670,12 +677,10 @@ static bool sddl_write_int(struct sddl_write_context *ctx,
 		return sddl_write(ctx, "-0x8000000000000000");
 	}
 
-	buf[0] = (sign == CONDITIONAL_ACE_INT_SIGN_NEGATIVE) ? '-' : '+';
-
 	if (base == CONDITIONAL_ACE_INT_BASE_8) {
-		snprintf(buf + 1, sizeof(buf) - 1, "0%llo", llabs(v));
+		snprintf(buf, sizeof(buf), "%c0%llo", sign_char, llabs(v));
 	} else {
-		snprintf(buf + 1, sizeof(buf) - 1, "0x%llx", llabs(v));
+		snprintf(buf, sizeof(buf), "%c0x%llx", sign_char, llabs(v));
 	}
 	return sddl_write(ctx, buf);
 }

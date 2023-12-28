@@ -1124,6 +1124,9 @@ planpythontestsuite("none", "samba.tests.samba_tool.visualize")
 for env in all_fl_envs:
     planpythontestsuite(env + ":local", "samba.tests.samba_tool.fsmo")
 
+# test getpassword for group managed service accounts
+planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.user_getpassword_gmsa")
+
 # test samba-tool user, group, contact and computer edit command
 for env in all_fl_envs:
     env += ":local"
@@ -1153,6 +1156,8 @@ for env, nt_hash in [("ad_dc:local", True),
                      ("ad_dc_no_ntlm:local", False)]:
     planpythontestsuite(env, "samba.tests.samba_tool.user",
                         environ={"EXPECT_NT_HASH": int(nt_hash)})
+    # test get-kerberos-ticket for locally accessible and group managed service accounts
+    planpythontestsuite(env, "samba.tests.samba_tool.user_get_kerberos_ticket")
     planpythontestsuite(env, "samba.tests.samba_tool.user_virtualCryptSHA_userPassword")
     planpythontestsuite(env, "samba.tests.samba_tool.user_virtualCryptSHA_gpg")
 planpythontestsuite("chgdcpass:local", "samba.tests.samba_tool.user_check_password_script")
@@ -2038,6 +2043,10 @@ planoldpythontestsuite(
 planoldpythontestsuite(
     'ad_dc',
     'samba.tests.krb5.conditional_ace_tests',
+    environ=krb5_environ)
+planoldpythontestsuite(
+    'ad_dc',
+    'samba.tests.krb5.gkdi_tests',
     environ=krb5_environ)
 
 for env in [

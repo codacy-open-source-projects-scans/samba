@@ -28,6 +28,7 @@
 #include "librpc/ndr/ndr_private.h"
 #include "lib/cmdline/cmdline.h"
 #include "libcli/util/hresult.h"
+#include "lib/crypto/gkdi.h"
 
 void init_glue(void);
 static PyObject *PyExc_NTSTATUSError;
@@ -430,8 +431,8 @@ static PyObject *py_interface_ips(PyObject *self, PyObject *args)
 
 static PyObject *py_strcasecmp_m(PyObject *self, PyObject *args)
 {
-	const char *s1 = NULL;
-	const char *s2 = NULL;
+	char *s1 = NULL;
+	char *s2 = NULL;
 	long cmp_result = 0;
 	if (!PyArg_ParseTuple(args, PYARG_STR_UNI
 			      PYARG_STR_UNI,
@@ -440,15 +441,15 @@ static PyObject *py_strcasecmp_m(PyObject *self, PyObject *args)
 	}
 
 	cmp_result = strcasecmp_m(s1, s2);
-	PyMem_Free(discard_const_p(char, s1));
-	PyMem_Free(discard_const_p(char, s2));
+	PyMem_Free(s1);
+	PyMem_Free(s2);
 	return PyLong_FromLong(cmp_result);
 }
 
 static PyObject *py_strstr_m(PyObject *self, PyObject *args)
 {
-	const char *s1 = NULL;
-	const char *s2 = NULL;
+	char *s1 = NULL;
+	char *s2 = NULL;
 	char *strstr_ret = NULL;
 	PyObject *result = NULL;
 	if (!PyArg_ParseTuple(args, PYARG_STR_UNI
@@ -458,13 +459,13 @@ static PyObject *py_strstr_m(PyObject *self, PyObject *args)
 
 	strstr_ret = strstr_m(s1, s2);
 	if (!strstr_ret) {
-		PyMem_Free(discard_const_p(char, s1));
-		PyMem_Free(discard_const_p(char, s2));
+		PyMem_Free(s1);
+		PyMem_Free(s2);
 		Py_RETURN_NONE;
 	}
 	result = PyUnicode_FromString(strstr_ret);
-	PyMem_Free(discard_const_p(char, s1));
-	PyMem_Free(discard_const_p(char, s2));
+	PyMem_Free(s1);
+	PyMem_Free(s2);
 	return result;
 }
 
@@ -572,7 +573,7 @@ static PyMethodDef py_misc_methods[] = {
 	{ "is_ntvfs_fileserver_built", (PyCFunction)py_is_ntvfs_fileserver_built, METH_NOARGS,
 		"is the NTVFS file server built in this installation?" },
 	{ "is_heimdal_built", (PyCFunction)py_is_heimdal_built, METH_NOARGS,
-		"is Samba built with Heimdal Kerberbos?" },
+		"is Samba built with Heimdal Kerberos?" },
 	{ "generate_random_bytes",
 		(PyCFunction)py_generate_random_bytes,
 		METH_VARARGS,
@@ -600,6 +601,8 @@ static struct PyModuleDef moduledef = {
 MODULE_INIT_FUNC(_glue)
 {
 	PyObject *m;
+	PyObject *py_obj = NULL;
+	int ret;
 
 	debug_setup_talloc_log();
 
@@ -609,33 +612,73 @@ MODULE_INIT_FUNC(_glue)
 
 	PyModule_AddObject(m, "version",
 					   PyUnicode_FromString(SAMBA_VERSION_STRING));
-	PyExc_NTSTATUSError = PyErr_NewException(discard_const_p(char, "samba.NTSTATUSError"), PyExc_RuntimeError, NULL);
+	PyExc_NTSTATUSError = PyErr_NewException("samba.NTSTATUSError", PyExc_RuntimeError, NULL);
 	if (PyExc_NTSTATUSError != NULL) {
 		Py_INCREF(PyExc_NTSTATUSError);
 		PyModule_AddObject(m, "NTSTATUSError", PyExc_NTSTATUSError);
 	}
 
-	PyExc_WERRORError = PyErr_NewException(discard_const_p(char, "samba.WERRORError"), PyExc_RuntimeError, NULL);
+	PyExc_WERRORError = PyErr_NewException("samba.WERRORError", PyExc_RuntimeError, NULL);
 	if (PyExc_WERRORError != NULL) {
 		Py_INCREF(PyExc_WERRORError);
 		PyModule_AddObject(m, "WERRORError", PyExc_WERRORError);
 	}
 
-	PyExc_HRESULTError = PyErr_NewException(discard_const_p(char, "samba.HRESULTError"), PyExc_RuntimeError, NULL);
+	PyExc_HRESULTError = PyErr_NewException("samba.HRESULTError", PyExc_RuntimeError, NULL);
 	if (PyExc_HRESULTError != NULL) {
 		Py_INCREF(PyExc_HRESULTError);
 		PyModule_AddObject(m, "HRESULTError", PyExc_HRESULTError);
 	}
 
-	PyExc_DsExtendedError = PyErr_NewException(discard_const_p(char, "samba.DsExtendedError"), PyExc_RuntimeError, NULL);
+	PyExc_DsExtendedError = PyErr_NewException("samba.DsExtendedError", PyExc_RuntimeError, NULL);
 	if (PyExc_DsExtendedError != NULL) {
 		Py_INCREF(PyExc_DsExtendedError);
 		PyModule_AddObject(m, "DsExtendedError", PyExc_DsExtendedError);
 	}
 
+	PyModule_AddObject(m, "HRES_E_INVALIDARG",
+			   PyLong_FromUnsignedLongLong(HRES_ERROR_V(HRES_E_INVALIDARG)));
+	PyModule_AddObject(m, "HRES_NTE_BAD_KEY",
+			   PyLong_FromUnsignedLongLong(HRES_ERROR_V(HRES_NTE_BAD_KEY)));
+	PyModule_AddObject(m, "HRES_NTE_NO_KEY",
+			   PyLong_FromUnsignedLongLong(HRES_ERROR_V(HRES_NTE_NO_KEY)));
 	PyModule_AddObject(m, "HRES_SEC_E_INVALID_TOKEN",
 			   PyLong_FromUnsignedLongLong(HRES_ERROR_V(HRES_SEC_E_INVALID_TOKEN)));
 	PyModule_AddObject(m, "HRES_SEC_E_LOGON_DENIED",
 			   PyLong_FromUnsignedLongLong(HRES_ERROR_V(HRES_SEC_E_LOGON_DENIED)));
+
+	ret = PyModule_AddIntConstant(m, "GKDI_L1_KEY_ITERATION", gkdi_l1_key_iteration);
+	if (ret) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddIntConstant(m, "GKDI_L2_KEY_ITERATION", gkdi_l2_key_iteration);
+	if (ret) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	py_obj = PyLong_FromLongLong(gkdi_key_cycle_duration);
+	if (py_obj == NULL) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddObject(m, "GKDI_KEY_CYCLE_DURATION", py_obj);
+	if (ret) {
+		Py_DECREF(py_obj);
+		Py_DECREF(m);
+		return NULL;
+	}
+	py_obj = PyLong_FromLongLong(gkdi_max_clock_skew);
+	if (py_obj == NULL) {
+		Py_DECREF(m);
+		return NULL;
+	}
+	ret = PyModule_AddObject(m, "GKDI_MAX_CLOCK_SKEW", py_obj);
+	if (ret) {
+		Py_DECREF(py_obj);
+		Py_DECREF(m);
+		return NULL;
+	}
+
 	return m;
 }

@@ -40,8 +40,10 @@ The username specified on the command is the sAMAccountName.
 The username may also be specified using the --filter option.
 
 The command must be run from the root user id or another authorized user id.
-The '-H' or '--URL' option only supports ldapi:// or [tdb://] and can be
-used to adjust the local path. By default tdb:// is used by default.
+The '-H' or '--URL' option normally only supports ldapi:// or [tdb://] and
+can be used to adjust the local path. By default, tdb:// is used.
+if the target account is a group managed service account, then in this
+case the -H can point to a remote AD DC LDAP server.
 
 The '--attributes' parameter takes a comma separated list of attributes,
 which will be printed or given to the script specified by '--script'. If a
@@ -52,13 +54,19 @@ for which virtual attributes are supported in your environment):
 
    virtualClearTextUTF16: The raw cleartext as stored in the
                           'Primary:CLEARTEXT' (or 'Primary:SambaGPG'
-                          with '--decrypt-samba-gpg') buffer inside of the
+                          with '--decrypt-samba-gpg') buffer inside the
                           supplementalCredentials attribute. This typically
                           contains valid UTF-16-LE, but may contain random
-                          bytes, e.g. for computer accounts.
+                          bytes, e.g. for computer and gMSA accounts.
+                          When the account is a group managed service account,
+                          and the user is permitted to access
+                          msDS-ManagedPassword then the current and previous
+                          password can be read over LDAP. Add ;previous=1
+                          to read the previous password.
 
    virtualClearTextUTF8:  As virtualClearTextUTF16, but converted to UTF-8
-                          (only from valid UTF-16-LE).
+                          (invalid UTF-16-LE is mapped in the same way as
+                          Windows).
 
    virtualSSHA:           As virtualClearTextUTF8, but a salted SHA-1
                           checksum, useful for OpenLDAP's '{SSHA}' algorithm.
@@ -70,7 +78,7 @@ for which virtual attributes are supported in your environment):
                           also be specified. By appending ";rounds=x" to the
                           attribute name i.e. virtualCryptSHA256;rounds=10000
                           will calculate a SHA256 hash with 10,000 rounds.
-                          Non numeric values for rounds are silently ignored.
+                          Non-numeric values for rounds are silently ignored.
                           The value is calculated as follows:
                           1) If a value exists in 'Primary:userPassword' with
                              the specified number of rounds it is returned.
@@ -88,7 +96,7 @@ for which virtual attributes are supported in your environment):
                           also be specified. By appending ";rounds=x" to the
                           attribute name i.e. virtualCryptSHA512;rounds=10000
                           will calculate a SHA512 hash with 10,000 rounds.
-                          Non numeric values for rounds are silently ignored.
+                          Non-numeric values for rounds are silently ignored.
                           The value is calculated as follows:
                           1) If a value exists in 'Primary:userPassword' with
                              the specified number of rounds it is returned.
@@ -110,7 +118,7 @@ for which virtual attributes are supported in your environment):
                           Kerberos keys from a UTF-8 cleartext password.
 
    virtualSambaGPG:       The raw cleartext as stored in the
-                          'Primary:SambaGPG' buffer inside of the
+                          'Primary:SambaGPG' buffer inside the
                           supplementalCredentials attribute.
                           See the 'password hash gpg key ids' option in
                           smb.conf.
@@ -151,12 +159,12 @@ samba-tool user getpassword --filter=samaccountname=TestUser3 --attributes=msDS-
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+        "hostopts": options.HostOptions,
     }
 
     takes_options = [
-        Option("-H", "--URL", help="LDB URL for sam.ldb database or local ldapi server", type=str,
-               metavar="URL", dest="H"),
-        Option("--filter", help="LDAP Filter to set password on", type=str),
+        Option("--filter", help="LDAP Filter to get password for (must match single account)", type=str),
         Option("--attributes", type=str,
                help=virtual_attributes_help,
                metavar="ATTRIBUTELIST", dest="attributes"),
@@ -169,7 +177,8 @@ samba-tool user getpassword --filter=samaccountname=TestUser3 --attributes=msDS-
 
     def run(self, username=None, H=None, filter=None,
             attributes=None, decrypt_samba_gpg=None,
-            sambaopts=None, versionopts=None):
+            sambaopts=None, versionopts=None, hostopts=None,
+            credopts=None):
         self.lp = sambaopts.get_loadparm()
 
         if decrypt_samba_gpg and not gpg_decrypt:
@@ -186,7 +195,8 @@ samba-tool user getpassword --filter=samaccountname=TestUser3 --attributes=msDS-
 
         password_attrs = self.parse_attributes(attributes)
 
-        samdb = self.connect_system_samdb(url=H, allow_local=True)
+        creds = credopts.get_credentials(self.lp)
+        samdb = self.connect_for_passwords(url=hostopts.H, require_ldapi=False, creds=creds)
 
         obj = self.get_account_attributes(samdb, username,
                                           basedn=None,
@@ -197,4 +207,4 @@ samba-tool user getpassword --filter=samaccountname=TestUser3 --attributes=msDS-
 
         ldif = samdb.write_ldif(obj, ldb.CHANGETYPE_NONE)
         self.outf.write("%s" % ldif)
-        self.outf.write("Got password OK\n")
+        self.errf.write("Got password OK\n")
