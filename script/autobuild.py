@@ -991,16 +991,46 @@ tasks = {
             ("allstatic-make", "make -j"),
             ("allstatic-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
             ("allstatic-lcov", LCOV_CMD),
+            ("allstatic-def-check-clean-tree", CLEAN_SOURCE_TREE_CMD),
+            ("allstatic-def-clean", "make clean"),
+
+        # force all libraries as private
+            ("allprivate-def-distclean", "make distclean"),
+            ("allprivate-def-configure", "./configure.developer " + samba_configure_params + " --private-libraries=ALL"),
+            ("allprivate-def-make", "make -j"),
+            # note wrapper libraries need to be public
+            ("allprivate-def-no-public", "ls ./bin/shared | egrep -v '^private$|lib[nprsu][saeoi][smscd].*-wrapper.so$|pam_set_items.so' | wc -l | grep -q '^0'"),
+            ("allprivate-def-only-private-ext", "ls ./bin/shared/private | egrep 'private-samba' | wc -l | grep -q '^0' && exit 1; exit 0"),
+            ("allprivate-def-no-non-private-ext", "ls ./bin/shared/private | egrep -v 'private-samba|^libpypamtest.so$' | wc -l | grep -q '^0'"),
+            ("allprivate-def-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
+            ("allprivate-def-lcov", LCOV_CMD),
+            ("allprivate-def-check-clean-tree", CLEAN_SOURCE_TREE_CMD),
+            ("allprivate-def-clean", "make clean"),
+
+        # force all libraries as private with a non default
+        # extension and 2 exceptions
+            ("allprivate-ext-distclean", "make distclean"),
+            ("allprivate-ext-configure", "./configure.developer " + samba_configure_params + " --private-libraries=ALL --private-library-extension=private-library --private-extension-exception=pac,ndr"),
+            ("allprivate-ext-make", "make -j"),
+            # note wrapper libraries need to be public
+            ("allprivate-ext-no-public", "ls ./bin/shared | egrep -v '^private$|lib[nprsu][saeoi][smscd].*-wrapper.so$|pam_set_items.so' | wc -l | grep -q '^0'"),
+            ("allprivate-ext-no-private-default-ext", "ls ./bin/shared/private | grep 'private-samba' | wc -l | grep -q '^0'"),
+            ("allprivate-ext-has-private-ext", "ls ./bin/shared/private | grep 'private-library' | wc -l | grep -q '^0' && exit 1; exit 0"),
+            ("allprivate-ext-libndr-no-private-ext", "ls ./bin/shared/private | grep -v 'private-library' | grep 'libndr' | wc -l | grep -q '^1'"),
+            ("allprivate-ext-libpac-no-private-ext", "ls ./bin/shared/private | grep -v 'private-library' | grep 'libpac' | wc -l | grep -q '^1'"),
+            ("allprivate-ext-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
+            ("allprivate-ext-lcov", LCOV_CMD),
+            ("allprivate-ext-check-clean-tree", CLEAN_SOURCE_TREE_CMD),
+            ("allprivate-ext-clean", "make clean"),
 
         # retry with nonshared smbd and smbtorture
             ("nonshared-distclean", "make distclean"),
             ("nonshared-configure", "./configure.developer " + samba_configure_params + " --bundled-libraries=ALL --with-static-modules=ALL --nonshared-binary=smbtorture,smbd/smbd"),
             ("nonshared-make", "make -j"),
-            # TODO ("nonshared-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
-            # TODO ("nonshared-lcov", LCOV_CMD),
-
-            ("check-clean-tree", CLEAN_SOURCE_TREE_CMD),
-            ("clean", "make clean"),
+            ("nonshared-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
+            ("nonshared-lcov", LCOV_CMD),
+            ("nonshared-check-clean-tree", CLEAN_SOURCE_TREE_CMD),
+            ("nonshared-clean", "make clean"),
         ],
     },
 

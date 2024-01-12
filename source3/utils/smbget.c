@@ -116,6 +116,21 @@ static void get_auth_data_with_context_fn(SMBCCTX *ctx,
 	const char *domain = NULL;
 	enum credentials_obtained obtained = CRED_UNINITIALISED;
 
+	domain = cli_credentials_get_domain_and_obtained(creds, &obtained);
+	if (domain != NULL) {
+		bool overwrite = false;
+		if (dom[0] == '\0') {
+			overwrite = true;
+		}
+		if (obtained >= CRED_CALLBACK_RESULT) {
+			overwrite = true;
+		}
+		if (overwrite) {
+			strncpy(dom, domain, dom_len - 1);
+		}
+	}
+	cli_credentials_set_domain(creds, dom, obtained);
+
 	username = cli_credentials_get_username_and_obtained(creds, &obtained);
 	if (username != NULL) {
 		bool overwrite = false;
@@ -129,11 +144,12 @@ static void get_auth_data_with_context_fn(SMBCCTX *ctx,
 			strncpy(usr, username, usr_len - 1);
 		}
 	}
+	cli_credentials_set_username(creds, usr, obtained);
 
 	password = cli_credentials_get_password_and_obtained(creds, &obtained);
 	if (password != NULL) {
 		bool overwrite = false;
-		if (usr[0] == '\0') {
+		if (pwd[0] == '\0') {
 			overwrite = true;
 		}
 		if (obtained >= CRED_CALLBACK_RESULT) {
@@ -143,30 +159,17 @@ static void get_auth_data_with_context_fn(SMBCCTX *ctx,
 			strncpy(pwd, password, pwd_len - 1);
 		}
 	}
+	cli_credentials_set_password(creds, pwd, obtained);
 
-	domain = cli_credentials_get_domain_and_obtained(creds, &obtained);
-	if (domain != NULL) {
-		bool overwrite = false;
+	smbc_set_credentials_with_fallback(ctx, dom, usr, pwd);
+
+	if (!opt.quiet) {
 		if (usr[0] == '\0') {
-			overwrite = true;
-		}
-		if (obtained >= CRED_CALLBACK_RESULT) {
-			overwrite = true;
-		}
-		if (overwrite) {
-			strncpy(dom, domain, dom_len - 1);
-		}
-	}
-
-	smbc_set_credentials_with_fallback(ctx, domain, username, password);
-
-	if (!opt.quiet && username != NULL) {
-		if (username[0] == '\0') {
 			printf("Using guest user\n");
+		} else if (dom[0] == '\0') {
+			printf("Using user: %s\n", usr);
 		} else {
-			printf("Using domain: %s, user: %s\n",
-				domain,
-				username);
+			printf("Using domain: %s, user: %s\n", dom, usr);
 		}
 	}
 }
