@@ -2681,11 +2681,20 @@ sub provision($$)
 	my $local_symlinks_shrdir="$shrdir/local_symlinks";
 	push(@dirs,$local_symlinks_shrdir);
 
+	my $worm_shrdir="$shrdir/worm";
+	push(@dirs,$worm_shrdir);
+
 	my $fruit_resource_stream_shrdir="$shrdir/fruit_resource_stream";
 	push(@dirs,$fruit_resource_stream_shrdir);
 
 	my $smbget_sharedir="$shrdir/smbget";
 	push(@dirs, $smbget_sharedir);
+
+	my $recycle_shrdir="$shrdir/recycle";
+	push(@dirs,$recycle_shrdir);
+
+	my $fakedircreatetimes_shrdir="$shrdir/fakedircreatetimes";
+	push(@dirs,$fakedircreatetimes_shrdir);
 
 	# this gets autocreated by winbindd
 	my $wbsockdir="$prefix_abs/wbsock";
@@ -3503,6 +3512,13 @@ sub provision($$)
 	path = $local_symlinks_shrdir
 	follow symlinks = yes
 
+[worm]
+	copy = tmp
+	path = $worm_shrdir
+	vfs objects = worm
+	worm:grace_period = 1
+	comment = vfs_worm with 1s grace_period
+
 [kernel_oplocks]
 	copy = tmp
 	kernel oplocks = yes
@@ -3595,6 +3611,19 @@ sub provision($$)
 [smbget]
 	path = $smbget_sharedir
 	comment = smb username is [%U]
+
+[recycle]
+	copy = tmp
+	path = $recycle_shrdir
+	vfs objects = recycle
+	recycle : repository = .trash
+	recycle : exclude = *.tmp
+	recycle : directory_mode = 755
+
+[fakedircreatetimes]
+	copy = tmp
+	path = $fakedircreatetimes_shrdir
+	fake directory create times = yes
 
 [smbget_guest]
 	path = $smbget_sharedir
