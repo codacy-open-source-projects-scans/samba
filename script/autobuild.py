@@ -296,7 +296,7 @@ tasks = {
     "samba-no-opath-build": {
         "git-clone-required": True,
         "sequence": [
-            ("configure", "ADDITIONAL_CFLAGS='-DDISABLE_OPATH=1' ./configure.developer --without-ad-dc " + samba_configure_params),
+            ("configure", "ADDITIONAL_CFLAGS='-DDISABLE_OPATH=1 -DDISABLE_VFS_OPEN_HOW_RESOLVE_NO_SYMLINKS=1 -DDISABLE_PROC_FDS=1' ./configure.developer --without-ad-dc " + samba_configure_params),
             ("make", "make -j"),
             ("check-clean-tree", CLEAN_SOURCE_TREE_CMD),
             ("chmod-R-a-w", "chmod -R a-w ."),
@@ -334,6 +334,7 @@ tasks = {
             "admem_idmap_autorid",
             "ad_member_idmap_ad",
             "ad_member_rfc2307",
+            "ad_member_idmap_nss",
             "ad_member_oneway",
             "chgdcpass",
             "vampire_2000_dc",
@@ -403,6 +404,7 @@ tasks = {
             "admem_idmap_autorid",
             "ad_member_idmap_ad",
             "ad_member_rfc2307",
+            "ad_member_idmap_nss",
             "ad_member_oneway",
             "chgdcpass",
             "vampire_2000_dc",
@@ -514,6 +516,7 @@ tasks = {
             "admem_idmap_autorid",
             "ad_member_idmap_ad",
             "ad_member_rfc2307",
+            "ad_member_idmap_nss",
             "ad_member_offlogon",
             ])),
             ("lcov", LCOV_CMD),
@@ -720,6 +723,7 @@ tasks = {
             "admem_idmap_autorid",
             "ad_member_idmap_ad",
             "ad_member_rfc2307",
+            "ad_member_idmap_nss",
             "ad_member_offlogon",
             ])),
             ("lcov", LCOV_CMD),
@@ -857,7 +861,7 @@ tasks = {
             ("ctdb-check", "test -e ${PREFIX_DIR}/sbin/ctdbd"),
 
             ("test", make_test(
-                cmd='make test',
+                cmd='PYTHONPATH=${PYTHON_PREFIX}:$PYTHONPATH make test',
                 INJECT_SELFTEST_PREFIX=0,
                 include_envs=["clusteredmember"])
             ),

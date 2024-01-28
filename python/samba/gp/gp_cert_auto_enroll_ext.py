@@ -217,10 +217,11 @@ def getca(ca, url, trust_dir):
                  ' installed or not configured.')
         if 'cACertificate' in ca:
             log.warn('Installing the server certificate only.')
+            der_certificate = base64.b64decode(ca['cACertificate'])
             try:
-                cert = load_der_x509_certificate(ca['cACertificate'])
+                cert = load_der_x509_certificate(der_certificate)
             except TypeError:
-                cert = load_der_x509_certificate(ca['cACertificate'],
+                cert = load_der_x509_certificate(der_certificate,
                                                  default_backend())
             cert_data = cert.public_bytes(Encoding.PEM)
             with open(root_cert, 'wb') as w:
@@ -358,7 +359,8 @@ class gp_cert_auto_enroll_ext(gp_pol_ext, gp_applier):
         # If the policy has changed, unapply, then apply new policy
         old_val = self.cache_get_attribute_value(guid, attribute)
         old_data = json.loads(old_val) if old_val is not None else {}
-        templates = ['%s.%s' % (ca['name'], t.decode()) for t in get_supported_templates(ca['hostname'])]
+        templates = ['%s.%s' % (ca['name'], t.decode()) for t in get_supported_templates(ca['hostname'])] \
+            if old_val is not None else []
         new_data = { 'templates': templates, **ca }
         if changed(new_data, old_data) or self.cache_get_apply_state() == GPOSTATE.ENFORCE:
             self.unapply(guid, attribute, old_val)

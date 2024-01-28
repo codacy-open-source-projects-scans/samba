@@ -905,6 +905,14 @@ static struct functable net_func[] = {
 		   "'net vfs' commands.")
 	},
 
+	{	"witness",
+		net_witness,
+		NET_TRANSPORT_LOCAL,
+		N_("Manage witness registrations"),
+		N_("  Use 'net help witness' to get more information about "
+		   "'net witness' commands.")
+	},
+
 #ifdef WITH_FAKE_KASERVER
 	{	"afs",
 		net_afs,
@@ -1233,6 +1241,61 @@ static struct functable net_func[] = {
 			.arg        = &c->opt_dns_ttl,
 			.descrip    = "TTL in seconds of DNS records",
 		},
+		/* Options for 'net witness {list,...}' */
+		{
+			.longName   = "witness-registration",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_registration,
+		},
+		{
+			.longName   = "witness-net-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_net_name,
+		},
+		{
+			.longName   = "witness-share-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_share_name,
+		},
+		{
+			.longName   = "witness-ip-address",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_ip_address,
+		},
+		{
+			.longName   = "witness-client-computer-name",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_client_computer_name,
+		},
+		{
+			.longName   = "witness-apply-to-all",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &c->opt_witness_apply_to_all,
+		},
+		{
+			.longName   = "witness-new-ip",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_new_ip,
+		},
+		{
+			.longName   = "witness-new-node",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &c->opt_witness_new_node,
+		},
+		{
+			.longName   = "witness-forced-response",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &c->opt_witness_forced_response,
+		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
@@ -1245,6 +1308,7 @@ static struct functable net_func[] = {
 	BlockSignals(True, SIGPIPE);
 
 	zero_sockaddr(&c->opt_dest_ip);
+	c->opt_witness_new_node = -2;
 
 	smb_init_locale();
 
