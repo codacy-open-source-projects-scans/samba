@@ -23,14 +23,15 @@
 import inspect
 from abc import ABCMeta, abstractmethod
 
-from ldb import ERR_NO_SUCH_OBJECT, FLAG_MOD_ADD, FLAG_MOD_REPLACE, LdbError,\
-    Message, MessageElement, SCOPE_BASE, SCOPE_SUBTREE, binary_encode
+from ldb import (ERR_NO_SUCH_OBJECT, FLAG_MOD_ADD, FLAG_MOD_REPLACE,
+                 LdbError, Message, MessageElement, SCOPE_BASE,
+                 SCOPE_SUBTREE)
 from samba.sd_utils import SDUtils
 
-from .exceptions import DeleteError, DoesNotExist, FieldError,\
-    ProtectError, UnprotectError
-from .fields import DateTimeField, DnField, Field, GUIDField, IntegerField,\
-    StringField
+from .exceptions import (DeleteError, DoesNotExist, FieldError,
+                         ProtectError, UnprotectError)
+from .fields import (DateTimeField, DnField, Field, GUIDField, IntegerField,
+                     StringField)
 from .query import Query
 
 # Keeps track of registered models.
@@ -56,17 +57,17 @@ class Model(metaclass=ModelMeta):
     distinguished_name = DnField("distinguishedName")
     dn = DnField("dn")
     ds_core_propagation_data = DateTimeField("dsCorePropagationData",
-                                             hidden=True)
+                                             hidden=True, readonly=True)
     instance_type = IntegerField("instanceType")
     name = StringField("name")
     object_category = DnField("objectCategory")
     object_class = StringField("objectClass",
                                default=lambda obj: obj.get_object_class())
     object_guid = GUIDField("objectGUID")
-    usn_changed = IntegerField("uSNChanged", hidden=True)
-    usn_created = IntegerField("uSNCreated", hidden=True)
-    when_changed = DateTimeField("whenChanged", hidden=True)
-    when_created = DateTimeField("whenCreated", hidden=True)
+    usn_changed = IntegerField("uSNChanged", hidden=True, readonly=True)
+    usn_created = IntegerField("uSNCreated", hidden=True, readonly=True)
+    when_changed = DateTimeField("whenChanged", hidden=True, readonly=True)
+    when_created = DateTimeField("whenCreated", hidden=True, readonly=True)
 
     def __init__(self, **kwargs):
         """Create a new model instance and optionally populate fields.
@@ -205,7 +206,7 @@ class Model(metaclass=ModelMeta):
     def build_expression(cls, **kwargs):
         """Build LDAP search expression from kwargs.
 
-        :kwargs: fields to use for expression using model field names
+        :param kwargs: fields to use for expression using model field names
         """
         # Take a copy, never modify the original if it can be avoided.
         # Then always add the object_class to the search criteria.
@@ -218,9 +219,9 @@ class Model(metaclass=ModelMeta):
 
         for field_name, value in criteria.items():
             field = cls.fields.get(field_name)
-            if not field:
+            if field is None:
                 raise ValueError(f"Unknown field '{field_name}'")
-            expression += f"({field.name}={binary_encode(value)})"
+            expression += field.expression(value)
 
         if num_fields > 1:
             expression += ")"

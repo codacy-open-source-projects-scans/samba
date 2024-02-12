@@ -20,17 +20,17 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from enum import IntEnum
-
 import io
 from abc import ABCMeta, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
+from enum import IntEnum, IntFlag
 from xml.etree import ElementTree
 
-from ldb import Dn, MessageElement, string_to_time, timestring
+from ldb import Dn, MessageElement, binary_encode, string_to_time, timestring
 from samba.dcerpc import security
 from samba.dcerpc.misc import GUID
 from samba.ndr import ndr_pack, ndr_unpack
+from samba.nt_time import datetime_from_nt_time, nt_time_from_datetime
 
 
 class Field(metaclass=ABCMeta):
@@ -90,6 +90,10 @@ class Field(metaclass=ABCMeta):
         :returns: MessageElement or None
         """
         pass
+
+    def expression(self, value):
+        """Returns the ldb search expression for this field."""
+        return f"({self.name}={binary_encode(value)})"
 
 
 class IntegerField(Field):
@@ -181,7 +185,7 @@ class EnumField(Field):
 
         Has a special case for IntEnum as the constructor only accepts int.
         """
-        if issubclass(self.enum, IntEnum):
+        if issubclass(self.enum, (IntEnum, IntFlag)):
             return self.enum(int(str(value)))
         else:
             return self.enum(str(value))
@@ -205,6 +209,10 @@ class EnumField(Field):
         else:
             return MessageElement(str(value.value), flags, self.name)
 
+    def expression(self, value):
+        """Returns the ldb search expression for this field."""
+        return f"({self.name}={binary_encode(str(value.value))})"
+
 
 class DateTimeField(Field):
     """A field for parsing ldb timestamps into Python datetime."""
@@ -214,10 +222,11 @@ class DateTimeField(Field):
         if value is None:
             return
         elif len(value) > 1 or self.many:
-            return [datetime.fromtimestamp(string_to_time(str(item)))
-                    for item in value]
+            return [datetime.fromtimestamp(string_to_time(str(item)),
+                                           tz=timezone.utc) for item in value]
         else:
-            return datetime.fromtimestamp(string_to_time(str(value)))
+            return datetime.fromtimestamp(string_to_time(str(value)),
+                                          tz=timezone.utc)
 
     def to_db_value(self, ldb, value, flags):
         """Convert datetime or list of datetime to MessageElement."""
@@ -229,6 +238,31 @@ class DateTimeField(Field):
                 flags, self.name)
         else:
             return MessageElement(timestring(int(datetime.timestamp(value))),
+                                  flags, self.name)
+
+
+class NtTimeField(Field):
+    """18-digit Active Directory timestamps."""
+
+    def from_db_value(self, ldb, value):
+        """Convert MessageElement to datetime or list of datetime."""
+        if value is None:
+            return
+        elif len(value) > 1 or self.many:
+            return [datetime_from_nt_time(int(item)) for item in value]
+        else:
+            return datetime_from_nt_time(int(value[0]))
+
+    def to_db_value(self, ldb, value, flags):
+        """Convert datetime or list of datetime to MessageElement."""
+        if value is None:
+            return
+        elif isinstance(value, list):
+            return MessageElement(
+                [str(nt_time_from_datetime(item)) for item in value],
+                flags, self.name)
+        else:
+            return MessageElement(str(nt_time_from_datetime(value)),
                                   flags, self.name)
 
 
@@ -339,6 +373,11 @@ class SIDField(Field):
             return MessageElement(ndr_pack(security.dom_sid(value)),
                                   flags, self.name)
 
+    def expression(self, value):
+        """Returns the ldb search expression for this field."""
+        # NOTE: value can be str or `security.dom_sid` so convert to str first.
+        return f"({self.name}={binary_encode(str(value))})"
+
 
 class SDDLField(Field):
     """A SDDL field encodes and decodes SDDL data."""
@@ -407,6 +446,14 @@ class BooleanField(Field):
                 [str(bool(item)).upper() for item in value], flags, self.name)
         else:
             return MessageElement(str(bool(value)).upper(), flags, self.name)
+
+    def expression(self, value):
+        """Returns the ldb search expression for this field."""
+        # BooleanField edge case: query by TRUE works but not by FALSE.
+        if value is False:
+            return f"(!({self.name}=TRUE))"
+        else:
+            return super().expression(str(value))
 
 
 class PossibleClaimValuesField(Field):

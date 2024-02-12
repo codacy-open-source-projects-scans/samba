@@ -528,7 +528,7 @@ NTTIME samdb_result_allow_password_change(struct ldb_context *sam_ldb,
 }
 
 /*
-  pull a samr_Password structutre from a result set.
+  pull a samr_Password structure from a result set.
 */
 struct samr_Password *samdb_result_hash(TALLOC_CTX *mem_ctx, const struct ldb_message *msg, const char *attr)
 {
@@ -539,6 +539,7 @@ struct samr_Password *samdb_result_hash(TALLOC_CTX *mem_ctx, const struct ldb_me
 		if (hash == NULL) {
 			return NULL;
 		}
+		talloc_keep_secret(hash);
 		memcpy(hash->hash, val->data, MIN(val->length, sizeof(hash->hash)));
 	}
 	return hash;
@@ -555,6 +556,13 @@ unsigned int samdb_result_hashes(TALLOC_CTX *mem_ctx, const struct ldb_message *
 
 	*hashes = NULL;
 	if (!val) {
+		return 0;
+	}
+	if (val->length % 16 != 0) {
+		/*
+		 * The length is wrong. Don’t try to read beyond the end of the
+		 * buffer.
+		 */
 		return 0;
 	}
 	count = val->length / 16;
@@ -654,7 +662,7 @@ NTSTATUS samdb_result_passwords(TALLOC_CTX *mem_ctx,
 }
 
 /*
-  pull a samr_LogonHours structutre from a result set.
+  pull a samr_LogonHours structure from a result set.
 */
 struct samr_LogonHours samdb_result_logon_hours(TALLOC_CTX *mem_ctx, struct ldb_message *msg, const char *attr)
 {

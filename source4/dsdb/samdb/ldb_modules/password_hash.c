@@ -1,4 +1,4 @@
-/* 
+/*
    ldb database module
 
    Copyright (C) Simo Sorce  2004-2008
@@ -11,12 +11,12 @@
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -539,13 +539,13 @@ static int password_hash_bypass(struct ldb_module *module, struct ldb_request *r
 			if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 				talloc_free(scb);
 				return ldb_error(ldb, LDB_ERR_CONSTRAINT_VIOLATION,
-						 "ndr_pull_struct_blob PrimaryKerberosNeverKeys");
+						 "ndr_pull_struct_blob PrimaryKerberosNewerKeys");
 			}
 
 			if (k->version != 4) {
 				talloc_free(scb);
 				return ldb_error(ldb, LDB_ERR_CONSTRAINT_VIOLATION,
-						 "KerberosNerverKeys version != 4");
+						 "KerberosNewerKeys version != 4");
 			}
 
 			if (k->ctr.ctr4.salt.string == NULL) {
@@ -663,7 +663,7 @@ static int password_hash_bypass(struct ldb_module *module, struct ldb_request *r
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			talloc_free(scb);
 			return ldb_error(ldb, LDB_ERR_CONSTRAINT_VIOLATION,
-					 "ndr_pull_struct_blob_all");
+					 "ndr_push_struct_blob");
 		}
 
 		if (sce->values[0].length != blob.length) {
@@ -685,7 +685,7 @@ static int password_hash_bypass(struct ldb_module *module, struct ldb_request *r
 	return ldb_next_request(module, request);
 }
 
-/* Get the NT hash, and fill it in as an entry in the password history, 
+/* Get the NT hash, and fill it in as an entry in the password history,
    and specify it into io->g.nt_hash */
 
 static int setup_nt_fields(struct setup_password_fields_io *io)
@@ -1012,7 +1012,7 @@ static int setup_primary_kerberos(struct setup_password_fields_io *io,
 		old_pkb3 = &_old_pkb.ctr.ctr3;
 	}
 
-	/* if we didn't found the old keys we're done */
+	/* if we didn't find the old keys we're done */
 	if (!old_pkb3) {
 		return LDB_SUCCESS;
 	}
@@ -1127,7 +1127,7 @@ static int setup_primary_kerberos_newer(struct setup_password_fields_io *io,
 		old_pkb4 = &_old_pkb.ctr.ctr4;
 	}
 
-	/* if we didn't found the old keys we're done */
+	/* if we didn't find the old keys we're done */
 	if (!old_pkb4) {
 		return LDB_SUCCESS;
 	}
@@ -1317,14 +1317,14 @@ static int setup_primary_wdigest(struct setup_password_fields_io *io,
 		.user	= &sAMAccountName_l,
 		.realm	= &dns_domain_u,
 		},
-	/* 
+	/*
 	 * userPrincipalName, no realm
 	 */
 		{
 		.user	= &userPrincipalName,
 		},
 		{
-		/* 
+		/*
 		 * NOTE: w2k3 messes this up, if the user has a real userPrincipalName,
 		 *       the fallback to the sAMAccountName based userPrincipalName is correct
 		 */
@@ -1333,7 +1333,7 @@ static int setup_primary_wdigest(struct setup_password_fields_io *io,
 		{
 		.user	= &userPrincipalName_u,
 		},
-	/* 
+	/*
 	 * nt4dom\sAMAccountName, no realm
 	 */
 		{
@@ -1416,7 +1416,7 @@ static int setup_primary_wdigest(struct setup_password_fields_io *io,
 						      io->ac->status->domain_data.dns_domain);
 		if (!user_principal_name) {
 			return ldb_oom(ldb);
-		}	
+		}
 	}
 	userPrincipalName	= data_blob_string_const(user_principal_name);
 	userPrincipalName_l	= data_blob_string_const(strlower_talloc(io->ac, user_principal_name));
@@ -3515,11 +3515,11 @@ static int msg_find_old_and_new_pwd_val(const struct ldb_message *msg,
 	return LDB_SUCCESS;
 }
 
-static int setup_io(struct ph_context *ac, 
+static int setup_io(struct ph_context *ac,
 		    const struct ldb_message *client_msg,
 		    const struct ldb_message *existing_msg,
-		    struct setup_password_fields_io *io) 
-{ 
+		    struct setup_password_fields_io *io)
+{
 	const struct ldb_val *quoted_utf16, *old_quoted_utf16, *lm_hash, *old_lm_hash;
 	struct ldb_context *ldb = ldb_module_get_ctx(ac->module);
 	struct loadparm_context *lp_ctx = talloc_get_type(
