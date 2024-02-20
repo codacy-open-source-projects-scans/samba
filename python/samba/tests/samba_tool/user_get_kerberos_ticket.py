@@ -30,12 +30,12 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 
 from ldb import SCOPE_BASE
 from samba import credentials
-from samba.credentials import Credentials, MUST_USE_KERBEROS
-from samba.dcerpc import security, samr
+from samba.credentials import MUST_USE_KERBEROS
+from samba.dcerpc import security
 from samba.dsdb import UF_WORKSTATION_TRUST_ACCOUNT, UF_NORMAL_ACCOUNT
 from samba.netcmd.domain.models import User
 from samba.ndr import ndr_pack, ndr_unpack
-from samba.tests import connect_samdb, connect_samdb_env, delete_force
+from samba.tests import connect_samdb, delete_force
 
 from samba.tests import BlackboxTestCase, BlackboxProcessError
 
@@ -55,7 +55,7 @@ SERVER_PASSWORD = os.environ["PASSWORD"]
 CREDS = f"-U{SERVER_USERNAME}%{SERVER_PASSWORD}"
 
 
-class GetKerberosTiketTest(BlackboxTestCase):
+class GetKerberosTicketTest(BlackboxTestCase):
     """Blackbox tests for GMSA getpassword and connecting as that user."""
 
     @classmethod
@@ -136,7 +136,7 @@ class GetKerberosTiketTest(BlackboxTestCase):
         output_ccache = self.get_ticket(self.gmsa_username)
         creds = self.insta_creds(template=self.env_creds)
         creds.set_kerberos_state(MUST_USE_KERBEROS)
-        creds.set_named_ccache(self.lp, output_ccache)
+        creds.set_named_ccache(output_ccache, credentials.SPECIFIED, self.lp)
         db = connect_samdb(PW_CHECK_URL, credentials=creds, lp=self.lp)
         msg = db.search(base="", scope=SCOPE_BASE, attrs=["tokenGroups"])[0]
         connecting_user_sid = str(ndr_unpack(security.dom_sid, msg["tokenGroups"][0]))

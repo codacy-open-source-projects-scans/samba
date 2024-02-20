@@ -20,18 +20,22 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from .fields import BooleanField, DnField, IntegerField, SIDField, StringField
+from .fields import (BooleanField, DnField, EnumField, IntegerField, SIDField,
+                     StringField)
 from .model import Model
+from .types import AccountType, GroupType, SystemFlags
 
 
 class Group(Model):
+    account_type = EnumField("sAMAccountType", AccountType)
+    group_type = EnumField("groupType", GroupType)
     admin_count = IntegerField("adminCount")
     description = StringField("description")
     is_critical_system_object = BooleanField("isCriticalSystemObject",
                                              default=False, readonly=True)
     member = DnField("member", many=True)
     object_sid = SIDField("objectSid")
-    system_flags = IntegerField("systemFlags")
+    system_flags = EnumField("systemFlags", SystemFlags)
 
     @staticmethod
     def get_object_class():
