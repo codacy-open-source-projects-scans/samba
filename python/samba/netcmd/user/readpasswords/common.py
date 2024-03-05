@@ -22,6 +22,7 @@
 import base64
 import builtins
 import binascii
+import datetime
 import errno
 import io
 import os
@@ -34,7 +35,8 @@ from samba.dcerpc import drsblobs, security, gmsa
 from samba.ndr import ndr_unpack
 from samba.netcmd import Command, CommandError
 from samba.samdb import SamDB
-
+from samba.nt_time import timedelta_from_nt_time_delta, nt_time_from_datetime
+from samba.gkdi import MAX_CLOCK_SKEW
 
 # python[3]-gpgme is abandoned since ubuntu 1804 and debian 9
 # have to use python[3]-gpg instead
@@ -101,6 +103,8 @@ virtual_attributes = {
     },
     "unicodePwd": {
         "flags": ldb.ATTR_FLAG_FORCE_BASE64_LDIF,
+    },
+    "virtualManagedPasswordQueryTime": {
     },
 }
 
@@ -369,10 +373,28 @@ class GetPasswordCommand(Command):
             managed_password = obj["msDS-ManagedPassword"][0]
             unpacked_managed_password = ndr_unpack(gmsa.MANAGEDPASSWORD_BLOB,
                                                    managed_password)
-            calculated["Primary:CLEARTEXT"] = \
-                unpacked_managed_password.passwords.current
             calculated["OLDCLEARTEXT"] = \
                 unpacked_managed_password.passwords.previous
+            query_interval = unpacked_managed_password.passwords.query_interval
+            calculated["GMSA:query_interval"] = \
+                query_interval
+
+            query_time_datetime = \
+                timedelta_from_nt_time_delta(query_interval) + datetime.datetime.now(tz=datetime.timezone.utc)
+
+            query_time_nttime = nt_time_from_datetime(query_time_datetime)
+
+            calculated["GMSA:query_time"] = query_time_nttime
+
+            # This password is useful for a keytab, but not for
+            # authentication, so don't show or provide it as the new password
+            # just yet
+            if calculated["GMSA:query_interval"] <= MAX_CLOCK_SKEW:
+                calculated["Primary:CLEARTEXT"] = \
+                    unpacked_managed_password.passwords.previous
+            else:
+                calculated["Primary:CLEARTEXT"] = \
+                    unpacked_managed_password.passwords.current
 
         account_name = str(obj["sAMAccountName"][0])
         if "userPrincipalName" in obj:
@@ -770,6 +792,10 @@ class GetPasswordCommand(Command):
                 v = get_wDigest(i, primary_wdigest, account_name, account_upn, domain, dns_domain)
                 if v is None:
                     continue
+            elif a == "virtualManagedPasswordQueryTime":
+                if "GMSA:query_time" not in calculated:
+                    continue
+                v = str(calculated["GMSA:query_time"])
             else:
                 continue
             obj[a] = ldb.MessageElement(v, ldb.FLAG_MOD_REPLACE, vattr["raw_attr"])
@@ -840,10 +866,14 @@ class GetPasswordCommand(Command):
                     continue
                 if ra["vformat"] != fm:
                     continue
+
                 srcattr = get_src_attrname(ra["attr"])
+                if srcattr is not None:
+                    an = "%s;format=%s" % (srcattr, fm)
+                else:
+                    srcattr = an = get_src_attrname(ra["raw_attr"])
                 if srcattr is None:
                     continue
-                an = "%s;format=%s" % (srcattr, fm)
                 if an in generated_formats:
                     continue
                 generated_formats[an] = fm

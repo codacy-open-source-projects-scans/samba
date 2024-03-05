@@ -21,33 +21,30 @@
 #
 
 import inspect
-from abc import ABCMeta, abstractmethod
 
 from ldb import (ERR_NO_SUCH_OBJECT, FLAG_MOD_ADD, FLAG_MOD_REPLACE,
                  LdbError, Message, MessageElement, SCOPE_BASE,
                  SCOPE_SUBTREE)
 from samba.sd_utils import SDUtils
 
+from .constants import MODELS
 from .exceptions import (DeleteError, FieldError, NotFound, ProtectError,
                          UnprotectError)
 from .fields import (DateTimeField, DnField, Field, GUIDField, IntegerField,
-                     StringField)
+                     SIDField, StringField)
 from .query import Query
 
-# Keeps track of registered models.
-# This gets populated by the ModelMeta class.
-MODELS = {}
 
-
-class ModelMeta(ABCMeta):
+class ModelMeta(type):
 
     def __new__(mcls, name, bases, namespace, **kwargs):
         cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        cls.fields = dict(inspect.getmembers(cls, lambda f: isinstance(f, Field)))
+        cls.meta = mcls
+        object_class = cls.get_object_class()
 
         if cls.__name__ != "Model":
-            cls.fields = dict(inspect.getmembers(cls, lambda f: isinstance(f, Field)))
-            cls.meta = mcls
-            MODELS[name] = cls
+            MODELS[object_class] = cls
 
         return cls
 
@@ -64,6 +61,7 @@ class Model(metaclass=ModelMeta):
     object_class = StringField("objectClass",
                                default=lambda obj: obj.get_object_class())
     object_guid = GUIDField("objectGUID")
+    object_sid = SIDField("objectSid")
     usn_changed = IntegerField("uSNChanged", hidden=True, readonly=True)
     usn_created = IntegerField("uSNCreated", hidden=True, readonly=True)
     when_changed = DateTimeField("whenChanged", hidden=True, readonly=True)
@@ -81,8 +79,12 @@ class Model(metaclass=ModelMeta):
         self._message = None
 
         for field_name, field in self.fields.items():
-            if field_name in kwargs:
-                default = kwargs[field_name]
+            field_value = kwargs.get(field_name)
+
+            # Set fields from values provided in kwargs dict.
+            # If field is set to None we use the field default (if any)
+            if field_value is not None:
+                default = field_value
             elif callable(field.default):
                 default = field.default(self)
             else:
@@ -109,13 +111,8 @@ class Model(metaclass=ModelMeta):
             return self.dn == other.dn
 
     def __json__(self):
-        """Automatically called by custom JSONEncoder class.
-
-        When turning an object into json any fields of type RelatedField
-        will also end up calling this method.
-        """
-        if self.dn is not None:
-            return str(self.dn)
+        """Automatically called by custom JSONEncoder class."""
+        return self.as_dict()
 
     @staticmethod
     def get_base_dn(ldb):
@@ -139,13 +136,12 @@ class Model(metaclass=ModelMeta):
         return cls.get_base_dn(ldb)
 
     @staticmethod
-    @abstractmethod
     def get_object_class():
         """Returns the objectClass for this model."""
-        pass
+        return "top"
 
     @classmethod
-    def from_message(cls, ldb, message):
+    def _from_message(cls, ldb, message):
         """Create a new model instance from the Ldb Message object.
 
         :param ldb: Ldb connection
@@ -229,13 +225,23 @@ class Model(metaclass=ModelMeta):
         return expression
 
     @classmethod
-    def query(cls, ldb, **kwargs):
+    def query(cls, ldb, polymorphic=False, base_dn=None, **kwargs):
         """Returns a search query for this model.
 
+        NOTE: If polymorphic is enabled then querying will return instances
+        of that specific model, for example querying User can return Computer
+        and ManagedServiceAccount instances.
+
+        By default, polymorphic querying is disabled, and querying User
+        will only return User instances.
+
         :param ldb: Ldb connection
+        :param polymorphic: If true enables polymorphic querying (see note)
+        :param base_dn: Optional provide base dn for searching or use the model
         :param kwargs: Search criteria as keyword args
         """
-        base_dn = cls.get_search_dn(ldb)
+        if base_dn is None:
+            base_dn = cls.get_search_dn(ldb)
 
         # If the container does not exist produce a friendly error message.
         try:
@@ -247,7 +253,7 @@ class Model(metaclass=ModelMeta):
                 raise NotFound(f"Container does not exist: {base_dn}")
             raise
 
-        return Query(cls, ldb, result)
+        return Query(cls, ldb, result, polymorphic)
 
     @classmethod
     def get(cls, ldb, **kwargs):
@@ -276,7 +282,7 @@ class Model(metaclass=ModelMeta):
                 else:
                     raise
 
-            return cls.from_message(ldb, res[0])
+            return cls._from_message(ldb, res[0])
         else:
             return cls.query(ldb, **kwargs).get()
 
@@ -356,7 +362,7 @@ class Model(metaclass=ModelMeta):
             self._apply(ldb, res[0])
         else:
             # Existing Message was stored to work out what fields changed.
-            existing_obj = self.from_message(ldb, self._message)
+            existing_obj = self._from_message(ldb, self._message)
 
             # Only modify replace or modify fields that have changed.
             # Any fields that are set to None or an empty list get unset.

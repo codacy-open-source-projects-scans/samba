@@ -42,6 +42,13 @@ typedef struct {
 	(pyldb_check_type(pyobj, "Ldb") ?	\
 	 pyldb_Ldb_AS_LDBCONTEXT(pyobj) : NULL)
 
+#define PyErr_LDB_OR_RAISE(py_ldb, ldb) \
+	ldb = pyldb_Ldb_AsLdbContext(py_ldb); \
+	if (!ldb) { \
+		PyErr_SetString(PyExc_TypeError, "Ldb connection object required"); \
+		return NULL; \
+	}
+
 typedef struct {
 	PyObject_HEAD
 	TALLOC_CTX *mem_ctx;
@@ -52,6 +59,13 @@ PyObject *pyldb_Dn_FromDn(struct ldb_dn *);
 bool pyldb_Object_AsDn(TALLOC_CTX *mem_ctx, PyObject *object, struct ldb_context *ldb_ctx, struct ldb_dn **dn);
 #define pyldb_Dn_AS_DN(pyobj) ((PyLdbDnObject *)pyobj)->dn
 
+#define PyErr_LDB_DN_OR_RAISE(py_ldb_dn, dn) \
+	if (!pyldb_check_type(py_ldb_dn, "Dn")) { \
+		PyErr_SetString(PyExc_TypeError, "ldb Dn object required"); \
+		return NULL; \
+	} \
+	dn = pyldb_Dn_AS_DN(py_ldb_dn);
+
 bool pyldb_check_type(PyObject *obj, const char *type_name);
 
 typedef struct {
@@ -60,13 +74,6 @@ typedef struct {
 	struct ldb_message *msg;
 } PyLdbMessageObject;
 #define pyldb_Message_AsMessage(pyobj) ((PyLdbMessageObject *)pyobj)->msg
-
-typedef struct {
-	PyObject_HEAD
-	TALLOC_CTX *mem_ctx;
-	struct ldb_module *mod;
-} PyLdbModuleObject;
-#define pyldb_Module_AsModule(pyobj) ((PyLdbModuleObject *)pyobj)->mod
 
 /*
  * NOTE: el (and so the return value of
@@ -110,7 +117,15 @@ typedef struct {
 	} \
 } while(0)
 
-/* Picked out of thin air. To do this properly, we should probably have some part of the 
+#define PyErr_LDB_ERROR_IS_ERR_RAISE_FREE(err,ret,ldb,mem_ctx) do {	\
+	if (ret != LDB_SUCCESS) { \
+		PyErr_SetLdbError(err, ret, ldb); \
+		TALLOC_FREE(mem_ctx);		  \
+		return NULL; \
+	} \
+} while(0)
+
+/* Picked out of thin air. To do this properly, we should probably have some part of the
  * errors in LDB be allocated to bindings ? */
 #define LDB_ERR_PYTHON_EXCEPTION	142
 

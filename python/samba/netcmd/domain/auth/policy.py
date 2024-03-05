@@ -188,19 +188,17 @@ class cmd_domain_auth_policy_list(Command):
 
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
-        # Authentication policies grouped by cn.
         try:
-            policies = {policy.cn: policy.as_dict()
-                        for policy in AuthenticationPolicy.query(ldb)}
+            policies = AuthenticationPolicy.query(ldb)
         except ModelError as e:
             raise CommandError(e)
 
         # Using json output format gives more detail.
         if output_format == "json":
-            self.print_json(policies)
+            self.print_json({policy.name: policy for policy in policies})
         else:
-            for policy in policies.keys():
-                self.outf.write(f"{policy}\n")
+            for policy in policies:
+                print(policy.name, file=self.outf)
 
 
 class cmd_domain_auth_policy_view(Command):
@@ -413,7 +411,7 @@ class cmd_domain_auth_policy_create(Command):
             raise CommandError(e)
 
         # Authentication policy created successfully.
-        self.outf.write(f"Created authentication policy: {name}\n")
+        print(f"Created authentication policy: {name}", file=self.outf)
 
 
 class cmd_domain_auth_policy_modify(Command):
@@ -621,7 +619,7 @@ class cmd_domain_auth_policy_modify(Command):
             raise CommandError(e)
 
         # Authentication policy updated successfully.
-        self.outf.write(f"Updated authentication policy: {name}\n")
+        print(f"Updated authentication policy: {name}", file=self.outf)
 
 
 class cmd_domain_auth_policy_delete(Command):
@@ -670,7 +668,7 @@ class cmd_domain_auth_policy_delete(Command):
                 raise CommandError(e)
 
         # Authentication policy deleted successfully.
-        self.outf.write(f"Deleted authentication policy: {name}\n")
+        print(f"Deleted authentication policy: {name}", file=self.outf)
 
 
 class cmd_domain_auth_policy(SuperCommand):

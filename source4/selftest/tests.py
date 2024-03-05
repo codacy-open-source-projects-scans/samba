@@ -202,13 +202,6 @@ for t in smbtorture4_testsuites("ldap."):
 for t in smbtorture4_testsuites("dsdb."):
     plansmbtorture4testsuite(t, "ad_dc:local", "localhost")
 
-ldbdir = os.path.join(srcdir(), "lib/ldb")
-# Don't run LDB tests when using system ldb, as we won't have ldbtest installed
-if os.path.exists(os.path.join(samba4bindir, "ldbtest")):
-    plantestsuite("ldb.base", "none", "%s/tests/test-tdb-subunit.sh %s" % (ldbdir, samba4bindir))
-else:
-    skiptestsuite("ldb.base", "Using system LDB, ldbtest not available")
-
 plantestsuite_loadlist("samba4.tests.attr_from_server.python(ad_dc_ntvfs)",
                        "ad_dc_ntvfs:local",
                        [python, os.path.join(DSDB_PYTEST_DIR, "attr_from_server.py"),
@@ -565,6 +558,10 @@ plantestsuite_loadlist("samba.tests.sddl_conditional_ace",
 
 for t in smbtorture4_testsuites("dns_internal."):
     plansmbtorture4testsuite(t, "ad_dc_default:local", '//$SERVER/whavever')
+
+# These tests want to run on a barely changed fresh provision, before
+# too much happens to this environment.
+planpythontestsuite("chgdcpass:local", "samba.tests.dsdb_quiet_provision_tests")
 
 # Local tests
 for t in smbtorture4_testsuites("dlz_bind9."):
@@ -1171,7 +1168,9 @@ planpythontestsuite("ad_dc_default:local", "samba.tests.samba_tool.schema")
 planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.domain_claim")
 planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.domain_auth_policy")
 planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.domain_auth_silo")
+planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.domain_kds_root_key")
 planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.domain_models")
+planpythontestsuite("ad_dc_default", "samba.tests.samba_tool.service_account")
 planpythontestsuite("schema_dc:local", "samba.tests.samba_tool.schema")
 planpythontestsuite("ad_dc:local", "samba.tests.samba_tool.ntacl")
 planpythontestsuite("none", "samba.tests.samba_tool.provision_password_check")

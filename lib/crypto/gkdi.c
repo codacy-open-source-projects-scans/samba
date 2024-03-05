@@ -175,11 +175,45 @@ struct Gkid gkdi_get_interval_id(const NTTIME time)
 		    time / gkdi_key_cycle_duration % gkdi_l2_key_iteration);
 }
 
-NTTIME gkdi_get_key_start_time(const struct Gkid gkid)
+bool gkdi_get_key_start_time(const struct Gkid gkid, NTTIME *start_time_out)
 {
-	return (gkid.l0_idx * gkdi_l1_key_iteration * gkdi_l2_key_iteration +
-		gkid.l1_idx * gkdi_l2_key_iteration + gkid.l2_idx) *
-	       gkdi_key_cycle_duration;
+	if (!gkid_is_valid(gkid)) {
+		return false;
+	}
+
+	{
+		enum GkidType key_type = gkid_key_type(gkid);
+		if (key_type != GKID_L2_SEED_KEY) {
+			return false;
+		}
+	}
+
+	{
+		/*
+		 * Make sure that the GKID is not so large its start time can’t
+		 * be represented in NTTIME.
+		 */
+		static const struct Gkid max_gkid = {
+			UINT64_MAX /
+				(gkdi_l1_key_iteration * gkdi_l2_key_iteration *
+				 gkdi_key_cycle_duration),
+			UINT64_MAX /
+				(gkdi_l2_key_iteration *
+				 gkdi_key_cycle_duration) %
+				gkdi_l1_key_iteration,
+			UINT64_MAX / gkdi_key_cycle_duration %
+				gkdi_l2_key_iteration};
+		if (!gkid_less_than_or_equal_to(gkid, max_gkid)) {
+			return false;
+		}
+	}
+
+	*start_time_out = ((uint64_t)gkid.l0_idx * gkdi_l1_key_iteration *
+				   gkdi_l2_key_iteration +
+			   (uint64_t)gkid.l1_idx * gkdi_l2_key_iteration +
+			   (uint64_t)gkid.l2_idx) *
+			  gkdi_key_cycle_duration;
+	return true;
 }
 
 /*
@@ -188,7 +222,7 @@ NTTIME gkdi_get_key_start_time(const struct Gkid gkid)
  */
 NTTIME gkdi_get_interval_start_time(const NTTIME time)
 {
-	return time % gkdi_key_cycle_duration;
+	return time / gkdi_key_cycle_duration * gkdi_key_cycle_duration;
 }
 
 bool gkid_less_than_or_equal_to(const struct Gkid g1, const struct Gkid g2)
@@ -207,7 +241,18 @@ bool gkid_less_than_or_equal_to(const struct Gkid g1, const struct Gkid g2)
 bool gkdi_rollover_interval(const int64_t managed_password_interval,
 			    NTTIME *result)
 {
-	if (managed_password_interval < 0) {
+	/*
+	 * This is actually a conservative reckoning. The interval could be one
+	 * higher than this maximum and not overflow. But there’s no reason to
+	 * support intervals that high (and Windows will start producing strange
+	 * results for intervals beyond that).
+	 */
+	const int64_t maximum_interval = UINT64_MAX / gkdi_key_cycle_duration *
+					 10 / 24;
+
+	if (managed_password_interval < 0 ||
+	    managed_password_interval > maximum_interval)
+	{
 		return false;
 	}
 

@@ -49,19 +49,17 @@ class cmd_domain_auth_silo_list(Command):
 
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
-        # Authentication silos grouped by cn.
         try:
-            silos = {silo.cn: silo.as_dict()
-                     for silo in AuthenticationSilo.query(ldb)}
+            silos = AuthenticationSilo.query(ldb)
         except ModelError as e:
             raise CommandError(e)
 
         # Using json output format gives more detail.
         if output_format == "json":
-            self.print_json(silos)
+            self.print_json({silo.name: silo for silo in silos})
         else:
-            for silo in silos.keys():
-                self.outf.write(f"{silo}\n")
+            for silo in silos:
+                print(silo.name, file=self.outf)
 
 
 class cmd_domain_auth_silo_view(Command):
@@ -149,7 +147,7 @@ class cmd_domain_auth_silo_create(Command):
         :param name: Either the DN or name of authentication policy
         """
         try:
-            return AuthenticationPolicy.lookup(ldb, name)
+            return AuthenticationPolicy.find(ldb, name)
         except (ModelError, ValueError) as e:
             raise CommandError(e)
 
@@ -212,7 +210,7 @@ class cmd_domain_auth_silo_create(Command):
             raise CommandError(e)
 
         # Authentication silo created successfully.
-        self.outf.write(f"Created authentication silo: {name}\n")
+        print(f"Created authentication silo: {name}", file=self.outf)
 
 
 class cmd_domain_auth_silo_modify(Command):
@@ -266,7 +264,7 @@ class cmd_domain_auth_silo_modify(Command):
         :param name: Either the DN or name of authentication policy
         """
         try:
-            return AuthenticationPolicy.lookup(ldb, name)
+            return AuthenticationPolicy.find(ldb, name)
         except (ModelError, ValueError) as e:
             raise CommandError(e)
 
@@ -337,7 +335,7 @@ class cmd_domain_auth_silo_modify(Command):
             raise CommandError(e)
 
         # Silo updated successfully.
-        self.outf.write(f"Updated authentication silo: {name}\n")
+        print(f"Updated authentication silo: {name}", file=self.outf)
 
 
 class cmd_domain_auth_silo_delete(Command):
@@ -386,7 +384,7 @@ class cmd_domain_auth_silo_delete(Command):
                 raise CommandError(e)
 
         # Authentication silo deleted successfully.
-        self.outf.write(f"Deleted authentication silo: {name}\n")
+        print(f"Deleted authentication silo: {name}", file=self.outf)
 
 
 class cmd_domain_auth_silo(SuperCommand):
