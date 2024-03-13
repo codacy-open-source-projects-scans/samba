@@ -254,31 +254,43 @@ service_check ()
 
 #-------------------------------------------------
 
-nfs_releaseip ()
+grace_period()
 {
+	_arg="$1"
+
 	if [ -x "/usr/bin/grace_period" ]; then
-		/usr/bin/grace_period "2:${2}"
+		/usr/bin/grace_period "$_arg"
 	else
 		dbus-send --print-reply --system --dest=org.ganesha.nfsd \
-			  /org/ganesha/nfsd/admin org.ganesha.nfsd.admin.grace \
-			  string:"2:${2}"
+			/org/ganesha/nfsd/admin org.ganesha.nfsd.admin.grace \
+			string:"$_arg"
 	fi
+}
+
+nfs_startipreallocate()
+{
+	grace_period "0:"
+}
+
+nfs_releaseip()
+{
+	_ip="$2"
+
+	# NFS-Ganesha recovery code only processes items matching $_ip
+	grace_period "2:${_ip}"
 }
 
 nfs_takeip ()
 {
+	_ip="$2"
+
 	case  $state_fs in
 	glusterfs)
-		check_ln "$NODESTATEDIR" "${GANSTATEDIR}/${2}"
+		check_ln "$NODESTATEDIR" "${GANSTATEDIR}/${_ip}"
 		;;
 	esac
-	if [ -x "/usr/bin/grace_period" ]; then
-		/usr/bin/grace_period "5:${2}"
-	else
-		dbus-send --print-reply --system --dest=org.ganesha.nfsd \
-			  /org/ganesha/nfsd/admin org.ganesha.nfsd.admin.grace \
-			  string:"5:${2}"
-	fi
+
+	grace_period "5:${_ip}"
 }
 
 ##################################################
@@ -322,6 +334,7 @@ startup
 stop
 start
 check
+startipreallocate
 releaseip
 takeip
 monitor-list-shares
@@ -339,11 +352,12 @@ startup)             nfs_startup             ;;
 stop)                service_stop "$1"       ;;
 start)               service_start "$1"      ;;
 check)               service_check "$1"      ;;
+startipreallocate)   nfs_startipreallocate   ;;
 releaseip)           nfs_releaseip "$@"      ;;
 takeip)              nfs_takeip "$@"         ;;
 monitor-list-shares) nfs_monitor_list_shares ;;
 register)            nfs_register            ;;
-monitor-pre|monitor-post|releaseip-pre|takeip-pre)
+monitor-pre|monitor-post)
 	# Not required/implemented
 	:
 	;;
