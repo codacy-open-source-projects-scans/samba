@@ -110,9 +110,9 @@ class Model(metaclass=ModelMeta):
         else:
             return self.dn == other.dn
 
-    def __json__(self):
+    def __json__(self, **kwargs):
         """Automatically called by custom JSONEncoder class."""
-        return self.as_dict()
+        return self.as_dict(**kwargs)
 
     @staticmethod
     def get_base_dn(ldb):
@@ -182,7 +182,7 @@ class Model(metaclass=ModelMeta):
 
         self._apply(ldb, res[0])
 
-    def as_dict(self, include_hidden=False):
+    def as_dict(self, include_hidden=False, **kwargs):
         """Returns a dict representation of the model.
 
         :param include_hidden: Include fields with hidden=True when set
@@ -225,7 +225,8 @@ class Model(metaclass=ModelMeta):
         return expression
 
     @classmethod
-    def query(cls, ldb, polymorphic=False, base_dn=None, **kwargs):
+    def query(cls, ldb, polymorphic=False, base_dn=None, scope=SCOPE_SUBTREE,
+              **kwargs):
         """Returns a search query for this model.
 
         NOTE: If polymorphic is enabled then querying will return instances
@@ -238,6 +239,7 @@ class Model(metaclass=ModelMeta):
         :param ldb: Ldb connection
         :param polymorphic: If true enables polymorphic querying (see note)
         :param base_dn: Optional provide base dn for searching or use the model
+        :param scope: Ldb search scope (default SCOPE_SUBTREE)
         :param kwargs: Search criteria as keyword args
         """
         if base_dn is None:
@@ -246,7 +248,7 @@ class Model(metaclass=ModelMeta):
         # If the container does not exist produce a friendly error message.
         try:
             result = ldb.search(base_dn,
-                                scope=SCOPE_SUBTREE,
+                                scope=scope,
                                 expression=cls.build_expression(**kwargs))
         except LdbError as e:
             if e.args[0] == ERR_NO_SUCH_OBJECT:

@@ -262,6 +262,9 @@ static bool claim_v1_offset_to_ace_token(
 	uint8_t f = claim->flags & CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
 	result->flags = f | CONDITIONAL_ACE_FLAG_TOKEN_FROM_ATTR;
 
+	if (claim->values[offset].int_value == NULL) {
+		return false;
+	}
 	switch (claim->value_type) {
 	case CLAIM_SECURITY_ATTRIBUTE_TYPE_INT64:
 		return claim_v1_int_to_ace_int(claim, offset, result);
@@ -934,6 +937,16 @@ NTSTATUS claim_v1_check_and_sort(TALLOC_CTX *mem_ctx,
 		.value_type = claim->value_type,
 		.case_sensitive = case_sensitive
 	};
+
+	/*
+	 * It could be that the values array contains a NULL pointer, in which
+	 * case we don't need to worry about what type it is.
+	 */
+	for (i = 0; i < claim->value_count; i++) {
+		if (claim->values[i].int_value == NULL) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+	}
 
 	if (claim->value_type == CLAIM_SECURITY_ATTRIBUTE_TYPE_BOOLEAN) {
 		NTSTATUS status = claim_v1_check_and_sort_boolean(mem_ctx, claim);

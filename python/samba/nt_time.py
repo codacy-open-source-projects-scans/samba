@@ -18,7 +18,7 @@
 #
 
 import datetime
-from typing import NewType
+from typing import NewType, Optional
 import re
 
 
@@ -56,7 +56,7 @@ def datetime_from_nt_time(nt_time: NtTime) -> datetime.datetime:
     return NT_EPOCH + time_since_epoch
 
 
-def nt_time_delta_from_datetime(dt: datetime.timedelta) -> NtTimeDelta:
+def nt_time_delta_from_timedelta(dt: datetime.timedelta) -> NtTimeDelta:
     return NtTimeDelta(round(dt.total_seconds() * NT_TICKS_PER_SEC))
 
 
@@ -88,7 +88,7 @@ def nt_time_from_string(s: str) -> NtTime:
             dt = datetime.datetime.now(datetime.timezone.utc)
         elif re.match(r'^\d{14}\.0Z$', s):
             # "20230127223641.0Z"
-            dt = datetime.strptime(s, '%Y%m%d%H%M%S.0Z')
+            dt = datetime.datetime.strptime(s, '%Y%m%d%H%M%S.0Z')
         else:
             dt = datetime.datetime.fromisoformat(s)
     except ValueError:
@@ -107,7 +107,7 @@ def nt_time_from_string(s: str) -> NtTime:
     return nt_time_from_datetime(dt)
 
 
-def string_from_nt_time(nttime: NtTime, format:str=None) -> str:
+def string_from_nt_time(nttime: NtTime, format: Optional[str] = None) -> str:
     """Format an NtTime date as a string.
 
     If format is not provided, an ISO 8601 string is used.

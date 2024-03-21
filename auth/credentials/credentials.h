@@ -262,7 +262,7 @@ void cli_credentials_set_impersonate_principal(struct cli_credentials *cred,
 					       const char *principal,
 					       const char *self_service);
 void cli_credentials_set_target_service(struct cli_credentials *cred, const char *principal);
-const char *cli_credentials_get_salt_principal(struct cli_credentials *cred);
+char *cli_credentials_get_salt_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx);
 const char *cli_credentials_get_impersonate_principal(struct cli_credentials *cred);
 const char *cli_credentials_get_self_service(struct cli_credentials *cred);
 const char *cli_credentials_get_target_service(struct cli_credentials *cred);
@@ -348,12 +348,6 @@ NTSTATUS netlogon_creds_session_encrypt(
 	struct netlogon_creds_CredentialState *state,
 	DATA_BLOB data);
 
-int cli_credentials_get_aes256_key(struct cli_credentials *cred,
-				   TALLOC_CTX *mem_ctx,
-				   struct loadparm_context *lp_ctx,
-				   const char *salt,
-				   DATA_BLOB *aes_256);
-
 /**
  * Kerberos FAST handling
  */
@@ -365,5 +359,19 @@ NTSTATUS cli_credentials_set_krb5_fast_armor_credentials(struct cli_credentials 
 struct cli_credentials *cli_credentials_get_krb5_fast_armor_credentials(struct cli_credentials *creds);
 
 bool cli_credentials_get_krb5_require_fast_armor(struct cli_credentials *creds);
+
+/**
+ * Group Managed Service Account helper
+ */
+
+/*
+ * All current callers set "for_keytab = true", but if we start using
+ * this for getting a TGT we need the logic to ignore a very new
+ * key
+ */
+NTSTATUS cli_credentials_set_gmsa_passwords(struct cli_credentials *creds,
+					    const DATA_BLOB *managed_password_blob,
+					    bool for_keytab,
+					    const char **error_string);
 
 #endif /* __CREDENTIALS_H__ */

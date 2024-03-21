@@ -20,12 +20,12 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from samba.domain.models import (AccountType, Computer, Group,
+                                 GroupManagedServiceAccount,
+                                 SupportedEncryptionTypes, User)
+from samba.domain.models.exceptions import ModelError
 from samba.getopt import CredentialsOptions, HostOptions, Option, SambaOptions
 from samba.netcmd import Command, CommandError
-from samba.netcmd.domain.models import (AccountType, Computer, Group,
-                                        GroupManagedServiceAccount,
-                                        SupportedEncryptionTypes, User)
-from samba.netcmd.domain.models.exceptions import ModelError
 
 
 class cmd_service_account_list(Command):
@@ -109,13 +109,17 @@ class cmd_service_account_create(Command):
                dest="name", action="store", type=str, required=True),
         Option("--dns-host-name", help="Name of DNS host (required).",
                dest="dns_host_name", action="store", type=str, required=True),
+        Option("--group-msa-membership",
+               help="Provide optional Group MSA Membership SDDL.",
+               dest="group_msa_membership", action="store", type=str),
         Option("--managed-password-interval",
                help="Managed password refresh interval in days.",
                dest="managed_password_interval", action="store", type=int),
     ]
 
     def run(self, hostopts=None, sambaopts=None, credopts=None, name=None,
-            dns_host_name=None, managed_password_interval=None):
+            dns_host_name=None, group_msa_membership=None,
+            managed_password_interval=None):
 
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
 
@@ -123,6 +127,7 @@ class cmd_service_account_create(Command):
             name=name,
             managed_password_interval=managed_password_interval,
             dns_host_name=dns_host_name,
+            group_msa_membership=group_msa_membership,
         )
 
         # Create group managed service account.

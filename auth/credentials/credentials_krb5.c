@@ -1174,10 +1174,8 @@ _PUBLIC_ int cli_credentials_get_keytab(struct cli_credentials *cred,
 	krb5_keytab keytab;
 	TALLOC_CTX *mem_ctx;
 	const char *username = cli_credentials_get_username(cred);
-	const char *upn = NULL;
 	const char *realm = cli_credentials_get_realm(cred);
 	char *salt_principal = NULL;
-	uint32_t uac_flags = 0;
 
 	if (cred->keytab_obtained >= (MAX(cred->principal_obtained,
 					  cred->username_obtained))) {
@@ -1200,37 +1198,10 @@ _PUBLIC_ int cli_credentials_get_keytab(struct cli_credentials *cred,
 		return ENOMEM;
 	}
 
-	switch (cred->secure_channel_type) {
-	case SEC_CHAN_WKSTA:
-	case SEC_CHAN_RODC:
-		uac_flags = UF_WORKSTATION_TRUST_ACCOUNT;
-		break;
-	case SEC_CHAN_BDC:
-		uac_flags = UF_SERVER_TRUST_ACCOUNT;
-		break;
-	case SEC_CHAN_DOMAIN:
-	case SEC_CHAN_DNS_DOMAIN:
-		uac_flags = UF_INTERDOMAIN_TRUST_ACCOUNT;
-		break;
-	default:
-		upn = cli_credentials_get_principal(cred, mem_ctx);
-		if (upn == NULL) {
-			TALLOC_FREE(mem_ctx);
-			return ENOMEM;
-		}
-		uac_flags = UF_NORMAL_ACCOUNT;
-		break;
-	}
-
-	ret = smb_krb5_salt_principal_str(realm,
-					  username, /* sAMAccountName */
-					  upn, /* userPrincipalName */
-					  uac_flags,
-					  mem_ctx,
-					  &salt_principal);
-	if (ret) {
+	salt_principal = cli_credentials_get_salt_principal(cred, mem_ctx);
+	if (salt_principal == NULL) {
 		talloc_free(mem_ctx);
-		return ret;
+		return ENOMEM;
 	}
 
 	ret = smb_krb5_create_memory_keytab(mem_ctx,
@@ -1412,9 +1383,61 @@ _PUBLIC_ int cli_credentials_get_kvno(struct cli_credentials *cred)
 }
 
 
-const char *cli_credentials_get_salt_principal(struct cli_credentials *cred)
+char *cli_credentials_get_salt_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx)
 {
-	return cred->salt_principal;
+	TALLOC_CTX *frame = NULL;
+	const char *realm = NULL;
+	const char *username = NULL;
+	uint32_t uac_flags = 0;
+	char *salt_principal = NULL;
+	const char *upn = NULL;
+	int ret;
+
+	/* If specified, use the specified value */
+	if (cred->salt_principal != NULL) {
+		return talloc_strdup(mem_ctx, cred->salt_principal);
+	}
+
+	frame = talloc_stackframe();
+
+	switch (cred->secure_channel_type) {
+	case SEC_CHAN_WKSTA:
+	case SEC_CHAN_RODC:
+		uac_flags = UF_WORKSTATION_TRUST_ACCOUNT;
+		break;
+	case SEC_CHAN_BDC:
+		uac_flags = UF_SERVER_TRUST_ACCOUNT;
+		break;
+	case SEC_CHAN_DOMAIN:
+	case SEC_CHAN_DNS_DOMAIN:
+		uac_flags = UF_INTERDOMAIN_TRUST_ACCOUNT;
+		break;
+	default:
+		upn = cli_credentials_get_principal(cred, frame);
+		if (upn == NULL) {
+			TALLOC_FREE(frame);
+			return NULL;
+		}
+		uac_flags = UF_NORMAL_ACCOUNT;
+		break;
+	}
+
+	realm = cli_credentials_get_realm(cred);
+	username = cli_credentials_get_username(cred);
+
+	ret = smb_krb5_salt_principal_str(realm,
+					  username, /* sAMAccountName */
+					  upn, /* userPrincipalName */
+					  uac_flags,
+					  mem_ctx,
+					  &salt_principal);
+	if (ret) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	TALLOC_FREE(frame);
+	return salt_principal;
 }
 
 _PUBLIC_ void cli_credentials_set_salt_principal(struct cli_credentials *cred, const char *principal)
@@ -1481,29 +1504,69 @@ _PUBLIC_ void cli_credentials_set_target_service(struct cli_credentials *cred, c
 	cred->target_service = talloc_strdup(cred, target_service);
 }
 
-_PUBLIC_ int cli_credentials_get_aes256_key(struct cli_credentials *cred,
-					    TALLOC_CTX *mem_ctx,
-					    struct loadparm_context *lp_ctx,
-					    const char *salt,
-					    DATA_BLOB *aes_256)
+_PUBLIC_ int cli_credentials_get_kerberos_key(struct cli_credentials *cred,
+					      TALLOC_CTX *mem_ctx,
+					      struct loadparm_context *lp_ctx,
+					      krb5_enctype enctype,
+					      bool previous,
+					      DATA_BLOB *key_blob)
 {
 	struct smb_krb5_context *smb_krb5_context = NULL;
 	krb5_error_code krb5_ret;
 	int ret;
 	const char *password = NULL;
+	const char *salt = NULL;
 	krb5_data cleartext_data;
 	krb5_data salt_data = {
 		.length = 0,
 	};
 	krb5_keyblock key;
 
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	if ((int)enctype == (int)ENCTYPE_ARCFOUR_HMAC) {
+		struct samr_Password *nt_hash;
+
+		if (previous) {
+			nt_hash = cli_credentials_get_old_nt_hash(cred, frame);
+		} else {
+			nt_hash = cli_credentials_get_nt_hash(cred, frame);
+		}
+
+		if (nt_hash == NULL) {
+			TALLOC_FREE(frame);
+			return EINVAL;
+		}
+		*key_blob = data_blob_talloc(mem_ctx,
+					     nt_hash->hash,
+					     sizeof(nt_hash->hash));
+		if (key_blob->data == NULL) {
+			TALLOC_FREE(frame);
+			return ENOMEM;
+		}
+		TALLOC_FREE(frame);
+		return 0;
+	}
+
 	if (cred->password_will_be_nt_hash) {
-		DEBUG(1,("cli_credentials_get_aes256_key: cannot generate AES256 key using NT hash\n"));
+		DEBUG(1,("cli_credentials_get_kerberos_key: cannot generate Kerberos key using NT hash\n"));
+		TALLOC_FREE(frame);
 		return EINVAL;
 	}
 
-	password = cli_credentials_get_password(cred);
+	salt = cli_credentials_get_salt_principal(cred, frame);
+	if (salt == NULL) {
+		TALLOC_FREE(frame);
+		return EINVAL;
+	}
+
+	if (previous) {
+		password = cli_credentials_get_old_password(cred);
+	} else {
+		password = cli_credentials_get_password(cred);
+	}
 	if (password == NULL) {
+		TALLOC_FREE(frame);
 		return EINVAL;
 	}
 
@@ -1513,6 +1576,7 @@ _PUBLIC_ int cli_credentials_get_aes256_key(struct cli_credentials *cred,
 	ret = cli_credentials_get_krb5_context(cred, lp_ctx,
 					       &smb_krb5_context);
 	if (ret != 0) {
+		TALLOC_FREE(frame);
 		return ret;
 	}
 
@@ -1520,31 +1584,34 @@ _PUBLIC_ int cli_credentials_get_aes256_key(struct cli_credentials *cred,
 	salt_data.length = strlen(salt);
 
 	/*
-	 * create ENCTYPE_AES256_CTS_HMAC_SHA1_96 key out of
+	 * create Kerberos key out of
 	 * the salt and the cleartext password
 	 */
 	krb5_ret = smb_krb5_create_key_from_string(smb_krb5_context->krb5_context,
 						   NULL,
 						   &salt_data,
 						   &cleartext_data,
-						   ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+						   enctype,
 						   &key);
 	if (krb5_ret != 0) {
 		DEBUG(1,("cli_credentials_get_aes256_key: "
 			 "generation of a aes256-cts-hmac-sha1-96 key failed: %s\n",
 			 smb_get_krb5_error_message(smb_krb5_context->krb5_context,
 						    krb5_ret, mem_ctx)));
+		TALLOC_FREE(frame);
 		return EINVAL;
 	}
-	*aes_256 = data_blob_talloc(mem_ctx,
+	*key_blob = data_blob_talloc(mem_ctx,
 				    KRB5_KEY_DATA(&key),
 				    KRB5_KEY_LENGTH(&key));
 	krb5_free_keyblock_contents(smb_krb5_context->krb5_context, &key);
-	if (aes_256->data == NULL) {
+	if (key_blob->data == NULL) {
+		TALLOC_FREE(frame);
 		return ENOMEM;
 	}
-	talloc_keep_secret(aes_256->data);
+	talloc_keep_secret(key_blob->data);
 
+	TALLOC_FREE(frame);
 	return 0;
 }
 

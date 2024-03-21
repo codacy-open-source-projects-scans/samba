@@ -482,7 +482,12 @@ static PyObject *py_ldb_dn_is_null(PyLdbDnObject *self,
 static PyObject *py_ldb_dn_get_casefold(PyLdbDnObject *self,
 		PyObject *Py_UNUSED(ignored))
 {
-	return PyUnicode_FromString(ldb_dn_get_casefold(self->dn));
+	const char *s = ldb_dn_get_casefold(self->dn);
+	if (s == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
+	return PyUnicode_FromString(s);
 }
 
 static PyObject *py_ldb_dn_get_linearized(PyLdbDnObject *self,
@@ -1200,43 +1205,33 @@ static const char **PyList_AsStrList(TALLOC_CTX *mem_ctx, PyObject *list,
 	return ret;
 }
 
+static PyObject *py_ldb_connect(PyLdbObject *self, PyObject *args, PyObject *kwargs);
+
 static int py_ldb_init(PyLdbObject *self, PyObject *args, PyObject *kwargs)
 {
 	const char * const kwnames[] = { "url", "flags", "options", NULL };
 	char *url = NULL;
-	PyObject *py_options = Py_None;
-	const char **options;
+	PyObject *py_options = NULL;
 	unsigned int flags = 0;
-	int ret;
-	struct ldb_context *ldb;
 
 	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|zIO:Ldb.__init__",
 					 discard_const_p(char *, kwnames),
-					 &url, &flags, &py_options))
+					 &url, &flags, &py_options)) {
 		return -1;
-
-	ldb = pyldb_Ldb_AS_LDBCONTEXT(self);
-
-	if (py_options == Py_None) {
-		options = NULL;
-	} else {
-		options = PyList_AsStrList(ldb, py_options, "options");
-		if (options == NULL)
-			return -1;
 	}
 
 	if (url != NULL) {
-		ret = ldb_connect(ldb, url, flags, options);
-		if (ret != LDB_SUCCESS) {
-			PyErr_SetLdbError(PyExc_LdbError, ret, ldb);
-			talloc_free(options);
+		/* py_ldb_connect returns py_None on success, NULL on error */
+		PyObject *result = py_ldb_connect(self, args, kwargs);
+		if (result == NULL) {
 			return -1;
 		}
+		Py_DECREF(result);
 	} else {
+		struct ldb_context *ldb = pyldb_Ldb_AS_LDBCONTEXT(self);
 		ldb_set_flags(ldb, flags);
 	}
 
-	talloc_free(options);
 	return 0;
 }
 
@@ -4023,7 +4018,18 @@ static PyObject *py_ldb_msg_richcmp(PyLdbMessageObject *py_msg1,
 
 	msg1 = pyldb_Message_AsMessage(py_msg1),
 	msg2 = pyldb_Message_AsMessage(py_msg2);
-
+	/*
+	 * FIXME: this can be a non-transitive compare, unsuitable for
+	 * sorting.
+	 *
+	 * supposing msg1, msg2, and msg3 have 1, 2, and 3 elements
+	 * each. msg2 has a NULL DN, while msg1 has a DN that compares
+	 * higher than msg3. Then:
+	 *
+	 * msg1 < msg2, due to num_elements.
+	 * msg2 < msg3, due to num_elements.
+	 * msg1 > msg3, due to DNs.
+	 */
 	if ((msg1->dn != NULL) || (msg2->dn != NULL)) {
 		ret = ldb_dn_compare(msg1->dn, msg2->dn);
 		if (ret != 0) {
@@ -4031,9 +4037,11 @@ static PyObject *py_ldb_msg_richcmp(PyLdbMessageObject *py_msg1,
 		}
 	}
 
-	ret = msg1->num_elements - msg2->num_elements;
-	if (ret != 0) {
-		return richcmp(ret, op);
+	if (msg1->num_elements > msg2->num_elements) {
+		return richcmp(1, op);
+	}
+	if (msg1->num_elements < msg2->num_elements) {
+		return richcmp(-1, op);
 	}
 
 	for (i = 0; i < msg1->num_elements; i++) {

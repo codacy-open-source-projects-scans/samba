@@ -104,6 +104,14 @@ class SamDB(samba.Ldb):
 
         super().connect(url=url, flags=flags, options=options)
 
+    def __repr__(self):
+        if self.url:
+            return f"<SamDB {id(self):x} ({self.url})>"
+
+        return f"<SamDB {id(self):x} (no connection)>"
+
+    __str__ = __repr__
+
     def am_rodc(self):
         """return True if we are an RODC"""
         return dsdb._am_rodc(self)
@@ -961,6 +969,14 @@ accountExpires: %u
 
     domain_sid = property(get_domain_sid, set_domain_sid,
                           doc="SID for the domain")
+
+    def get_connecting_user_sid(self):
+        """Returns the SID of the connected user."""
+        msg = self.search(base="", scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])[0]
+        return str(ndr_unpack(security.dom_sid, msg["tokenGroups"][0]))
+
+    connecting_user_sid = property(get_connecting_user_sid,
+                                   doc="SID of the connecting user")
 
     def set_invocation_id(self, invocation_id):
         """Set the invocation id for this SamDB handle.

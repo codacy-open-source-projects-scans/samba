@@ -38,6 +38,7 @@ struct samba_kdc_base_context {
 	struct tevent_context *ev_ctx;
 	struct loadparm_context *lp_ctx;
 	struct imessaging_context *msg_ctx;
+	struct ldb_context *samdb;
 };
 
 struct samba_kdc_seq;
@@ -74,6 +75,7 @@ struct samba_kdc_entry {
 	bool is_trust : 1;
 	bool claims_from_pac_are_initialized : 1;
 	bool claims_from_db_are_initialized : 1;
+	bool group_managed_service_account : 1;
 };
 
 extern struct hdb_method hdb_samba4_interface;

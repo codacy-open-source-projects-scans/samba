@@ -19,11 +19,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from samba.domain.models import Group, GroupManagedServiceAccount, Model, User
+from samba.domain.models.exceptions import ModelError
 from samba.getopt import CredentialsOptions, HostOptions, Option, SambaOptions
 from samba.netcmd import Command, CommandError, SuperCommand
-from samba.netcmd.domain.models import (Group, GroupManagedServiceAccount,
-                                        Model, User)
-from samba.netcmd.domain.models.exceptions import ModelError
 
 
 class cmd_service_account_group_msa_membership_show(Command):
@@ -59,14 +58,14 @@ class cmd_service_account_group_msa_membership_show(Command):
             raise CommandError(f"Group managed service account {name} not found.")
 
         try:
-            trustees = [Model.get(ldb, object_sid=sid, polymorphic=True) for sid in gmsa.trustees]
+            trustees = {sid: Model.get(ldb, object_sid=sid, polymorphic=True) for sid in gmsa.trustees}
         except ModelError as e:
             raise CommandError(e)
 
         if output_format == "json":
             self.print_json({
                 "dn": gmsa.dn,
-                "trustees": [trustee.dn for trustee in trustees]
+                "trustees": [trustee.dn if trustee else f"<SID={sid}>" for sid, trustee in trustees.items()]
             })
         else:
             print(f"Account-DN: {gmsa.dn}", file=self.outf)
@@ -74,8 +73,9 @@ class cmd_service_account_group_msa_membership_show(Command):
             print("Accounts or groups that are able to retrieve this group managed service account password:",
                   file=self.outf)
 
-            for trustee in trustees:
-                print(f"  {trustee.dn}", file=self.outf)
+            for sid, trustee in trustees.items():
+                dn = trustee.dn if trustee else f"<SID={sid}>"
+                print(f"  {dn}", file=self.outf)
 
 
 class cmd_service_account_group_msa_membership_add(Command):
@@ -114,20 +114,20 @@ class cmd_service_account_group_msa_membership_add(Command):
         # Note that principal can be a user or group (by passing in a Dn).
         # If the Dn is a group it will see it as a User but this doesn't matter.
         try:
-            trustee = User.find(ldb, principal)
+            trustee = User.get_sid_for_principal(ldb, principal)
         except ModelError as e:
             raise CommandError(e)
 
         if trustee is None:
-            raise CommandError(f"Trust {principal} not found.")
+            raise CommandError(f"Trustee {principal} not found.")
 
         try:
             trustees = gmsa.trustees
         except ModelError as e:
             raise CommandError(e)
 
-        if trustee.object_sid in trustees:
-            print(f"Trustee '{trustee}' is already allowed to show managed passwords for: {gmsa}",
+        if trustee in trustees:
+            print(f"Trustee '{principal}' is already allowed to show managed passwords for: {gmsa}",
                   file=self.outf)
         else:
             gmsa.add_trustee(trustee)
@@ -137,7 +137,7 @@ class cmd_service_account_group_msa_membership_add(Command):
             except ModelError as e:
                 raise CommandError(e)
 
-            print(f"Trustee '{trustee}' is now allowed to show managed passwords for: {gmsa}",
+            print(f"Trustee '{principal}' is now allowed to show managed passwords for: {gmsa}",
                   file=self.outf)
 
 
@@ -177,20 +177,20 @@ class cmd_service_account_group_msa_membership_remove(Command):
         # Note that principal can be a user or group (by passing in a Dn).
         # If the Dn is a group it will see it as a User but this doesn't matter.
         try:
-            trustee = User.find(ldb, principal)
+            trustee = User.get_sid_for_principal(ldb, principal)
         except ModelError as e:
             raise CommandError(e)
 
         if trustee is None:
-            raise CommandError(f"User {principal} not found.")
+            raise CommandError(f"Trustee {principal} not found.")
 
         try:
             trustees = gmsa.trustees
         except ModelError as e:
             raise CommandError(e)
 
-        if trustee.object_sid not in trustees:
-            print(f"Trustee '{trustee}' cannot currently show managed passwords for: {gmsa}",
+        if trustee not in trustees:
+            print(f"Trustee '{principal}' cannot currently show managed passwords for: {gmsa}",
                   file=self.outf)
         else:
             gmsa.remove_trustee(trustee)
@@ -200,7 +200,7 @@ class cmd_service_account_group_msa_membership_remove(Command):
             except ModelError as e:
                 raise CommandError(e)
 
-            print(f"Trustee '{trustee}' removed access to show managed passwords for: {gmsa}",
+            print(f"Trustee '{principal}' removed access to show managed passwords for: {gmsa}",
                   file=self.outf)
 
 

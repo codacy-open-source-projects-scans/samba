@@ -1131,6 +1131,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	bool force_rc4 = lpcfg_kdc_force_enable_rc4_weak_session_keys(lp_ctx);
 	struct ldb_message_element *objectclasses;
 	struct ldb_val computer_val = data_blob_string_const("computer");
+	struct ldb_val gmsa_oc_val = data_blob_string_const("msDS-GroupManagedServiceAccount");
 	uint32_t config_default_supported_enctypes = lpcfg_kdc_default_domain_supported_enctypes(lp_ctx);
 	uint32_t default_supported_enctypes =
 		config_default_supported_enctypes != 0 ?
@@ -1195,6 +1196,10 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	if (!p) {
 		ret = ENOMEM;
 		goto out;
+	}
+
+	if (objectclasses && ldb_msg_find_val(objectclasses, &gmsa_oc_val)) {
+		p->group_managed_service_account = true;
 	}
 
 	p->is_rodc = is_rodc;
@@ -3643,7 +3648,6 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 {
 	int ldb_ret;
 	struct ldb_message *msg = NULL;
-	struct auth_session_info *session_info = NULL;
 	struct samba_kdc_db_context *kdc_db_ctx = NULL;
 	/* The idea here is very simple.  Using Kerberos to
 	 * authenticate the KDC to the LDAP server is highly likely to
@@ -3668,23 +3672,34 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 				 &kdc_db_ctx->policy.usr_tkt_lifetime,
 				 &kdc_db_ctx->policy.renewal_lifetime);
 
-	session_info = system_session(kdc_db_ctx->lp_ctx);
-	if (session_info == NULL) {
-		talloc_free(kdc_db_ctx);
-		return NT_STATUS_INTERNAL_ERROR;
-	}
+	/* This is to allow "samba-tool domain exportkeytab to take a -H */
+	if (base_ctx->samdb != NULL) {
+		/*
+		 * Caller is responsible for lifetimes.  In reality
+		 * the whole thing is destroyed before leaving the
+		 * function the samdb was passed into
+		 */
+		kdc_db_ctx->samdb = base_ctx->samdb;
+	} else {
+		struct auth_session_info *session_info = NULL;
+		session_info = system_session(kdc_db_ctx->lp_ctx);
+		if (session_info == NULL) {
+			talloc_free(kdc_db_ctx);
+			return NT_STATUS_INTERNAL_ERROR;
+		}
 
-	/* Setup the link to LDB */
-	kdc_db_ctx->samdb = samdb_connect(kdc_db_ctx,
-					  base_ctx->ev_ctx,
-					  base_ctx->lp_ctx,
-					  session_info,
-					  NULL,
-					  0);
-	if (kdc_db_ctx->samdb == NULL) {
-		DBG_WARNING("Cannot open samdb for KDC backend!\n");
-		talloc_free(kdc_db_ctx);
-		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+		/* Setup the link to LDB */
+		kdc_db_ctx->samdb = samdb_connect(kdc_db_ctx,
+						  base_ctx->ev_ctx,
+						  base_ctx->lp_ctx,
+						  session_info,
+						  NULL,
+						  0);
+		if (kdc_db_ctx->samdb == NULL) {
+			DBG_WARNING("Cannot open samdb for KDC backend!\n");
+			talloc_free(kdc_db_ctx);
+			return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+		}
 	}
 
 	/* Find out our own krbtgt kvno */

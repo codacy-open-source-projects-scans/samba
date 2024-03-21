@@ -58,9 +58,15 @@ def segfault_detector(f):
 def no_gdb_backtrace(f):
     from os import environ
     def w(*args, **kwargs):
+        old = environ.get('PLEASE_NO_GDB_BACKTRACE')
         environ['PLEASE_NO_GDB_BACKTRACE'] = '1'
-        f(*args, **kwargs)
-        del environ['PLEASE_NO_GDB_BACKTRACE']
+        try:
+            f(*args, **kwargs)
+        finally:
+            if old is not None:
+                environ['PLEASE_NO_GDB_BACKTRACE'] = old
+            else:
+                del environ['PLEASE_NO_GDB_BACKTRACE']
 
     return w
 

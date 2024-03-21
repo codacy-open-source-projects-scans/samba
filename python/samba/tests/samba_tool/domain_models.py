@@ -24,11 +24,12 @@ import os
 from datetime import datetime, timezone
 from xml.etree import ElementTree
 
-from ldb import FLAG_MOD_ADD, MessageElement, SCOPE_ONELEVEL
+from ldb import FLAG_MOD_ADD, SCOPE_ONELEVEL, MessageElement
+
 from samba.dcerpc import security
 from samba.dcerpc.misc import GUID
-from samba.netcmd.domain.models import (AccountType, Computer, Group, Site,
-                                        User, StrongNTLMPolicy, fields)
+from samba.domain.models import (AccountType, Computer, Group, Site,
+                                 StrongNTLMPolicy, User, fields)
 from samba.ndr import ndr_pack, ndr_unpack
 
 from .base import SambaToolCmdTest
@@ -80,18 +81,35 @@ class ComputerModelTests(SambaToolCmdTest):
         super().setUpClass()
 
     def test_computer_constructor(self):
-        comp1 = Computer(name="comp1")
+        # Use only name
+        comp1 = Computer.create(self.samdb, name="comp1")
+        self.assertEqual(comp1.name, "comp1")
         self.assertEqual(comp1.account_name, "comp1$")
 
-        comp2 = Computer(cn="comp2")
+        # Use only cn
+        comp2 = Computer.create(self.samdb, cn="comp2")
+        self.assertEqual(comp2.name, "comp2")
         self.assertEqual(comp2.account_name, "comp2$")
 
-        # User accidentally left out '$' in username.
-        comp3 = Computer(name="comp3", username="comp3")
+        # Use name and account_name but missing "$" in account_name.
+        comp3 = Computer.create(self.samdb, name="comp3", account_name="comp3")
+        self.assertEqual(comp3.name, "comp3")
         self.assertEqual(comp3.account_name, "comp3$")
 
-        comp4 = Computer(cn="comp4", username="comp4$")
+        # Use cn and account_name but missing "$" in account_name.
+        comp4 = Computer.create(self.samdb, cn="comp4", account_name="comp4$")
+        self.assertEqual(comp4.name, "comp4")
         self.assertEqual(comp4.account_name, "comp4$")
+
+        # Use only account_name, the name should get the "$" removed.
+        comp5 = Computer.create(self.samdb, account_name="comp5$")
+        self.assertEqual(comp5.name, "comp5")
+        self.assertEqual(comp5.account_name, "comp5$")
+
+        # Use only account_name but accidentally forgot the "$" character.
+        comp6 = Computer.create(self.samdb, account_name="comp6")
+        self.assertEqual(comp6.name, "comp6")
+        self.assertEqual(comp6.account_name, "comp6$")
 
 
 class FieldTestMixin:

@@ -26,21 +26,44 @@
 #include "python/modules.h"
 #include "py_net.h"
 #include "libnet_export_keytab.h"
+#include "pyldb.h"
+#include "libcli/util/pyerrors.h"
 
 void initdckeytab(void);
 
 static PyObject *py_net_export_keytab(py_net_Object *self, PyObject *args, PyObject *kwargs)
 {
 	struct libnet_export_keytab r;
+	PyObject *py_samdb = NULL;
 	TALLOC_CTX *mem_ctx;
-	const char *kwnames[] = { "keytab", "principal", NULL };
+	const char *kwnames[] = { "keytab",
+				  "samdb",
+				  "principal",
+				  "keep_stale_entries",
+				  NULL };
 	NTSTATUS status;
+	/*
+	 * int, with values true or false, to match expectation of
+	 * PyArg_ParseTupleAndKeywords()
+	 */
+	int keep_stale_entries = false;
+
 	r.in.principal = NULL;
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|z:export_keytab", discard_const_p(char *, kwnames),
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s|Ozp:export_keytab", discard_const_p(char *, kwnames),
 					 &r.in.keytab_name,
-					 &r.in.principal)) {
+					 &py_samdb,
+					 &r.in.principal,
+					 &keep_stale_entries)) {
 		return NULL;
+	}
+
+	r.in.keep_stale_entries = keep_stale_entries;
+
+	if (py_samdb == NULL) {
+		r.in.samdb = NULL;
+	} else {
+		PyErr_LDB_OR_RAISE(py_samdb, r.in.samdb);
 	}
 
 	mem_ctx = talloc_new(self->mem_ctx);
@@ -50,9 +73,12 @@ static PyObject *py_net_export_keytab(py_net_Object *self, PyObject *args, PyObj
 	}
 
 	status = libnet_export_keytab(self->libnet_ctx, mem_ctx, &r);
-	if (NT_STATUS_IS_ERR(status)) {
-		PyErr_SetString(PyExc_RuntimeError,
-				r.out.error_string?r.out.error_string:nt_errstr(status));
+
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS_and_string(status,
+					     r.out.error_string
+					     ? r.out.error_string
+					     : nt_errstr(status));
 		talloc_free(mem_ctx);
 		return NULL;
 	}

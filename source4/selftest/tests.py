@@ -604,6 +604,8 @@ plantestsuite("samba4.blackbox.test_old_enctypes", "fl2003dc:local", [os.path.jo
 
 planpythontestsuite("ad_dc_default", "samba.tests.blackbox.claims")
 
+planpythontestsuite("ad_dc_default", "samba.tests.blackbox.gmsa")
+
 if have_heimdal_support:
     plantestsuite("samba4.blackbox.kpasswd",
                   "ad_dc:local",
@@ -1375,7 +1377,8 @@ planoldpythontestsuite("ad_dc",
                        extra_args=['-U"$USERNAME%$PASSWORD"'])
 planoldpythontestsuite("ad_dc",
                        "samba.tests.segfault",
-                       extra_args=['-U"$USERNAME%$PASSWORD"'])
+                       extra_args=['-U"$USERNAME%$PASSWORD"'],
+                       environ={"TALLOC_FREE_FILL": "0xab"})
 # Need to test the password hashing in multiple environments to ensure that
 # all the possible options are covered
 #

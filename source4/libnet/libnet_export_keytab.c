@@ -20,18 +20,22 @@
 
 #include "includes.h"
 #include "system/kerberos.h"
+#include "auth/credentials/credentials.h"
 #include "auth/kerberos/kerberos.h"
+#include "auth/kerberos/kerberos_credentials.h"
+#include "auth/kerberos/kerberos_util.h"
+#include "auth/kerberos/kerberos_srv_keytab.h"
 #include "kdc/samba_kdc.h"
 #include "libnet/libnet_export_keytab.h"
-
 #include "kdc/db-glue.h"
 #include "kdc/sdb.h"
 
 static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
-			    krb5_context context,
+			    struct smb_krb5_context *smb_krb5_context,
 			    struct samba_kdc_db_context *db_ctx,
 			    const char *keytab_name,
 			    const char *principal,
+			    bool keep_stale_entries,
 			    const char **error_string)
 {
 	struct sdb_entry sentry = {};
@@ -40,7 +44,9 @@ static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	char *entry_principal = NULL;
 	bool copy_one_principal = (principal != NULL);
-	krb5_data password;
+	bool keys_exported = false;
+	krb5_context context = smb_krb5_context->krb5_context;
+	TALLOC_CTX *tmp_ctx = NULL;
 
 	code = smb_krb5_kt_open_relative(context,
 					 keytab_name,
@@ -77,7 +83,13 @@ static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
 
 	for (; code == 0; code = samba_kdc_nextkey(context, db_ctx, &sentry)) {
 		int i;
-
+		bool found_previous = false;
+		tmp_ctx = talloc_new(mem_ctx);
+		if (tmp_ctx == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto done;
+		}
+		
 		code = krb5_unparse_name(context,
 					 sentry.principal,
 					 &entry_principal);
@@ -89,39 +101,115 @@ static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
 			goto done;
 		}
 
-		if (sentry.keys.len == 0) {
-			SAFE_FREE(entry_principal);
-			sdb_entry_free(&sentry);
-
-			continue;
+		if (!keep_stale_entries) {
+			code = smb_krb5_remove_obsolete_keytab_entries(mem_ctx,
+								       context,
+								       keytab,
+								       1, &sentry.principal,
+								       sentry.kvno,
+								       &found_previous,
+								       error_string);
+			if (code != 0) {
+				*error_string = talloc_asprintf(mem_ctx,
+								"Failed to remove old principals from keytab: %s\n",
+								*error_string);
+				status = NT_STATUS_UNSUCCESSFUL;
+				goto done;
+			}
 		}
 
-		for (i = 0; i < sentry.keys.len; i++) {
-			struct sdb_key *s = &(sentry.keys.val[i]);
-			krb5_enctype enctype;
+		/*
+		 * If this was a gMSA and we did not just read the
+		 * keys directly, then generate them
+		 */
+		if (sentry.skdc_entry->group_managed_service_account
+		    && sentry.keys.len == 0) {
+			struct ldb_dn *dn = sentry.skdc_entry->msg->dn;
+			/*
+			 * for error message only, but we are about to
+			 * destroy the string name, so write this out
+			 * now
+			 */
+			const char *extended_dn =
+				ldb_dn_get_extended_linearized(mem_ctx,
+							       dn,
+							       1);
 
-			enctype = KRB5_KEY_TYPE(&(s->key));
-			password.length = KRB5_KEY_LENGTH(&s->key);
-			password.data = (char *)KRB5_KEY_DATA(&s->key);
+			/*
+			 * Modify the DN in the entry (not needed by
+			 * the KDC code any longer) to be minimal, so
+			 * we can search on it over LDAP.
+			 */
+			ldb_dn_minimise(dn);
 
-			DBG_INFO("smb_krb5_kt_add_entry for enctype=0x%04x\n",
-				  (int)enctype);
-			code = smb_krb5_kt_add_entry(context,
-						     keytab,
-						     sentry.kvno,
-						     entry_principal,
-						     NULL,
-						     enctype,
-						     &password,
-						     true);    /* no_salt */
-			if (code != 0) {
-				status = NT_STATUS_UNSUCCESSFUL;
-				*error_string = smb_get_krb5_error_message(context,
-									   code,
-									   mem_ctx);
-				DEBUG(0, ("smb_krb5_kt_add_entry failed code=%d, error = %s\n",
-					  code, *error_string));
+			status = smb_krb5_fill_keytab_gmsa_keys(tmp_ctx,
+								smb_krb5_context,
+								keytab,
+								sentry.principal,
+								db_ctx->samdb,
+								dn,
+								error_string);
+			if (NT_STATUS_IS_OK(status)) {
+				keys_exported = true;
+			} else if (copy_one_principal) {
+				*error_string = talloc_asprintf(mem_ctx,
+								"Failed to write gMSA password for %s to keytab: %s\n",
+								principal,
+								*error_string);
 				goto done;
+			} else if (!NT_STATUS_EQUAL(status, NT_STATUS_NO_USER_KEYS)) {
+				*error_string = talloc_asprintf(mem_ctx,
+								"Failed to write gMSA password for %s to keytab: %s\n",
+								extended_dn,
+								*error_string);
+				goto done;
+			}
+		} else {
+			krb5_keytab_entry kt_entry;
+			ZERO_STRUCT(kt_entry);
+			kt_entry.principal = sentry.principal;
+			kt_entry.vno       = sentry.kvno;
+
+			for (i = 0; i < sentry.keys.len; i++) {
+				struct sdb_key *s = &(sentry.keys.val[i]);
+				krb5_keyblock *keyp;
+				bool found;
+
+				keyp = KRB5_KT_KEY(&kt_entry);
+
+				*keyp = s->key;
+
+				code = smb_krb5_is_exact_entry_in_keytab(mem_ctx,
+									 context,
+									 keytab,
+									 &kt_entry,
+									 &found,
+									 error_string);
+				if (code != 0) {
+					status = NT_STATUS_UNSUCCESSFUL;
+					*error_string = smb_get_krb5_error_message(context,
+										   code,
+										   mem_ctx);
+					DEBUG(0, ("smb_krb5_is_exact_entry_in_keytab failed code=%d, error = %s\n",
+						  code, *error_string));
+					goto done;
+				}
+
+				if (found) {
+					continue;
+				}
+
+				code = krb5_kt_add_entry(context, keytab, &kt_entry);
+				if (code != 0) {
+					status = NT_STATUS_UNSUCCESSFUL;
+					*error_string = smb_get_krb5_error_message(context,
+										   code,
+										   mem_ctx);
+					DEBUG(0, ("smb_krb5_kt_add_entry failed code=%d, error = %s\n",
+						  code, *error_string));
+					goto done;
+				}
+				keys_exported = true;
 			}
 		}
 
@@ -129,6 +217,7 @@ static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
 			break;
 		}
 
+		TALLOC_FREE(tmp_ctx);
 		SAFE_FREE(entry_principal);
 		sdb_entry_free(&sentry);
 	}
@@ -141,8 +230,29 @@ static NTSTATUS sdb_kt_copy(TALLOC_CTX *mem_ctx,
 		goto done;
 	}
 
-	status = NT_STATUS_OK;
+	if (keys_exported == false) {
+		if (keep_stale_entries == false) {
+			*error_string = talloc_asprintf(mem_ctx,
+							"No keys found while exporting %s.  "
+							"Consider connecting to a local sam.ldb, "
+							"only gMSA accounts can be exported over "
+							"LDAP and connecting user needs to be authorized",
+							principal ? principal : "all users in domain");
+			status = NT_STATUS_NO_USER_KEYS;
+		} else {
+			DBG_NOTICE("No new keys found while exporting %s.  "
+				   "If new keys were expected, consider connecting "
+				   "to a local sam.ldb, only gMSA accounts can be exported over "
+				   "LDAP and connecting user needs to be authorized\n",
+				   principal ? principal : "all users in domain");
+			status = NT_STATUS_OK;
+		}
+	} else {
+		status = NT_STATUS_OK;
+	}
+
 done:
+	TALLOC_FREE(tmp_ctx);
 	SAFE_FREE(entry_principal);
 	sdb_entry_free(&sentry);
 
@@ -158,9 +268,11 @@ NTSTATUS libnet_export_keytab(struct libnet_context *ctx, TALLOC_CTX *mem_ctx, s
 	const char *error_string = NULL;
 	NTSTATUS status;
 
+	bool keep_stale_entries = r->in.keep_stale_entries;
+
 	ret = smb_krb5_init_context(ctx, ctx->lp_ctx, &smb_krb5_context);
 	if (ret) {
-		return NT_STATUS_NO_MEMORY; 
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	base_ctx = talloc_zero(mem_ctx, struct samba_kdc_base_context);
@@ -170,6 +282,7 @@ NTSTATUS libnet_export_keytab(struct libnet_context *ctx, TALLOC_CTX *mem_ctx, s
 
 	base_ctx->ev_ctx = ctx->event_ctx;
 	base_ctx->lp_ctx = ctx->lp_ctx;
+	base_ctx->samdb = r->in.samdb;
 
 	status = samba_kdc_setup_db_ctx(mem_ctx, base_ctx, &db_ctx);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -178,22 +291,45 @@ NTSTATUS libnet_export_keytab(struct libnet_context *ctx, TALLOC_CTX *mem_ctx, s
 
 	if (r->in.principal != NULL) {
 		DEBUG(0, ("Export one principal to %s\n", r->in.keytab_name));
-		status = sdb_kt_copy(mem_ctx,
-				     smb_krb5_context->krb5_context,
-				     db_ctx,
-				     r->in.keytab_name,
-				     r->in.principal,
-				     &error_string);
 	} else {
-		unlink(r->in.keytab_name);
 		DEBUG(0, ("Export complete keytab to %s\n", r->in.keytab_name));
-		status = sdb_kt_copy(mem_ctx,
-				     smb_krb5_context->krb5_context,
-				     db_ctx,
-				     r->in.keytab_name,
-				     NULL,
-				     &error_string);
+		if (!keep_stale_entries) {
+			struct stat st;
+			int stat_ret = stat(r->in.keytab_name, &st);
+			if (stat_ret == -1 && errno == ENOENT) {
+				/* continue */
+			} else if (stat_ret == -1) {
+				int errno_save = errno;
+				r->out.error_string
+					= talloc_asprintf(mem_ctx,
+							  "Failure checking if keytab export location %s is an existing file: %s",
+							  r->in.keytab_name,
+							  strerror(errno_save));
+				return map_nt_error_from_unix_common(errno_save);
+			} else {
+				r->out.error_string
+					= talloc_asprintf(mem_ctx,
+							  "Refusing to export keytab to existing file %s",
+							  r->in.keytab_name);
+				return NT_STATUS_OBJECT_NAME_EXISTS;
+			}
+
+			/*
+			 * No point looking for old
+			 * keys in a empty file
+			 */
+			keep_stale_entries = true;
+		}
 	}
+
+
+	status = sdb_kt_copy(mem_ctx,
+			     smb_krb5_context,
+			     db_ctx,
+			     r->in.keytab_name,
+			     r->in.principal,
+			     keep_stale_entries,
+			     &error_string);
 
 	talloc_free(db_ctx);
 	talloc_free(base_ctx);
