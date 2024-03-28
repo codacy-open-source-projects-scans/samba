@@ -25,19 +25,8 @@ from samba.domain.models import (MAX_TGT_LIFETIME, MIN_TGT_LIFETIME,
                                  AuthenticationPolicy, AuthenticationSilo,
                                  Group, StrongNTLMPolicy)
 from samba.domain.models.exceptions import ModelError
-from samba.netcmd import Command, CommandError, Option, SuperCommand
+from samba.netcmd import Command, CommandError, Option
 from samba.netcmd.validators import Range
-
-
-def check_similar_args(option, args):
-    """Helper method for checking similar mutually exclusive args.
-
-    Example: --user-allowed-to-authenticate-from and
-             --user-allowed-to-authenticate-from-device-silo
-    """
-    num = sum(arg is not None for arg in args)
-    if num > 1:
-        raise CommandError(f"{option} argument repeated {num} times.")
 
 
 class UserOptions(options.OptionGroup):
@@ -61,31 +50,11 @@ class UserOptions(options.OptionGroup):
                         type=str, dest="allowed_to_authenticate_from",
                         action="callback", callback=self.set_option,
                         metavar="SDDL")
-        self.add_option("--user-allowed-to-authenticate-from-device-silo",
-                        help="To authenticate, the user must log in from a device in SILO.",
-                        type=str, dest="allowed_to_authenticate_from_device_silo",
-                        action="callback", callback=self.set_option,
-                        metavar="SILO")
-        self.add_option("--user-allowed-to-authenticate-from-device-group",
-                        help="To authenticate, the user must log in from a device in GROUP.",
-                        type=str, dest="allowed_to_authenticate_from_device_group",
-                        action="callback", callback=self.set_option,
-                        metavar="GROUP")
         self.add_option("--user-allowed-to-authenticate-to",
                         help="A target service, on a user account, requires the connecting user to match SDDL",
                         type=str, dest="allowed_to_authenticate_to",
                         action="callback", callback=self.set_option,
                         metavar="SDDL")
-        self.add_option("--user-allowed-to-authenticate-to-by-group",
-                        help="A target service, on a user account, requires the connecting user to be in GROUP",
-                        type=str, dest="allowed_to_authenticate_to_by_group",
-                        action="callback", callback=self.set_option,
-                        metavar="GROUP")
-        self.add_option("--user-allowed-to-authenticate-to-by-silo",
-                        help="A target service, on a user account, requires the connecting user to be in SILO",
-                        type=str, dest="allowed_to_authenticate_to_by_silo",
-                        action="callback", callback=self.set_option,
-                        metavar="SILO")
 
 
 class ServiceOptions(options.OptionGroup):
@@ -111,31 +80,11 @@ class ServiceOptions(options.OptionGroup):
                         type=str, dest="allowed_to_authenticate_from",
                         action="callback", callback=self.set_option,
                         metavar="SDDL")
-        self.add_option("--service-allowed-to-authenticate-from-device-silo",
-                        help="To authenticate, the service must authenticate on a device in SILO.",
-                        type=str, dest="allowed_to_authenticate_from_device_silo",
-                        action="callback", callback=self.set_option,
-                        metavar="SILO")
-        self.add_option("--service-allowed-to-authenticate-from-device-group",
-                        help="To authenticate, the service must authenticate on a device in GROUP.",
-                        type=str, dest="allowed_to_authenticate_from_device_group",
-                        action="callback", callback=self.set_option,
-                        metavar="GROUP")
         self.add_option("--service-allowed-to-authenticate-to",
                         help="The target service requires the connecting user to match SDDL",
                         type=str, dest="allowed_to_authenticate_to",
                         action="callback", callback=self.set_option,
                         metavar="SDDL")
-        self.add_option("--service-allowed-to-authenticate-to-by-group",
-                        help="The target service requires the connecting user to be in GROUP",
-                        type=str, dest="allowed_to_authenticate_to_by_group",
-                        action="callback", callback=self.set_option,
-                        metavar="GROUP")
-        self.add_option("--service-allowed-to-authenticate-to-by-silo",
-                        help="The target service requires the connecting user to be in SILO",
-                        type=str, dest="allowed_to_authenticate_to_by_silo",
-                        action="callback", callback=self.set_option,
-                        metavar="SILO")
 
 
 class ComputerOptions(options.OptionGroup):
@@ -154,16 +103,6 @@ class ComputerOptions(options.OptionGroup):
                         type=str, dest="allowed_to_authenticate_to",
                         action="callback", callback=self.set_option,
                         metavar="SDDL")
-        self.add_option("--computer-allowed-to-authenticate-to-by-group",
-                        help="The computer account (server, workstation) service requires the connecting user to be in GROUP",
-                        type=str, dest="allowed_to_authenticate_to_by_group",
-                        action="callback", callback=self.set_option,
-                        metavar="GROUP")
-        self.add_option("--computer-allowed-to-authenticate-to-by-silo",
-                        help="The computer account (server, workstation) service requires the connecting user to be in SILO",
-                        type=str, dest="allowed_to_authenticate_to_by_silo",
-                        action="callback", callback=self.set_option,
-                        metavar="SILO")
 
 
 class cmd_domain_auth_policy_list(Command):
@@ -283,89 +222,7 @@ class cmd_domain_auth_policy_create(Command):
         if audit and enforce:
             raise CommandError("--audit and --enforce cannot be used together.")
 
-        # Check for repeated, similar arguments.
-        check_similar_args("--user-allowed-to-authenticate-from",
-                           [useropts.allowed_to_authenticate_from,
-                            useropts.allowed_to_authenticate_from_device_group,
-                            useropts.allowed_to_authenticate_from_device_silo])
-        check_similar_args("--user-allowed-to-authenticate-to",
-                           [useropts.allowed_to_authenticate_to,
-                            useropts.allowed_to_authenticate_to_by_group,
-                            useropts.allowed_to_authenticate_to_by_silo])
-        check_similar_args("--service-allowed-to-authenticate-from",
-                           [serviceopts.allowed_to_authenticate_from,
-                            serviceopts.allowed_to_authenticate_from_device_group,
-                            serviceopts.allowed_to_authenticate_from_device_silo])
-        check_similar_args("--service-allowed-to-authenticate-to",
-                           [serviceopts.allowed_to_authenticate_to,
-                            serviceopts.allowed_to_authenticate_to_by_group,
-                            serviceopts.allowed_to_authenticate_to_by_silo])
-        check_similar_args("--computer-allowed-to-authenticate-to",
-                           [computeropts.allowed_to_authenticate_to,
-                            computeropts.allowed_to_authenticate_to_by_group,
-                            computeropts.allowed_to_authenticate_to_by_silo])
-
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
-
-        # Generate SDDL for authenticating users from a device in a group
-        if useropts.allowed_to_authenticate_from_device_group:
-            group = Group.get(
-                ldb, cn=useropts.allowed_to_authenticate_from_device_group)
-            useropts.allowed_to_authenticate_from = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating users from a device in a silo
-        if useropts.allowed_to_authenticate_from_device_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=useropts.allowed_to_authenticate_from_device_silo)
-            useropts.allowed_to_authenticate_from = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating user accounts to a group
-        if useropts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=useropts.allowed_to_authenticate_to_by_group)
-            useropts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating user accounts to a silo
-        if useropts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=useropts.allowed_to_authenticate_to_by_silo)
-            useropts.allowed_to_authenticate_to = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts from a device in a group
-        if serviceopts.allowed_to_authenticate_from_device_group:
-            group = Group.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_from_device_group)
-            serviceopts.allowed_to_authenticate_from = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts from a device in a silo
-        if serviceopts.allowed_to_authenticate_from_device_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_from_device_silo)
-            serviceopts.allowed_to_authenticate_from = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts to a group
-        if serviceopts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_to_by_group)
-            serviceopts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts to a silo
-        if serviceopts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_to_by_silo)
-            serviceopts.allowed_to_authenticate_to = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating computer accounts to a group
-        if computeropts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=computeropts.allowed_to_authenticate_to_by_group)
-            computeropts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating computer accounts to a silo
-        if computeropts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=computeropts.allowed_to_authenticate_to_by_silo)
-            computeropts.allowed_to_authenticate_to = silo.get_authentication_sddl()
 
         try:
             policy = AuthenticationPolicy.get(ldb, cn=name)
@@ -461,89 +318,7 @@ class cmd_domain_auth_policy_modify(Command):
         if audit and enforce:
             raise CommandError("--audit and --enforce cannot be used together.")
 
-        # Check for repeated, similar arguments.
-        check_similar_args("--user-allowed-to-authenticate-from",
-                           [useropts.allowed_to_authenticate_from,
-                            useropts.allowed_to_authenticate_from_device_group,
-                            useropts.allowed_to_authenticate_from_device_silo])
-        check_similar_args("--user-allowed-to-authenticate-to",
-                           [useropts.allowed_to_authenticate_to,
-                            useropts.allowed_to_authenticate_to_by_group,
-                            useropts.allowed_to_authenticate_to_by_silo])
-        check_similar_args("--service-allowed-to-authenticate-from",
-                           [serviceopts.allowed_to_authenticate_from,
-                            serviceopts.allowed_to_authenticate_from_device_group,
-                            serviceopts.allowed_to_authenticate_from_device_silo])
-        check_similar_args("--service-allowed-to-authenticate-to",
-                           [serviceopts.allowed_to_authenticate_to,
-                            serviceopts.allowed_to_authenticate_to_by_group,
-                            serviceopts.allowed_to_authenticate_to_by_silo])
-        check_similar_args("--computer-allowed-to-authenticate-to",
-                           [computeropts.allowed_to_authenticate_to,
-                            computeropts.allowed_to_authenticate_to_by_group,
-                            computeropts.allowed_to_authenticate_to_by_silo])
-
         ldb = self.ldb_connect(hostopts, sambaopts, credopts)
-
-        # Generate SDDL for authenticating users from a device in a group
-        if useropts.allowed_to_authenticate_from_device_group:
-            group = Group.get(
-                ldb, cn=useropts.allowed_to_authenticate_from_device_group)
-            useropts.allowed_to_authenticate_from = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating users from a device in a silo
-        if useropts.allowed_to_authenticate_from_device_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=useropts.allowed_to_authenticate_from_device_silo)
-            useropts.allowed_to_authenticate_from = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating user accounts to a group
-        if useropts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=useropts.allowed_to_authenticate_to_by_group)
-            useropts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating user accounts to a silo
-        if useropts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=useropts.allowed_to_authenticate_to_by_silo)
-            useropts.allowed_to_authenticate_to = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating users from a device a device in a group
-        if serviceopts.allowed_to_authenticate_from_device_group:
-            group = Group.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_from_device_group)
-            serviceopts.allowed_to_authenticate_from = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts from a device in a silo
-        if serviceopts.allowed_to_authenticate_from_device_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_from_device_silo)
-            serviceopts.allowed_to_authenticate_from = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts to a group
-        if serviceopts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_to_by_group)
-            serviceopts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating service accounts to a silo
-        if serviceopts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=serviceopts.allowed_to_authenticate_to_by_silo)
-            serviceopts.allowed_to_authenticate_to = silo.get_authentication_sddl()
-
-        # Generate SDDL for authenticating computer accounts to a group
-        if computeropts.allowed_to_authenticate_to_by_group:
-            group = Group.get(
-                ldb, cn=computeropts.allowed_to_authenticate_to_by_group)
-            computeropts.allowed_to_authenticate_to = group.get_authentication_sddl()
-
-        # Generate SDDL for authenticating computer accounts to a silo
-        if computeropts.allowed_to_authenticate_to_by_silo:
-            silo = AuthenticationSilo.get(
-                ldb, cn=computeropts.allowed_to_authenticate_to_by_silo)
-            computeropts.allowed_to_authenticate_to = silo.get_authentication_sddl()
 
         try:
             policy = AuthenticationPolicy.get(ldb, cn=name)
@@ -668,15 +443,3 @@ class cmd_domain_auth_policy_delete(Command):
 
         # Authentication policy deleted successfully.
         print(f"Deleted authentication policy: {name}", file=self.outf)
-
-
-class cmd_domain_auth_policy(SuperCommand):
-    """Manage authentication policies on the domain."""
-
-    subcommands = {
-        "list": cmd_domain_auth_policy_list(),
-        "view": cmd_domain_auth_policy_view(),
-        "create": cmd_domain_auth_policy_create(),
-        "modify": cmd_domain_auth_policy_modify(),
-        "delete": cmd_domain_auth_policy_delete(),
-    }

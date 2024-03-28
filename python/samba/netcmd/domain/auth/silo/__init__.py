@@ -1,6 +1,6 @@
 # Unix SMB/CIFS implementation.
 #
-# Model constants
+# authentication silos - authentication silo management
 #
 # Copyright (C) Catalyst.Net Ltd. 2023
 #
@@ -20,5 +20,26 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# Default SDDL for GroupManagedServiceAccount msDS-GroupMSAMembership field.
-GROUP_MSA_MEMBERSHIP_DEFAULT = "O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;LA)"
+from samba.netcmd import SuperCommand
+
+from .member import cmd_domain_auth_silo_member
+from .silo import (
+    cmd_domain_auth_silo_create,
+    cmd_domain_auth_silo_delete,
+    cmd_domain_auth_silo_list,
+    cmd_domain_auth_silo_modify,
+    cmd_domain_auth_silo_view,
+)
+
+
+class cmd_domain_auth_silo(SuperCommand):
+    """Manage authentication silos on the domain."""
+
+    subcommands = {
+        "list": cmd_domain_auth_silo_list(),
+        "view": cmd_domain_auth_silo_view(),
+        "create": cmd_domain_auth_silo_create(),
+        "modify": cmd_domain_auth_silo_modify(),
+        "delete": cmd_domain_auth_silo_delete(),
+        "member": cmd_domain_auth_silo_member(),
+    }

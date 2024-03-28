@@ -23,9 +23,7 @@
 import samba.getopt as options
 from samba.domain.models import AuthenticationPolicy, AuthenticationSilo
 from samba.domain.models.exceptions import ModelError
-from samba.netcmd import Command, CommandError, Option, SuperCommand
-
-from .silo_member import cmd_domain_auth_silo_member
+from samba.netcmd import Command, CommandError, Option
 
 
 class cmd_domain_auth_silo_list(Command):
@@ -385,16 +383,3 @@ class cmd_domain_auth_silo_delete(Command):
 
         # Authentication silo deleted successfully.
         print(f"Deleted authentication silo: {name}", file=self.outf)
-
-
-class cmd_domain_auth_silo(SuperCommand):
-    """Manage authentication silos on the domain."""
-
-    subcommands = {
-        "list": cmd_domain_auth_silo_list(),
-        "view": cmd_domain_auth_silo_view(),
-        "create": cmd_domain_auth_silo_create(),
-        "modify": cmd_domain_auth_silo_modify(),
-        "delete": cmd_domain_auth_silo_delete(),
-        "member": cmd_domain_auth_silo_member(),
-    }

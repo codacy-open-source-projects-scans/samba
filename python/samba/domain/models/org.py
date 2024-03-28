@@ -1,8 +1,8 @@
 # Unix SMB/CIFS implementation.
 #
-# Model constants
+# Organizational models.
 #
-# Copyright (C) Catalyst.Net Ltd. 2023
+# Copyright (C) Catalyst.Net Ltd. 2024
 #
 # Written by Rob van der Linde <rob@catalyst.net.nz>
 #
@@ -20,5 +20,26 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# Default SDDL for GroupManagedServiceAccount msDS-GroupMSAMembership field.
-GROUP_MSA_MEMBERSHIP_DEFAULT = "O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;LA)"
+from .fields import IntegerField, StringField
+from .model import Model
+from .person import Person
+
+
+class OrganizationalPerson(Person):
+    country_code = IntegerField("countryCode")
+    given_name = StringField("givenName")
+
+    @staticmethod
+    def get_object_class():
+        return "organizationalPerson"
+
+
+class OrganizationalUnit(Model):
+    ou = StringField("ou")
+
+    def __str__(self):
+        return str(self.ou)
+
+    @staticmethod
+    def get_object_class():
+        return "organizationalUnit"

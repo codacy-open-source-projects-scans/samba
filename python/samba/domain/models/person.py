@@ -1,6 +1,6 @@
 # Unix SMB/CIFS implementation.
 #
-# Person and OrganisationalPerson models.
+# Person model.
 #
 # Copyright (C) Catalyst.Net Ltd. 2024
 #
@@ -20,7 +20,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from .fields import IntegerField, StringField
+from .fields import StringField
 from .model import Model
 
 
@@ -30,12 +30,3 @@ class Person(Model):
     @staticmethod
     def get_object_class():
         return "person"
-
-
-class OrganizationalPerson(Person):
-    country_code = IntegerField("countryCode")
-    given_name = StringField("givenName")
-
-    @staticmethod
-    def get_object_class():
-        return "organizationalPerson"

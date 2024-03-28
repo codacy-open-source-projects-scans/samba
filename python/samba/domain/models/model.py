@@ -24,15 +24,15 @@ import inspect
 
 from ldb import (ERR_NO_SUCH_OBJECT, FLAG_MOD_ADD, FLAG_MOD_REPLACE,
                  LdbError, Message, MessageElement, SCOPE_BASE,
-                 SCOPE_SUBTREE)
+                 SCOPE_ONELEVEL, SCOPE_SUBTREE)
 from samba.sd_utils import SDUtils
 
-from .constants import MODELS
 from .exceptions import (DeleteError, FieldError, NotFound, ProtectError,
                          UnprotectError)
 from .fields import (DateTimeField, DnField, Field, GUIDField, IntegerField,
                      SIDField, StringField)
 from .query import Query
+from .registry import MODELS
 
 
 class ModelMeta(type):
@@ -42,10 +42,7 @@ class ModelMeta(type):
         cls.fields = dict(inspect.getmembers(cls, lambda f: isinstance(f, Field)))
         cls.meta = mcls
         object_class = cls.get_object_class()
-
-        if cls.__name__ != "Model":
-            MODELS[object_class] = cls
-
+        MODELS[object_class] = cls
         return cls
 
 
@@ -193,7 +190,7 @@ class Model(metaclass=ModelMeta):
         for attr, field in self.fields.items():
             if not field.hidden or include_hidden:
                 value = getattr(self, attr)
-                if value is not None:
+                if value not in (None, []):
                     obj_dict[field.name] = value
 
         return obj_dict
@@ -317,6 +314,11 @@ class Model(metaclass=ModelMeta):
             return cls.create(ldb, **attrs), True
         else:
             return obj, False
+
+    def children(self, ldb):
+        """Returns a Query of the current models children."""
+        return Model.query(
+            ldb, base_dn=self.dn, scope=SCOPE_ONELEVEL, polymorphic=True)
 
     def save(self, ldb):
         """Save model to Ldb database.

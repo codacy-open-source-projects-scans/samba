@@ -241,11 +241,6 @@ bool timeval_is_zero(const struct timeval *tv);
 struct timeval timeval_current(void);
 
 /**
-  return a timeval struct with the given elements
-*/
-struct timeval timeval_set(uint32_t secs, uint32_t usecs);
-
-/**
   return a timeval ofs microseconds after tv
 */
 struct timeval timeval_add(const struct timeval *tv,
@@ -316,14 +311,6 @@ struct timeval timeval_min(const struct timeval *tv1,
 */
 struct timeval timeval_max(const struct timeval *tv1,
 			   const struct timeval *tv2);
-
-/**
-  return the difference between two timevals as a timeval
-  if tv1 comes after tv2, then return a zero timeval
-  (this is *tv2 - *tv1)
-*/
-struct timeval timeval_until(const struct timeval *tv1,
-			     const struct timeval *tv2);
 
 /**
   convert a timeval to a NTTIME

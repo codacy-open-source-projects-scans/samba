@@ -28,7 +28,8 @@ from ldb import FLAG_MOD_ADD, SCOPE_ONELEVEL, MessageElement
 
 from samba.dcerpc import security
 from samba.dcerpc.misc import GUID
-from samba.domain.models import (AccountType, Computer, Group, Site,
+from samba.domain.models import (AccountType, AuthenticationPolicy,
+                                 AuthenticationSilo, Computer, Group, Site,
                                  StrongNTLMPolicy, User, fields)
 from samba.ndr import ndr_pack, ndr_unpack
 
@@ -72,6 +73,48 @@ class ModelTests(SambaToolCmdTest):
         self.assertNotEqual(humans, 0)
         self.assertEqual(robots + humans, robots_vs_humans)
 
+    def test_as_dict(self):
+        """Test the as_dict method for serializing to dict then JSON."""
+        policy = AuthenticationPolicy.create(self.samdb, name="as_dict_pol")
+        self.addCleanup(policy.delete, self.samdb)
+        silo = AuthenticationSilo.create(self.samdb,
+                                         name="test_as_dict_silo",
+                                         description="test as_dict silo",
+                                         enforced=True,
+                                         user_authentication_policy=None,
+                                         service_authentication_policy=policy.dn,
+                                         computer_authentication_policy=None,
+                                         members=[])
+        self.addCleanup(silo.delete, self.samdb)
+        silo_dict = silo.as_dict()
+
+        # Test various fields with different datatypes.
+        self.assertEqual(silo_dict["name"], "test_as_dict_silo")
+        self.assertEqual(silo_dict["description"], "test as_dict silo")
+        self.assertEqual(silo_dict["msDS-AuthNPolicySiloEnforced"], True)
+
+        # Fields that are None are excluded as that means unsetting a field.
+        self.assertNotIn("msDS-UserAuthNPolicy", silo_dict)
+        self.assertIn("msDS-ServiceAuthNPolicy", silo_dict)
+
+        # Fields with many=True are represented by an empty list,
+        # but should still be excluded by as_dict().
+        self.assertNotIn("msDS-AuthNPolicySiloMembers", silo_dict)
+
+        # Now add a member and see if silo members appears as a key.
+        jane = User.get(self.samdb, account_name="jane")
+        silo.members.append(jane.dn)
+        silo.save(self.samdb)
+        silo_dict = silo.as_dict()
+        self.assertIn("msDS-AuthNPolicySiloMembers", silo_dict)
+
+        # Hidden fields are excluded by default.
+        self.assertNotIn("whenCreated", silo_dict)
+
+        # Unless include_hidden=True is used.
+        silo_dict = silo.as_dict(include_hidden=True)
+        self.assertIn("whenCreated", silo_dict)
+
 
 class ComputerModelTests(SambaToolCmdTest):
 
@@ -83,31 +126,37 @@ class ComputerModelTests(SambaToolCmdTest):
     def test_computer_constructor(self):
         # Use only name
         comp1 = Computer.create(self.samdb, name="comp1")
+        self.addCleanup(comp1.delete, self.samdb)
         self.assertEqual(comp1.name, "comp1")
         self.assertEqual(comp1.account_name, "comp1$")
 
         # Use only cn
         comp2 = Computer.create(self.samdb, cn="comp2")
+        self.addCleanup(comp2.delete, self.samdb)
         self.assertEqual(comp2.name, "comp2")
         self.assertEqual(comp2.account_name, "comp2$")
 
         # Use name and account_name but missing "$" in account_name.
         comp3 = Computer.create(self.samdb, name="comp3", account_name="comp3")
+        self.addCleanup(comp3.delete, self.samdb)
         self.assertEqual(comp3.name, "comp3")
         self.assertEqual(comp3.account_name, "comp3$")
 
         # Use cn and account_name but missing "$" in account_name.
         comp4 = Computer.create(self.samdb, cn="comp4", account_name="comp4$")
+        self.addCleanup(comp4.delete, self.samdb)
         self.assertEqual(comp4.name, "comp4")
         self.assertEqual(comp4.account_name, "comp4$")
 
         # Use only account_name, the name should get the "$" removed.
         comp5 = Computer.create(self.samdb, account_name="comp5$")
+        self.addCleanup(comp5.delete, self.samdb)
         self.assertEqual(comp5.name, "comp5")
         self.assertEqual(comp5.account_name, "comp5$")
 
         # Use only account_name but accidentally forgot the "$" character.
         comp6 = Computer.create(self.samdb, account_name="comp6")
+        self.addCleanup(comp6.delete, self.samdb)
         self.assertEqual(comp6.name, "comp6")
         self.assertEqual(comp6.account_name, "comp6$")
 

@@ -260,27 +260,6 @@ static PyTypeObject PyLdbControl = {
 	.tp_flags = Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE,
 };
 
-static void PyErr_SetLdbError(PyObject *error, int ret, struct ldb_context *ldb_ctx)
-{
-	PyObject *exc = NULL;
-	if (ret == LDB_ERR_PYTHON_EXCEPTION) {
-		return; /* Python exception should already be set, just keep that */
-	}
-	exc = Py_BuildValue("(i,s)", ret,
-			    ldb_ctx == NULL?ldb_strerror(ret):ldb_errstring(ldb_ctx));
-	if (exc == NULL) {
-		/*
-		 * Py_BuildValue failed, and will have set its own exception.
-		 * It isn't the one we wanted, but it will have to do.
-		 * This is all very unexpected.
-		 */
-		fprintf(stderr, "could not make LdbError %d!\n", ret);
-		return;
-	}
-	PyErr_SetObject(error, exc);
-	Py_DECREF(exc);
-}
-
 static PyObject *py_ldb_bytes_str(PyBytesObject *self)
 {
 	char *msg = NULL;
@@ -1425,14 +1404,21 @@ static struct ldb_message *PyDict_AsMessage(TALLOC_CTX *mem_ctx,
 	}
 
 	if (dn_value) {
-		if (!pyldb_Object_AsDn(msg, dn_value, ldb_ctx, &msg->dn)) {
+		struct ldb_dn *dn = NULL;
+		if (!pyldb_Object_AsDn(msg, dn_value, ldb_ctx, &dn)) {
 			PyErr_SetString(PyExc_TypeError, "unable to import dn object");
 			TALLOC_FREE(msg);
 			return NULL;
 		}
-		if (msg->dn == NULL) {
+		if (dn == NULL) {
 			PyErr_SetString(PyExc_TypeError, "dn set but not found");
 			TALLOC_FREE(msg);
+			return NULL;
+		}
+		msg->dn = talloc_reference(msg, dn);
+		if (msg->dn == NULL) {
+			talloc_free(mem_ctx);
+			PyErr_NoMemory();
 			return NULL;
 		}
 	} else {
@@ -3748,7 +3734,7 @@ static PyObject *py_ldb_msg_add(PyLdbMessageObject *self, PyObject *args)
 
 static PyMethodDef py_ldb_msg_methods[] = {
 	{ "from_dict", (PyCFunction)py_ldb_msg_from_dict, METH_CLASS | METH_VARARGS,
-		"Message.from_dict(ldb, dict, mod_flag=FLAG_MOD_REPLACE) -> ldb.Message\n"
+		"Message.from_dict(ldb, dict, mod_flag) -> ldb.Message\n"
 		"Class method to create ldb.Message object from Dictionary.\n"
 		"mod_flag is one of FLAG_MOD_ADD, FLAG_MOD_REPLACE or FLAG_MOD_DELETE."},
 	{ "keys", (PyCFunction)py_ldb_msg_keys, METH_NOARGS,

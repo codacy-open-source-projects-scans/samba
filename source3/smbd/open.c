@@ -999,11 +999,11 @@ static void change_file_owner_to_parent_fsp(struct files_struct *parent_fsp,
                 return;
 	}
 
-	set_effective_capability(DAC_OVERRIDE_CAPABILITY);
+	become_root();
 	ret = SMB_VFS_FCHOWN(fsp,
 			     parent_fsp->fsp_name->st.st_ex_uid,
 			     (gid_t)-1);
-	drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
+	unbecome_root();
 	if (ret == -1) {
 		DBG_ERR("failed to fchown "
 			"file %s to parent directory uid %u. Error "
@@ -1036,11 +1036,11 @@ static NTSTATUS change_dir_owner_to_parent_fsp(struct files_struct *parent_fsp,
 		return NT_STATUS_OK;
 	}
 
-	set_effective_capability(DAC_OVERRIDE_CAPABILITY);
+	become_root();
 	ret = SMB_VFS_FCHOWN(fsp,
 			     parent_fsp->fsp_name->st.st_ex_uid,
 			     (gid_t)-1);
-	drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
+	unbecome_root();
 	if (ret == -1) {
 		status = map_nt_error_from_unix(errno);
 		DBG_ERR("failed to chown "
@@ -3206,7 +3206,7 @@ static void schedule_defer_open(struct share_mode_lock *lck,
 	 * measure here in case the other smbd is stuck
 	 * somewhere else. */
 
-	timeout = timeval_set(OPLOCK_BREAK_TIMEOUT*2, 0);
+	timeout = tevent_timeval_set(OPLOCK_BREAK_TIMEOUT * 2, 0);
 
 	if (request_timed_out(req, timeout)) {
 		return;
@@ -3230,7 +3230,7 @@ static void schedule_async_open_timer(struct tevent_context *ev,
 static void schedule_async_open(struct smb_request *req)
 {
 	struct deferred_open_record *open_rec = NULL;
-	struct timeval timeout = timeval_set(20, 0);
+	struct timeval timeout = tevent_timeval_set(20, 0);
 	bool ok;
 
 	if (request_timed_out(req, timeout)) {
@@ -4184,11 +4184,11 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		 * the oplock got removed.
 		 */
 
-		setup_poll_open(
-			req,
-			&fsp->file_id,
-			timeval_set(OPLOCK_BREAK_TIMEOUT*2, 0),
-			timeval_set(1, 0));
+		setup_poll_open(req,
+				&fsp->file_id,
+				tevent_timeval_set(OPLOCK_BREAK_TIMEOUT * 2,
+						   0),
+				tevent_timeval_set(1, 0));
 
 		return NT_STATUS_SHARING_VIOLATION;
 	}
@@ -5542,13 +5542,13 @@ static NTSTATUS inherit_new_acl(files_struct *dirfsp, files_struct *fsp)
 
 	if (inherit_owner) {
 		/* We need to be root to force this. */
-		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
+		become_root();
 	}
 	status = SMB_VFS_FSET_NT_ACL(metadata_fsp(fsp),
 			security_info_sent,
 			psd);
 	if (inherit_owner) {
-		drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
+		unbecome_root();
 	}
 	TALLOC_FREE(frame);
 	return status;
