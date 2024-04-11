@@ -173,6 +173,7 @@ void update_stat_ex_mtime(struct stat_ex *dst, struct timespec write_ts);
 void update_stat_ex_create_time(struct stat_ex *dst, struct timespec create_time);
 void update_stat_ex_from_saved_stat(struct stat_ex *dst,
 				    const struct stat_ex *src);
+void copy_stat_ex_timestamps(files_struct *fsp, const struct smb_file_time *ft);
 int sys_stat(const char *fname, SMB_STRUCT_STAT *sbuf,
 	     bool fake_dir_create_times);
 int sys_fstat(int fd, SMB_STRUCT_STAT *sbuf,
@@ -221,11 +222,6 @@ void init_stat_ex_from_stat (struct stat_ex *dst,
 bool getgroups_unix_user(TALLOC_CTX *mem_ctx, const char *user,
 			 gid_t primary_gid,
 			 gid_t **ret_groups, uint32_t *p_ngroups);
-
-/* The following definitions come from lib/tallocmsg.c  */
-
-void register_msg_pool_usage(TALLOC_CTX *mem_ctx,
-			     struct messaging_context *msg_ctx);
 
 /* The following definitions come from lib/time.c  */
 

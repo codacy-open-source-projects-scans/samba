@@ -1111,7 +1111,7 @@ int ldb_dn_compare_base(struct ldb_dn *base, struct ldb_dn *dn)
 
 		/* compare attr.cf_value. */
 		if (b_vlen != dn_vlen) {
-			return b_vlen - dn_vlen;
+			return NUMERIC_CMP(b_vlen, dn_vlen);
 		}
 		ret = strncmp(b_vdata, dn_vdata, b_vlen);
 		if (ret != 0) return ret;
@@ -1197,7 +1197,7 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 
 		/* compare attr.cf_value. */
 		if (dn0_vlen != dn1_vlen) {
-			return dn0_vlen - dn1_vlen;
+			return NUMERIC_CMP(dn0_vlen, dn1_vlen);
 		}
 		ret = strncmp(dn0_vdata, dn1_vdata, dn0_vlen);
 		if (ret != 0) {

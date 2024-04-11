@@ -46,7 +46,10 @@ class ChunkHTTPRequestHandler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('content-type', 'application/json; charset=UTF-8')
-        self.send_header('Transfer-Encoding', 'chunked')
+        if self.path == "usegziptransferencoding":
+            self.send_header('Transfer-Encoding', 'gzip')
+        else:
+            self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
         resp = bytes()
         for chunk in chunks:
@@ -99,7 +102,7 @@ class HttpChunkBlackboxTests(BlackboxTestCase):
         try:
             msg = "snglechunksnglechunksnglechunksnglechunksnglechunk"
             resp = self.check_output("%s -d11 -U%% -I%s --rsize 49 --uri %s" % (COMMAND, os.getenv("SERVER_IP", "localhost"), msg))
-            self.fail(str(e))
+            self.fail("unexpected success")
         except BlackboxProcessError as e:
             if "http_read_chunk: size 50 exceeds max content len 49 skipping body" not in e.stderr.decode('utf-8'):
                 self.fail(str(e))
@@ -114,3 +117,13 @@ class HttpChunkBlackboxTests(BlackboxTestCase):
         except BlackboxProcessError as e:
             print("Failed with: %s" % e)
             self.fail(str(e))
+
+    def test_gzip_transfer_encoding(self):
+        try:
+            msg = "usegziptransferencoding"
+            resp = self.check_output("%s -U%% -I%s --rsize 50 --uri %s" % (COMMAND, os.getenv("SERVER_IP", "localhost"), msg))
+            self.assertEqual(msg, resp.decode('utf-8'))
+            self.fail("unexpected success")
+        except BlackboxProcessError as e:
+            if "http_response_needs_body: Unsupported transfer encoding type gzip" not in e.stderr.decode('utf-8'):
+                self.fail(str(e))

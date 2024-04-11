@@ -1,7 +1,6 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
-   Database interface wrapper around tdb
-   Copyright (C) Volker Lendecke 2005-2007
+   Copyright (C) 2002 by Martin Pool <mbp@samba.org>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -17,19 +16,12 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef __DBWRAP_TDB_H__
-#define __DBWRAP_TDB_H__
+#ifndef _SAMBA_FSTRING_H
+#define _SAMBA_FSTRING_H
 
-#include "lib/dbwrap/dbwrap.h"
+#ifndef FSTRING_LEN
+#define FSTRING_LEN 256
+typedef char fstring[FSTRING_LEN];
+#endif
 
-struct db_context;
-
-struct db_context *db_open_tdb(TALLOC_CTX *mem_ctx,
-			       const char *name,
-			       int hash_size, int tdb_flags,
-			       int open_flags, mode_t mode,
-			       enum dbwrap_lock_order lock_order,
-			       uint64_t dbwrap_flags);
-
-
-#endif /* __DBWRAP_TDB_H__ */
+#endif /* _SAMBA_FSTRING_H */

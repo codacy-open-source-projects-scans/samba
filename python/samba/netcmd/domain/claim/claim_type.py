@@ -21,7 +21,7 @@
 #
 
 import samba.getopt as options
-from samba.domain.models import AttributeSchema, ClaimType, ClassSchema, ValueType
+from samba.domain.models import AttributeSchema, ClaimType, ClassSchema
 from samba.domain.models.exceptions import ModelError
 from samba.netcmd import Command, CommandError, Option, SuperCommand
 
@@ -244,8 +244,8 @@ class cmd_domain_claim_claim_type_delete(Command):
             if not force:
                 raise CommandError(
                     f"{e}\nTry --force to delete protected claim types.")
-            else:
-                raise CommandError(e)
+
+            raise CommandError(e)
 
         # Claim type deleted successfully.
         print(f"Deleted claim type: {name}", file=self.outf)

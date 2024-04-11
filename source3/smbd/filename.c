@@ -737,12 +737,12 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 	NTTIME twrp,
 	struct files_struct **_dirfsp,
 	struct smb_filename **_smb_fname,
-	struct open_symlink_err **_symlink_err)
+	struct reparse_data_buffer **_symlink_err)
 {
 	struct smb_filename *smb_dirname = NULL;
 	struct smb_filename *smb_fname_rel = NULL;
 	struct smb_filename *smb_fname = NULL;
-	struct open_symlink_err *symlink_err = NULL;
+	struct reparse_data_buffer *symlink_err = NULL;
 	const bool posix = (ucf_flags & UCF_POSIX_PATHNAMES);
 	char *dirname = NULL;
 	const char *fname_rel = NULL;
@@ -846,6 +846,9 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 						      &symlink_err);
 
 		if (NT_STATUS_EQUAL(status, NT_STATUS_STOPPED_ON_SYMLINK)) {
+			struct symlink_reparse_struct
+				*lnk = &symlink_err->parsed.lnk;
+			size_t unparsed = lnk->unparsed_path_length;
 			size_t name_in_len, dirname_len;
 
 			name_in_len = strlen(name_in);
@@ -853,7 +856,14 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 
 			SMB_ASSERT(name_in_len >= dirname_len);
 
-			symlink_err->unparsed += (name_in_len - dirname_len);
+			unparsed += (name_in_len - dirname_len);
+
+			if (unparsed > UINT16_MAX) {
+				status = NT_STATUS_BUFFER_OVERFLOW;
+				goto fail;
+			}
+
+			lnk->unparsed_path_length = unparsed;
 			*_symlink_err = symlink_err;
 
 			goto fail;
@@ -950,10 +960,10 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 		 * Upper layers might need the link target. Here we
 		 * still have the relname around, get the symlink err.
 		 */
-		status = create_open_symlink_err(mem_ctx,
-						 smb_dirname->fsp,
-						 smb_fname_rel,
-						 &symlink_err);
+		status = read_symlink_reparse(mem_ctx,
+					      smb_dirname->fsp,
+					      smb_fname_rel,
+					      &symlink_err);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_DEBUG("Could not read symlink for %s: %s\n",
 				  smb_fname_str_dbg(
@@ -1126,7 +1136,8 @@ NTSTATUS filename_convert_dirfsp(
 	struct files_struct **_dirfsp,
 	struct smb_filename **_smb_fname)
 {
-	struct open_symlink_err *symlink_err = NULL;
+	struct reparse_data_buffer *symlink_err = NULL;
+	struct symlink_reparse_struct *lnk = NULL;
 	NTSTATUS status;
 	char *target = NULL;
 	char *safe_target = NULL;
@@ -1161,13 +1172,14 @@ next:
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_STOPPED_ON_SYMLINK)) {
 		return status;
 	}
+	lnk = &symlink_err->parsed.lnk;
 
 	/*
 	 * If we're on an MSDFS share, see if this is
 	 * an MSDFS link.
 	 */
 	if (lp_host_msdfs() && lp_msdfs_root(SNUM(conn)) &&
-	    strnequal(symlink_err->reparse->substitute_name, "msdfs:", 6))
+	    strnequal(lnk->substitute_name, "msdfs:", 6))
 	{
 		TALLOC_FREE(*_smb_fname);
 		TALLOC_FREE(symlink_err);
@@ -1175,7 +1187,7 @@ next:
 	}
 
 	if (!lp_follow_symlinks(SNUM(conn))) {
-		status = (symlink_err->unparsed == 0)
+		status = (lnk->unparsed_path_length == 0)
 				 ? NT_STATUS_OBJECT_NAME_NOT_FOUND
 				 : NT_STATUS_OBJECT_PATH_NOT_FOUND;
 		TALLOC_FREE(symlink_err);
@@ -1196,8 +1208,8 @@ next:
 
 	target = symlink_target_path(mem_ctx,
 				     name_in,
-				     symlink_err->reparse->substitute_name,
-				     symlink_err->unparsed);
+				     lnk->substitute_name,
+				     lnk->unparsed_path_length);
 	if (target == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1206,7 +1218,7 @@ next:
 					  conn->connectpath,
 					  NULL,
 					  target,
-					  symlink_err->unparsed,
+					  lnk->unparsed_path_length,
 					  &safe_target);
 	TALLOC_FREE(symlink_err);
 	if (!NT_STATUS_IS_OK(status)) {
