@@ -55,6 +55,7 @@
 
 #define LOADPARM_SUBSTITUTION_INTERNALS 1
 #include "includes.h"
+#include "lib/util/util_file.h"
 #include "system/filesys.h"
 #include "util_tdb.h"
 #include "lib/param/loadparm.h"
@@ -951,6 +952,8 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.kpasswd_port = 464;
 
 	Globals.kdc_enable_fast = true;
+
+	Globals.winbind_debug_traceid = true;
 
 	Globals.aio_max_threads = 100;
 

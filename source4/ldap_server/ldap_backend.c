@@ -19,6 +19,7 @@
 */
 
 #include "includes.h"
+#include <talloc.h>
 #include "ldap_server/ldap_server.h"
 #include "../lib/util/dlinklist.h"
 #include "auth/credentials/credentials.h"
@@ -27,6 +28,7 @@
 #include "auth/common_auth.h"
 #include "param/param.h"
 #include "samba/service_stream.h"
+#include "dsdb/gmsa/util.h"
 #include "dsdb/samdb/samdb.h"
 #include <ldb_errors.h>
 #include <ldb_module.h>
@@ -212,7 +214,7 @@ int ldapsrv_backend_Init(struct ldapsrv_connection *conn,
 	if (opaque_connection_state == NULL) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
-	opaque_connection_state->using_encrypted_connection = using_tls || using_seal;
+	opaque_connection_state->using_encrypted_connection = using_tls || using_seal || conn->is_ldapi;
 	ret = ldb_set_opaque(conn->ldb,
 			     DSDB_OPAQUE_ENCRYPTED_CONNECTION_STATE_NAME,
 			     opaque_connection_state);
@@ -596,6 +598,7 @@ struct ldapsrv_context {
 	bool attributesonly;
 	struct ldb_control **controls;
 	size_t count; /* For notification only */
+	const struct gmsa_update **updates;
 };
 
 static int ldap_server_search_callback(struct ldb_request *req, struct ldb_reply *ares)
@@ -657,6 +660,31 @@ static int ldap_server_search_callback(struct ldb_request *req, struct ldb_reply
 			ent->attributes[j].num_values = msg->elements[j].num_values;
 			ent->attributes[j].values = msg->elements[j].values;
 		}
+
+		{
+			const struct ldb_control
+				*ctrl = ldb_controls_get_control(
+					ares->controls,
+					DSDB_CONTROL_GMSA_UPDATE_OID);
+
+			if (ctrl != NULL) {
+				const struct gmsa_update **updates = NULL;
+				const size_t len = talloc_array_length(
+					ctx->updates);
+
+				updates = talloc_realloc(
+					ctx,
+					ctx->updates,
+					const struct gmsa_update *,
+					len + 1);
+				if (updates != NULL) {
+					updates[len] = talloc_steal(updates,
+								    ctrl->data);
+					ctx->updates = updates;
+				}
+			}
+		}
+
 queue_reply:
 		status = ldapsrv_queue_reply(call, ent_r);
 		if (NT_STATUS_EQUAL(status, NT_STATUS_FILE_TOO_LARGE)) {
@@ -923,6 +951,22 @@ static NTSTATUS ldapsrv_SearchRequest(struct ldapsrv_call *call)
 	ldb_ret = ldb_wait(lreq->handle, LDB_WAIT_ALL);
 
 	if (ldb_ret == LDB_SUCCESS) {
+		size_t n;
+		const size_t len = talloc_array_length(callback_ctx->updates);
+
+		for (n = 0; n < len; ++n) {
+			int ret;
+
+			ret = dsdb_update_gmsa_entry_keys(
+				samdb, local_ctx, callback_ctx->updates[n]);
+			if (ret) {
+				/* Ignore the error. */
+				DBG_WARNING("Failed to update keys for Group "
+					    "Managed Service Account: %s\n",
+					    ldb_strerror(ret));
+			}
+		}
+
 		if (call->notification.busy) {
 			/* Move/Add it to the end */
 			DLIST_DEMOTE(call->conn->pending_calls, call);

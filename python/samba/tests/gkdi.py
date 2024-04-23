@@ -57,6 +57,7 @@ from samba.hresult import (
 )
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.nt_time import (
+    datetime_from_nt_time,
     nt_time_from_datetime,
     NtTime,
     NtTimeDelta,
@@ -74,6 +75,8 @@ RootKey = NewType("RootKey", ldb.Message)
 
 ROOT_KEY_START_TIME = NtTime(KEY_CYCLE_DURATION + MAX_CLOCK_SKEW)
 
+DSDB_GMSA_TIME_OPAQUE = "dsdb_gmsa_time_opaque"
+
 
 class GetKeyError(Exception):
     def __init__(self, status: HResult, message: str):
@@ -89,24 +92,35 @@ class GkdiBaseTest(TestCase):
         b"\x01\x01\x00\x00\x00\x00\x00\x05\x12\x00\x00\x00"
     )
 
-    @staticmethod
-    def current_time(offset: Optional[datetime.timedelta] = None) -> datetime.datetime:
-        current_time = datetime.datetime.now(tz=datetime.timezone.utc)
+    def set_db_time(self, samdb: SamDB, time: Optional[NtTime]) -> None:
+        samdb.set_opaque(DSDB_GMSA_TIME_OPAQUE, time)
+
+    def get_db_time(self, samdb: SamDB) -> Optional[NtTime]:
+        return samdb.get_opaque(DSDB_GMSA_TIME_OPAQUE)
+
+    def current_time(
+        self, samdb: SamDB, *, offset: Optional[datetime.timedelta] = None
+    ) -> datetime.datetime:
+        now = self.get_db_time(samdb)
+        if now is None:
+            current_time = datetime.datetime.now(tz=datetime.timezone.utc)
+        else:
+            current_time = datetime_from_nt_time(now)
 
         if offset is not None:
             current_time += offset
 
         return current_time
 
-    def current_nt_time(self, offset: Optional[datetime.timedelta] = None) -> NtTime:
-        return nt_time_from_datetime(self.current_time(offset))
+    def current_nt_time(
+        self, samdb: SamDB, *, offset: Optional[datetime.timedelta] = None
+    ) -> NtTime:
+        return nt_time_from_datetime(self.current_time(samdb, offset=offset))
 
-    def current_gkid(self, offset: Optional[datetime.timedelta] = None) -> Gkid:
-        if offset is None:
-            # Allow for clock skew.
-            offset = timedelta_from_nt_time_delta(MAX_CLOCK_SKEW)
-
-        return Gkid.from_nt_time(self.current_nt_time(offset))
+    def current_gkid(
+        self, samdb: SamDB, *, offset: Optional[datetime.timedelta] = None
+    ) -> Gkid:
+        return Gkid.from_nt_time(self.current_nt_time(samdb, offset=offset))
 
     def gkdi_connect(
         self, host: str, lp: LoadParm, server_creds: Credentials
@@ -246,8 +260,12 @@ class GkdiBaseTest(TestCase):
         return root_key_object, root_key_id
 
     def validate_get_key_request(
-        self, gkid: Gkid, current_gkid: Gkid, root_key_specified: bool
+        self, gkid: Gkid, current_time: NtTime, root_key_specified: bool
     ) -> None:
+        # The key being requested must not be from the future. That said, we
+        # allow for a little bit of clock skew so that we can compute the next
+        # managed password prior to the expiration of the current one.
+        current_gkid = Gkid.from_nt_time(NtTime(current_time + MAX_CLOCK_SKEW))
         if gkid > current_gkid:
             raise GetKeyError(
                 HRES_E_INVALIDARG,
@@ -276,7 +294,7 @@ class GkdiBaseTest(TestCase):
         gkid: Gkid,
         *,
         root_key_id_hint: Optional[misc.GUID] = None,
-        current_gkid: Optional[Gkid] = None,
+        current_time: Optional[NtTime] = None,
     ) -> SeedKeyPair:
         """Emulate the ISDKey.GetKey() RPC method.
 
@@ -286,8 +304,8 @@ class GkdiBaseTest(TestCase):
         Windows, pass a GUID in the *root_key_id_hint* parameter to specify a
         particular root key to use."""
 
-        if current_gkid is None:
-            current_gkid = self.current_gkid()
+        if current_time is None:
+            current_time = self.current_nt_time(samdb)
 
         root_key_specified = root_key_id is not None
         if root_key_specified:
@@ -295,13 +313,14 @@ class GkdiBaseTest(TestCase):
                 root_key_id_hint, "don’t provide both root key ID parameters"
             )
 
-        self.validate_get_key_request(gkid, current_gkid, root_key_specified)
+        self.validate_get_key_request(gkid, current_time, root_key_specified)
 
         root_key_object, root_key_id = self.get_root_key_object(
             samdb, root_key_id if root_key_specified else root_key_id_hint, gkid
         )
 
         if root_key_specified:
+            current_gkid = Gkid.from_nt_time(current_time)
             if gkid.l0_idx < current_gkid.l0_idx:
                 # All of the seed keys with an L0 index less than the current L0
                 # index are from the past and thus are safe to return. If the
@@ -364,13 +383,13 @@ class GkdiBaseTest(TestCase):
         target_sd: bytes,  # An NDR‐encoded valid security descriptor in self‐relative format.
         root_key_id: Optional[misc.GUID],
         gkid: Gkid,
-        current_gkid: Optional[Gkid] = None,
+        current_time: Optional[NtTime] = None,
     ) -> GroupKey:
-        if current_gkid is None:
-            current_gkid = self.current_gkid()
+        if current_time is None:
+            current_time = self.current_nt_time(samdb)
 
         root_key_specified = root_key_id is not None
-        self.validate_get_key_request(gkid, current_gkid, root_key_specified)
+        self.validate_get_key_request(gkid, current_time, root_key_specified)
 
         root_key_object, root_key_id = self.get_root_key_object(
             samdb, root_key_id, gkid
@@ -523,8 +542,9 @@ class GkdiBaseTest(TestCase):
             samdb,
             domain_dn,
             current_nt_time=self.current_nt_time(
+                samdb,
                 # Allow for clock skew.
-                timedelta_from_nt_time_delta(MAX_CLOCK_SKEW)
+                offset=timedelta_from_nt_time_delta(MAX_CLOCK_SKEW),
             ),
             use_start_time=use_start_time,
             hash_algorithm=hash_algorithm,
@@ -647,7 +667,8 @@ def create_root_key(
 
     root_key_dn = samdb.get_config_basedn()
     root_key_dn.add_child(
-        "CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services")
+        "CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services"
+    )
 
     root_key_dn.add_child(f"CN={guid}")
 
@@ -667,9 +688,7 @@ def create_root_key(
         "msKds-KDFAlgorithmID": (
             "SP800_108_CTR_HMAC"
         ),  # comes from Server Configuration.
-        "msKds-SecretAgreementAlgorithmID": (
-            "DH"
-        ),  # comes from Server Configuration.
+        "msKds-SecretAgreementAlgorithmID": "DH",  # comes from Server Configuration.
         "msKds-SecretAgreementParam": (
             ffc_dh_parameters
         ),  # comes from Server Configuration.
@@ -679,9 +698,7 @@ def create_root_key(
         ),  # comes from Server Configuration. [MS-GKDI] claims this defaults to ‘256’.
     }
     if kdf_parameters is not None:
-        details["msKds-KDFParam"] = (
-            kdf_parameters  # comes from Server Configuration.
-        )
+        details["msKds-KDFParam"] = kdf_parameters  # comes from Server Configuration.
 
     samdb.add(details)
 

@@ -25,6 +25,7 @@ import re
 NtTime = NewType("NtTime", int)
 NtTimeDelta = NewType("NtTimeDelta", int)
 
+NT_TIME_MAX = NtTime((1 << 64) - 1)
 
 NT_EPOCH = datetime.datetime(1601, 1, 1, 0, 0, 0, 0, tzinfo=datetime.timezone.utc)
 NT_TICKS_PER_μSEC = 10
@@ -34,7 +35,7 @@ NT_TICKS_PER_SEC = NT_TICKS_PER_μSEC * 1_000_000
 def _validate_nt_time(nt_time: NtTime) -> None:
     if not isinstance(nt_time, int):
         raise ValueError(f"{nt_time} is not an integer")
-    if not 0 <= nt_time < 2**64:
+    if not 0 <= nt_time <= NT_TIME_MAX:
         raise ValueError(f"{nt_time} is out of range")
 
 
@@ -84,19 +85,21 @@ def nt_time_from_string(s: str) -> NtTime:
     UTC).
     """
     try:
-        if s == 'now':
+        if s == "now":
             dt = datetime.datetime.now(datetime.timezone.utc)
-        elif re.match(r'^\d{14}\.0Z$', s):
+        elif re.match(r"^\d{14}\.0Z$", s):
             # "20230127223641.0Z"
-            dt = datetime.datetime.strptime(s, '%Y%m%d%H%M%S.0Z')
+            dt = datetime.datetime.strptime(s, "%Y%m%d%H%M%S.0Z")
         else:
             dt = datetime.datetime.fromisoformat(s)
     except ValueError:
-        raise ValueError("Expected a date in either "
-                         "ISO8601 'YYYY-MM-DD HH:MM:SS' format, "
-                         "LDAP timestamp 'YYYYmmddHHMMSS.0Z', "
-                         "or the literal string 'now'. "
-                         f" Got '{s}'.")
+        raise ValueError(
+            "Expected a date in either "
+            "ISO8601 'YYYY-MM-DD HH:MM:SS' format, "
+            "LDAP timestamp 'YYYYmmddHHMMSS.0Z', "
+            "or the literal string 'now'. "
+            f" Got '{s}'."
+        )
 
     if dt.tzinfo is None:
         # This is a cursed timestamp with no timezone info. We have to

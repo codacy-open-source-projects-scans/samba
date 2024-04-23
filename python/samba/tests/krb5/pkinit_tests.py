@@ -36,7 +36,7 @@ from cryptography.x509.oid import NameOID
 
 import ldb
 import samba.tests
-from samba import credentials, generate_random_password, ntstatus
+from samba import credentials, ntstatus
 from samba.dcerpc import security, netlogon
 from samba.tests.krb5 import kcrypto
 from samba.tests.krb5.kdc_base_test import KDCBaseTest
@@ -589,7 +589,7 @@ class PkInitTests(KDCBaseTest):
                             expect_error=ntstatus.NT_STATUS_WRONG_PASSWORD)
 
     def test_pkinit_ntlm_from_pac(self):
-        """Test public-key PK-INIT to get an NT has and confirm NTLM
+        """Test public-key PK-INIT to get an NT hash and confirm NTLM
            authentication is possible with it."""
         client_creds = self._get_creds()
         client_creds.set_kerberos_state(credentials.AUTO_USE_KERBEROS)
@@ -656,7 +656,7 @@ class PkInitTests(KDCBaseTest):
                             logon_type=netlogon.NetlogonNetworkInformation)
 
     def test_pkinit_ntlm_from_pac_must_change_now(self):
-        """Test public-key PK-INIT to get an NT has and confirm NTLM
+        """Test public-key PK-INIT to get an NT hash and confirm NTLM
            authentication is possible with it."""
         client_creds = self._get_creds()
         client_creds.set_kerberos_state(credentials.AUTO_USE_KERBEROS)
@@ -679,10 +679,10 @@ class PkInitTests(KDCBaseTest):
 
         freshness_token = self.create_freshness_token()
 
-        kdc_exchange_dict = self._pkinit_req(client_creds, krbtgt_creds,
-                                             freshness_token=freshness_token,
-                                             expect_error=KDC_ERR_KEY_EXPIRED,
-                                             expect_edata=True
+        self._pkinit_req(client_creds, krbtgt_creds,
+                         freshness_token=freshness_token,
+                         expect_error=KDC_ERR_KEY_EXPIRED,
+                         expect_edata=True
         )
 
         # AS-REQ will not succeed, password is still expired
