@@ -163,19 +163,47 @@ for env in ["ad_dc_ntvfs", "fl2008r2dc", "fl2003dc"]:
         '--use-kerberos=required --option=clientldapsaslwrapping=plain',
         '--use-kerberos=required --client-protection=sign',
         '--use-kerberos=required --client-protection=encrypt',
+        '--use-kerberos=required --client-protection=sign --option="ldap_testing:channel_bound=yes"',
+        '--use-kerberos=required --client-protection=sign --option="ldap_testing:channel_bound=no"',
+        '--use-kerberos=required --client-protection=sign --option="ldap_testing:channel_bound=yes" --option="ldap_testing:forced_channel_binding=wRoNg"',
+        '--use-kerberos=required --client-protection=sign --option="ldap_testing:channel_bound=no" --option="ldap_testing:forced_channel_binding=wRoNg"',
         '--use-kerberos=disabled --option=clientldapsaslwrapping=plain',
         '--use-kerberos=disabled --client-protection=sign --option=ntlmssp_client:ldap_style_send_seal=no',
         '--use-kerberos=disabled --client-protection=sign',
         '--use-kerberos=disabled --client-protection=encrypt',
+        '--use-kerberos=disabled --client-protection=sign --option="ldap_testing:channel_bound=yes"',
+        '--use-kerberos=disabled --client-protection=sign --option="ldap_testing:channel_bound=no"',
+        '--use-kerberos=disabled --client-protection=sign --option="ldap_testing:channel_bound=yes" --option="ldap_testing:forced_channel_binding=wRoNg"',
+        '--use-kerberos=disabled --client-protection=sign --option="ldap_testing:channel_bound=no" --option="ldap_testing:forced_channel_binding=wRoNg"',
     ]
 
     for auth_option in auth_options:
         options = '-U"$USERNAME%$PASSWORD"' + ' ' + auth_option
         plantestsuite("samba4.ldb.simple.ldap with SASL-BIND %s(%s)" % (options, env),
                       env, "%s/test_ldb_simple.sh ldap $SERVER %s" % (bbdir, options))
-    options = '-U"$USERNAME%$PASSWORD" --option="tlsverifypeer=no_check"'
-    plantestsuite("samba4.ldb.simple.ldaps with SASL-BIND %s(%s)" % (options, env),
-                  env, "%s/test_ldb_simple.sh ldaps $SERVER %s" % (bbdir, options))
+
+    auth_options = [
+        '--use-kerberos=required --option="ldap_testing:channel_bound=yes" --option="ldap_testing:tls_channel_bindings=yes"',
+        '--use-kerberos=required --option="ldap_testing:channel_bound=yes" --option="ldap_testing:tls_channel_bindings=no"',
+        '--use-kerberos=required --option="ldap_testing:channel_bound=yes" --option="ldap_testing:forced_channel_binding=wRoNg"',
+        '--use-kerberos=required --option="ldap_testing:channel_bound=no"  --option="ldap_testing:tls_channel_bindings=no"',
+        '--use-kerberos=required --option="ldap_testing:channel_bound=no"  --option="ldap_testing:tls_channel_bindings=yes"',
+        '--use-kerberos=required --option="ldap_testing:channel_bound=no"  --option="ldap_testing:forced_channel_binding=wRoNg"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=yes" --option="ldap_testing:tls_channel_bindings=yes"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=yes" --option="ldap_testing:tls_channel_bindings=no"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=yes" --option="ldap_testing:forced_channel_binding=wRoNg"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=no"  --option="ldap_testing:tls_channel_bindings=no"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=no"  --option="ldap_testing:tls_channel_bindings=yes"',
+        '--use-kerberos=disabled --option="ldap_testing:channel_bound=no"  --option="ldap_testing:forced_channel_binding=wRoNg"',
+    ]
+    for auth_option in auth_options:
+        options = '-U"$USERNAME%$PASSWORD" --option="tlsverifypeer=no_check" ' + auth_option
+        plantestsuite("samba4.ldb.simple.ldaps with SASL-BIND %s(%s)" % (options, env),
+                      env, "%s/test_ldb_simple.sh ldaps $SERVER %s" % (bbdir, options))
+        options += ' --option="clientldapsaslwrapping=starttls"'
+        plantestsuite("samba4.ldb.simple.ldap starttls with SASL-BIND %s(%s)" % (options, env),
+                      env, "%s/test_ldb_simple.sh ldap $SERVER %s" % (bbdir, options))
+
 
 envraw = "fl2008r2dc"
 env = "%s:local" % envraw
@@ -339,13 +367,11 @@ for env in all_fl_envs:
     transport = "ncacn_np"
     plansmbtorture4testsuite('rpc.pac', env, ["%s:$SERVER[]" % (transport, ), '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN'], "samba4.rpc.pac on %s" % (transport,))
     plansmbtorture4testsuite('rpc.lsa.secrets', env, ["%s:$SERVER[]" % (transport, ), '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN', '--option=gensec:target_hostname=$NETBIOSNAME', 'rpc.lsa.secrets'], "samba4.rpc.lsa.secrets on %s with Kerberos" % (transport,))
-    plansmbtorture4testsuite('rpc.lsa.secrets', env, ["%s:$SERVER[]" % (transport, ), '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN', "--option=clientusespnegoprincipal=yes", '--option=gensec:target_hostname=$NETBIOSNAME'], "samba4.rpc.lsa.secrets on %s with Kerberos - use target principal" % (transport,))
     plansmbtorture4testsuite('rpc.lsa.secrets', env, ["%s:$SERVER[target_principal=dcom/$NETBIOSNAME]" % (transport, ), '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN'], "samba4.rpc.lsa.secrets on %s with Kerberos - netbios name principal dcom" % (transport,))
     plansmbtorture4testsuite('rpc.lsa.secrets', env, [r"%s:$SERVER[target_principal=$NETBIOSNAME\$]" % (transport, ), '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN'], "samba4.rpc.lsa.secrets on %s with Kerberos - netbios name principal dollar" % (transport,))
     plansmbtorture4testsuite('rpc.lsa.secrets', env, ["%s:$SERVER[target_principal=$NETBIOSNAME]" % (transport, ), '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN'], "samba4.rpc.lsa.secrets on %s with Kerberos - netbios name principal" % (transport,))
     plansmbtorture4testsuite('rpc.lsa.secrets.none*', env, ["%s:$SERVER" % transport, '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN', "--option=gensec:fake_gssapi_krb5=yes", '--option=gensec:gssapi_krb5=no', '--option=gensec:target_hostname=$NETBIOSNAME'], "samba4.rpc.lsa.secrets on %s with Kerberos - use Samba3 style login" % transport)
     plansmbtorture4testsuite('rpc.lsa.secrets.none*', env, ["%s:$SERVER" % transport, '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN', "--option=gensec:fake_gssapi_krb5=yes", '--option=gensec:gssapi_krb5=no', '--option=gensec:target_hostname=$NETBIOSNAME', '--option=gensec_krb5:send_authenticator_checksum=false'], "samba4.rpc.lsa.secrets on %s with Kerberos - use raw-krb5-no-authenticator-checksum style login" % transport)
-    plansmbtorture4testsuite('rpc.lsa.secrets.none*', env, ["%s:$SERVER" % transport, '-k', 'yes', '-U$USERNAME%$PASSWORD', '--workgroup=$DOMAIN', "--option=clientusespnegoprincipal=yes", '--option=gensec:fake_gssapi_krb5=yes', '--option=gensec:gssapi_krb5=no', '--option=gensec:target_hostname=$NETBIOSNAME'], "samba4.rpc.lsa.secrets on %s with Kerberos - use Samba3 style login, use target principal" % transport)
 
     # Winreg tests test bulk Kerberos encryption of DCE/RPC
     # We test rpc.winreg here too, because the winreg interface if

@@ -577,6 +577,7 @@ fail:
 
 krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 					     TALLOC_CTX *mem_ctx,
+					     struct ldb_context *ldb,
 					     const struct ldb_message *msg,
 					     bool is_krbtgt,
 					     bool is_rodc,
@@ -611,6 +612,7 @@ krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 	struct samba_kdc_user_keys older_keys = { .num_pkeys = 0, };
 	uint32_t available_enctypes = 0;
 	uint32_t supported_enctypes = supported_enctypes_in;
+	const bool exporting_keytab = flags & SDB_F_ADMIN_DATA;
 
 	*supported_enctypes_out = 0;
 
@@ -825,7 +827,7 @@ krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 
 		if ((flags & SDB_F_GET_CLIENT) && (flags & SDB_F_FOR_AS_REQ)) {
 			include_history = true;
-		} else if (flags & SDB_F_ADMIN_DATA) {
+		} else if (exporting_keytab) {
 			include_history = true;
 		}
 
@@ -1670,7 +1672,8 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	supported_session_etypes &= kdc_enctypes;
 
 	/* Get keys from the db */
-	ret = samba_kdc_message2entry_keys(context, p, msg,
+	ret = samba_kdc_message2entry_keys(context, p,
+					   kdc_db_ctx->samdb, msg,
 					   is_krbtgt, is_rodc,
 					   userAccountControl,
 					   ent_type, flags, kvno, entry,
@@ -1696,7 +1699,8 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	    (kdc_enctypes & ENC_RC4_HMAC_MD5) != 0)
 	{
 		supported_enctypes = ENC_RC4_HMAC_MD5;
-		ret = samba_kdc_message2entry_keys(context, p, msg,
+		ret = samba_kdc_message2entry_keys(context, p,
+						   kdc_db_ctx->samdb, msg,
 						   is_krbtgt, is_rodc,
 						   userAccountControl,
 						   ent_type, flags, kvno, entry,
@@ -3790,6 +3794,7 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 
 krb5_error_code dsdb_extract_aes_256_key(krb5_context context,
 					 TALLOC_CTX *mem_ctx,
+					 struct ldb_context *ldb,
 					 const struct ldb_message *msg,
 					 uint32_t user_account_control,
 					 const uint32_t *kvno,
@@ -3808,6 +3813,7 @@ krb5_error_code dsdb_extract_aes_256_key(krb5_context context,
 
 	krb5_ret = samba_kdc_message2entry_keys(context,
 						mem_ctx,
+						ldb,
 						msg,
 						false, /* is_krbtgt */
 						false, /* is_rodc */

@@ -55,7 +55,7 @@ static struct db_context *smbXsrv_client_global_db_ctx = NULL;
 
 NTSTATUS smbXsrv_client_global_init(void)
 {
-	const char *global_path = NULL;
+	char *global_path = NULL;
 	struct db_context *backend = NULL;
 	struct db_context *db_ctx = NULL;
 
@@ -79,11 +79,9 @@ NTSTATUS smbXsrv_client_global_init(void)
 			  O_RDWR | O_CREAT, 0600,
 			  DBWRAP_LOCK_ORDER_1,
 			  DBWRAP_FLAG_NONE);
+	TALLOC_FREE(global_path);
 	if (backend == NULL) {
-		NTSTATUS status;
-
-		status = map_nt_error_from_unix_common(errno);
-
+		NTSTATUS status = map_nt_error_from_unix_common(errno);
 		return status;
 	}
 
@@ -427,13 +425,14 @@ static NTSTATUS smbXsrv_client_global_store(struct smbXsrv_client_global0 *globa
 	key = dbwrap_record_get_key(global->db_rec);
 	val = dbwrap_record_get_value(global->db_rec);
 
-	ZERO_STRUCT(global_blob);
-	global_blob.version = smbXsrv_version_global_current();
+	global_blob = (struct smbXsrv_client_globalB) {
+		.version = smbXsrv_version_global_current(),
+		.info.info0 = global,
+	};
 	if (val.dsize >= 8) {
 		global_blob.seqnum = IVAL(val.dptr, 4);
 	}
 	global_blob.seqnum += 1;
-	global_blob.info.info0 = global;
 
 	global->stored = true;
 	ndr_err = ndr_push_struct_blob(&blob, global->db_rec, &global_blob,
@@ -1436,7 +1435,7 @@ NTSTATUS smbXsrv_client_remove(struct smbXsrv_client *client)
 		};
 		struct GUID_txt_buf buf;
 
-		DBG_DEBUG("client_guid[%s] stored\n",
+		DBG_DEBUG("client_guid[%s] removed\n",
 			  GUID_buf_string(&client->global->client_guid, &buf));
 		NDR_PRINT_DEBUG(smbXsrv_clientB, &client_blob);
 	}

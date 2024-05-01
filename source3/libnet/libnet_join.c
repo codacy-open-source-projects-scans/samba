@@ -1110,7 +1110,8 @@ static bool libnet_join_joindomain_store_secrets(TALLOC_CTX *mem_ctx,
  Connect dc's IPC$ share
 ****************************************************************/
 
-static NTSTATUS libnet_join_connect_dc_ipc(const char *dc,
+static NTSTATUS libnet_join_connect_dc_ipc(TALLOC_CTX *mem_ctx,
+					   const char *dc,
 					   const char *user,
 					   const char *domain,
 					   const char *pass,
@@ -1143,7 +1144,8 @@ static NTSTATUS libnet_join_connect_dc_ipc(const char *dc,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = cli_full_connection_creds(cli,
+	status = cli_full_connection_creds(mem_ctx,
+					   cli,
 					   NULL,
 					   dc,
 					   NULL, 0,
@@ -1184,7 +1186,8 @@ static NTSTATUS libnet_join_lookup_dc_rpc(TALLOC_CTX *mem_ctx,
 		use_kerberos = false;
 	}
 
-	status = libnet_join_connect_dc_ipc(r->in.dc_name,
+	status = libnet_join_connect_dc_ipc(mem_ctx,
+					    r->in.dc_name,
 					    account,
 					    domain,
 					    password,
@@ -1773,7 +1776,9 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 						   CRED_SPECIFIED);
 	}
 
-	status = cli_full_connection_creds(&cli, NULL,
+	status = cli_full_connection_creds(frame,
+					   &cli,
+					   NULL,
 					   dc_name,
 					   NULL, 0,
 					   "IPC$", "IPC",
@@ -1789,7 +1794,8 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 			return NT_STATUS_NO_MEMORY;
 		}
 
-		status = cli_full_connection_creds(&cli,
+		status = cli_full_connection_creds(frame,
+						   &cli,
 						   NULL,
 						   dc_name,
 						   NULL, 0,
@@ -1930,7 +1936,8 @@ static NTSTATUS libnet_join_unjoindomain_rpc(TALLOC_CTX *mem_ctx,
 	ZERO_STRUCT(domain_pol);
 	ZERO_STRUCT(user_pol);
 
-	status = libnet_join_connect_dc_ipc(r->in.dc_name,
+	status = libnet_join_connect_dc_ipc(mem_ctx,
+					    r->in.dc_name,
 					    r->in.admin_account,
 					    r->in.admin_domain,
 					    r->in.admin_password,

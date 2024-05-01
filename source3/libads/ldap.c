@@ -822,6 +822,8 @@ ADS_STATUS ads_connect(ADS_STRUCT *ads)
 	NTSTATUS ntstatus;
 	char addr[INET6_ADDRSTRLEN];
 	struct sockaddr_storage existing_ss;
+	bool tls = false;
+	bool start_tls = false;
 
 	zero_sockaddr(&existing_ss);
 
@@ -849,6 +851,7 @@ ADS_STATUS ads_connect(ADS_STRUCT *ads)
 	}
 
 	ads_zero_ldap(ads);
+	ZERO_STRUCT(ads->ldap_tls_data);
 	ZERO_STRUCT(ads->ldap_wrap_data);
 	ads->ldap.last_attempt	= time_mono(NULL);
 	ads->ldap_wrap_data.wrap_type	= ADS_SASLWRAP_TYPE_PLAIN;
@@ -967,6 +970,12 @@ got_connection:
 		goto out;
 	}
 
+	ads->ldap_tls_data.mem_ctx = talloc_init("ads LDAP TLS connection memory");
+	if (!ads->ldap_tls_data.mem_ctx) {
+		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
+		goto out;
+	}
+
 	ads->ldap_wrap_data.mem_ctx = talloc_init("ads LDAP connection memory");
 	if (!ads->ldap_wrap_data.mem_ctx) {
 		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
@@ -974,6 +983,17 @@ got_connection:
 	}
 
 	/* Otherwise setup the TCP LDAP session */
+
+	if (ads->auth.flags & ADS_AUTH_SASL_LDAPS) {
+		tls = true;
+		ads->ldap.port = 636;
+	} else if (ads->auth.flags & ADS_AUTH_SASL_STARTTLS) {
+		tls = true;
+		start_tls = true;
+		ads->ldap.port = 389;
+	} else {
+		ads->ldap.port = 389;
+	}
 
 	ads->ldap.ld = ldap_open_with_timeout(ads->config.ldap_server_name,
 					      &ads->ldap.ss,
@@ -984,13 +1004,84 @@ got_connection:
 	}
 	DEBUG(3,("Connected to LDAP server %s\n", ads->config.ldap_server_name));
 
+	ldap_set_option(ads->ldap.ld, LDAP_OPT_PROTOCOL_VERSION, &version);
+
+	if (start_tls) {
+		unsigned int to = lp_ldap_connection_timeout();
+		struct berval *rspdata = NULL;
+		char *rspoid = NULL;
+		int rc;
+
+		if (to) {
+			/* Setup timeout */
+			gotalarm = 0;
+			CatchSignal(SIGALRM, gotalarm_sig);
+			alarm(to);
+			/* End setup timeout. */
+		}
+
+		rc = ldap_extended_operation_s(ads->ldap.ld,
+					       LDAP_EXOP_START_TLS,
+					       NULL,
+					       NULL,
+					       NULL,
+					       &rspoid,
+					       &rspdata);
+		if (gotalarm != 0 && rc == LDAP_SUCCESS) {
+			rc = LDAP_TIMEOUT;
+		}
+
+		if (to) {
+			/* Teardown timeout. */
+			alarm(0);
+			CatchSignal(SIGALRM, SIG_IGN);
+		}
+
+		if (rspoid != NULL) {
+			ldap_memfree(rspoid);
+		}
+
+		if (rspdata != NULL) {
+			ber_bvfree(rspdata);
+		}
+
+		if (rc != LDAP_SUCCESS) {
+			status = ADS_ERROR_LDAP(rc);
+			goto out;
+		}
+	}
+
+	if (tls) {
+		unsigned int to = lp_ldap_connection_timeout();
+
+		if (to) {
+			/* Setup timeout */
+			gotalarm = 0;
+			CatchSignal(SIGALRM, gotalarm_sig);
+			alarm(to);
+			/* End setup timeout. */
+		}
+
+		status = ads_setup_tls_wrapping(&ads->ldap_tls_data,
+						ads->ldap.ld,
+						ads->config.ldap_server_name);
+
+		if (to) {
+			/* Teardown timeout. */
+			alarm(0);
+			CatchSignal(SIGALRM, SIG_IGN);
+		}
+
+		if ( !ADS_ERR_OK(status) ) {
+			goto out;
+		}
+	}
+
 	/* cache the successful connection for workgroup and realm */
 	if (ads_closest_dc(ads)) {
 		saf_store( ads->server.workgroup, ads->config.ldap_server_name);
 		saf_store( ads->server.realm, ads->config.ldap_server_name);
 	}
-
-	ldap_set_option(ads->ldap.ld, LDAP_OPT_PROTOCOL_VERSION, &version);
 
 	/* fill in the current time and offsets */
 
@@ -1003,11 +1094,6 @@ got_connection:
 
 	if (ads->auth.flags & ADS_AUTH_ANON_BIND) {
 		status = ADS_ERROR(ldap_simple_bind_s(ads->ldap.ld, NULL, NULL));
-		goto out;
-	}
-
-	if (ads->auth.flags & ADS_AUTH_SIMPLE_BIND) {
-		status = ADS_ERROR(ldap_simple_bind_s(ads->ldap.ld, ads->auth.user_name, ads->auth.password));
 		goto out;
 	}
 
@@ -1066,6 +1152,9 @@ void ads_disconnect(ADS_STRUCT *ads)
 		ldap_unbind(ads->ldap.ld);
 		ads->ldap.ld = NULL;
 	}
+	if (ads->ldap_tls_data.mem_ctx) {
+		talloc_free(ads->ldap_tls_data.mem_ctx);
+	}
 	if (ads->ldap_wrap_data.wrap_ops &&
 		ads->ldap_wrap_data.wrap_ops->disconnect) {
 		ads->ldap_wrap_data.wrap_ops->disconnect(&ads->ldap_wrap_data);
@@ -1074,6 +1163,7 @@ void ads_disconnect(ADS_STRUCT *ads)
 		talloc_free(ads->ldap_wrap_data.mem_ctx);
 	}
 	ads_zero_ldap(ads);
+	ZERO_STRUCT(ads->ldap_tls_data);
 	ZERO_STRUCT(ads->ldap_wrap_data);
 }
 

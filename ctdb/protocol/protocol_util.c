@@ -749,9 +749,8 @@ int ctdb_connection_list_read(TALLOC_CTX *mem_ctx,
 	struct ctdb_connection_list_read_state state;
 	char *line = NULL;
 	FILE *f = NULL;
-	int ret;
+	int ret = 0;
 	size_t len = 0;
-	ssize_t nread;
 
 	if (conn_list == NULL) {
 		return EINVAL;
@@ -769,7 +768,16 @@ int ctdb_connection_list_read(TALLOC_CTX *mem_ctx,
 		return errno;
 	}
 
-	while ((nread = getline(&line, &len, f)) != -1) {
+	for (;;) {
+		ssize_t nread = getline(&line, &len, f);
+		if (nread == -1) {
+			if (!feof(f)) {
+				/* real error */
+				ret = errno;
+			}
+			break;
+		}
+
 		if ((nread > 0) && (line[nread-1] == '\n')) {
 			line[nread-1] = '\0';
 		}

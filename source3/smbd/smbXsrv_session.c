@@ -1010,8 +1010,8 @@ struct tevent_req *smb2srv_session_close_previous_send(TALLOC_CTX *mem_ctx,
 					uint64_t previous_session_id,
 					uint64_t current_session_id)
 {
-	struct tevent_req *req;
-	struct smb2srv_session_close_previous_state *state;
+	struct tevent_req *req = NULL;
+	struct smb2srv_session_close_previous_state *state = NULL;
 	uint32_t global_id = previous_session_id & UINT32_MAX;
 	uint64_t global_zeros = previous_session_id & 0xFFFFFFFF00000000LLU;
 	struct smbXsrv_session_table *table = conn->client->session_table;
@@ -1040,14 +1040,11 @@ struct tevent_req *smb2srv_session_close_previous_send(TALLOC_CTX *mem_ctx,
 	}
 	current_token = session_info->security_token;
 
-	if (current_token->num_sids > PRIMARY_USER_SID_INDEX) {
-		state->current_sid = &current_token->sids[PRIMARY_USER_SID_INDEX];
-	}
-
-	if (state->current_sid == NULL) {
+	if (current_token->num_sids <= PRIMARY_USER_SID_INDEX) {
 		tevent_req_done(req);
 		return tevent_req_post(req, ev);
 	}
+	state->current_sid = &current_token->sids[PRIMARY_USER_SID_INDEX];
 
 	if (!security_token_has_nt_authenticated_users(current_token)) {
 		/* TODO */
@@ -1747,9 +1744,9 @@ struct tevent_req *smb2srv_session_shutdown_send(TALLOC_CTX *mem_ctx,
 					struct smbXsrv_session *session,
 					struct smbd_smb2_request *current_req)
 {
-	struct tevent_req *req;
-	struct smb2srv_session_shutdown_state *state;
-	struct tevent_req *subreq;
+	struct tevent_req *req = NULL;
+	struct smb2srv_session_shutdown_state *state = NULL;
+	struct tevent_req *subreq = NULL;
 	struct smbXsrv_connection *xconn = NULL;
 	size_t len = 0;
 

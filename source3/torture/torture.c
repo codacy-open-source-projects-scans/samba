@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    SMB torture tester
    Copyright (C) Andrew Tridgell 1997-1998
@@ -27,6 +27,7 @@
 #include "tldap.h"
 #include "tldap_util.h"
 #include "tldap_gensec_bind.h"
+#include "tldap_tls_connect.h"
 #include "../librpc/gen_ndr/svcctl.h"
 #include "../lib/util/memcache.h"
 #include "nsswitch/winbind_client.h"
@@ -53,6 +54,7 @@
 #include "auth/gensec/gensec.h"
 #include "lib/util/string_wrappers.h"
 #include "source3/lib/substitute.h"
+#include "ads.h"
 
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
@@ -155,8 +157,15 @@ static struct cli_state *open_nbt_connection(void)
 		flags |= CLI_FULL_CONNECTION_FORCE_DOS_ERRORS;
 	}
 
-	status = cli_connect_nb(host, NULL, port_to_use, 0x20, myname,
-				signing_state, flags, &c);
+	status = cli_connect_nb(NULL,
+				host,
+				NULL,
+				port_to_use,
+				0x20,
+				myname,
+				signing_state,
+				flags,
+				&c);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Failed to connect with %s. Error %s\n", host, nt_errstr(status) );
 		return NULL;
@@ -334,13 +343,14 @@ bool smbcli_parse_unc(const char *unc_name, TALLOC_CTX *mem_ctx,
 }
 
 static bool torture_open_connection_share(struct cli_state **c,
-				   const char *hostname, 
+				   const char *hostname,
 				   const char *sharename,
 				   int flags)
 {
 	NTSTATUS status;
 
-	status = cli_full_connection_creds(c,
+	status = cli_full_connection_creds(NULL,
+					   c,
 					   myname,
 					   hostname,
 					   NULL, /* dest_ss */
@@ -634,9 +644,9 @@ static bool check_error(int line, NTSTATUS status,
 		num = NT_STATUS_DOS_CODE(status);
 
                 if (eclass != cclass || ecode != num) {
-                        printf("unexpected error code class=%d code=%d\n", 
+                        printf("unexpected error code class=%d code=%d\n",
                                (int)cclass, (int)num);
-                        printf(" expected %d/%d %s (line=%d)\n", 
+                        printf(" expected %d/%d %s (line=%d)\n",
                                (int)eclass, (int)ecode, nt_errstr(nterr),
 			       line);
                         return False;
@@ -740,7 +750,7 @@ static bool rw_torture(struct cli_state *c)
 
 	memset(buf, '\0', sizeof(buf));
 
-	status = cli_openx(c, lockfname, O_RDWR | O_CREAT | O_EXCL, 
+	status = cli_openx(c, lockfname, O_RDWR | O_CREAT | O_EXCL,
 			 DENY_NONE, &fnum2);
 	if (!NT_STATUS_IS_OK(status)) {
 		status = cli_openx(c, lockfname, O_RDWR, DENY_NONE, &fnum2);
@@ -893,7 +903,7 @@ static bool rw_torture3(struct cli_state *c, char *lockfname)
 	{
 		for (i = 0; i < 500 && fnum == (uint16_t)-1; i++)
 		{
-			status = cli_openx(c, lockfname, O_RDONLY, 
+			status = cli_openx(c, lockfname, O_RDONLY,
 					 DENY_NONE, &fnum);
 			if (NT_STATUS_IS_OK(status)) {
 				break;
@@ -1024,7 +1034,7 @@ static bool rw_torture2(struct cli_state *c1, struct cli_state *c2)
 			printf("read failed\n");
 			printf("read %ld, expected %ld\n",
 			       (unsigned long)bytes_read,
-			       (unsigned long)buf_size); 
+			       (unsigned long)buf_size);
 			correct = False;
 			break;
 		}
@@ -1275,7 +1285,7 @@ static bool run_netbench(int client)
 		}
 
 		if (!strcmp(params[0],"NTCreateX")) {
-			nb_createx(params[1], ival(params[2]), ival(params[3]), 
+			nb_createx(params[1], ival(params[2]), ival(params[3]),
 				   ival(params[4]));
 		} else if (!strcmp(params[0],"Close")) {
 			nb_close(ival(params[1]));
@@ -1296,10 +1306,10 @@ static bool run_netbench(int client)
 		} else if (!strcmp(params[0],"FIND_FIRST")) {
 			nb_findfirst(params[1]);
 		} else if (!strcmp(params[0],"WriteX")) {
-			nb_writex(ival(params[1]), 
+			nb_writex(ival(params[1]),
 				  ival(params[2]), ival(params[3]), ival(params[4]));
 		} else if (!strcmp(params[0],"ReadX")) {
-			nb_readx(ival(params[1]), 
+			nb_readx(ival(params[1]),
 				  ival(params[2]), ival(params[3]), ival(params[4]));
 		} else if (!strcmp(params[0],"Flush")) {
 			nb_flush(ival(params[1]));
@@ -1335,7 +1345,7 @@ static bool run_nbench(int dummy)
 	t = create_procs(run_netbench, &correct);
 	alarm(0);
 
-	printf("\nThroughput %g MB/sec\n", 
+	printf("\nThroughput %g MB/sec\n",
 	       1.0e-6 * nbio_total() / t);
 	return correct;
 }
@@ -1657,7 +1667,7 @@ static bool tcon_devtest(struct cli_state *cli,
 			if (return_devtype != NULL &&
 			    strequal(cli->dev, return_devtype)) {
 				ret = True;
-			} else { 
+			} else {
 				printf("tconX to share %s with type %s "
 				       "succeeded but returned the wrong "
 				       "device type (got [%s] but should have got [%s])\n",
@@ -1699,7 +1709,8 @@ static bool run_tcon_devtype_test(int dummy)
 	NTSTATUS status;
 	bool ret = True;
 
-	status = cli_full_connection_creds(&cli1,
+	status = cli_full_connection_creds(NULL,
+					   &cli1,
 					   myname,
 					   host,
 					   NULL, /* dest_ss */
@@ -1754,10 +1765,10 @@ static bool run_tcon_devtype_test(int dummy)
 
 
 /*
-  This test checks that 
+  This test checks that
 
   1) the server supports multiple locking contexts on the one SMB
-  connection, distinguished by PID.  
+  connection, distinguished by PID.
 
   2) the server correctly fails overlapping locks made by the same PID (this
      goes against POSIX behaviour, which is why it is tricky to implement)
@@ -1919,7 +1930,7 @@ static bool run_locktest2(int dummy)
 
 
 /*
-  This test checks that 
+  This test checks that
 
   1) the server supports the full offset range in lock requests
 */
@@ -1963,7 +1974,7 @@ static bool run_locktest3(int dummy)
 
 		status = cli_lock32(cli1, fnum1, offset-1, 1, 0, WRITE_LOCK);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("lock1 %d failed (%s)\n", 
+			printf("lock1 %d failed (%s)\n",
 			       i,
 			       nt_errstr(status));
 			return False;
@@ -1971,7 +1982,7 @@ static bool run_locktest3(int dummy)
 
 		status = cli_lock32(cli2, fnum2, offset-2, 1, 0, WRITE_LOCK);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("lock2 %d failed (%s)\n", 
+			printf("lock2 %d failed (%s)\n",
 			       i,
 			       nt_errstr(status));
 			return False;
@@ -2011,7 +2022,7 @@ static bool run_locktest3(int dummy)
 
 		status = cli_unlock(cli1, fnum1, offset-1, 1);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("unlock1 %d failed (%s)\n", 
+			printf("unlock1 %d failed (%s)\n",
 			       i,
 			       nt_errstr(status));
 			return False;
@@ -2019,7 +2030,7 @@ static bool run_locktest3(int dummy)
 
 		status = cli_unlock(cli2, fnum2, offset-2, 1);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("unlock2 %d failed (%s)\n", 
+			printf("unlock2 %d failed (%s)\n",
 			       i,
 			       nt_errstr(status));
 			return False;
@@ -2372,12 +2383,12 @@ static bool run_locktest5(int dummy)
 		  NT_STATUS_IS_OK(cli_unlock(cli1, fnum1, 0, 4));
 
 	EXPECTED(ret, True);
-	printf("the same process %s unlock the stack of 4 locks\n", ret?"can":"cannot"); 
+	printf("the same process %s unlock the stack of 4 locks\n", ret?"can":"cannot");
 
 	/* Ensure the next unlock fails. */
 	ret = NT_STATUS_IS_OK(cli_unlock(cli1, fnum1, 0, 4));
 	EXPECTED(ret, False);
-	printf("the same process %s count the lock stack\n", !ret?"can":"cannot"); 
+	printf("the same process %s count the lock stack\n", !ret?"can":"cannot");
 
 	/* Ensure connection 2 can get a write lock. */
 	status = cli_lock32(cli2, fnum2, 0, 4, 0, WRITE_LOCK);
@@ -3856,7 +3867,7 @@ static bool run_fdsesstest(int dummy)
 }
 
 /*
-  This test checks that 
+  This test checks that
 
   1) the server does not allow an unlink on a file that is open
 */
@@ -3936,7 +3947,7 @@ static bool run_maxfidtest(int dummy)
 		status = cli_openx(cli, fname, O_RDWR|O_CREAT|O_TRUNC, DENY_NONE,
 		                  &fnums[i]);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("open of %s failed (%s)\n", 
+			printf("open of %s failed (%s)\n",
 			       fname, nt_errstr(status));
 			printf("maximum fnum is %d\n", i);
 			break;
@@ -3953,7 +3964,7 @@ static bool run_maxfidtest(int dummy)
 
 		status = cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 		if (!NT_STATUS_IS_OK(status)) {
-			printf("unlink of %s failed (%s)\n", 
+			printf("unlink of %s failed (%s)\n",
 			       fname, nt_errstr(status));
 			correct = False;
 		}
@@ -4093,12 +4104,12 @@ static bool run_randomipc(int dummy)
 
 		rand_buf(param, param_len);
 
-		SSVAL(param,0,api); 
+		SSVAL(param,0,api);
 
-		cli_api(cli, 
-			param, param_len, 8,  
+		cli_api(cli,
+			param, param_len, 8,
 			NULL, 0, CLI_BUFFER_SIZE,
-			&rparam, &rprcnt,     
+			&rparam, &rprcnt,
 			&rdata, &rdrcnt);
 		if (i % 100 == 0) {
 			printf("%d/%d\r", i,count);
@@ -4144,12 +4155,12 @@ static bool run_browsetest(int dummy)
 	}
 
 	printf("domain list:\n");
-	cli_NetServerEnum(cli, cli->server_domain, 
+	cli_NetServerEnum(cli, cli->server_domain,
 			  SV_TYPE_DOMAIN_ENUM,
 			  browse_callback, NULL);
 
 	printf("machine list:\n");
-	cli_NetServerEnum(cli, cli->server_domain, 
+	cli_NetServerEnum(cli, cli->server_domain,
 			  SV_TYPE_ALL,
 			  browse_callback, NULL);
 
@@ -4213,7 +4224,7 @@ static bool run_attrtest(int dummy)
 	}
 
 	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
-	cli_openx(cli, fname, 
+	cli_openx(cli, fname,
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
 	cli_close(cli, fnum);
 
@@ -4532,7 +4543,7 @@ static bool run_trans2test(int dummy)
 
 
 	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
-	cli_openx(cli, fname, 
+	cli_openx(cli, fname,
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
 	cli_close(cli, fnum);
 	status = cli_qpathinfo2(cli,
@@ -4595,7 +4606,7 @@ static bool run_trans2test(int dummy)
 		correct = False;
 	}
 
-	cli_openx(cli, fname2, 
+	cli_openx(cli, fname2,
 			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
 	cli_writeall(cli, fnum,  0, (uint8_t *)&fnum, 0, sizeof(fnum), NULL);
 	cli_close(cli, fnum);
@@ -4669,7 +4680,7 @@ static bool run_w2ktest(int dummy)
 		return False;
 	}
 
-	cli_openx(cli, fname, 
+	cli_openx(cli, fname,
 			O_RDWR | O_CREAT , DENY_NONE, &fnum);
 
 	for (level = 1004; level < 1040; level++) {
@@ -10428,7 +10439,7 @@ static bool run_error_map_extract(int dummy) {
 		if (!NT_STATUS_IS_DOS(status)) {
 			nt_status = status;
 		} else {
-			printf("/** Dos error on NT connection! (%s) */\n", 
+			printf("/** Dos error on NT connection! (%s) */\n",
 			       nt_errstr(status));
 			nt_status = NT_STATUS(0xc0000000);
 		}
@@ -10440,7 +10451,7 @@ static bool run_error_map_extract(int dummy) {
 
 		/* Case #1: 32-bit NT errors */
 		if (NT_STATUS_IS_DOS(status)) {
-			printf("/** NT error on DOS connection! (%s) */\n", 
+			printf("/** NT error on DOS connection! (%s) */\n",
 			       nt_errstr(status));
 			errnum = errclass = 0;
 		} else {
@@ -10448,15 +10459,15 @@ static bool run_error_map_extract(int dummy) {
 			errnum = NT_STATUS_DOS_CODE(status);
 		}
 
-		if (NT_STATUS_V(nt_status) != error) { 
-			printf("/*\t{ This NT error code was 'sqashed'\n\t from %s to %s \n\t during the session setup }\n*/\n", 
-			       get_nt_error_c_code(talloc_tos(), NT_STATUS(error)), 
+		if (NT_STATUS_V(nt_status) != error) {
+			printf("/*\t{ This NT error code was 'sqashed'\n\t from %s to %s \n\t during the session setup }\n*/\n",
+			       get_nt_error_c_code(talloc_tos(), NT_STATUS(error)),
 			       get_nt_error_c_code(talloc_tos(), nt_status));
 		}
 
-		printf("\t{%s,\t%s,\t%s},\n", 
-		       smb_dos_err_class(errclass), 
-		       smb_dos_err_name(errclass, errnum), 
+		printf("\t{%s,\t%s,\t%s},\n",
+		       smb_dos_err_class(errclass),
+		       smb_dos_err_name(errclass, errnum),
 		       get_nt_error_c_code(talloc_tos(), NT_STATUS(error)));
 
 		TALLOC_FREE(user_creds);
@@ -10635,8 +10646,14 @@ static bool run_chain2(int dummy)
 	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
 
 	printf("starting chain2 test\n");
-	status = cli_start_connection(&cli1, lp_netbios_name(), host, NULL,
-				      port_to_use, SMB_SIGNING_DEFAULT, flags);
+	status = cli_start_connection(talloc_tos(),
+				      &cli1,
+				      lp_netbios_name(),
+				      host,
+				      NULL,
+				      port_to_use,
+				      SMB_SIGNING_DEFAULT,
+				      flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		return False;
 	}
@@ -12346,12 +12363,40 @@ static bool run_tldap(int dummy)
 	struct tevent_req *req;
 	char *basedn;
 	const char *filter;
+	struct loadparm_context *lp_ctx = NULL;
+	int tcp_port = 389;
+	bool use_tls = false;
+	bool use_starttls = false;
+	int wrap_flags = -1;
+	uint32_t gensec_features = 0;
+
+	lp_ctx = loadparm_init_s3(talloc_tos(), loadparm_s3_helpers());
+
+	wrap_flags = lpcfg_client_ldap_sasl_wrapping(lp_ctx);
+
+	if (wrap_flags & ADS_AUTH_SASL_LDAPS) {
+		use_tls = true;
+		tcp_port = 636;
+	} else if (wrap_flags & ADS_AUTH_SASL_STARTTLS) {
+		use_tls = true;
+		use_starttls = true;
+	}
+	if (wrap_flags & ADS_AUTH_SASL_SEAL) {
+		gensec_features |= GENSEC_FEATURE_SEAL;
+	}
+	if (wrap_flags & ADS_AUTH_SASL_SIGN) {
+		gensec_features |= GENSEC_FEATURE_SIGN;
+	}
+
+	if (gensec_features != 0) {
+		gensec_features |= GENSEC_FEATURE_LDAP_STYLE;
+	}
 
 	if (!resolve_name(host, &addr, 0, false)) {
 		d_printf("could not find host %s\n", host);
 		return false;
 	}
-	status = open_socket_out(&addr, 389, 9999, &fd);
+	status = open_socket_out(&addr, tcp_port, 9999, &fd);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("open_socket_out failed: %s\n", nt_errstr(status));
 		return false;
@@ -12362,6 +12407,17 @@ static bool run_tldap(int dummy)
 		close(fd);
 		d_printf("tldap_context_create failed\n");
 		return false;
+	}
+
+	if (use_tls && !tldap_has_tls_tstream(ld)) {
+		tldap_set_starttls_needed(ld, use_starttls);
+
+		rc = tldap_tls_connect(ld, lp_ctx, host);
+		if (!TLDAP_RC_IS_SUCCESS(rc)) {
+			DBG_ERR("tldap_tls_connect(%s) failed: %s\n",
+				host, tldap_errstr(talloc_tos(), ld, rc));
+			return false;
+		}
 	}
 
 	rc = tldap_fetch_rootdse(ld);
@@ -12386,10 +12442,7 @@ static bool run_tldap(int dummy)
 	}
 
 	rc = tldap_gensec_bind(ld, torture_creds, "ldap", host, NULL,
-			       loadparm_init_s3(talloc_tos(),
-						loadparm_s3_helpers()),
-			       GENSEC_FEATURE_SIGN | GENSEC_FEATURE_SEAL);
-
+			       lp_ctx, gensec_features);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
 		d_printf("tldap_gensec_bind failed\n");
 		return false;
@@ -15313,7 +15366,7 @@ static double create_procs(bool (*fn)(int), bool *result)
 					printf("pid %d failed to start\n", (int)getpid());
 					_exit(1);
 				}
-				smb_msleep(10);	
+				smb_msleep(10);
 			}
 
 			child_status[i] = getpid();
@@ -16234,7 +16287,7 @@ static bool run_test(const char *name)
 	}
 
 	for (i=0;torture_ops[i].name;i++) {
-		fstr_sprintf(randomfname, "\\XX%x", 
+		fstr_sprintf(randomfname, "\\XX%x",
 			 (unsigned)random());
 
 		if (strequal(name, torture_ops[i].name)) {
@@ -16242,7 +16295,7 @@ static bool run_test(const char *name)
 			printf("Running %s\n", name);
 			if (torture_ops[i].flags & FLAG_MULTIPROC) {
 				t = create_procs(torture_ops[i].fn, &result);
-				if (!result) { 
+				if (!result) {
 					ret = False;
 					printf("TEST %s FAILED!\n", name);
 				}
@@ -16294,6 +16347,7 @@ static void usage(void)
 	printf("\t-b unclist_filename   specify multiple shares for multiple connections\n");
 	printf("\t-f filename           filename to test\n");
 	printf("\t-e                    encrypt\n");
+	printf("\t-T 'OPTION=VALUE'     smb.conf option line\n");
 	printf("\n\n");
 
 	printf("tests are:");
@@ -16380,7 +16434,7 @@ static void usage(void)
 
 	fstrcpy(workgroup, lp_workgroup());
 
-	while ((opt = getopt(argc, argv, "p:hW:U:n:N:O:o:m:Ll:d:Aec:ks:b:B:f:"))
+	while ((opt = getopt(argc, argv, "p:hW:U:n:N:O:o:m:Ll:d:Aec:ks:b:B:f:T:"))
 	       != EOF) {
 		switch (opt) {
 		case 'p':
@@ -16453,6 +16507,9 @@ static void usage(void)
 		case 'f':
 			test_filename = SMB_STRDUP(optarg);
 			break;
+		case 'T':
+			lpcfg_set_option(lp_ctx, optarg);
+			break;
 		default:
 			printf("Unknown option %c (%d)\n", (char)opt, opt);
 			usage();
@@ -16476,7 +16533,7 @@ static void usage(void)
 		}
 	}
 
-	printf("host=%s share=%s user=%s myname=%s\n", 
+	printf("host=%s share=%s user=%s myname=%s\n",
 	       host, share, username, myname);
 
 	torture_creds = cli_session_creds_init(frame,

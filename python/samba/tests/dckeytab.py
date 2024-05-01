@@ -55,7 +55,7 @@ class DCKeytabTests(TestCaseInTempDir):
             principal = '/'.join(entry.principal.components) + f"@{entry.principal.realm}"
             enctype = entry.enctype
             kvno = entry.key_version
-            key = tuple(entry.key.data)
+            key = bytes(entry.key.data)
             return (principal, enctype, kvno, key)
 
         keytab = ndr_unpack(krb5ccache.KEYTAB, keytab_bytes)
@@ -67,7 +67,7 @@ class DCKeytabTests(TestCaseInTempDir):
         keytab_as_set.add(entry_as_tuple)
 
         keytab_bytes = keytab.further_entry
-        while True:
+        while keytab_bytes:
             multiple_entry = ndr_unpack(krb5ccache.MULTIPLE_KEYTAB_ENTRIES, keytab_bytes)
             entry = multiple_entry.entry
             entry_as_tuple = entry_to_tuple(entry)
@@ -75,8 +75,6 @@ class DCKeytabTests(TestCaseInTempDir):
             keytab_as_set.add(entry_as_tuple)
 
             keytab_bytes = multiple_entry.further_entry
-            if not keytab_bytes:
-                break
 
         return keytab_as_set
 
@@ -438,7 +436,7 @@ class DCKeytabTests(TestCaseInTempDir):
         remote_keys = {}
 
         while True:
-            remote_keys[remote_keytab.entry.enctype] = remote_keytab.entry.key.data
+            remote_keys[remote_keytab.entry.enctype] = bytes(remote_keytab.entry.key.data)
             keytab_bytes = remote_keytab.further_entry
             if not keytab_bytes:
                 break
@@ -448,7 +446,7 @@ class DCKeytabTests(TestCaseInTempDir):
         local_keys = {}
 
         while True:
-            local_keys[local_keytab.entry.enctype] = local_keytab.entry.key.data
+            local_keys[local_keytab.entry.enctype] = bytes(local_keytab.entry.key.data)
             keytab_bytes = local_keytab.further_entry
             if not keytab_bytes:
                 break

@@ -646,7 +646,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	if (!py_tevent_req_wait_exc(self, req)) {
 		return -1;
 	}
-	status = cli_full_connection_creds_recv(req, &self->cli);
+	status = cli_full_connection_creds_recv(req, NULL, &self->cli);
 	TALLOC_FREE(req);
 
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1886,6 +1886,7 @@ static NTSTATUS list_posix_helper(struct file_info *finfo,
 {
 	PyObject *result = (PyObject *)state;
 	PyObject *file = NULL;
+	struct dom_sid_buf owner_buf, group_buf;
 	int ret;
 
 	/*
@@ -1895,13 +1896,15 @@ static NTSTATUS list_posix_helper(struct file_info *finfo,
 			     "s:K,s:K,"
 			     "s:l,s:l,s:l,s:l,"
 			     "s:i,s:K,s:i,s:i,s:I,"
-			     "s:s,s:s}",
-			     "name", finfo->name,
-			     "attrib", finfo->attr,
-
-			     "size", finfo->size,
-			     "allocaction_size", finfo->allocated_size,
-
+			     "s:s,s:s,s:k}",
+			     "name",
+			     finfo->name,
+			     "attrib",
+			     finfo->attr,
+			     "size",
+			     finfo->size,
+			     "allocaction_size",
+			     finfo->allocated_size,
 			     "btime",
 			     convert_timespec_to_time_t(finfo->btime_ts),
 			     "atime",
@@ -1910,17 +1913,22 @@ static NTSTATUS list_posix_helper(struct file_info *finfo,
 			     convert_timespec_to_time_t(finfo->mtime_ts),
 			     "ctime",
 			     convert_timespec_to_time_t(finfo->ctime_ts),
-
-			     "perms", finfo->st_ex_mode,
-			     "ino", finfo->ino,
-			     "dev", finfo->st_ex_dev,
-			     "nlink", finfo->st_ex_nlink,
-			     "reparse_tag", finfo->reparse_tag,
-
+			     "perms",
+			     finfo->st_ex_mode,
+			     "ino",
+			     finfo->ino,
+			     "dev",
+			     finfo->st_ex_dev,
+			     "nlink",
+			     finfo->st_ex_nlink,
+			     "reparse_tag",
+			     finfo->reparse_tag,
 			     "owner_sid",
-			     dom_sid_string(finfo, &finfo->owner_sid),
+			     dom_sid_str_buf(&finfo->owner_sid, &owner_buf),
 			     "group_sid",
-			     dom_sid_string(finfo, &finfo->group_sid));
+			     dom_sid_str_buf(&finfo->group_sid, &group_buf),
+			     "reparse_tag",
+			     (unsigned long)finfo->reparse_tag);
 	if (file == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1954,13 +1962,19 @@ static NTSTATUS list_helper(struct file_info *finfo,
 	 * Build a dictionary representing the file info.
 	 * Note: Windows does not always return short_name (so it may be None)
 	 */
-	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l}",
-			     "name", finfo->name,
-			     "attrib", (int)finfo->attr,
-			     "short_name", finfo->short_name,
-			     "size", size,
+	file = Py_BuildValue("{s:s,s:i,s:s,s:O,s:l,s:k}",
+			     "name",
+			     finfo->name,
+			     "attrib",
+			     (int)finfo->attr,
+			     "short_name",
+			     finfo->short_name,
+			     "size",
+			     size,
 			     "mtime",
-			     convert_timespec_to_time_t(finfo->mtime_ts));
+			     convert_timespec_to_time_t(finfo->mtime_ts),
+			     "reparse_tag",
+			     (unsigned long)finfo->reparse_tag);
 
 	Py_CLEAR(size);
 
@@ -2077,7 +2091,7 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 	const char *kwlist[] = { "directory", "mask", "attribs",
 				 "info_level", NULL };
 	NTSTATUS (*callback_fn)(struct file_info *, const char *, void *) =
-		&list_helper;
+		list_helper;
 
 	if (!ParseTupleAndKeywords(args, kwds, "z|sII:list", kwlist,
 				   &base_dir, &user_mask, &attribute,
@@ -2099,7 +2113,7 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 	}
 
 	if (info_level == SMB2_FIND_POSIX_INFORMATION) {
-		callback_fn = &list_posix_helper;
+		callback_fn = list_posix_helper;
 	}
 	status = do_listing(self, base_dir, user_mask, attribute,
 			    info_level, callback_fn, result);
