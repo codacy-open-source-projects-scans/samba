@@ -1093,6 +1093,80 @@ krb5_error_code smb_krb5_principal_get_comp_string(TALLOC_CTX *mem_ctx,
 	return 0;
 }
 
+krb5_error_code smb_krb5_cc_new_unique_memory(krb5_context context,
+					      TALLOC_CTX *mem_ctx,
+					      char **ccache_name,
+					      krb5_ccache *id)
+{
+	krb5_error_code code;
+	const char *type = NULL;
+	const char *name = NULL;
+
+	if (ccache_name != NULL) {
+		*ccache_name = NULL;
+	}
+	*id = NULL;
+
+#ifdef SAMBA4_USES_HEIMDAL
+	/*
+	 * "MEMORY:anonymous" is not visible to
+	 * the credential cache collection iterator
+	 *
+	 * It creates anonymous-POINTER-UNIQUECOUNTTER
+	 * in the background.
+	 */
+	code = krb5_cc_resolve(context, "MEMORY:anonymous", id);
+	if (code != 0) {
+		DBG_ERR("krb5_cc_resolve(MEMORY:anonymous) failed: %s\n",
+			smb_get_krb5_error_message(
+				context, code, mem_ctx));
+		return code;
+	}
+#else /* MIT */
+	/*
+	 * In MIT the "MEMORY:" credential cache collection
+	 * only contains the default cache (at most).
+	 */
+	code = krb5_cc_new_unique(context, "MEMORY", NULL, id);
+	if (code != 0) {
+		DBG_ERR("krb5_cc_new_unique failed: %s\n",
+			smb_get_krb5_error_message(
+				context, code, mem_ctx));
+		return code;
+	}
+#endif /* MIT */
+
+	type = krb5_cc_get_type(context, *id);
+	if (type == NULL) {
+		DBG_ERR("krb5_cc_get_type failed...\n");
+		krb5_cc_destroy(context, *id);
+		*id = NULL;
+		return KRB5_CC_UNKNOWN_TYPE;
+	}
+
+	name = krb5_cc_get_name(context, *id);
+	if (name == NULL) {
+		DBG_ERR("krb5_cc_get_name failed...\n");
+		krb5_cc_destroy(context, *id);
+		*id = NULL;
+		return KRB5_CC_BADNAME;
+	}
+
+	if (ccache_name == NULL) {
+		return 0;
+	}
+
+	*ccache_name = talloc_asprintf(mem_ctx, "%s:%s", type, name);
+	if (*ccache_name == NULL) {
+		DBG_ERR("krb5_cc_get_name failed...\n");
+		krb5_cc_destroy(context, *id);
+		*id = NULL;
+		return ENOMEM;
+	}
+
+	return 0;
+}
+
 /**
  * @brief
  *
@@ -2428,7 +2502,7 @@ krb5_error_code smb_krb5_kinit_s4u2_ccache(krb5_context ctx,
 	 * We need to avoid that and use a temporary krb5_ccache
 	 * in order to pass our TGT to the krb5_get_creds() function.
 	 */
-	code = krb5_cc_new_unique(ctx, NULL, NULL, &tmp_cc);
+	code = smb_krb5_cc_new_unique_memory(ctx, NULL, NULL, &tmp_cc);
 	if (code != 0) {
 		krb5_free_cred_contents(ctx, &store_creds);
 		return code;
@@ -2822,7 +2896,7 @@ krb5_error_code smb_krb5_kinit_s4u2_ccache(krb5_context ctx,
 	bool s4u2proxy = false;
 	bool ok;
 
-	code = krb5_cc_new_unique(ctx, "MEMORY", NULL, &tmp_cc);
+	code = smb_krb5_cc_new_unique_memory(ctx, NULL, NULL, &tmp_cc);
 	if (code != 0) {
 		return code;
 	}

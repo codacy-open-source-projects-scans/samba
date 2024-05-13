@@ -24,7 +24,9 @@ import samba.tests.libsmb
 class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
     def connection(self):
-        share = samba.tests.env_get_var_value("SHARENAME")
+        share = samba.tests.env_get_var_value("SHARENAME", allow_missing=True)
+        if not share:
+            share = "tmp"
         smb1 = samba.tests.env_get_var_value("SMB1", allow_missing=True)
         conn = libsmb.Conn(
             self.server_ip,
@@ -72,8 +74,10 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
         fd = conn.create(
             filename,
-            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE,
+            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE | sec.SEC_STD_DELETE,
             CreateDisposition=libsmb.FILE_CREATE)
+
+        conn.delete_on_close(fd, 1)
 
         with self.assertRaises(NTSTATUSError) as e:
             conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b'', 0)
@@ -103,9 +107,16 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
         self.assertEqual(e.exception.args[0],
                          ntstatus.NT_STATUS_IO_REPARSE_DATA_INVALID)
 
+        # Exact length works
         conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
-        b = reparse_symlink.put(0x80000026, 0, b'asdfasdfasdfasdfasdfasdf')
-        conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+
+        b = reparse_symlink.put(0x80000026, 0, b'asdf')
+
+        # We can't overwrite an existing reparse point with a different tag
+        with self.assertRaises(NTSTATUSError) as e:
+            conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+        self.assertEqual(e.exception.args[0],
+                         ntstatus.NT_STATUS_IO_REPARSE_TAG_MISMATCH)
 
     # Show that we can write to a reparse point when opened properly
     def test_write_reparse(self):
@@ -151,8 +162,20 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
             sec.SEC_STD_DELETE,
             CreateDisposition=libsmb.FILE_CREATE,
             CreateOptions=libsmb.FILE_DIRECTORY_FILE)
+
         b = reparse_symlink.put(0x80000025, 0, b'asdfasdfasdfasdfasdfasdf')
-        conn.fsctl(dir_fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+
+        try:
+            conn.fsctl(dir_fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+        except NTSTATUSError as e:
+            err = e.args[0]
+            if (err != ntstatus.NT_STATUS_ACCESS_DENIED):
+                raise
+
+        if (err == ntstatus.NT_STATUS_ACCESS_DENIED):
+            self.fail("Could not set reparse point on directory")
+            conn.delete_on_close(fd, 1)
+            return
 
         with self.assertRaises(NTSTATUSError) as e:
             fd = conn.create(
@@ -188,19 +211,21 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
             sec.SEC_STD_DELETE,
             CreateDisposition=libsmb.FILE_CREATE)
 
+
         b = reparse_symlink.put(0x80000025, 0, b'asdf')
         try:
             conn.fsctl(dir_fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
         except NTSTATUSError as e:
             err = e.args[0]
-            ok = (err == ntstatus.NT_STATUS_DIRECTORY_NOT_EMPTY)
-            if not ok:
-                raise
 
         conn.delete_on_close(fd, 1)
         conn.close(fd)
         conn.delete_on_close(dir_fd, 1)
         conn.close(dir_fd)
+
+        ok = (err == ntstatus.NT_STATUS_DIRECTORY_NOT_EMPTY)
+        if not ok:
+            self.fail(f'set_reparse on nonempty directory returned {err}')
 
     # Show that reparse point opens respect share modes
 
@@ -235,6 +260,69 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
         conn.delete_on_close(fd1, 1)
         conn.close(fd1)
+
+    def test_delete_reparse_point(self):
+        conn = self.connection()
+        filename = 'reparse'
+        self.clean_file(conn, filename)
+
+        fd = conn.create(
+            filename,
+            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE,
+            CreateDisposition=libsmb.FILE_CREATE)
+        b = reparse_symlink.put(0x80000025, 0, b'asdfasdfasdfasdfasdfasdf')
+        conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+        conn.close(fd)
+
+        (fd,cr,_) = conn.create_ex(
+            filename,
+            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE|sec.SEC_STD_DELETE,
+            CreateOptions=libsmb.FILE_OPEN_REPARSE_POINT,
+            CreateDisposition=libsmb.FILE_OPEN)
+
+        self.assertEqual(cr['file_attributes'] &
+                         libsmb.FILE_ATTRIBUTE_REPARSE_POINT,
+                         libsmb.FILE_ATTRIBUTE_REPARSE_POINT)
+
+        b = reparse_symlink.put(0x80000026, 0, b'')
+        with self.assertRaises(NTSTATUSError) as e:
+            conn.fsctl(fd, libsmb.FSCTL_DELETE_REPARSE_POINT, b, 0)
+        self.assertEqual(e.exception.args[0],
+                         ntstatus.NT_STATUS_IO_REPARSE_TAG_MISMATCH)
+
+        b = reparse_symlink.put(0x80000026, 0, b' ')
+        with self.assertRaises(NTSTATUSError) as e:
+            conn.fsctl(fd, libsmb.FSCTL_DELETE_REPARSE_POINT, b, 0)
+        self.assertEqual(e.exception.args[0],
+                         ntstatus.NT_STATUS_IO_REPARSE_DATA_INVALID)
+
+        b = reparse_symlink.put(0x80000025, 0, b' ')
+        with self.assertRaises(NTSTATUSError) as e:
+            conn.fsctl(fd, libsmb.FSCTL_DELETE_REPARSE_POINT, b, 0)
+        self.assertEqual(e.exception.args[0],
+                         ntstatus.NT_STATUS_IO_REPARSE_DATA_INVALID)
+
+        b = reparse_symlink.put(0x80000025, 0, b'')
+        conn.fsctl(fd, libsmb.FSCTL_DELETE_REPARSE_POINT, b, 0)
+
+        with self.assertRaises(NTSTATUSError) as e:
+            conn.fsctl(fd, libsmb.FSCTL_DELETE_REPARSE_POINT, b, 0)
+        self.assertEqual(e.exception.args[0],
+                         ntstatus.NT_STATUS_NOT_A_REPARSE_POINT)
+
+        conn.close(fd)
+
+        (fd,cr,_) = conn.create_ex(
+            filename,
+            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE|sec.SEC_STD_DELETE,
+            CreateDisposition=libsmb.FILE_OPEN)
+
+        self.assertEqual(cr['file_attributes'] &
+                         libsmb.FILE_ATTRIBUTE_REPARSE_POINT,
+                         0)
+
+        conn.delete_on_close(fd, 1)
+        conn.close(fd)
 
 if __name__ == '__main__':
     import unittest

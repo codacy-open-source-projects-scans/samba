@@ -79,16 +79,7 @@ static uint32_t smb_gss_krb5_copy_ccache(uint32_t *min_stat,
 	krb5_cc_cursor cursor = NULL;
 	krb5_principal princ = NULL;
 	krb5_error_code code;
-	char *dummy_name;
 	uint32_t maj_stat = GSS_S_FAILURE;
-
-	dummy_name = talloc_asprintf(ccc,
-				     "MEMORY:gss_krb5_copy_ccache-%p",
-				     &ccc->ccache);
-	if (dummy_name == NULL) {
-		*min_stat = ENOMEM;
-		return GSS_S_FAILURE;
-	}
 
 	/*
 	 * Create a dummy ccache, so we can iterate over the credentials
@@ -96,8 +87,7 @@ static uint32_t smb_gss_krb5_copy_ccache(uint32_t *min_stat,
 	 * copy. The new ccache needs to be initialized with this
 	 * principal.
 	 */
-	code = krb5_cc_resolve(context, dummy_name, &dummy_ccache);
-	TALLOC_FREE(dummy_name);
+	code = smb_krb5_cc_new_unique_memory(context, NULL, NULL, &dummy_ccache);
 	if (code != 0) {
 		*min_stat = code;
 		return GSS_S_FAILURE;
@@ -382,28 +372,17 @@ static krb5_error_code krb5_cc_remove_cred_wrap(struct ccache_container *ccc,
 	krb5_creds cached_creds = {0};
 	krb5_cc_cursor cursor = NULL;
 	krb5_error_code code;
-	char *dummy_name;
 
-	dummy_name = talloc_asprintf(ccc,
-				     "MEMORY:copy_ccache-%p",
-				     &ccc->ccache);
-	if (dummy_name == NULL) {
-		return KRB5_CC_NOMEM;
-	}
-
-	code = krb5_cc_resolve(ccc->smb_krb5_context->krb5_context,
-			       dummy_name,
-			       &dummy_ccache);
+	code = smb_krb5_cc_new_unique_memory(ccc->smb_krb5_context->krb5_context,
+					     NULL, NULL,
+					     &dummy_ccache);
 	if (code != 0) {
 		DBG_ERR("krb5_cc_resolve failed: %s\n",
 			smb_get_krb5_error_message(
 				ccc->smb_krb5_context->krb5_context,
 				code, ccc));
-		TALLOC_FREE(dummy_name);
 		return code;
 	}
-
-	TALLOC_FREE(dummy_name);
 
 	code = krb5_cc_start_seq_get(ccc->smb_krb5_context->krb5_context,
 				     ccc->ccache,
@@ -597,10 +576,11 @@ _PUBLIC_ bool cli_credentials_failed_kerberos_login(struct cli_credentials *cred
 
 static int cli_credentials_new_ccache(struct cli_credentials *cred,
 				      struct loadparm_context *lp_ctx,
-				      char *ccache_name,
+				      char *given_ccache_name,
 				      struct ccache_container **_ccc,
 				      const char **error_string)
 {
+	char *ccache_name = given_ccache_name;
 	bool must_free_cc_name = false;
 	krb5_error_code ret;
 	struct ccache_container *ccc = talloc(cred, struct ccache_container);
@@ -623,25 +603,27 @@ static int cli_credentials_new_ccache(struct cli_credentials *cred,
 	}
 
 	if (!ccache_name) {
-		must_free_cc_name = true;
-
 		if (lpcfg_parm_bool(lp_ctx, NULL, "credentials", "krb5_cc_file", false)) {
 			ccache_name = talloc_asprintf(ccc, "FILE:/tmp/krb5_cc_samba_%u_%p",
 						      (unsigned int)getpid(), ccc);
-		} else {
-			ccache_name = talloc_asprintf(ccc, "MEMORY:%p",
-						      ccc);
-		}
-
-		if (!ccache_name) {
-			talloc_free(ccc);
-			(*error_string) = strerror(ENOMEM);
-			return ENOMEM;
+			if (ccache_name == NULL) {
+				talloc_free(ccc);
+				(*error_string) = strerror(ENOMEM);
+				return ENOMEM;
+			}
+			must_free_cc_name = true;
 		}
 	}
 
-	ret = krb5_cc_resolve(ccc->smb_krb5_context->krb5_context, ccache_name,
-			      &ccc->ccache);
+	if (ccache_name != NULL) {
+		ret = krb5_cc_resolve(ccc->smb_krb5_context->krb5_context, ccache_name,
+				      &ccc->ccache);
+	} else {
+		ret = smb_krb5_cc_new_unique_memory(ccc->smb_krb5_context->krb5_context,
+						    ccc, &ccache_name,
+						    &ccc->ccache);
+		must_free_cc_name = true;
+	}
 	if (ret) {
 		(*error_string) = talloc_asprintf(cred, "failed to resolve a krb5 ccache (%s): %s\n",
 						  ccache_name,
@@ -756,6 +738,95 @@ _PUBLIC_ int cli_credentials_get_ccache(struct cli_credentials *cred,
 					const char **error_string)
 {
 	return cli_credentials_get_named_ccache(cred, event_ctx, lp_ctx, NULL, ccc, error_string);
+}
+
+/**
+ * @brief Check if a valid Kerberos credential cache is attached.
+ *
+ * This will not ask for a password nor do a kinit.
+ *
+ * @param cred The credentials context.
+ *
+ * @param mem_ctx A memory context to allocate the ccache_name.
+ *
+ * @param ccache_name A pointer to a string to store the ccache name.
+ *
+ * @param obtained A pointer to store the information how the ccache was
+ *                 obtained.
+ *
+ * @return True if a credential cache is attached, false if not or an error
+ *         occurred.
+ */
+_PUBLIC_ bool cli_credentials_get_ccache_name_obtained(
+	struct cli_credentials *cred,
+	TALLOC_CTX *mem_ctx,
+	char **ccache_name,
+	enum credentials_obtained *obtained)
+{
+	if (ccache_name != NULL) {
+		*ccache_name = NULL;
+	}
+
+	if (obtained != NULL) {
+		*obtained = CRED_UNINITIALISED;
+	}
+
+	if (cred->machine_account_pending) {
+		return false;
+	}
+
+	if (cred->ccache_obtained == CRED_UNINITIALISED) {
+		return false;
+	}
+
+	if (cred->ccache_obtained >= cred->ccache_threshold) {
+		krb5_context k5ctx = cred->ccache->smb_krb5_context->krb5_context;
+		krb5_ccache k5ccache = cred->ccache->ccache;
+		krb5_error_code ret;
+		time_t lifetime = 0;
+
+		ret = smb_krb5_cc_get_lifetime(k5ctx, k5ccache, &lifetime);
+		if (ret == KRB5_CC_END || ret == ENOENT) {
+			return false;
+		}
+		if (ret != 0) {
+			return false;
+		}
+		if (lifetime == 0) {
+			return false;
+		} else if (lifetime < 300) {
+			if (cred->password_obtained >= cred->ccache_obtained) {
+				/*
+				 * we have a password to re-kinit
+				 * so let the caller try that.
+				 */
+				return false;
+			}
+		}
+
+		if (ccache_name != NULL) {
+			char *name = NULL;
+
+			ret = krb5_cc_get_full_name(k5ctx, k5ccache, &name);
+			if (ret != 0) {
+				return false;
+			}
+
+			*ccache_name = talloc_strdup(mem_ctx, name);
+			SAFE_FREE(name);
+			if (*ccache_name == NULL) {
+				return false;
+			}
+		}
+
+		if (obtained != NULL) {
+			*obtained = cred->ccache_obtained;
+		}
+
+		return true;
+	}
+
+	return false;
 }
 
 /* We have good reason to think the ccache in these credentials is invalid - blow it away */
@@ -1070,7 +1141,6 @@ static int cli_credentials_shallow_ccache(struct cli_credentials *cred)
 	const struct ccache_container *old_ccc = NULL;
 	enum credentials_obtained old_obtained;
 	struct ccache_container *ccc = NULL;
-	char *ccache_name = NULL;
 	krb5_principal princ;
 
 	old_obtained = cred->ccache_obtained;
@@ -1103,18 +1173,16 @@ static int cli_credentials_shallow_ccache(struct cli_credentials *cred)
 	*ccc = *old_ccc;
 	ccc->ccache = NULL;
 
-	ccache_name = talloc_asprintf(ccc, "MEMORY:%p", ccc);
-
-	ret = krb5_cc_resolve(ccc->smb_krb5_context->krb5_context,
-			      ccache_name, &ccc->ccache);
+	ret = smb_krb5_cc_new_unique_memory(ccc->smb_krb5_context->krb5_context,
+					    NULL,
+					    NULL,
+					    &ccc->ccache);
 	if (ret != 0) {
 		TALLOC_FREE(ccc);
 		return ret;
 	}
 
 	talloc_set_destructor(ccc, free_mccache);
-
-	TALLOC_FREE(ccache_name);
 
 	ret = smb_krb5_cc_copy_creds(ccc->smb_krb5_context->krb5_context,
 				     old_ccc->ccache, ccc->ccache);

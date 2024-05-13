@@ -91,6 +91,7 @@ struct cli_credentials *cli_credentials_init_server(TALLOC_CTX *mem_ctx,
 void cli_credentials_set_anonymous(struct cli_credentials *cred);
 bool cli_credentials_wrong_password(struct cli_credentials *cred);
 const char *cli_credentials_get_password(struct cli_credentials *cred);
+enum credentials_obtained cli_credentials_get_password_obtained(struct cli_credentials *cred);
 const char *cli_credentials_get_password_and_obtained(struct cli_credentials *cred,
 						      enum credentials_obtained *obtained);
 void cli_credentials_get_ntlm_username_domain(struct cli_credentials *cred, TALLOC_CTX *mem_ctx,
@@ -105,6 +106,7 @@ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred, TALLOC_
 					   DATA_BLOB *_lm_session_key, DATA_BLOB *_session_key);
 const char *cli_credentials_get_realm(struct cli_credentials *cred);
 const char *cli_credentials_get_username(struct cli_credentials *cred);
+enum credentials_obtained cli_credentials_get_username_obtained(struct cli_credentials *cred);
 const char *cli_credentials_get_username_and_obtained(struct cli_credentials *cred,
 						      enum credentials_obtained *obtained);
 int cli_credentials_get_krb5_context(struct cli_credentials *cred,
@@ -120,6 +122,10 @@ int cli_credentials_get_named_ccache(struct cli_credentials *cred,
 				     struct loadparm_context *lp_ctx,
 				     char *ccache_name,
 				     struct ccache_container **ccc, const char **error_string);
+bool cli_credentials_get_ccache_name_obtained(struct cli_credentials *cred,
+					      TALLOC_CTX *mem_ctx,
+					      char **ccache_name,
+					      enum credentials_obtained *obtained);
 bool cli_credentials_failed_kerberos_login(struct cli_credentials *cred,
 					   const char *principal,
 					   unsigned int *count);
@@ -279,6 +285,8 @@ NTSTATUS cli_credentials_set_secrets(struct cli_credentials *cred,
 
 bool cli_credentials_set_username_callback(struct cli_credentials *cred,
 				  const char *(*username_cb) (struct cli_credentials *));
+
+enum credentials_obtained cli_credentials_get_principal_obtained(struct cli_credentials *cred);
 
 /**
  * Obtain the client principal for this credentials context.
