@@ -23,15 +23,23 @@ import os
 sys.path.insert(0, "bin/python")
 os.environ["PYTHONUNBUFFERED"] = "1"
 
-from typing import Iterable, NewType, Optional, Tuple, TypeVar
+from typing import Callable, Iterable, NewType, Optional, Tuple, TypeVar
 
 import datetime
 from itertools import chain
 
 import ldb
 
-from samba import auth, dsdb, gensec, werror
-from samba.dcerpc import gkdi, gmsa, misc, netlogon, security
+from samba import (
+    auth,
+    dsdb,
+    generate_random_password,
+    gensec,
+    ntstatus,
+    NTSTATUSError,
+    werror,
+)
+from samba.dcerpc import gkdi, gmsa, misc, netlogon, security, srvsvc
 from samba.ndr import ndr_pack, ndr_unpack
 from samba.nt_time import (
     nt_time_delta_from_timedelta,
@@ -99,6 +107,12 @@ class GmsaSeries:
         return NtTime(
             int(self.start_of_interval(n) + self.rollover_interval - two_minutes)
         )
+
+    def outside_previous_password_valid_window(self, n: int) -> NtTime:
+        return NtTime(self.start_of_interval(n) + MAX_CLOCK_SKEW)
+
+    def within_previous_password_valid_window(self, n: int) -> NtTime:
+        return NtTime(self.outside_previous_password_valid_window(n) - 1)
 
 
 class GmsaTests(GkdiBaseTest, KDCBaseTest):
@@ -300,6 +314,37 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
             self.future_gkid(), gkdi_rollover_interval(managed_password_interval)
         )
 
+    def gmsa_series_for_account(
+        self, samdb: SamDB, creds: KerberosCredentials, managed_password_interval: int
+    ) -> GmsaSeries:
+        gmsa_object = self.get_gmsa_object(samdb, creds.get_dn())
+        current_nt_time = self.current_nt_time(samdb)
+        gkid = Gkid.from_nt_time(
+            self.account_quantized_time(gmsa_object, current_nt_time)
+        )
+        return GmsaSeries(gkid, gkdi_rollover_interval(managed_password_interval))
+
+    def quantized_time(
+        self, key_start_time: NtTime, time: NtTime, gkdi_rollover_interval: NtTimeDelta
+    ) -> NtTime:
+        self.assertLessEqual(key_start_time, time)
+
+        time_since_key_start = NtTimeDelta(time - key_start_time)
+        quantized_time_since_key_start = NtTimeDelta(
+            time_since_key_start // gkdi_rollover_interval * gkdi_rollover_interval
+        )
+        return NtTime(key_start_time + quantized_time_since_key_start)
+
+    def account_quantized_time(self, gmsa_object: Gmsa, time: NtTime) -> NtTime:
+        pwd_id_blob = gmsa_object.get("msDS-ManagedPasswordId", idx=0)
+        self.assertIsNotNone(pwd_id_blob, "SAM should have initialized password ID")
+
+        pwd_id = ndr_unpack(gkdi.KeyEnvelope, pwd_id_blob)
+        key_start_time = Gkid.from_key_envelope(pwd_id).start_nt_time()
+
+        gkdi_rollover_interval = self.gmsa_rollover_interval(gmsa_object)
+        return self.quantized_time(key_start_time, time, gkdi_rollover_interval)
+
     def expected_gmsa_password_blob(
         self,
         samdb: SamDB,
@@ -360,11 +405,9 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
 
         current_time = self.current_nt_time(samdb)
 
-        time_since_key_start = NtTimeDelta(current_time - key_start_time)
-        quantized_time_since_key_start = NtTimeDelta(
-            time_since_key_start // gkdi_rollover_interval * gkdi_rollover_interval
+        new_key_start_time = self.quantized_time(
+            key_start_time, current_time, gkdi_rollover_interval
         )
-        new_key_start_time = NtTime(key_start_time + quantized_time_since_key_start)
         new_key_expiration_time = NtTime(new_key_start_time + gkdi_rollover_interval)
 
         account_sid = creds.get_sid()
@@ -508,8 +551,8 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
     # Perform a gensec logon using NTLMSSP. As samdb is passed in as a
     # parameter, it can have a time set on it with set_db_time().
     def gensec_ntlmssp_logon(
-        self, client_creds: Credentials, samdb: SamDB
-    ) -> "auth.session_info":
+        self, client_creds: Credentials, samdb: SamDB, expect_success: bool = True
+    ) -> "Optional[auth.session_info]":
         lp = self.get_lp()
         lp.set("server role", "active directory domain controller")
 
@@ -544,9 +587,17 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
                     server_to_client
                 )
             if not server_finished:
-                server_finished, server_to_client = gensec_server.update(
-                    client_to_server
-                )
+                try:
+                    server_finished, server_to_client = gensec_server.update(
+                        client_to_server
+                    )
+                except NTSTATUSError as err:
+                    self.assertFalse(expect_success, "got an unexpected error")
+
+                    self.assertEqual(ntstatus.NT_STATUS_WRONG_PASSWORD, err.args[0])
+                    return None
+
+        self.assertTrue(expect_success, "expected to get an error")
 
         # Retrieve the SIDs from the security token.
         return gensec_server.session_info()
@@ -698,6 +749,47 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
             self.gmsa_account(msa_membership=deny_world_sddl), expect_access=False
         )
 
+    def test_retrieving_password_over_sealed_connection(self):
+        lp = self.get_lp()
+        samdb = SamDB(
+            f"ldap://{self.dc_host}",
+            credentials=self.get_admin_creds(),
+            session_info=auth.system_session(lp),
+            lp=lp,
+        )
+
+        self.check_managed_password_access(
+            self.gmsa_account(), samdb=samdb, expect_access=True
+        )
+
+    def test_retrieving_password_over_unsealed_connection(self):
+        # Requires --use-kerberos=required, or it automatically upgrades to an
+        # encrypted connection.
+
+        # Remove FEATURE_SEAL which gets added by insta_creds.
+        creds = self.insta_creds(template=self.get_admin_creds())
+        creds.set_gensec_features(creds.get_gensec_features() & ~gensec.FEATURE_SEAL)
+
+        lp = self.get_lp()
+
+        sasl_wrap = lp.get("client ldap sasl wrapping")
+        self.addCleanup(lp.set, "client ldap sasl wrapping", sasl_wrap)
+        lp.set("client ldap sasl wrapping", "sign")
+
+        # Create a second ldb connection without seal.
+        samdb = SamDB(
+            f"ldap://{self.dc_host}",
+            credentials=creds,
+            session_info=auth.system_session(lp),
+            lp=lp,
+        )
+
+        self.check_managed_password_access(
+            self.gmsa_account(),
+            samdb=samdb,
+            expected_werror=werror.WERR_DS_CONFIDENTIALITY_REQUIRED,
+        )
+
     def test_retrieving_denied_password_over_unsealed_connection(self):
         # Requires --use-kerberos=required, or it automatically upgrades to an
         # encrypted connection.
@@ -724,6 +816,39 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         deny_world_sddl = "O:SYD:(D;;RP;;;WD)"
         self.check_managed_password_access(
             self.gmsa_account(msa_membership=deny_world_sddl),
+            samdb=samdb,
+            expected_werror=werror.WERR_DS_CONFIDENTIALITY_REQUIRED,
+        )
+
+    def test_retrieving_password_after_encrypted_simple_bind(self):
+        """Test retrieving the managed password using a simple bind with encryption."""
+        admin_sid = self.get_samdb().get_admin_sid()
+
+        creds = self.insta_creds(template=self.get_admin_creds())
+        creds.set_bind_dn(admin_sid)
+        samdb = SamDB(
+            url=f"ldaps://{self.dc_host}", credentials=creds, lp=self.get_lp()
+        )
+
+        self.check_managed_password_access(
+            self.gmsa_account(), samdb=samdb, expect_access=True
+        )
+
+    def test_retrieving_password_after_unencrypted_simple_bind(self):
+        """Test retrieving the managed password using a simple bind without encryption."""
+        admin_sid = self.get_samdb().get_admin_sid()
+
+        creds = self.insta_creds(template=self.get_admin_creds())
+        creds.set_bind_dn(admin_sid)
+        try:
+            samdb = SamDB(
+                url=f"ldap://{self.dc_host}", credentials=creds, lp=self.get_lp()
+            )
+        except ldb.LdbError:
+            self.fail("failed to perform simple bind")
+
+        self.check_managed_password_access(
+            self.gmsa_account(),
             samdb=samdb,
             expected_werror=werror.WERR_DS_CONFIDENTIALITY_REQUIRED,
         )
@@ -906,7 +1031,7 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         creds = self.gmsa_account(samdb=local_samdb, interval=password_interval)
         dn = creds.get_dn()
 
-        current_nt_time = self.current_nt_time(local_samdb)
+        current_nt_time = self.current_nt_time(samdb)
         self.set_db_time(local_samdb, current_nt_time)
 
         # Search the local database for the account’s keys.
@@ -983,7 +1108,7 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         creds = self.gmsa_account(samdb=local_samdb, interval=password_interval)
         dn = creds.get_dn()
 
-        current_nt_time = self.current_nt_time(local_samdb)
+        current_nt_time = self.current_nt_time(samdb)
         self.set_db_time(local_samdb, current_nt_time)
 
         # Search the local database for the account’s keys.
@@ -1001,8 +1126,14 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         self.assertEqual(creds.get_nt_hash(), previous_nt_hash)
 
         # Calculate the password with which to authenticate.
-        managed_pwd = self.expected_current_gmsa_password_blob(
-            samdb, creds, future_key_is_acceptable=False
+        current_series = self.gmsa_series_for_account(
+            local_samdb, creds, password_interval
+        )
+        managed_pwd = self.expected_gmsa_password_blob(
+            local_samdb,
+            creds,
+            current_series.interval_gkid(0),
+            query_expiration_gkid=current_series.interval_gkid(1),
         )
 
         # Set the new password.
@@ -1054,13 +1185,396 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         # Ensure that they match.
         self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
 
-    def test_gmsa_can_perform_netlogon(self):
-        creds = self.gmsa_account(kerberos_enabled=False)
-        self._test_samlogon(
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_when_current_key_is_valid(self):
+        """Test that we can perform a gensec logon at a time when we are sure
+        the current gMSA password is valid."""
+
+        password_interval = 18
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_when_current_key_is_expired(self):
+        """Test that we can perform a gensec logon using NTLMSSP at a time when
+        the current gMSA password has expired."""
+
+        password_interval = 40
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        # Set the time to the moment the original password has expired, and
+        # perform a gensec logon.
+        expired_time = series.start_of_interval(1)
+        self.set_db_time(samdb, expired_time)
+
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(samdb, creds, password_interval)
+        managed_pwd = self.expected_gmsa_password_blob(
+            samdb,
             creds,
+            current_series.interval_gkid(0),
+            previous_gkid=current_series.interval_gkid(-1),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
+        # Set the new password.
+        self.assertIsNotNone(
+            managed_pwd.passwords.current, "current password must be present"
+        )
+        creds.set_utf16_password(managed_pwd.passwords.current)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_when_next_key_is_expired(self):
+        password_interval = 42
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        expired_time = series.start_of_interval(2)
+        self.set_db_time(samdb, expired_time)
+
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(samdb, creds, password_interval)
+        managed_pwd = self.expected_gmsa_password_blob(
+            samdb,
+            creds,
+            current_series.interval_gkid(0),
+            previous_gkid=current_series.interval_gkid(-1),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
+        # Set the new password.
+        self.assertIsNotNone(
+            managed_pwd.passwords.current, "current password must be present"
+        )
+        creds.set_utf16_password(managed_pwd.passwords.current)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_during_clock_skew_window_when_current_key_is_valid(
+        self,
+    ):
+        password_interval = 43
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        self.set_db_time(samdb, series.during_skew_window(0))
+
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(samdb, creds, password_interval)
+        managed_pwd = self.expected_gmsa_password_blob(
+            samdb,
+            creds,
+            current_series.interval_gkid(0),
+            previous_gkid=current_series.interval_gkid(-1),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
+        # Set the new password.
+        self.assertIsNotNone(
+            managed_pwd.passwords.current, "current password must be present"
+        )
+        creds.set_utf16_password(managed_pwd.passwords.current)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_during_clock_skew_window_when_current_key_is_expired(
+        self,
+    ):
+        password_interval = 44
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        self.set_db_time(samdb, series.during_skew_window(1))
+
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(samdb, creds, password_interval)
+        managed_pwd = self.expected_gmsa_password_blob(
+            samdb,
+            creds,
+            current_series.interval_gkid(0),
+            previous_gkid=current_series.interval_gkid(-1),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
+        # Set the new password.
+        self.assertIsNotNone(
+            managed_pwd.passwords.current, "current password must be present"
+        )
+        creds.set_utf16_password(managed_pwd.passwords.current)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_during_clock_skew_window_when_next_key_is_expired(
+        self,
+    ):
+        password_interval = 47
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        self.set_db_time(samdb, series.during_skew_window(2))
+
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(samdb, creds, password_interval)
+        managed_pwd = self.expected_gmsa_password_blob(
+            samdb,
+            creds,
+            current_series.interval_gkid(0),
+            previous_gkid=current_series.interval_gkid(-1),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
+        # Set the new password.
+        self.assertIsNotNone(
+            managed_pwd.passwords.current, "current password must be present"
+        )
+        creds.set_utf16_password(managed_pwd.passwords.current)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_with_previous_password_within_five_minutes(
+        self,
+    ):
+        password_interval = 123
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        # Set the time to within five minutes of the original password’s expiry,
+        # and perform a gensec logon with the original password.
+        expired_time = series.within_previous_password_valid_window(1)
+        self.set_db_time(samdb, expired_time)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_cannot_perform_gensec_ntlmssp_logon_with_previous_but_one_password_within_five_minutes(
+        self,
+    ):
+        password_interval = 123
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        # Set the time to within five minutes of the *following* password’s expiry,
+        # and perform a gensec logon with the original password.
+        expired_time = series.within_previous_password_valid_window(2)
+        self.set_db_time(samdb, expired_time)
+
+        # Expect the gensec logon to fail.
+        self.gensec_ntlmssp_logon(creds, samdb, expect_success=False)
+
+    def test_gmsa_can_perform_gensec_ntlmssp_logon_with_previous_password_beyond_five_minutes(
+        self,
+    ):
+        password_interval = 456
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+
+        # Set the time to five minutes beyond the original password’s expiry,
+        # and try to perform a gensec logon with the original password.
+        expired_time = series.outside_previous_password_valid_window(1)
+        self.set_db_time(samdb, expired_time)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(creds.get_sid()), token_sids[0])
+
+    def test_gmsa_cannot_perform_gensec_ntlmssp_logon_with_previous_password_five_minutes_apart(
+        self,
+    ):
+        password_interval = 789
+
+        samdb = self.get_local_samdb()
+        series = self.gmsa_series(password_interval)
+        self.set_db_time(samdb, series.start_of_interval(0))
+
+        creds = self.gmsa_account(
+            samdb=samdb, interval=password_interval, kerberos_enabled=False
+        )
+        gmsa_sid = creds.get_sid()
+
+        # Set the time to after the original password’s expiry, and perform a
+        # gensec logon with the original password.
+        db_time = series.during_interval(1)
+        self.set_db_time(samdb, db_time)
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(gmsa_sid), token_sids[0])
+
+        # Set the time to not quite five minutes later, and perform a gensec
+        # logon with the original password.
+        self.set_db_time(samdb, NtTime(db_time + MAX_CLOCK_SKEW - 1))
+
+        # Perform a gensec logon.
+        session = self.gensec_ntlmssp_logon(creds, samdb)
+
+        # Ensure that the first SID contained within the security token is the gMSA’s SID.
+        token = session.security_token
+        token_sids = token.sids
+        self.assertGreater(len(token_sids), 0)
+
+        # Ensure that they match.
+        self.assertEqual(security.dom_sid(gmsa_sid), token_sids[0])
+
+        # Now set the time to exactly five minutes later, and try to perform a
+        # gensec logon with the original password.
+        self.set_db_time(samdb, NtTime(db_time + MAX_CLOCK_SKEW))
+
+        # Expect the gensec logon to fail.
+        self.gensec_ntlmssp_logon(creds, samdb, expect_success=False)
+
+    def test_gmsa_can_perform_netlogon(self):
+        self._test_samlogon(
+            self.gmsa_account(kerberos_enabled=False),
             netlogon.NetlogonNetworkInformation,
             validation_level=netlogon.NetlogonValidationSamInfo4,
-            domain_joined_mach_creds=creds,
+        )
+
+    def test_computer_cannot_perform_interactive_logon(self):
+        self._test_samlogon(
+            self.get_mach_creds(),
+            netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_NO_SUCH_USER,
+            validation_level=netlogon.NetlogonValidationSamInfo4,
+        )
+
+    def test_gmsa_cannot_perform_interactive_logon(self):
+        self._test_samlogon(
+            self.gmsa_account(kerberos_enabled=False),
+            netlogon.NetlogonInteractiveInformation,
+            expect_error=ntstatus.NT_STATUS_NO_SUCH_USER,
+            validation_level=netlogon.NetlogonValidationSamInfo4,
         )
 
     def _gmsa_can_perform_as_req(self, *, enctype: kcrypto.Enctype) -> None:
@@ -1098,6 +1612,204 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
 
     def test_gmsa_can_authenticate_to_ldap_without_kerberos(self):
         self._gmsa_can_authenticate_to_ldap(with_kerberos=False)
+
+    def test_gmsa_can_perform_ServerAuthenticate3(self):
+        creds = self.gmsa_account(kerberos_enabled=False)
+        username = creds.get_username()
+        dc_server = self.get_samdb().host_dns_name()
+
+        # Use the gMSA’s credentials to create a netlogon connection. This call,
+        # which internally performs a ServerAuthenticate3, is more than just
+        # setup: it is the centrepiece of the test.
+        c = netlogon.netlogon(
+            f"ncacn_ip_tcp:{dc_server}[schannel,seal]", self.get_lp(), creds
+        )
+        credential = netlogon.netr_Credential()
+        credential.data = list(b"abcdefgh")
+        server_credential = c.netr_ServerReqChallenge(None, username, credential)
+        with self.assertRaises(NTSTATUSError) as err:
+            # Try performing a ServerAuthenticate3 with our gMSA account. The
+            # procedure for calculating a correct challenge is too complicated
+            # to try to reimplement in Python, so we won’t even try. But the
+            # fact that we get an ACCESS_DENIED error, rather than something
+            # like NO_TRUST_SAM_ACCOUNT, shows that gMSAs are not prevented from
+            # using ServerAuthenticate3 to authenticate.
+            c.netr_ServerAuthenticate3(
+                dc_server,
+                username,
+                misc.SEC_CHAN_WKSTA,
+                username,
+                server_credential,
+                netlogon.NETLOGON_NEG_STRONG_KEYS | netlogon.NETLOGON_NEG_SUPPORTS_AES,
+            )
+
+        self.assertEqual(ntstatus.NT_STATUS_ACCESS_DENIED, err.exception.args[0])
+
+    def test_gmsa_cannot_be_locked_out_with_gensec_ntlmssp(self):
+        def try_bad_creds(creds: Credentials, samdb: SamDB) -> None:
+            self.gensec_ntlmssp_logon(creds, samdb, expect_success=False)
+
+        self._check_gmsa_cannot_be_locked_out(
+            try_bad_creds_fn=try_bad_creds, kerberos_enabled=False, local=True
+        )
+
+    def test_gmsa_cannot_be_locked_out_with_ldap_authentication(self):
+        def try_bad_creds(creds: Credentials, _samdb: SamDB) -> None:
+            with self.assertRaises(ldb.LdbError) as err:
+                SamDB(url=f"ldap://{self.dc_host}", credentials=creds, lp=self.get_lp())
+
+            num, estr = err.exception.args
+
+            self.assertEqual(ldb.ERR_INVALID_CREDENTIALS, num)
+            self.assertIn("NT_STATUS_LOGON_FAILURE", estr)
+
+        self._check_gmsa_cannot_be_locked_out(try_bad_creds_fn=try_bad_creds)
+
+    def _check_gmsa_cannot_be_locked_out(
+        self,
+        *,
+        try_bad_creds_fn: Callable[[Credentials, SamDB], None],
+        kerberos_enabled: bool = True,
+        local: bool = False,
+    ):
+        samdb = self.get_local_samdb() if local else self.get_samdb()
+        base_dn = ldb.Dn(samdb, samdb.domain_dn())
+
+        def modify_attr(attr, value):
+            if value is None:
+                value = []
+                flag = ldb.FLAG_MOD_DELETE
+            else:
+                value = str(value)
+                flag = ldb.FLAG_MOD_REPLACE
+
+                msg = ldb.Message(base_dn)
+                msg[attr] = ldb.MessageElement(value, flag, attr)
+                samdb.modify(msg)
+
+        res = samdb.search(base_dn, scope=ldb.SCOPE_BASE, attrs=["lockoutThreshold"])
+        self.assertEqual(1, len(res))
+
+        # Reset the lockout threshold as it was before.
+        lockout_threshold = res[0].get("lockoutThreshold", idx=0)
+        self.addCleanup(modify_attr, "lockoutThreshold", lockout_threshold)
+
+        # Set the new lockout threshold.
+        lockout_threshold = 3
+        modify_attr("lockoutThreshold", lockout_threshold)
+
+        creds = self.gmsa_account(kerberos_enabled=kerberos_enabled)
+        dn = ldb.Dn(samdb, str(creds.get_dn()))
+
+        # Truncate the password to ensure that it is invalid.
+        creds.set_password(creds.get_password()[:-1])
+
+        prev_bad_pwd_time = 0
+
+        for i in range(lockout_threshold + 1):
+            try_bad_creds_fn(creds, samdb)
+
+            # Ensure the account is not locked out.
+
+            res = samdb.search(
+                dn,
+                scope=ldb.SCOPE_BASE,
+                attrs=[
+                    "badPasswordTime",
+                    "badPwdCount",
+                    "lockoutTime",
+                    "msDS-User-Account-Control-Computed",
+                ],
+            )
+            self.assertEqual(1, len(res))
+
+            # Despite the bad password count having increased, …
+            bad_pwd_count = int(res[0].get("badPwdCount", idx=0))
+            self.assertEqual(i + 1, bad_pwd_count)
+
+            # …the account should not be locked out.
+            uac = int(res[0].get("msDS-User-Account-Control-Computed", idx=0))
+            self.assertFalse(uac & dsdb.UF_LOCKOUT)
+
+            # The bad password time should have increased.
+            bad_pwd_time = int(res[0].get("badPasswordTime", idx=0))
+            self.assertGreater(bad_pwd_time, prev_bad_pwd_time)
+
+            prev_bad_pwd_time = bad_pwd_time
+
+            # The lockout time should not be set.
+            lockout_time = res[0].get("lockoutTime", idx=0)
+            self.assertIsNone(lockout_time)
+
+    def _server_set_password(self, creds: Credentials, password: str) -> None:
+        dc_server = self.get_samdb().host_dns_name()
+        lp = self.get_lp()
+
+        conn = netlogon.netlogon(f"ncacn_ip_tcp:{dc_server}[schannel,seal]", lp, creds)
+
+        auth = creds.new_client_authenticator()
+        authenticator = netlogon.netr_Authenticator()
+        authenticator.cred.data = list(auth["credential"])
+        authenticator.timestamp = auth["timestamp"]
+
+        DATA_LEN = 512
+
+        encoded = password.encode("utf-16-le")
+        pwd_len = len(encoded)
+        filler = os.urandom(DATA_LEN - pwd_len)
+
+        pwd = netlogon.netr_CryptPassword()
+        pwd.length = pwd_len
+        pwd.data = list(filler + encoded)
+        creds.encrypt_netr_crypt_password(pwd)
+
+        conn.netr_ServerPasswordSet2(
+            dc_server,
+            creds.get_username(),
+            misc.SEC_CHAN_WKSTA,
+            creds.get_workstation(),
+            authenticator,
+            pwd,
+        )
+
+    def test_gmsa_can_authenticate_with_previous_password_and_ntlm(self):
+        creds = self.gmsa_account(kerberos_enabled=False)
+        dc_server = self.get_samdb().host_dns_name()
+        lp = self.get_lp()
+
+        # We can use NTLM to authenticate.
+        srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
+
+        PWD_LEN = 32
+
+        # Change the password using ServerPasswordSet2. Windows does not prevent
+        # this, despite the whole point of Group Managed Service Accounts being
+        # that the password is managed by AD, and despite changing passwords
+        # outside of that system not making much sense.
+        password_1 = generate_random_password(PWD_LEN, PWD_LEN)
+        self._server_set_password(creds, password_1)
+
+        # As less than five minutes have passed, we can still authenticate with
+        # our original password.
+        srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
+
+        # Change the password again.
+        password_2 = generate_random_password(PWD_LEN, PWD_LEN)
+        self._server_set_password(creds, password_2)
+
+        # This time, NTLM authentication fails!
+        with self.assertRaises(NTSTATUSError) as err:
+            srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
+
+        self.assertEqual(ntstatus.NT_STATUS_LOGON_FAILURE, err.exception.args[0])
+
+        # But we can use the previous password to authenticate.
+        creds.set_password(password_1)
+        srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
+
+        # And we can authenticate using the current password.
+        creds.set_password(password_2)
+        srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@
 #include "source3/lib/substitute.h"
 #include "source3/lib/adouble.h"
 #include "source3/smbd/dir.h"
+#include "source3/modules/util_reparse.h"
 
 #define DIR_ENTRY_SAFETY_MARGIN 4096
 
@@ -222,7 +223,7 @@ NTSTATUS get_ea_value_fsp(TALLOC_CTX *mem_ctx,
 		return map_nt_error_from_unix(errno);
 	}
 
-	DEBUG(10,("get_ea_value: EA %s is of length %u\n", ea_name, (unsigned int)sizeret));
+	DBG_DEBUG("EA %s is of length %zd\n", ea_name, sizeret);
 	dump_data(10, (uint8_t *)val, sizeret);
 
 	pea->flags = 0;
@@ -760,10 +761,13 @@ NTSTATUS set_ea(connection_struct *conn, files_struct *fsp,
 
 		canonicalize_ea_name(fsp, unix_ea_name);
 
-		DEBUG(10,("set_ea: ea_name %s ealen = %u\n", unix_ea_name, (unsigned int)ea_list->ea.value.length));
+		DBG_DEBUG("ea_name %s ealen = %zu\n",
+			  unix_ea_name,
+			  ea_list->ea.value.length);
 
 		if (samba_private_attr_name(unix_ea_name)) {
-			DEBUG(10,("set_ea: ea name %s is a private Samba name.\n", unix_ea_name));
+			DBG_DEBUG("ea name %s is a private Samba name.\n",
+				  unix_ea_name);
 			return NT_STATUS_ACCESS_DENIED;
 		}
 
@@ -776,15 +780,17 @@ NTSTATUS set_ea(connection_struct *conn, files_struct *fsp,
 #ifdef ENOATTR
 			/* Removing a non existent attribute always succeeds. */
 			if (ret == -1 && errno == ENOATTR) {
-				DEBUG(10,("set_ea: deleting ea name %s didn't exist - succeeding by default.\n",
-						unix_ea_name));
+				DBG_DEBUG("deleting ea name %s didn't exist - "
+					  "succeeding by default.\n",
+					  unix_ea_name);
 				ret = 0;
 			}
 #endif
 		} else {
-			DEBUG(10,("set_ea: setting ea name %s on file "
+			DBG_DEBUG("setting ea name %s on file "
 				  "%s by file descriptor.\n",
-				  unix_ea_name, fsp_str_dbg(fsp)));
+				  unix_ea_name,
+				  fsp_str_dbg(fsp));
 			ret = SMB_VFS_FSETXATTR(fsp, unix_ea_name,
 						ea_list->ea.value.data, ea_list->ea.value.length, 0);
 		}
@@ -3676,14 +3682,27 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 			*fixed_portion = 56;
 			break;
 
-		case SMB_FILE_ATTRIBUTE_TAG_INFORMATION:
-			DBG_DEBUG(" SMB_FILE_ATTRIBUTE_TAG_INFORMATION\n");
-			SIVAL(pdata,0,mode);
-			SIVAL(pdata,4,0);
+		case SMB_FILE_ATTRIBUTE_TAG_INFORMATION: {
+			uint32_t tag = 0;
+			uint8_t *data = NULL;
+			uint32_t datalen;
+
+			DBG_DEBUG("SMB_FILE_ATTRIBUTE_TAG_INFORMATION\n");
+
+			(void)fsctl_get_reparse_point(fsp,
+						      talloc_tos(),
+						      &tag,
+						      &data,
+						      UINT32_MAX,
+						      &datalen);
+			TALLOC_FREE(data);
+
+			SIVAL(pdata, 0, mode);
+			SIVAL(pdata, 4, tag);
 			data_size = 8;
 			*fixed_portion = 8;
 			break;
-
+		}
 		/*
 		 * SMB2 UNIX Extensions.
 		 */
@@ -4354,8 +4373,7 @@ static NTSTATUS smb2_file_rename_information(connection_struct *conn,
 		return status;
 	}
 
-	DEBUG(10,("smb2_file_rename_information: got name |%s|\n",
-				newname));
+	DBG_DEBUG("got name |%s|\n", newname);
 
 	if (newname[0] == ':') {
 		/* Create an smb_fname to call rename_internals_fsp() with. */
@@ -4395,10 +4413,11 @@ static NTSTATUS smb2_file_rename_information(connection_struct *conn,
 		goto out;
 	}
 
-	DEBUG(10,("smb2_file_rename_information: "
-		  "SMB_FILE_RENAME_INFORMATION (%s) %s -> %s\n",
-		  fsp_fnum_dbg(fsp), fsp_str_dbg(fsp),
-		  smb_fname_str_dbg(smb_fname_dst)));
+	DBG_DEBUG("SMB_FILE_RENAME_INFORMATION (%s) %s -> %s\n",
+		  fsp_fnum_dbg(fsp),
+		  fsp_str_dbg(fsp),
+		  smb_fname_str_dbg(smb_fname_dst));
+
 	status = rename_internals_fsp(conn,
 				fsp,
 				smb_fname_dst,

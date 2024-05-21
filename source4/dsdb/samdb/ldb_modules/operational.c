@@ -700,15 +700,10 @@ static int construct_msds_keyversionnumber(struct ldb_module *module,
 
 }
 
-#define _UF_TRUST_ACCOUNTS ( \
-	UF_WORKSTATION_TRUST_ACCOUNT | \
-	UF_SERVER_TRUST_ACCOUNT | \
-	UF_INTERDOMAIN_TRUST_ACCOUNT \
-)
 #define _UF_NO_EXPIRY_ACCOUNTS ( \
 	UF_SMARTCARD_REQUIRED | \
 	UF_DONT_EXPIRE_PASSWD | \
-	_UF_TRUST_ACCOUNTS \
+	UF_TRUST_ACCOUNT_MASK \
 )
 
 
@@ -884,10 +879,7 @@ static int construct_msds_user_account_control_computed(struct ldb_module *modul
 	/* Test account expire time */
 	unix_to_nt_time(&now, time(NULL));
 
-	userAccountControl = ldb_msg_find_attr_as_uint(msg,
-						       "userAccountControl",
-						       0);
-	if (!(userAccountControl & _UF_TRUST_ACCOUNTS)) {
+	if (!dsdb_account_is_trust(msg)) {
 
 		int64_t lockoutTime = ldb_msg_find_attr_as_int64(msg, "lockoutTime", 0);
 		if (lockoutTime != 0) {
@@ -906,6 +898,9 @@ static int construct_msds_user_account_control_computed(struct ldb_module *modul
 		}
 	}
 
+	userAccountControl = ldb_msg_find_attr_as_uint(msg,
+						       "userAccountControl",
+						       0);
 	if (!(userAccountControl & _UF_NO_EXPIRY_ACCOUNTS)) {
 		NTTIME must_change_time
 			= get_msds_user_password_expiry_time_computed(module,

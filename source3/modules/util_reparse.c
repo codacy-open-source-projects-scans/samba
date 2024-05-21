@@ -100,6 +100,7 @@ NTSTATUS fsctl_get_reparse_point(struct files_struct *fsp,
 	}
 
 	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("failed: %s\n", nt_errstr(status));
 		return status;
 	}
 
@@ -121,6 +122,23 @@ NTSTATUS fsctl_get_reparse_point(struct files_struct *fsp,
 	return NT_STATUS_OK;
 }
 
+NTSTATUS fsctl_get_reparse_tag(struct files_struct *fsp,
+			       uint32_t *_reparse_tag)
+{
+	uint8_t *out_data = NULL;
+	uint32_t out_len;
+	NTSTATUS status;
+
+	status = fsctl_get_reparse_point(fsp,
+					 talloc_tos(),
+					 _reparse_tag,
+					 &out_data,
+					 UINT32_MAX,
+					 &out_len);
+	TALLOC_FREE(out_data);
+	return status;
+}
+
 NTSTATUS fsctl_set_reparse_point(struct files_struct *fsp,
 				 TALLOC_CTX *mem_ctx,
 				 const uint8_t *in_data,
@@ -130,8 +148,6 @@ NTSTATUS fsctl_set_reparse_point(struct files_struct *fsp,
 	const uint8_t *reparse_data = NULL;
 	size_t reparse_data_length;
 	uint32_t existing_tag;
-	uint8_t *existing_data = NULL;
-	uint32_t existing_len;
 	NTSTATUS status;
 	uint32_t dos_mode;
 	int ret;
@@ -158,23 +174,13 @@ NTSTATUS fsctl_set_reparse_point(struct files_struct *fsp,
 		  reparse_tag,
 		  reparse_data_length);
 
-	status = fsctl_get_reparse_point(fsp,
-					 talloc_tos(),
-					 &existing_tag,
-					 &existing_data,
-					 UINT32_MAX,
-					 &existing_len);
-	if (NT_STATUS_IS_OK(status)) {
-
-		TALLOC_FREE(existing_data);
-
-		if (existing_tag != reparse_tag) {
-			DBG_DEBUG("Can't overwrite tag %" PRIX32
-				  " with tag %" PRIX32 "\n",
-				  existing_tag,
-				  reparse_tag);
-			return NT_STATUS_IO_REPARSE_TAG_MISMATCH;
-		}
+	status = fsctl_get_reparse_tag(fsp, &existing_tag);
+	if (NT_STATUS_IS_OK(status) && (existing_tag != reparse_tag)) {
+		DBG_DEBUG("Can't overwrite tag %" PRIX32 " with tag %" PRIX32
+			  "\n",
+			  existing_tag,
+			  reparse_tag);
+		return NT_STATUS_IO_REPARSE_TAG_MISMATCH;
 	}
 
 	/* Store the data */
@@ -214,8 +220,6 @@ NTSTATUS fsctl_del_reparse_point(struct files_struct *fsp,
 				 uint32_t in_len)
 {
 	uint32_t existing_tag;
-	uint8_t *existing_data = NULL;
-	uint32_t existing_len;
 	uint32_t reparse_tag;
 	const uint8_t *reparse_data = NULL;
 	size_t reparse_data_length;
@@ -223,16 +227,10 @@ NTSTATUS fsctl_del_reparse_point(struct files_struct *fsp,
 	uint32_t dos_mode;
 	int ret;
 
-	status = fsctl_get_reparse_point(fsp,
-					 talloc_tos(),
-					 &existing_tag,
-					 &existing_data,
-					 UINT32_MAX,
-					 &existing_len);
+	status = fsctl_get_reparse_tag(fsp, &existing_tag);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
-	TALLOC_FREE(existing_data);
 
 	status = reparse_buffer_check(in_data,
 				      in_len,

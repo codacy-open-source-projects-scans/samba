@@ -6541,7 +6541,9 @@ NTSTATUS dsdb_update_bad_pwd_count(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	if (badPwdCount >= lockoutThreshold) {
+	if (dsdb_account_is_trust(user_msg)) {
+		/* Trust accounts cannot be locked out. */
+	} else if (badPwdCount >= lockoutThreshold) {
 		ret = samdb_msg_add_int64(sam_ctx, mod_msg, mod_msg, "lockoutTime", now);
 		if (ret != LDB_SUCCESS) {
 			TALLOC_FREE(mod_msg);
@@ -6576,7 +6578,7 @@ int dsdb_user_obj_set_defaults(struct ldb_context *ldb,
 {
 	size_t i;
 	int ret;
-	const struct attribute_values {
+	static const struct attribute_values {
 		const char *name;
 		const char *value;
 		const char *add_value;
@@ -7011,4 +7013,14 @@ int dsdb_is_protected_user(struct ldb_context *ldb,
 	}
 
 	return 0;
+}
+
+bool dsdb_account_is_trust(const struct ldb_message *msg)
+{
+	uint32_t userAccountControl;
+
+	userAccountControl = ldb_msg_find_attr_as_uint(msg,
+						       "userAccountControl",
+						       0);
+	return userAccountControl & UF_TRUST_ACCOUNT_MASK;
 }

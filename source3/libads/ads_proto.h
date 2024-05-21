@@ -32,6 +32,8 @@
 #ifndef _LIBADS_ADS_PROTO_H_
 #define _LIBADS_ADS_PROTO_H_
 
+struct cli_credentials;
+
 enum ads_sasl_state_e {
 	ADS_SASL_PLAIN = 0,
 	ADS_SASL_SIGN,
@@ -76,14 +78,14 @@ bool ads_setspn_delete(ADS_STRUCT *ads, const char *machine_name,
 
 /* The following definitions come from libads/krb5_errs.c  */
 
-/* The following definitions come from libads/kerberos_util.c  */
-
-int ads_kinit_password(ADS_STRUCT *ads);
-
 /* The following definitions come from libads/ldap.c  */
 
 bool ads_sitename_match(ADS_STRUCT *ads);
 bool ads_closest_dc(ADS_STRUCT *ads);
+ADS_STATUS ads_connect_cldap_only(ADS_STRUCT *ads);
+ADS_STATUS ads_connect_creds(ADS_STRUCT *ads, struct cli_credentials *creds);
+ADS_STATUS ads_connect_simple_anon(ADS_STRUCT *ads);
+ADS_STATUS ads_connect_machine(ADS_STRUCT *ads);
 ADS_STATUS ads_connect(ADS_STRUCT *ads);
 ADS_STATUS ads_connect_user_creds(ADS_STRUCT *ads);
 void ads_zero_ldap(ADS_STRUCT *ads);
@@ -201,7 +203,12 @@ ADS_STATUS ads_ranged_search(ADS_STRUCT *ads,
 
 /* The following definitions come from libads/sasl.c  */
 
-ADS_STATUS ads_sasl_bind(ADS_STRUCT *ads);
+NTSTATUS ads_simple_creds(TALLOC_CTX *mem_ctx,
+			  const char *account_domain,
+			  const char *account_name,
+			  const char *password,
+			  struct cli_credentials **_creds);
+ADS_STATUS ads_sasl_bind(ADS_STRUCT *ads, struct cli_credentials *creds);
 
 /* The following definitions come from libads/sasl_wrapping.c  */
 

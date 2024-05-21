@@ -1214,7 +1214,12 @@ krb5_error_code smb_krb5_renew_ticket(const char *ccache_string,
 	}
 
 	if (!ccache_string) {
-		ccache_string = krb5_cc_default_name(context);
+		/*
+		 * A renew has low risk in mixing different
+		 * ccaches, so we allow callers to pass
+		 * NULL for the default cache.
+		 */
+		ccache_string = smb_force_krb5_cc_default_name(context);
 	}
 
 	if (!ccache_string) {
@@ -3985,6 +3990,14 @@ int ads_krb5_cli_get_ticket(TALLOC_CTX *mem_ctx,
 		ENCTYPE_NULL};
 	bool ok;
 
+	if (ccname == NULL) {
+		DBG_ERR("No explicit ccache given for service [%s], "
+			"impersonating [%s]\n",
+			principal, impersonate_princ_s);
+		retval = EINVAL;
+		goto failed;
+	}
+
 	DBG_DEBUG("Getting ticket for service [%s] using creds from [%s] "
 		  "and impersonating [%s]\n",
 		  principal, ccname, impersonate_princ_s);
@@ -4000,12 +4013,10 @@ int ads_krb5_cli_get_ticket(TALLOC_CTX *mem_ctx,
 		krb5_set_real_time(context, time(NULL) + time_offset, 0);
 	}
 
-	retval = krb5_cc_resolve(context,
-				 ccname ? ccname : krb5_cc_default_name(context),
-				 &ccdef);
+	retval = krb5_cc_resolve(context, ccname, &ccdef);
 	if (retval != 0) {
-		DBG_WARNING("krb5_cc_default failed (%s)\n",
-			    error_message(retval));
+		DBG_WARNING("krb5_cc_resolve(%s) failed (%s)\n",
+			    ccname, error_message(retval));
 		goto failed;
 	}
 
@@ -4106,6 +4117,28 @@ krb5_error_code smb_krb5_init_context_common(krb5_context *_krb5_context)
 
 	*_krb5_context = krb5_ctx;
 	return 0;
+}
+
+/*
+ * This should only be used in code that
+ * really wants to touch the global default ccache!
+ */
+krb5_error_code smb_force_krb5_cc_default(krb5_context ctx, krb5_ccache *id)
+{
+#undef krb5_cc_default
+	return krb5_cc_default(ctx, id);
+#define krb5_cc_default __ERROR__XX__NEVER_USE_krb5_cc_default__;
+}
+
+/*
+ * This should only be used in code that
+ * really wants to touch the global default ccache!
+ */
+const char *smb_force_krb5_cc_default_name(krb5_context ctx)
+{
+#undef krb5_cc_default_name
+	return krb5_cc_default_name(ctx);
+#define krb5_cc_default_name __ERROR__XX__NEVER_USE_krb5_cc_default_name__;
 }
 
 #else /* HAVE_KRB5 */

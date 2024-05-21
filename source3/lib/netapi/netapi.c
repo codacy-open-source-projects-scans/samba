@@ -22,7 +22,6 @@
 #include "lib/netapi/netapi.h"
 #include "lib/netapi/netapi_private.h"
 #include "secrets.h"
-#include "krb5_env.h"
 #include "source3/param/loadparm.h"
 #include "lib/param/param.h"
 #include "auth/gensec/gensec.h"
@@ -368,6 +367,29 @@ NET_API_STATUS libnetapi_set_creds(struct libnetapi_ctx *ctx,
 	}
 
 	ctx->creds = creds;
+
+	return NET_API_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Get the credentials of the libnet context
+ *
+ * @param[in]  ctx      The netapi context
+ *
+ * @param[in]  creds    A pointer to hold the creds.
+ *
+ * @return 0 on success, an werror code otherwise.
+ */
+NET_API_STATUS libnetapi_get_creds(struct libnetapi_ctx *ctx,
+				   struct cli_credentials **creds)
+{
+	if (ctx == NULL) {
+		return W_ERROR_V(WERR_INVALID_PARAMETER);
+	}
+
+	if (creds != NULL) {
+		*creds = ctx->creds;
+	}
 
 	return NET_API_STATUS_SUCCESS;
 }

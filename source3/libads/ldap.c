@@ -34,6 +34,8 @@
 #include "lib/param/loadparm.h"
 #include "libsmb/namequery.h"
 #include "../librpc/gen_ndr/ndr_ads.h"
+#include "auth/credentials/credentials.h"
+#include "passdb.h"
 
 #ifdef HAVE_LDAP
 
@@ -730,7 +732,7 @@ static NTSTATUS ads_find_dc(ADS_STRUCT *ads)
 	 * In case of LDAP we use get_dc_name() as that
 	 * creates the custom krb5.conf file
 	 */
-	if (!(ads->auth.flags & ADS_AUTH_NO_BIND)) {
+	if (ads->auth.flags & ADS_AUTH_GENERATE_KRB5_CONFIG) {
 		fstring srv_name;
 		struct sockaddr_storage ip_out;
 
@@ -810,12 +812,14 @@ static NTSTATUS ads_find_dc(ADS_STRUCT *ads)
 		  c_realm, c_domain, nt_errstr(status)));
 	return status;
 }
+
 /**
  * Connect to the LDAP server
  * @param ads Pointer to an existing ADS_STRUCT
  * @return status of connection
  **/
-ADS_STATUS ads_connect(ADS_STRUCT *ads)
+static ADS_STATUS ads_connect_internal(ADS_STRUCT *ads,
+				       struct cli_credentials *creds)
 {
 	int version = LDAP_VERSION3;
 	ADS_STATUS status;
@@ -826,6 +830,22 @@ ADS_STATUS ads_connect(ADS_STRUCT *ads)
 	bool start_tls = false;
 
 	zero_sockaddr(&existing_ss);
+
+	if (!(ads->auth.flags & ADS_AUTH_NO_BIND)) {
+		SMB_ASSERT(creds != NULL);
+	}
+
+	if (ads->auth.flags & ADS_AUTH_ANON_BIND) {
+		/*
+		 * Simple anonyous binds are only
+		 * allowed for anonymous credentials
+		 */
+		SMB_ASSERT(cli_credentials_is_anonymous(creds));
+	}
+
+	if (!(ads->auth.flags & (ADS_AUTH_NO_BIND|ADS_AUTH_ANON_BIND))) {
+		ads->auth.flags |= ADS_AUTH_GENERATE_KRB5_CONFIG;
+	}
 
 	/*
 	 * ads_connect can be passed in a reused ADS_STRUCT
@@ -932,27 +952,6 @@ got_connection:
 
 	print_sockaddr(addr, sizeof(addr), &ads->ldap.ss);
 	DEBUG(3,("Successfully contacted LDAP server %s\n", addr));
-
-	if (!ads->auth.user_name) {
-		/* Must use the userPrincipalName value here or sAMAccountName
-		   and not servicePrincipalName; found by Guenther Deschner */
-		ads->auth.user_name = talloc_asprintf(ads,
-						      "%s$",
-						      lp_netbios_name());
-		if (ads->auth.user_name == NULL) {
-			DBG_ERR("talloc_asprintf failed\n");
-			status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
-			goto out;
-		}
-	}
-
-	if (ads->auth.realm == NULL) {
-		ads->auth.realm = talloc_strdup(ads, ads->config.realm);
-		if (ads->auth.realm == NULL) {
-			status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
-			goto out;
-		}
-	}
 
 	if (!ads->auth.kdc_server) {
 		print_sockaddr(addr, sizeof(addr), &ads->ldap.ss);
@@ -1097,7 +1096,7 @@ got_connection:
 		goto out;
 	}
 
-	status = ads_sasl_bind(ads);
+	status = ads_sasl_bind(ads, creds);
 
  out:
 	if (DEBUGLEVEL >= 11) {
@@ -1112,18 +1111,98 @@ got_connection:
 }
 
 /**
- * Connect to the LDAP server using given credentials
+ * Connect to the LDAP server using without a bind
+ * and without a tcp connection at all
+ *
  * @param ads Pointer to an existing ADS_STRUCT
  * @return status of connection
  **/
-ADS_STATUS ads_connect_user_creds(ADS_STRUCT *ads)
+ADS_STATUS ads_connect_cldap_only(ADS_STRUCT *ads)
 {
-	ads->auth.flags |= ADS_AUTH_USER_CREDS;
-
-	return ads_connect(ads);
+	ads->auth.flags |= ADS_AUTH_NO_BIND;
+	return ads_connect_internal(ads, NULL);
 }
 
 /**
+ * Connect to the LDAP server
+ * @param ads Pointer to an existing ADS_STRUCT
+ * @return status of connection
+ **/
+ADS_STATUS ads_connect_creds(ADS_STRUCT *ads, struct cli_credentials *creds)
+{
+	SMB_ASSERT(creds != NULL);
+
+	/*
+	 * We allow upgrades from
+	 * ADS_AUTH_NO_BIND if credentials
+	 * are specified
+	 */
+	ads->auth.flags &= ~ADS_AUTH_NO_BIND;
+
+	/*
+	 * We allow upgrades from ADS_AUTH_ANON_BIND,
+	 * as we don't want to use simple binds with
+	 * non-anon credentials
+	 */
+	if (!cli_credentials_is_anonymous(creds)) {
+		ads->auth.flags &= ~ADS_AUTH_ANON_BIND;
+	}
+
+	return ads_connect_internal(ads, creds);
+}
+
+/**
+ * Connect to the LDAP server using anonymous credentials
+ * using a simple bind without username/password
+ *
+ * @param ads Pointer to an existing ADS_STRUCT
+ * @return status of connection
+ **/
+ADS_STATUS ads_connect_simple_anon(ADS_STRUCT *ads)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct cli_credentials *creds = NULL;
+	ADS_STATUS status;
+
+	creds = cli_credentials_init_anon(frame);
+	if (creds == NULL) {
+		TALLOC_FREE(frame);
+		return ADS_ERROR_SYSTEM(errno);
+	}
+
+	ads->auth.flags |= ADS_AUTH_ANON_BIND;
+	status = ads_connect_creds(ads, creds);
+	TALLOC_FREE(frame);
+	return status;
+}
+
+/**
+ * Connect to the LDAP server using the machine account
+ * @param ads Pointer to an existing ADS_STRUCT
+ * @return status of connection
+ **/
+ADS_STATUS ads_connect_machine(ADS_STRUCT *ads)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct cli_credentials *creds = NULL;
+	ADS_STATUS status;
+	NTSTATUS ntstatus;
+
+	ntstatus = pdb_get_trust_credentials(ads->server.workgroup,
+					     ads->server.realm,
+					     frame,
+					     &creds);
+	if (!NT_STATUS_IS_OK(ntstatus)) {
+		TALLOC_FREE(frame);
+		return ADS_ERROR_NT(ntstatus);
+	}
+
+	status = ads_connect_creds(ads, creds);
+	TALLOC_FREE(frame);
+	return status;
+}
+
+/*
  * Zero out the internal ads->ldap struct and initialize the address to zero IP.
  * @param ads Pointer to an existing ADS_STRUCT
  *
@@ -1944,7 +2023,7 @@ static ADS_STATUS ads_mod_ber(TALLOC_CTX *ctx, ADS_MODLIST *mods,
 	if (!val)
 		return ads_modlist_add(ctx, mods, LDAP_MOD_DELETE, name, NULL);
 	return ads_modlist_add(ctx, mods, LDAP_MOD_REPLACE|LDAP_MOD_BVALUES,
-			       name, (const void **) values);
+			       name, (const void *) values);
 }
 
 static void ads_print_error(int ret, LDAP *ld)
@@ -3644,8 +3723,7 @@ ADS_STATUS ads_current_time(ADS_STRUCT *ads)
 		 */
 		ads_s->config.flags = 0;
 
-		ads_s->auth.flags = ADS_AUTH_ANON_BIND;
-		status = ads_connect( ads_s );
+		status = ads_connect_simple_anon(ads_s);
 		if ( !ADS_ERR_OK(status))
 			goto done;
 	}
@@ -3667,9 +3745,15 @@ ADS_STATUS ads_current_time(ADS_STRUCT *ads)
 	ads->config.current_time = ads_parse_time(timestr);
 
 	if (ads->config.current_time != 0) {
-		ads->auth.time_offset = ads->config.current_time - time(NULL);
-		DEBUG(4,("KDC time offset is %d seconds\n", ads->auth.time_offset));
+		ads->config.time_offset = ads->config.current_time - time(NULL);
+		DBG_INFO("server time offset is %d seconds\n",
+			 ads->config.time_offset);
+	} else {
+		ads->config.time_offset = 0;
 	}
+
+	DBG_INFO("server time offset is %d seconds\n",
+		 ads->config.time_offset);
 
 	ads_msgfree(ads, res);
 
@@ -3728,8 +3812,7 @@ ADS_STATUS ads_domain_func_level(ADS_STRUCT *ads, uint32_t *val)
 		 */
 		ads_s->config.flags = 0;
 
-		ads_s->auth.flags = ADS_AUTH_ANON_BIND;
-		status = ads_connect( ads_s );
+		status = ads_connect_simple_anon(ads_s);
 		if ( !ADS_ERR_OK(status))
 			goto done;
 	}
