@@ -224,26 +224,6 @@ enum ldb_debug_level {LDB_DEBUG_FATAL, LDB_DEBUG_ERROR,
 #define LDB_DEBUG_ALWAYS_LOG  LDB_DEBUG_FATAL
 
 /**
-  the user can optionally supply a debug function. The function
-  is based on the vfprintf() style of interface, but with the addition
-  of a severity level
-*/
-struct ldb_debug_ops {
-	void (*debug)(void *context, enum ldb_debug_level level,
-		      const char *fmt, va_list ap) PRINTF_ATTRIBUTE(3,0);
-	void *context;
-};
-
-/**
-  The user can optionally supply a custom utf8 functions,
-  to handle comparisons and casefolding.
-*/
-struct ldb_utf8_fns {
-	void *context;
-	char *(*casefold)(void *context, TALLOC_CTX *mem_ctx, const char *s, size_t n);
-};
-
-/**
    Flag value for database connection mode.
 
    If LDB_FLG_RDONLY is used in ldb_connect, then the database will be
@@ -2204,13 +2184,37 @@ int ldb_set_debug(struct ldb_context *ldb,
 		  void *context);
 
 /**
-  this allows the user to set custom utf8 function for error reporting. make
-  sure it is able to handle ASCII first, so it prevents issues with dotted
-  languages.
-*/
+ * This allows the user to set custom utf8 functions.
+ *
+ * Be aware that casefold in some locales will break ldb expectations. In
+ * particular, if 'i' is uppercased to 'İ' (a capital I with a dot, used in
+ * some languages), the string '<guid=' will not equal '<GUID='.
+ *
+ * The default functions casefold ASCII only, and those used by Samba use a
+ * version of the NTFS UCS-2 upcase table which is dotted-i safe.
+ *
+ * The context argument will be passed to the casefold() and casecmp()
+ * functions as the first argument. It is unused in the default and Samba
+ * implementations, but could for example be used to hold a libICU context.
+ *
+ * The second argument for the casefold function is a TALLOC context.
+ */
+void ldb_set_utf8_functions(struct ldb_context *ldb,
+			    void *context,
+			    char *(*casefold)(void *, void *, const char *, size_t n),
+			    int (*casecmp)(void *ctx, const struct ldb_val *v1,
+					   const struct ldb_val *v2));
+
+/**
+ * This legacy function is for setting a custom utf8 casefold function. It
+ * cannot set a comparison function, which makes it very difficult for a
+ * comparison to be both efficient and correct.
+ *
+ * Use ldb_set_utf8_functions() instead!
+ */
 void ldb_set_utf8_fns(struct ldb_context *ldb,
 		      void *context,
-		      char *(*casefold)(void *, void *, const char *, size_t n));
+		      char *(*casefold)(void *, void *, const char *, size_t n)) _DEPRECATED_;
 
 /**
    this sets up debug to print messages on stderr

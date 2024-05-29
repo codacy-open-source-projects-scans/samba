@@ -458,7 +458,8 @@ static NTSTATUS get_ea_list_from_fsp(TALLOC_CTX *mem_ctx,
 			 */
 			TALLOC_FREE(listp);
 			continue;
-		} else if (listp->ea.value.length > 65536) {
+		}
+		if (listp->ea.value.length > 65536) {
 			/*
 			 * SMB clients may report error with file
 			 * if large EA is presented to them.
@@ -476,9 +477,10 @@ static NTSTATUS get_ea_list_from_fsp(TALLOC_CTX *mem_ctx,
 		*pea_total_len +=
 			4 + strlen(dos_ea_name) + 1 + listp->ea.value.length;
 
-		DEBUG(10,("get_ea_list_from_file: total_len = %u, %s, val len "
-			  "= %u\n", (unsigned int)*pea_total_len, dos_ea_name,
-			  (unsigned int)listp->ea.value.length));
+		DBG_DEBUG("total_len = %zu, %s, val len = %zu\n",
+			  *pea_total_len,
+			  dos_ea_name,
+			  listp->ea.value.length);
 
 		DLIST_ADD_END(ea_list_head, listp);
 
@@ -489,8 +491,7 @@ static NTSTATUS get_ea_list_from_fsp(TALLOC_CTX *mem_ctx,
 		*pea_total_len += 4;
 	}
 
-	DEBUG(10, ("get_ea_list_from_file: total_len = %u\n",
-		   (unsigned int)*pea_total_len));
+	DBG_DEBUG("total_len = %zu\n", *pea_total_len);
 
 	*ea_list = ea_list_head;
 	return NT_STATUS_OK;
@@ -1165,8 +1166,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 	}
 	space_remaining -= pad;
 
-	DEBUG(10,("smbd_marshall_dir_entry: space_remaining = %d\n",
-		space_remaining ));
+	DBG_DEBUG("space_remaining = %d\n", space_remaining);
 
 	pdata += pad;
 	p = pdata;
@@ -1177,7 +1177,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 
 	switch (info_level) {
 	case SMB_FIND_INFO_STANDARD:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_INFO_STANDARD\n"));
+		DBG_DEBUG("SMB_FIND_INFO_STANDARD\n");
 		if(requires_resume_key) {
 			SIVAL(p,0,reskey);
 			p += 4;
@@ -1216,7 +1216,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_EA_SIZE:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_EA_SIZE\n"));
+		DBG_DEBUG("SMB_FIND_EA_SIZE\n");
 		if (requires_resume_key) {
 			SIVAL(p,0,reskey);
 			p += 4;
@@ -1262,7 +1262,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		struct ea_list *file_list = NULL;
 		size_t ea_len = 0;
 
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_EA_LIST\n"));
+		DBG_DEBUG("SMB_FIND_EA_LIST\n");
 		if (!name_list) {
 			return NT_STATUS_INVALID_PARAMETER;
 		}
@@ -1325,7 +1325,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 	}
 
 	case SMB_FIND_FILE_BOTH_DIRECTORY_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_BOTH_DIRECTORY_INFO\n"));
+		DBG_DEBUG("SMB_FIND_FILE_BOTH_DIRECTORY_INFO\n");
 		was_8_3 = mangle_is_8_3(fname, True, conn->params);
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
@@ -1395,7 +1395,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_FILE_DIRECTORY_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_DIRECTORY_INFO\n"));
+		DBG_DEBUG("SMB_FIND_FILE_DIRECTORY_INFO\n");
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
 		put_long_date_full_timespec(conn->ts_res,p,&create_date_ts); p += 8;
@@ -1434,7 +1434,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_FILE_FULL_DIRECTORY_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_FULL_DIRECTORY_INFO\n"));
+		DBG_DEBUG("SMB_FIND_FILE_FULL_DIRECTORY_INFO\n");
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
 		put_long_date_full_timespec(conn->ts_res,p,&create_date_ts); p += 8;
@@ -1477,7 +1477,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_FILE_NAMES_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_NAMES_INFO\n"));
+		DBG_DEBUG("SMB_FIND_FILE_NAMES_INFO\n");
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
 		p += 4;
@@ -1512,7 +1512,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_ID_FULL_DIRECTORY_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_ID_FULL_DIRECTORY_INFO\n"));
+		DBG_DEBUG("SMB_FIND_ID_FULL_DIRECTORY_INFO\n");
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
 		put_long_date_full_timespec(conn->ts_res,p,&create_date_ts); p += 8;
@@ -1557,7 +1557,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		break;
 
 	case SMB_FIND_ID_BOTH_DIRECTORY_INFO:
-		DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_ID_BOTH_DIRECTORY_INFO\n"));
+		DBG_DEBUG("SMB_FIND_ID_BOTH_DIRECTORY_INFO\n");
 		was_8_3 = mangle_is_8_3(fname, True, conn->params);
 		p += 4;
 		SIVAL(p,0,reskey); p += 4;
@@ -1684,7 +1684,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 		/* Begin of SMB_QUERY_FILE_UNIX_BASIC */
 
 		if (info_level == SMB_FIND_FILE_UNIX) {
-			DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_UNIX\n"));
+			DBG_DEBUG("SMB_FIND_FILE_UNIX\n");
 			p = store_file_unix_basic(conn, p,
 						NULL, &smb_fname->st);
 			status = srvstr_push(base_data, flags2, p,
@@ -1694,7 +1694,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 				return status;
 			}
 		} else {
-			DEBUG(10,("smbd_marshall_dir_entry: SMB_FIND_FILE_UNIX_INFO2\n"));
+			DBG_DEBUG("SMB_FIND_FILE_UNIX_INFO2\n");
 			p = store_file_unix_basic_info2(conn, p,
 						NULL, &smb_fname->st);
 			nameptr = p;
@@ -1743,10 +1743,10 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 			};
 			enum ndr_err_code ndr_err;
 
+			DBG_DEBUG("SMB2_FILE_POSIX_INFORMATION\n");
+
 			p+= 4;
 			SIVAL(p,0,reskey); p+= 4;
-
-			DBG_DEBUG("SMB2_FILE_POSIX_INFORMATION\n");
 
 			if (!conn_using_smb2(conn->sconn)) {
 				return NT_STATUS_INVALID_LEVEL;

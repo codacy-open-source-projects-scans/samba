@@ -841,10 +841,10 @@ static void cli_posix_stat_done(struct tevent_req *subreq)
 	}
 
 	/* total size, in bytes */
-	sbuf->st_ex_size = IVAL2_TO_SMB_BIG_UINT(data, 0);
+	sbuf->st_ex_size = BVAL(data, 0);
 
 	/* number of blocks allocated */
-	sbuf->st_ex_blocks = IVAL2_TO_SMB_BIG_UINT(data,8);
+	sbuf->st_ex_blocks = BVAL(data,8);
 #if defined (HAVE_STAT_ST_BLOCKS) && defined(STAT_ST_BLOCKSIZE)
 	sbuf->st_ex_blocks /= STAT_ST_BLOCKSIZE;
 #else
@@ -872,7 +872,7 @@ static void cli_posix_stat_done(struct tevent_req *subreq)
 	}
 #endif
 	/* inode */
-	sbuf->st_ex_ino = (SMB_INO_T)IVAL2_TO_SMB_BIG_UINT(data, 76);
+	sbuf->st_ex_ino = (SMB_INO_T)BVAL(data, 76);
 
 	/* protection */
 	sbuf->st_ex_mode |= wire_perms_to_unix(IVAL(data, 84));
@@ -2026,10 +2026,10 @@ static void cli_smb2_hardlink_opened(struct tevent_req *subreq)
 		state->ev,
 		state->cli,
 		state->fnum_src,
-		1,		/* in_info_type */
-		SMB_FILE_LINK_INFORMATION - 1000, /* in_file_info_class */
+		SMB2_0_INFO_FILE,	    /* in_info_type */
+		FSCC_FILE_LINK_INFORMATION, /* in_file_info_class */
 		&inbuf,
-		0);		/* in_additional_info */
+		0); /* in_additional_info */
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
