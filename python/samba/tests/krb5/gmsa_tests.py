@@ -1033,8 +1033,7 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         creds = self.gmsa_account(samdb=local_samdb, interval=password_interval)
         dn = creds.get_dn()
 
-        current_nt_time = self.current_nt_time(samdb)
-        self.set_db_time(local_samdb, current_nt_time)
+        self.set_db_time(local_samdb, None)
 
         # Search the local database for the account’s keys.
         res = local_samdb.search(
@@ -1080,8 +1079,18 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
             "supplementalCredentials has not been updated (yet)",
         )
 
+        # Calculate the password with which to authenticate.
+        current_series = self.gmsa_series_for_account(
+            local_samdb, creds, password_interval
+        )
+        managed_pwd = self.expected_gmsa_password_blob(
+            local_samdb,
+            creds,
+            current_series.interval_gkid(0),
+            query_expiration_gkid=current_series.interval_gkid(1),
+        )
+
         # Set the new password.
-        managed_pwd = ndr_unpack(gmsa.MANAGEDPASSWORD_BLOB, managed_password)
         self.assertIsNotNone(
             managed_pwd.passwords.current, "current password must be present"
         )
@@ -1110,8 +1119,7 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         creds = self.gmsa_account(samdb=local_samdb, interval=password_interval)
         dn = creds.get_dn()
 
-        current_nt_time = self.current_nt_time(samdb)
-        self.set_db_time(local_samdb, current_nt_time)
+        self.set_db_time(local_samdb, None)
 
         # Search the local database for the account’s keys.
         res = local_samdb.search(
@@ -1897,11 +1905,11 @@ class GmsaTests(GkdiBaseTest, KDCBaseTest):
         self.assertEqual(ntstatus.NT_STATUS_LOGON_FAILURE, err.exception.args[0])
 
         # But we can use the previous password to authenticate.
-        creds.set_password(password_1)
+        creds.update_password(password_1)
         srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
 
         # And we can authenticate using the current password.
-        creds.set_password(password_2)
+        creds.update_password(password_2)
         srvsvc.srvsvc(f"ncacn_np:{dc_server}", lp, creds)
 
 

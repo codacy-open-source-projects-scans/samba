@@ -1829,7 +1829,8 @@ sub ConvertObjectFromPythonData($$$$$$;$$)
 		my $ctype_name = $self->use_type_variable($ctype);
 		unless (defined ($ctype_name)) {
 			error($location, "Unable to determine origin of type `" . mapTypeName($ctype) . "'");
-			$self->pidl("PyErr_SetString(PyExc_TypeError, \"Can not convert C Type " . mapTypeName($ctype) . " from Python\");");
+			$self->pidl("PyErr_SetString(PyExc_TypeError, \"Cannot convert Python object to NDR $target\");");
+			$self->pidl("$fail");
 			return;
 		}
 		$self->pidl("PY_CHECK_TYPE($ctype_name, $cvar, $fail);");
@@ -2294,6 +2295,10 @@ sub ConvertObjectToPythonLevel($$$$$$$)
 		}
 		my $conv = $self->ConvertObjectToPythonData($mem_ctx, $l->{DATA_TYPE}, $var_name, $e->{ORIGINAL});
 		$self->pidl("$py_var = $conv;");
+		if ($conv eq "NULL") {
+			$self->pidl("PyErr_SetString(PyExc_NotImplementedError, \"Cannot convert NDR $var_name to Python\");");
+			$self->pidl("$fail");
+		}
 	} elsif ($l->{TYPE} eq "SUBCONTEXT") {
 		$self->ConvertObjectToPythonLevel($mem_ctx, $env, $e, $nl, $var_name, $py_var, $fail, $recurse);
 	} else {

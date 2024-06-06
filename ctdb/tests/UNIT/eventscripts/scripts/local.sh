@@ -312,12 +312,20 @@ EOF
 # PNN can already be cached in the state directory.
 ctdb_set_pnn()
 {
-	export FAKE_CTDB_PNN="$1"
+	export FAKE_CTDB_PNN="${1:-0}"
 	echo "Setting up PNN ${FAKE_CTDB_PNN}"
 
 	CTDB_SCRIPT_VARDIR="${CTDB_TEST_TMP_DIR}/scripts/${FAKE_CTDB_PNN}"
 	export CTDB_SCRIPT_VARDIR
 	mkdir -p "$CTDB_SCRIPT_VARDIR"
+
+	if [ -f "${CTDB_BASE}/public_addresses" ]; then
+		ctdb ip | while read -r _ip _pnn; do
+			if [ "$_pnn" = "$FAKE_CTDB_PNN" ]; then
+				echo "$_ip"
+			fi
+		done >"${CTDB_SCRIPT_VARDIR}/my-public-ip-addresses"
+	fi
 }
 
 ctdb_get_interfaces()
