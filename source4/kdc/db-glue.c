@@ -28,6 +28,7 @@
 #include "auth/auth_sam.h"
 #include "dsdb/gmsa/util.h"
 #include "dsdb/samdb/samdb.h"
+#include "dsdb/common/proto.h"
 #include "dsdb/common/util.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
 #include "param/param.h"
@@ -1235,8 +1236,9 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 
 	const struct authn_kerberos_client_policy *authn_client_policy = NULL;
 	const struct authn_server_policy *authn_server_policy = NULL;
-	int64_t enforced_tgt_lifetime_raw;
 	const bool user2user = (flags & SDB_F_USER2USER_PRINCIPAL);
+	int64_t lifetime_secs;
+	int effective_lifetime_secs;
 
 	*entry = (struct sdb_entry) {};
 
@@ -1286,6 +1288,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		ret = ENOMEM;
 		goto out;
 	}
+	p->current_nttime = *kdc_db_ctx->current_nttime_ull;
 
 	talloc_set_destructor(p, samba_kdc_entry_destructor);
 
@@ -1605,22 +1608,25 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		}
 	}
 
-	enforced_tgt_lifetime_raw = authn_policy_enforced_tgt_lifetime_raw(authn_client_policy);
-	if (enforced_tgt_lifetime_raw != 0) {
-		int64_t lifetime_secs = enforced_tgt_lifetime_raw;
+	entry->skdc_entry->enforced_tgt_lifetime_nt_ticks = authn_policy_enforced_tgt_lifetime_raw(authn_client_policy);
+	lifetime_secs = entry->skdc_entry->enforced_tgt_lifetime_nt_ticks;
+	effective_lifetime_secs = *entry->max_life;
 
+	if (lifetime_secs != 0) {
 		lifetime_secs /= INT64_C(1000) * 1000 * 10;
 		lifetime_secs = MIN(lifetime_secs, INT_MAX);
 		lifetime_secs = MAX(lifetime_secs, INT_MIN);
+
+		effective_lifetime_secs = MIN(effective_lifetime_secs,
+					      lifetime_secs);
 
 		/*
 		 * Set both lifetime and renewal time based only on the
 		 * configured maximum lifetime — not on the configured renewal
 		 * time. Yes, this is what Windows does.
 		 */
-		lifetime_secs = MIN(*entry->max_life, lifetime_secs);
-		*entry->max_life = lifetime_secs;
-		*entry->max_renew = lifetime_secs;
+		*entry->max_life = effective_lifetime_secs;
+		*entry->max_renew = effective_lifetime_secs;
 	}
 
 	if (ent_type == SAMBA_KDC_ENT_TYPE_CLIENT && (flags & SDB_F_FOR_AS_REQ)) {
@@ -1661,15 +1667,27 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 			entry->flags.forwardable = 0;
 			entry->flags.proxiable = 0;
 
-			if (enforced_tgt_lifetime_raw == 0) {
+			if (lifetime_secs == 0) {
 				/*
 				 * If a TGT lifetime hasn’t been set, Protected
 				 * Users enforces a four hour TGT lifetime.
 				 */
-				*entry->max_life = MIN(*entry->max_life, 4 * 60 * 60);
-				*entry->max_renew = MIN(*entry->max_renew, 4 * 60 * 60);
+
+				effective_lifetime_secs = 4 * 60 * 60;
+
+				*entry->max_life = MIN(*entry->max_life, effective_lifetime_secs);
+				*entry->max_renew = MIN(*entry->max_renew, effective_lifetime_secs);
 			}
 		}
+	}
+
+	if (effective_lifetime_secs != lifetime_secs) {
+		/*
+		 * Since ‘effective_lifetime_secs’ has changed, update
+		 * ‘enforced_tgt_lifetime_nt_ticks’ to match.
+		 */
+		entry->skdc_entry->enforced_tgt_lifetime_nt_ticks =
+			effective_lifetime_secs * (INT64_C(1000) * 1000 * 10);
 	}
 
 	if (rid == DOMAIN_RID_KRBTGT || is_rodc) {
@@ -2180,8 +2198,8 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	enum ndr_err_code ndr_err;
 	int ret;
 	unsigned int i;
-	struct timeval tv;
-	NTTIME an_hour_ago;
+	NTTIME now = *kdc_db_ctx->current_nttime_ull;
+	NTTIME an_hour_ago, an_hour;
 	bool prefer_current = false;
 	bool force_rc4 = lpcfg_kdc_force_enable_rc4_weak_session_keys(lp_ctx);
 	uint32_t supported_enctypes = ENC_RC4_HMAC_MD5;
@@ -2308,6 +2326,7 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	p->kdc_db_ctx = kdc_db_ctx;
 	p->realm_dn = realm_dn;
 	p->supported_enctypes = pa_supported_enctypes;
+	p->current_nttime = *kdc_db_ctx->current_nttime_ull;
 
 	talloc_set_destructor(p, samba_kdc_entry_destructor);
 
@@ -2350,11 +2369,18 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	/*
 	 * Windows prefers the previous key for one hour.
 	 */
-	tv = timeval_current();
-	if (tv.tv_sec > 3600) {
-		tv.tv_sec -= 3600;
+
+	an_hour = INT64_C(1000) * 1000 * 10 * 3600;
+
+	/*
+	 * While a 'now' value of 0 is implausible, avoid this being a
+	 * silly value in that case
+	 */
+	if (now > an_hour) {
+		an_hour_ago = now - an_hour;
+	} else {
+		an_hour_ago = now;
 	}
-	an_hour_ago = timeval_to_nttime(&tv);
 
 	/* first work out the current kvno */
 	current_kvno = 0;
@@ -2717,6 +2743,69 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 	return 0;
 }
 
+/* This is for the reset UF_SMARTCARD_REQUIRED password, but only in the expired case */
+static void smartcard_random_pw_update(TALLOC_CTX *mem_ctx,
+				       struct ldb_context *ldb,
+				       struct ldb_dn *dn)
+{
+	int ret;
+	NTSTATUS status = NT_STATUS_OK;
+	/*
+	 * The password_hash module expects these passwords to be
+	 * null‐terminated, so we zero-initialise with {}
+	 */
+	uint8_t new_password[128] = {};
+	DATA_BLOB password_blob = {.data = new_password,
+				   .length = sizeof(new_password)};
+
+	/*
+	 * This will be re-randomised in password_hash, but want this
+	 * to be random in a failure case
+	 */
+	generate_random_buffer(new_password, sizeof(new_password)-2);
+
+	ret = ldb_transaction_start(ldb);
+	if (ret != LDB_SUCCESS) {
+		DBG_ERR("Transaction start for automated "
+			"password rotation "
+			"of soon-to-expire "
+			"underlying password on account %s with "
+			"UF_SMARTCARD_REQUIRED failed: %s\n",
+			ldb_dn_get_linearized(dn),
+			ldb_errstring(ldb));
+		return;
+	}
+
+	status = samdb_set_password(ldb,
+				    mem_ctx,
+				    dn,
+				    &password_blob,
+				    NULL,
+				    DSDB_PASSWORD_KDC_RESET_SMARTCARD_ACCOUNT_PASSWORD,
+				    NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		ldb_transaction_cancel(ldb);
+		DBG_ERR("Automated password rotation "
+			"of soon-to-expire "
+			"underlying password on account %s with "
+			"UF_SMARTCARD_REQUIRED failed: %s\n",
+			ldb_dn_get_linearized(dn),
+			nt_errstr(status));
+		return;
+	}
+
+	ret = ldb_transaction_commit(ldb);
+	if (ret != LDB_SUCCESS) {
+		DBG_ERR("Transaction commit for automated "
+			"password rotation "
+			"of soon-to-expire "
+			"underlying password on account %s with "
+			"UF_SMARTCARD_REQUIRED failed: %s\n",
+			ldb_dn_get_linearized(dn),
+			ldb_errstring(ldb));
+	}
+}
+
 static krb5_error_code samba_kdc_fetch_client(krb5_context context,
 					       struct samba_kdc_db_context *kdc_db_ctx,
 					       TALLOC_CTX *mem_ctx,
@@ -2728,19 +2817,151 @@ static krb5_error_code samba_kdc_fetch_client(krb5_context context,
 	struct ldb_dn *realm_dn;
 	krb5_error_code ret;
 	struct ldb_message *msg = NULL;
+	int tries = 0;
+	NTTIME pwd_last_set_last_loop = INT64_MAX;
+	bool pwd_last_set_last_loop_set = false;
 
-	ret = samba_kdc_lookup_client(context, kdc_db_ctx,
-				      mem_ctx, principal, user_attrs, DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
-				      &realm_dn, &msg);
-	if (ret != 0) {
-		return ret;
+	/*
+	 * We will try up to 3 times to rotate the expired or soon to
+	 * expire password of a UF_SMARTCARD_REQUIRED account,
+	 * re-starting the search if we attempted a password change
+	 * (allowing the new secrets and expiry to be used).
+	 *
+	 * A failure to change the password is not fatal, as password
+	 * changes are attempted before the ultimate expiry.  This way
+	 * the server will still process an AS-REQ with PKINIT until
+	 * it (later, in the KDC code) finds the password has actually
+	 * expired.
+	 */
+	while (tries++ <= 2) {
+		NTTIME pwd_last_set_this_loop;
+		uint32_t attr_flags_computed;
+
+		/*
+		 * When we look up the client, we also pre-rotate any expired
+		 * passwords in the UF_SMARTCARD_REQUIRED case
+		 */
+		ret = samba_kdc_lookup_client(context, kdc_db_ctx,
+					      mem_ctx, principal, user_attrs, DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
+					      &realm_dn, &msg);
+		if (ret != 0) {
+			return ret;
+		}
+
+		ret = samba_kdc_message2entry(context, kdc_db_ctx, mem_ctx,
+					      principal, SAMBA_KDC_ENT_TYPE_CLIENT,
+					      flags, kvno,
+					      realm_dn, msg, entry);
+		if (ret != 0) {
+			return ret;
+		}
+
+		if (!(flags & SDB_F_FOR_AS_REQ)) {
+			break;
+		}
+
+		/* This is the check on UF_SMARTCARD_REQUIRED */
+		if (!(entry->flags.require_hwauth)) {
+			break;
+		}
+
+		/*
+		 * This check is also the configuration gate: the
+		 * operational module will set a
+		 * msDS-UserPasswordExpiryTimeComputed that in turn is
+		 * represented here as NULL unless the
+		 * expiry/auto-rotation of UF_SMARTCARD_REQUIRED
+		 * accounts is enabled
+		 */
+		if (entry->pw_end == NULL) {
+			break;
+		}
+
+		/*
+		 * Find if the pwdLastSet has changed on an account
+		 * that we are about to change the password for.  If
+		 * we have both seen it and it has changed already, go
+		 * with that, even if it would fail the tests.  As
+		 * well as dealing with races, this will avoid a
+		 * double-reset every loop if the TGT lifetime is
+		 * longer than the expiry.
+		 */
+		pwd_last_set_this_loop =
+			ldb_msg_find_attr_as_int64(msg, "pwdLastSet", INT64_MAX);
+		if (pwd_last_set_last_loop_set &&
+		    pwd_last_set_last_loop != pwd_last_set_this_loop) {
+			break;
+		}
+		pwd_last_set_last_loop = pwd_last_set_this_loop;
+		pwd_last_set_last_loop_set = true;
+
+		attr_flags_computed
+			= ldb_msg_find_attr_as_uint(msg,
+						    "msDS-User-Account-Control-Computed",
+						    UF_PASSWORD_EXPIRED /* A safe if chaotic default */);
+		if (attr_flags_computed & UF_PASSWORD_EXPIRED) {
+			/* Already expired, keep processing */
+		} else {
+			/*
+			 * Will expire soon, but not already expired.
+			 *
+			 * However we must first
+			 * check if this is before the TGT is due to
+			 * expire.
+			 *
+			 * Then we check if we are half-way
+			 * though the password lifetime before we make
+			 * a password rotation.
+			 */
+			NTTIME must_change_time
+				= samdb_result_nttime(msg,
+						      "msDS-UserPasswordExpiryTimeComputed",
+						      0);
+			NTTIME pw_lifetime = must_change_time - pwd_last_set_this_loop;
+			NTTIME pw_halflife = pw_lifetime / 2;
+			if (must_change_time
+			    > entry->skdc_entry->enforced_tgt_lifetime_nt_ticks + entry->skdc_entry->current_nttime) {
+				/* Password will not expire before TGT will */
+				break;
+			}
+
+			if (pwd_last_set_this_loop != 0
+			    && pwd_last_set_this_loop + pw_halflife > entry->skdc_entry->current_nttime) {
+				/*
+				 * Still in first half of password
+				 * lifetime, no change per
+				 * https://lists.samba.org/archive/cifs-protocol/2024-May/004316.html
+				 */
+				break;
+			}
+			/* Keep processing */
+		}
+
+		if (kdc_db_ctx->rodc) {
+			/*
+			 * Nothing we can do locally on an RODC.  So
+			 * we trigger pushing the user back to the
+			 * full DC to ensure the PW is rotated.
+			 */
+			ret = SDB_ERR_NOT_FOUND_HERE;
+			break;
+		}
+
+		/*
+		 * Reset PW to random value.  All we can do is loop
+		 * and hope we succeed again on failure, if we succeed
+		 * then we will pass the tests above and break out of the loop
+		 *
+		 * We don't want to fail on error here as we might
+		 * still be able to provide service to the client if
+		 * the password is not yet actually expired.  They may get
+		 * better luck at another KDC or at a later AS-REQ.
+		 */
+		smartcard_random_pw_update(mem_ctx, kdc_db_ctx->samdb, entry->skdc_entry->msg->dn);
 	}
 
-	ret = samba_kdc_message2entry(context, kdc_db_ctx, mem_ctx,
-				      principal, SAMBA_KDC_ENT_TYPE_CLIENT,
-				      flags, kvno,
-				      realm_dn, msg, entry);
 	return ret;
+
 }
 
 static krb5_error_code samba_kdc_fetch_krbtgt(krb5_context context,
@@ -4009,6 +4230,8 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 	int ldb_ret;
 	struct ldb_message *msg = NULL;
 	struct samba_kdc_db_context *kdc_db_ctx = NULL;
+	bool time_ok;
+
 	/* The idea here is very simple.  Using Kerberos to
 	 * authenticate the KDC to the LDAP server is highly likely to
 	 * be circular.
@@ -4025,6 +4248,9 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 	kdc_db_ctx->lp_ctx = base_ctx->lp_ctx;
 	kdc_db_ctx->msg_ctx = base_ctx->msg_ctx;
 
+	/* Copy over the pointer that will be updated with the time */
+	kdc_db_ctx->current_nttime_ull = base_ctx->current_nttime_ull;
+
 	/* get default kdc policy */
 	lpcfg_default_kdc_policy(mem_ctx,
 				 base_ctx->lp_ctx,
@@ -4037,7 +4263,10 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 		/*
 		 * Caller is responsible for lifetimes.  In reality
 		 * the whole thing is destroyed before leaving the
-		 * function the samdb was passed into
+		 * function the samdb was passed into.
+		 *
+		 * We assume this DB is created from python and so
+		 * can't be in the ldb_wrap cache.
 		 */
 		kdc_db_ctx->samdb = base_ctx->samdb;
 	} else {
@@ -4054,12 +4283,22 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 						  base_ctx->lp_ctx,
 						  session_info,
 						  NULL,
-						  0);
+						  SAMBA_LDB_WRAP_CONNECT_FLAG_NO_SHARE_CONTEXT);
 		if (kdc_db_ctx->samdb == NULL) {
 			DBG_WARNING("Cannot open samdb for KDC backend!\n");
 			talloc_free(kdc_db_ctx);
 			return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
 		}
+	}
+
+	/*
+	 * Set the current time pointer, which will be updated before
+	 * each packet (Heimdal) or fetch call (MIT)
+	 */
+	time_ok = dsdb_gmsa_set_current_time(kdc_db_ctx->samdb, kdc_db_ctx->current_nttime_ull);
+	if (!time_ok) {
+		talloc_free(kdc_db_ctx);
+		return NT_STATUS_INTERNAL_ERROR;
 	}
 
 	/* Find out our own krbtgt kvno */

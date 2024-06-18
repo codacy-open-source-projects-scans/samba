@@ -2540,6 +2540,16 @@ static NTSTATUS samdb_set_password_request(struct ldb_context *ldb, TALLOC_CTX *
 			talloc_free(req);
 			return NT_STATUS_NO_MEMORY;
 		}
+
+	/* a KDC-triggered smart card password rollover (ResetSmartCardAccountPassword) */
+	} else if (old_password_checked == DSDB_PASSWORD_KDC_RESET_SMARTCARD_ACCOUNT_PASSWORD) {
+		ret = ldb_request_add_control(req,
+					      DSDB_CONTROL_PASSWORD_KDC_RESET_SMARTCARD_ACCOUNT_PASSWORD,
+					      true, NULL);
+		if (ret != LDB_SUCCESS) {
+			talloc_free(req);
+			return NT_STATUS_NO_MEMORY;
+		}
 	}
 	if (hash_values) {
 		ret = ldb_request_add_control(req,
@@ -5755,7 +5765,7 @@ int dsdb_search(struct ldb_context *ldb,
 		 * • whenCreated
 		 */
 
-		ret = dsdb_update_gmsa_keys(ldb, tmp_ctx, res, &retry);
+		ret = dsdb_update_gmsa_keys(tmp_ctx, ldb, res, &retry);
 		if (ret) {
 			talloc_free(tmp_ctx);
 			return ret;

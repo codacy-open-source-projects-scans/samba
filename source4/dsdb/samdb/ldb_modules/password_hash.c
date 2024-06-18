@@ -135,6 +135,7 @@ struct ph_context {
 	bool pwd_last_set_bypass;
 	bool pwd_last_set_default;
 	bool smartcard_reset;
+	bool kdc_reset_smartcard_account_password;
 	const char **userPassword_schemes;
 };
 
@@ -2622,6 +2623,8 @@ static int setup_given_passwords(struct setup_password_fields_io *io,
 static int setup_password_fields(struct setup_password_fields_io *io)
 {
 	struct ldb_context *ldb = ldb_module_get_ctx(io->ac->module);
+	bool prepare_random;
+
 	int ret;
 
 	ret = setup_last_set_field(io);
@@ -2629,17 +2632,11 @@ static int setup_password_fields(struct setup_password_fields_io *io)
 		return ret;
 	}
 
-	if (!io->ac->update_password) {
+	if (!io->ac->update_password && !io->ac->smartcard_reset) {
 		return LDB_SUCCESS;
 	}
 
 	if (io->u.is_krbtgt) {
-		size_t min = 196;
-		size_t max = 255;
-		size_t diff = max - min;
-		size_t len = max;
-		struct ldb_val *krbtgt_utf16 = NULL;
-
 		if (!io->ac->pwd_reset) {
 			return dsdb_module_werror(io->ac->module,
 					LDB_ERR_ATTRIBUTE_OR_VALUE_EXISTS,
@@ -2653,6 +2650,23 @@ static int setup_password_fields(struct setup_password_fields_io *io)
 					WERR_DS_INVALID_ATTRIBUTE_SYNTAX,
 					"Password reset on krbtgt requires UTF16!");
 		}
+	}
+
+	prepare_random = io->u.is_krbtgt || io->ac->smartcard_reset ||
+			 io->ac->kdc_reset_smartcard_account_password;
+
+	/*
+	 * krbtgt, smartcard reset (on addition of
+	 * UF_SMARTCARD_REQUIRED) and KDC-triggered rollover (for
+	 * ResetSmartCardAccountPassword) need random passwords for
+	 * all supported keys
+	 */
+	if (prepare_random) {
+		size_t min = 196;
+		size_t max = 255;
+		size_t diff = max - min;
+		size_t len = max;
+		struct ldb_val *krbtgt_utf16 = NULL;
 
 		/*
 		 * Instead of taking the callers value,
@@ -2725,63 +2739,25 @@ static int setup_password_fields(struct setup_password_fields_io *io)
 
 static int setup_smartcard_reset(struct setup_password_fields_io *io)
 {
-	struct ldb_context *ldb = ldb_module_get_ctx(io->ac->module);
-	struct supplementalCredentialsBlob scb = { .__ndr_size = 0 };
-	enum ndr_err_code ndr_err;
 
 	if (!io->ac->smartcard_reset) {
 		return LDB_SUCCESS;
 	}
 
-	io->g.nt_hash = talloc(io->ac, struct samr_Password);
-	if (io->g.nt_hash == NULL) {
-		return ldb_module_oom(io->ac->module);
-	}
-	generate_secret_buffer(io->g.nt_hash->hash,
-			       sizeof(io->g.nt_hash->hash));
+	/*
+	 * We must not keep the old password history otherwise the
+	 * password will not appear to have been randomised until the
+	 * 60min window is over
+	 */
 	io->g.nt_history_len = 0;
 
 	/*
-	 * We take the "old" value and store it
-	 * with num_packages = 0.
-	 *
-	 * On "add" we have scb.sub.signature == 0, which
-	 * results in:
-	 *
-	 * [0000] 00 00 00 00 00 00 00 00   00 00 00 00 00
-	 *
-	 * On modify it's likely to be scb.sub.signature ==
-	 * SUPPLEMENTAL_CREDENTIALS_SIGNATURE (0x0050), which results in
-	 * something like:
-	 *
-	 * [0000] 00 00 00 00 62 00 00 00   00 00 00 00 20 00 20 00
-	 * [0010] 20 00 20 00 20 00 20 00   20 00 20 00 20 00 20 00
-	 * [0020] 20 00 20 00 20 00 20 00   20 00 20 00 20 00 20 00
-	 * [0030] 20 00 20 00 20 00 20 00   20 00 20 00 20 00 20 00
-	 * [0040] 20 00 20 00 20 00 20 00   20 00 20 00 20 00 20 00
-	 * [0050] 20 00 20 00 20 00 20 00   20 00 20 00 20 00 20 00
-	 * [0060] 20 00 20 00 20 00 20 00   20 00 20 00 50 00 00
-	 *
-	 * See https://bugzilla.samba.org/show_bug.cgi?id=11441
-	 * and ndr_{push,pull}_supplementalCredentialsSubBlob().
+	 * The password has been randomly set earlier, but now we need
+	 * to declare this a password update so that the change is
+	 * made (this ensures that the other rules about updates are
+	 * skipped in case, which is the setting of
+	 * UF_SMARTCARD_REQUIRED on an account)
 	 */
-	scb = io->o.scb;
-	scb.sub.num_packages = 0;
-
-	/*
-	 * setup 'supplementalCredentials' value without packages
-	 */
-	ndr_err = ndr_push_struct_blob(&io->g.supplemental, io->ac,
-				       &scb,
-				       (ndr_push_flags_fn_t)ndr_push_supplementalCredentialsBlob);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		NTSTATUS status = ndr_map_error2ntstatus(ndr_err);
-		ldb_asprintf_errstring(ldb,
-				       "setup_smartcard_reset: "
-				       "failed to push supplementalCredentialsBlob: %s",
-				       nt_errstr(status));
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
 
 	io->ac->update_password = true;
 	return LDB_SUCCESS;
@@ -2958,6 +2934,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 		return ret;
 	}
 
+	/* Do not apply restrictions on a KDC-issued rollover (eg ResetSmartCardAccountPassword) */
+	if (io->ac->kdc_reset_smartcard_account_password) {
+		return LDB_SUCCESS;
+	}
+
 	/*
 	 * First check the old password is correct, for password
 	 * changes when this hasn't already been checked by a
@@ -2998,8 +2979,22 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 		}
 	}
 
+	/*
+	 * There is no restriction on a smartcard_reset update, even
+	 * if a password was specified, as it is randomised in this
+	 * module.
+	 */
+	if (io->ac->smartcard_reset) {
+		return LDB_SUCCESS;
+	}
+
+	/*
+	 * Only non-trust accounts have restrictions.
+	 *
+	 * This is where a krbtgt random password set will also exit, as
+	 * io->u.restrictions = 0 is called earlier.
+	 */
 	if (io->u.restrictions == 0) {
-		/* FIXME: Is this right? */
 		return LDB_SUCCESS;
 	}
 
@@ -4206,6 +4201,17 @@ static void ph_apply_controls(struct ph_context *ac)
 		/* Mark the "smartcard required" control as uncritical (done) */
 		ctrl->critical = false;
 	}
+
+	ac->kdc_reset_smartcard_account_password = false;
+	ctrl = ldb_request_get_control(ac->req,
+				DSDB_CONTROL_PASSWORD_KDC_RESET_SMARTCARD_ACCOUNT_PASSWORD);
+	if (ctrl != NULL) {
+		ac->kdc_reset_smartcard_account_password = true;
+
+		/* Mark KDC running ResetSmartCardAccountPassword control as uncritical (done) */
+		ctrl->critical = false;
+	}
+
 }
 
 static int ph_op_callback(struct ldb_request *req, struct ldb_reply *ares)

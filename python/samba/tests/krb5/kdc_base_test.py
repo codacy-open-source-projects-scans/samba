@@ -894,7 +894,6 @@ class KDCBaseTest(TestCaseInTempDir, RawKerberosTest):
             domain = samdb.domain_netbios_name().upper()
 
             password = generate_random_password(32, 32)
-            utf16pw = ('"%s"' % password).encode('utf-16-le')
 
             try:
                 net_ctx.set_password(newpassword=password,
@@ -2167,7 +2166,7 @@ class KDCBaseTest(TestCaseInTempDir, RawKerberosTest):
         #
         # The NT hash is different, as it is returned to the client in
         # the PAC so is visible in the network behaviour.
-        if force_nt4_hash or smartcard_required:
+        if force_nt4_hash:
             expected_etypes = {kcrypto.Enctype.RC4}
         keys = self.get_keys(creds, expected_etypes=expected_etypes)
         self.creds_set_keys(creds, keys)
@@ -3786,3 +3785,34 @@ class KDCBaseTest(TestCaseInTempDir, RawKerberosTest):
             self.assertEqual(0, flags)
 
         return validation
+
+    def check_ticket_times(self,
+                           ticket_creds,
+                           expected_life=None,
+                           expected_renew_life=None,
+                           delta=0):
+        ticket = ticket_creds.ticket_private
+
+        authtime = ticket['authtime']
+        starttime = ticket.get('starttime', authtime)
+        endtime = ticket['endtime']
+        renew_till = ticket.get('renew-till', None)
+
+        starttime = self.get_EpochFromKerberosTime(starttime)
+
+        if expected_life is not None:
+            actual_end = self.get_EpochFromKerberosTime(
+                endtime.decode('ascii'))
+            actual_lifetime = actual_end - starttime
+
+            self.assertAlmostEqual(expected_life, actual_lifetime, delta=delta)
+
+        if renew_till is None:
+            self.assertIsNone(expected_renew_life)
+        else:
+            if expected_renew_life is not None:
+                actual_renew_till = self.get_EpochFromKerberosTime(
+                    renew_till.decode('ascii'))
+                actual_renew_life = actual_renew_till - starttime
+
+                self.assertAlmostEqual(expected_renew_life, actual_renew_life, delta=delta)

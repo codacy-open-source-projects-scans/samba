@@ -3108,6 +3108,7 @@ class RawKerberosTest(TestCase):
                          expect_resource_groups_flag=None,
                          expected_device_groups=None,
                          expected_extra_pac_buffers=None,
+                         expect_matching_nt_hash_in_pac=None,
                          to_rodc=False):
         if expected_error_mode == 0:
             expected_error_mode = ()
@@ -3188,6 +3189,7 @@ class RawKerberosTest(TestCase):
             'expect_resource_groups_flag': expect_resource_groups_flag,
             'expected_device_groups': expected_device_groups,
             'expected_extra_pac_buffers': expected_extra_pac_buffers,
+            'expect_matching_nt_hash_in_pac': expect_matching_nt_hash_in_pac,
             'to_rodc': to_rodc
         }
         if callback_dict is None:
@@ -4781,10 +4783,10 @@ class RawKerberosTest(TestCase):
 
                 creds = kdc_exchange_dict['creds']
                 nt_password = bytes(ntlm_package.nt_password.hash)
-                if creds.user_account_control & UF_SMARTCARD_REQUIRED:
-                    self.assertNotEqual(creds.get_nt_hash(), nt_password)
-                else:
+                if kdc_exchange_dict['expect_matching_nt_hash_in_pac']:
                     self.assertEqual(creds.get_nt_hash(), nt_password)
+                else:
+                    self.assertNotEqual(creds.get_nt_hash(), nt_password)
 
                 kdc_exchange_dict['nt_hash_from_pac'] = ntlm_package.nt_password
 
@@ -5098,7 +5100,8 @@ class RawKerberosTest(TestCase):
                 if sent_freshness:
                     expected_patypes += PADATA_AS_FRESHNESS,
 
-                if (self.kdc_fast_support
+                if (error_code != KDC_ERR_PREAUTH_FAILED
+                        and self.kdc_fast_support
                         and not sent_fast
                         and not sent_enc_challenge):
                     expected_patypes += (PADATA_FX_FAST,)
@@ -6053,6 +6056,10 @@ class RawKerberosTest(TestCase):
             name_type=NT_SRV_INST, names=[krbtgt_username, krbtgt_realm])
 
         return krbtgt_sname
+
+    def get_kpasswd_sname(self):
+        return self.PrincipalName_create(name_type=NT_PRINCIPAL,
+                                         names=['kadmin', 'changepw'])
 
     def add_requester_sid(self, pac, sid):
         pac_buffers = pac.buffers

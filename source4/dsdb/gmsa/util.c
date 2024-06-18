@@ -1529,8 +1529,8 @@ static bool dsdb_data_blobs_equal(const DATA_BLOB *d1, const DATA_BLOB *d2)
 	}
 }
 
-int dsdb_update_gmsa_entry_keys(struct ldb_context *ldb,
-				TALLOC_CTX *mem_ctx,
+int dsdb_update_gmsa_entry_keys(TALLOC_CTX *mem_ctx,
+				struct ldb_context *ldb,
 				const struct gmsa_update *gmsa_update)
 {
 	TALLOC_CTX *tmp_ctx = NULL;
@@ -1650,8 +1650,8 @@ out:
 	return ret;
 }
 
-int dsdb_update_gmsa_keys(struct ldb_context *ldb,
-			  TALLOC_CTX *mem_ctx,
+int dsdb_update_gmsa_keys(TALLOC_CTX *mem_ctx,
+			  struct ldb_context *ldb,
 			  const struct ldb_result *res,
 			  bool *retry_out)
 {
@@ -1750,7 +1750,9 @@ int dsdb_update_gmsa_keys(struct ldb_context *ldb,
 			continue;
 		}
 
-		ret = dsdb_update_gmsa_entry_keys(ldb, tmp_ctx, gmsa_update);
+		ret = dsdb_update_gmsa_entry_keys(tmp_ctx,
+						  ldb,
+						  gmsa_update);
 		if (ret) {
 			goto out;
 		}
@@ -1780,4 +1782,15 @@ bool dsdb_gmsa_current_time(struct ldb_context *ldb, NTTIME *current_time_out)
 	}
 
 	return gmsa_current_time(current_time_out);
+}
+
+/* Set the current time.  Caller to supply valid unsigned long long talloc pointer and manage lifetime */
+bool dsdb_gmsa_set_current_time(struct ldb_context *ldb, unsigned long long *current_time_talloc)
+{
+	int ret = ldb_set_opaque(ldb, DSDB_GMSA_TIME_OPAQUE, current_time_talloc);
+	if (ret != LDB_SUCCESS) {
+
+		return false;
+	}
+	return true;
 }

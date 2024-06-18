@@ -3933,23 +3933,25 @@ sub wait_for_start($$$$$)
 	    print "wait for smbd\n";
 
 	    my $count = 0;
-	    do {
-		if (defined($envvars->{GNUTLS_FORCE_FIPS_MODE})) {
+
+	    if (defined($envvars->{GNUTLS_FORCE_FIPS_MODE})) {
 			# We don't have NTLM in FIPS mode, so lets use
 			# smbcontrol instead of smbclient.
 			$cmd = Samba::bindir_path($self, "smbcontrol");
 			$cmd .= " $envvars->{CONFIGURATION}";
 			$cmd .= " smbd ping";
-		} else {
+	    } else {
 			# This uses NTLM which is not available in FIPS
-			$cmd = Samba::bindir_path($self, "smbclient");
+			$cmd = "NSS_WRAPPER_HOSTS='$envvars->{NSS_WRAPPER_HOSTS}' ";
+			$cmd .= Samba::bindir_path($self, "smbclient");
 			$cmd .= " $envvars->{CONFIGURATION}";
 			$cmd .= " -L $envvars->{SERVER}";
 			$cmd .= " -U%";
 			$cmd .= " -I $envvars->{SERVER_IP}";
 			$cmd .= " -p 139";
-		}
+	    }
 
+	    do {
 		$ret = system($cmd);
 		if ($ret != 0) {
 		    sleep(1);

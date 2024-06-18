@@ -273,6 +273,12 @@ enum ldb_debug_level {LDB_DEBUG_FATAL, LDB_DEBUG_ERROR,
 */
 #define LDB_FLG_DONT_CREATE_DB 64
 
+/**
+ * Allow DB create time flags that have meaning only to our
+ * calling application or modules.  These must be in this range:
+ */
+#define LDB_FLG_PRIVATE_MASK 0xff000000
+
 /*
    structures for ldb_parse_tree handling code
 */
@@ -1896,6 +1902,9 @@ bool ldb_dn_add_child_val(struct ldb_dn *dn,
 			  struct ldb_val value);
 
 struct ldb_dn *ldb_dn_copy(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
+struct ldb_dn *ldb_dn_copy_with_ldb_context(TALLOC_CTX *mem_ctx,
+					    struct ldb_dn *dn,
+					    struct ldb_context *ldb);
 struct ldb_dn *ldb_dn_get_parent(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
 char *ldb_dn_canonical_string(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);
 char *ldb_dn_canonical_ex_string(TALLOC_CTX *mem_ctx, struct ldb_dn *dn);

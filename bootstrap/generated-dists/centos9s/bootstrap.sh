@@ -7,13 +7,18 @@
 
 set -xueo pipefail
 
-yum update -y
-yum install -y epel-release
-yum install -y yum-plugin-copr
-yum copr enable -y sergiomb/SambaAD
-yum update -y
+dnf update -y
+dnf install -y dnf-plugins-core
+dnf install -y epel-release
+dnf install -y centos-release-gluster9
 
-yum install -y \
+dnf -v repolist all
+dnf config-manager --set-enabled crb -y
+
+dnf update -y
+
+dnf install -y \
+    --setopt=install_weak_deps=False \
     "@Development Tools" \
     acl \
     attr \
@@ -24,11 +29,8 @@ yum install -y \
     bison \
     ccache \
     chrpath \
-    compat-gnutls37-devel \
-    compat-gnutls37-utils \
     crypto-policies-scripts \
     cups-devel \
-    curl \
     dbus-devel \
     docbook-dtds \
     docbook-style-xsl \
@@ -39,6 +41,11 @@ yum install -y \
     git \
     glib2-devel \
     glibc-common \
+    glibc-langpack-en \
+    glusterfs-api-devel \
+    glusterfs-devel \
+    gnutls-devel \
+    gnutls-utils \
     gpgme-devel \
     gzip \
     hostname \
@@ -49,7 +56,6 @@ yum install -y \
     krb5-devel \
     krb5-server \
     krb5-workstation \
-    lcov \
     libacl-devel \
     libarchive-devel \
     libattr-devel \
@@ -62,49 +68,52 @@ yum install -y \
     libtasn1-tools \
     libtirpc-devel \
     libunwind-devel \
+    liburing-devel \
     libuuid-devel \
     libxslt \
     lmdb \
     lmdb-devel \
+    lsb_release \
     make \
     mingw64-gcc \
     ncurses-devel \
     openldap-devel \
     pam-devel \
     patch \
+    perl \
     perl-Archive-Tar \
     perl-ExtUtils-MakeMaker \
     perl-Parse-Yapp \
-    perl-Test-Base \
-    perl-core \
+    perl-Test-Simple \
     perl-generators \
     perl-interpreter \
     pkgconfig \
     popt-devel \
     procps-ng \
     psmisc \
+    python3 \
+    python3-cryptography \
+    python3-devel \
+    python3-dns \
+    python3-gpg \
+    python3-iso8601 \
     python3-libsemanage \
+    python3-markdown \
     python3-policycoreutils \
-    python36 \
-    python36-cryptography \
-    python36-devel \
-    python36-dns \
-    python36-gpg \
-    python36-iso8601 \
-    python36-markdown \
-    python36-pyasn1 \
-    python36-requests \
-    python36-setproctitle \
+    python3-pyasn1 \
+    python3-requests \
+    python3-setproctitle \
     quota-devel \
     readline-devel \
-    redhat-lsb \
     rng-tools \
     rpcgen \
+    rpcsvc-proto-devel \
     rsync \
     sed \
     sudo \
     systemd-devel \
     tar \
+    tracker-devel \
     tree \
     wget \
     which \
@@ -113,8 +122,4 @@ yum install -y \
     yum-utils \
     zlib-devel
 
-yum clean all
-
-if [ ! -f /usr/bin/python3 ]; then
-    ln -sf /usr/bin/python3.6 /usr/bin/python3
-fi
+dnf clean all
