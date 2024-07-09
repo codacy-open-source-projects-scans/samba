@@ -173,7 +173,8 @@ void update_stat_ex_mtime(struct stat_ex *dst, struct timespec write_ts);
 void update_stat_ex_create_time(struct stat_ex *dst, struct timespec create_time);
 void update_stat_ex_from_saved_stat(struct stat_ex *dst,
 				    const struct stat_ex *src);
-void copy_stat_ex_timestamps(files_struct *fsp, const struct smb_file_time *ft);
+void copy_stat_ex_timestamps(struct stat_ex *st,
+			     const struct smb_file_time *ft);
 int sys_stat(const char *fname, SMB_STRUCT_STAT *sbuf,
 	     bool fake_dir_create_times);
 int sys_fstat(int fd, SMB_STRUCT_STAT *sbuf,
@@ -525,15 +526,8 @@ char *realloc_string_sub(char *string,
 			const char *insert);
 void all_string_sub(char *s,const char *pattern,const char *insert, size_t len);
 char *string_truncate(char *s, unsigned int length);
-char *strchr_m(const char *src, char c);
-char *strrchr_m(const char *s, char c);
-char *strnrchr_m(const char *s, char c, unsigned int n);
-char *strstr_m(const char *src, const char *findstr);
 bool strlower_m(char *s);
 bool strupper_m(char *s);
-size_t strlen_m(const char *s);
-size_t strlen_m_term(const char *s);
-size_t strlen_m_term_null(const char *s);
 int fstr_sprintf(fstring s, const char *fmt, ...);
 
 uint64_t STR_TO_SMB_BIG_UINT(const char *nptr, const char **entptr);

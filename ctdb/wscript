@@ -102,9 +102,6 @@ def options(opt):
                    help=("Use pcap for packet capture (default=no)"),
                    action="store_true", dest='ctdb_pcap', default=False)
 
-    opt.add_option('--with-libcephfs',
-                   help=("Directory under which libcephfs is installed"),
-                   action="store", dest='libcephfs_dir', default=None)
     opt.add_option('--enable-ceph-reclock',
                    help=("Enable Ceph CTDB recovery lock helper (default=no)"),
                    action="store_true", dest='ctdb_ceph_reclock', default=False)
@@ -282,11 +279,6 @@ def configure(conf):
         Logs.info('Building with etcd support')
     conf.env.etcd_reclock = have_etcd_reclock
 
-    if Options.options.libcephfs_dir:
-        Logs.error('''--with-libcephfs no longer supported, please use compiler
-                   flags instead, e.g. GCC LIBRARY_PATH and C_INCLUDE_PATH''')
-        sys.exit(1)
-
     if Options.options.ctdb_ceph_reclock:
         if (conf.CHECK_HEADERS('rados/librados.h', False, False, 'rados') and
 					conf.CHECK_LIB('rados', shlib=True)):
@@ -437,7 +429,6 @@ def build(bld):
                         source=bld.SUBDIR('common',
                                           '''cmdline.c
                                              comm.c
-                                             conf.c
                                              db_hash.c
                                              event_script.c
                                              hash_count.c
@@ -465,10 +456,6 @@ def build(bld):
                                 tdb
                                 popt
                              ''')
-
-    bld.SAMBA_SUBSYSTEM('ctdb-logging-conf',
-                        source='common/logging_conf.c',
-                        deps='ctdb-util talloc')
 
     bld.SAMBA_SUBSYSTEM('ctdb-protocol-basic',
                         source=bld.SUBDIR('protocol', 'protocol_basic.c'),
@@ -534,35 +521,22 @@ def build(bld):
                      deps='''ctdb-util samba-util talloc replace popt''',
                      install_path='${CTDB_HELPER_BINDIR}')
 
-    bld.SAMBA_SUBSYSTEM('ctdb-cluster-conf',
-                        source='cluster/cluster_conf.c',
-                        deps='ctdb-util')
-
-    bld.SAMBA_SUBSYSTEM('ctdb-database-conf',
-                        source='database/database_conf.c',
-                        deps='ctdb-util')
-
-    bld.SAMBA_SUBSYSTEM('ctdb-event-conf',
-                        source='event/event_conf.c',
-                        deps='ctdb-util')
-
-    bld.SAMBA_SUBSYSTEM('ctdb-failover-conf',
-                        source='failover/failover_conf.c',
-                        deps='ctdb-util')
-
-    bld.SAMBA_SUBSYSTEM('ctdb-legacy-conf',
-                        source='server/legacy_conf.c',
-                        deps='ctdb-util')
+    bld.SAMBA_SUBSYSTEM('ctdb-conf',
+                        source='''conf/conf.c
+                                  conf/logging_conf.c
+                                  conf/cluster_conf.c
+                                  conf/database_conf.c
+                                  conf/event_conf.c
+                                  conf/failover_conf.c
+                                  conf/legacy_conf.c
+                                  conf/ctdb_config.c
+                               ''',
+                        deps='''ctdb-util talloc replace''')
 
     bld.SAMBA_BINARY('ctdb-config',
-                     source='common/conf_tool.c',
+                     source='conf/conf_tool.c',
                      cflags='-DCTDB_CONF_TOOL',
-                     deps='''ctdb-logging-conf
-                             ctdb-event-conf
-                             ctdb-cluster-conf
-                             ctdb-database-conf
-                             ctdb-failover-conf
-                             ctdb-legacy-conf
+                     deps='''ctdb-conf
                              ctdb-util samba-util talloc replace popt''',
                      install_path='${CTDB_HELPER_BINDIR}')
 
@@ -587,7 +561,7 @@ def build(bld):
                                           event_request.c
                                           '''),
                      deps='''ctdb-event-protocol
-                             ctdb-event-conf ctdb-logging-conf
+                             ctdb-conf
                              ctdb-server-util samba-util ctdb-util
                              talloc tevent replace popt''',
                      install_path='${CTDB_HELPER_BINDIR}')
@@ -618,17 +592,11 @@ def build(bld):
                                              ctdb_update_record.c
                                              ctdb_lock.c ctdb_fork.c
                                              ctdb_tunnel.c ctdb_client.c
-                                             ctdb_config.c
                                           '''),
                      includes='include',
                      deps='''ctdb-common ctdb-system ctdb-protocol
                              ctdb-tcp ctdb-util replace sys_rw popt
-                             ctdb-logging-conf
-                             ctdb-cluster-conf
-                             ctdb-database-conf
-                             ctdb-event-conf
-                             ctdb-failover-conf
-                             ctdb-legacy-conf
+                             ctdb-conf
                              ctdb-event-protocol
                              talloc tevent tdb-wrap tdb talloc_report''' +
                           ib_deps,
@@ -667,6 +635,10 @@ def build(bld):
                      deps='''ctdb-client ctdb-protocol ctdb-util
                              samba-util sys_rw replace tdb''',
                      install_path='${CTDB_HELPER_BINDIR}')
+
+    bld.SAMBA_BINARY("statd_callout",
+                     source="failover/statd_callout.c",
+                     install_path="${CTDB_HELPER_BINDIR}")
 
     bld.SAMBA_BINARY('ctdb_takeover_helper',
                      source='server/ctdb_takeover_helper.c',
@@ -814,6 +786,16 @@ def build(bld):
     bld.INSTALL_FILES('${CTDB_HELPER_BINDIR}', 'ctdb_lvs',
                       destname='ctdb_lvs', chmod=MODE_755)
 
+    bld.SAMBA_GENERATOR("ctdb-statd-callout-helper",
+                        source="tools/statd_callout_helper",
+                        target="statd_callout_helper",
+                        rule=f"sed {sed_cmdline} ${{SRC}} > ${{TGT}}")
+    bld.INSTALL_FILES("${CTDB_HELPER_BINDIR}", "statd_callout_helper",
+                      destname="statd_callout_helper", chmod=MODE_755)
+
+    bld.symlink_as(os.path.join(bld.env.CTDB_ETCDIR, "statd-callout"),
+                   os.path.join(bld.env.CTDB_HELPER_BINDIR, "statd_callout"))
+
     def SUBDIR_MODE_callback(arg, dirname, fnames):
         for f in fnames:
             fl = os.path.join(dirname, f)
@@ -887,7 +869,6 @@ def build(bld):
         'debug_locks.sh',
         'nfs-linux-kernel-callout',
         'notify.sh',
-        'statd-callout'
     ]
 
     for t in etc_scripts:

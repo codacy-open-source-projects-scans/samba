@@ -39,7 +39,7 @@ import ldb
 import samba.tests
 from samba import credentials, generate_random_password, ntstatus
 from samba.nt_time import (nt_time_delta_from_timedelta,
-                           nt_now, string_from_nt_time)
+                           nt_now, NtTime, string_from_nt_time)
 from samba.dcerpc import security, netlogon
 from samba.dsdb import UF_PASSWORD_EXPIRED, UF_DONT_EXPIRE_PASSWD
 from samba.tests.pso import PasswordSettings
@@ -626,10 +626,7 @@ class PkInitTests(KDCBaseTest):
                             attrs=["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"])
         msg = msgs[0]
 
-        try:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = msg["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"]
-        except KeyError:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = None
+        old_ExpirePasswordsOnSmartCardOnlyAccounts = msg.get("msDS-ExpirePasswordsOnSmartCardOnlyAccounts")
 
         self.addCleanup(set_ExpirePasswordsOnSmartCardOnlyAccounts,
                         samdb, old_ExpirePasswordsOnSmartCardOnlyAccounts)
@@ -752,10 +749,7 @@ class PkInitTests(KDCBaseTest):
                             attrs=["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"])
         msg = msgs[0]
 
-        try:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = msg["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"]
-        except KeyError:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = None
+        old_ExpirePasswordsOnSmartCardOnlyAccounts = msg.get("msDS-ExpirePasswordsOnSmartCardOnlyAccounts")
 
         self.addCleanup(set_ExpirePasswordsOnSmartCardOnlyAccounts,
                         samdb, old_ExpirePasswordsOnSmartCardOnlyAccounts)
@@ -834,10 +828,7 @@ class PkInitTests(KDCBaseTest):
                             attrs=["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"])
         msg = msgs[0]
 
-        try:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = msg["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"]
-        except KeyError:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = None
+        old_ExpirePasswordsOnSmartCardOnlyAccounts = msg.get("msDS-ExpirePasswordsOnSmartCardOnlyAccounts")
 
         self.addCleanup(set_ExpirePasswordsOnSmartCardOnlyAccounts,
                         samdb, old_ExpirePasswordsOnSmartCardOnlyAccounts)
@@ -1025,10 +1016,7 @@ class PkInitTests(KDCBaseTest):
                             attrs=["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"])
         msg = msgs[0]
 
-        try:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = msg["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"]
-        except KeyError:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = None
+        old_ExpirePasswordsOnSmartCardOnlyAccounts = msg.get("msDS-ExpirePasswordsOnSmartCardOnlyAccounts")
 
         self.addCleanup(set_ExpirePasswordsOnSmartCardOnlyAccounts,
                         samdb, old_ExpirePasswordsOnSmartCardOnlyAccounts)
@@ -1117,10 +1105,7 @@ class PkInitTests(KDCBaseTest):
                             attrs=["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"])
         msg = msgs[0]
 
-        try:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = msg["msDS-ExpirePasswordsOnSmartCardOnlyAccounts"]
-        except KeyError:
-            old_ExpirePasswordsOnSmartCardOnlyAccounts = None
+        old_ExpirePasswordsOnSmartCardOnlyAccounts = msg.get("msDS-ExpirePasswordsOnSmartCardOnlyAccounts")
 
         self.addCleanup(set_ExpirePasswordsOnSmartCardOnlyAccounts,
                         samdb, old_ExpirePasswordsOnSmartCardOnlyAccounts)
@@ -1218,7 +1203,7 @@ class PkInitTests(KDCBaseTest):
             self._test_samlogon(creds=client_creds,
                                 logon_type=netlogon.NetlogonNetworkInformation)
 
-        pwd_last_set = int(res[0]["pwdLastSet"][0])
+        pwd_last_set = NtTime(int(res[0]["pwdLastSet"][0]))
         self.assertGreater(pwd_last_set, 0)
 
         # This just checks the value is sensible

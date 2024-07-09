@@ -594,71 +594,6 @@ static NTSTATUS filename_convert_normalize_new(
 	return NT_STATUS_OK;
 }
 
-static const char *previous_slash(const char *name_in, const char *slash)
-{
-	const char *prev = NULL;
-
-	SMB_ASSERT((name_in <= slash) && (slash[0] == '/'));
-
-	prev = strchr_m(name_in, '/');
-
-	if (prev == slash) {
-		/* No previous slash */
-		return NULL;
-	}
-
-	while (true) {
-		const char *next = strchr_m(prev + 1, '/');
-
-		if (next == slash) {
-			return prev;
-		}
-		prev = next;
-	}
-
-	return NULL; /* unreachable */
-}
-
-static char *symlink_target_path(
-	TALLOC_CTX *mem_ctx,
-	const char *name_in,
-	const char *substitute,
-	size_t unparsed)
-{
-	size_t name_in_len = strlen(name_in);
-	const char *p_unparsed = NULL;
-	const char *parent = NULL;
-	char *ret;
-
-	SMB_ASSERT(unparsed <= name_in_len);
-
-	p_unparsed = name_in + (name_in_len - unparsed);
-
-	if (substitute[0] == '/') {
-		ret = talloc_asprintf(mem_ctx, "%s%s", substitute, p_unparsed);
-		return ret;
-	}
-
-	if (unparsed == 0) {
-		parent = strrchr_m(name_in, '/');
-	} else {
-		parent = previous_slash(name_in, p_unparsed);
-	}
-
-	if (parent == NULL) {
-		ret = talloc_asprintf(mem_ctx, "%s%s", substitute, p_unparsed);
-	} else {
-		ret = talloc_asprintf(mem_ctx,
-				      "%.*s/%s%s",
-				      (int)(parent - name_in),
-				      name_in,
-				      substitute,
-				      p_unparsed);
-	}
-
-	return ret;
-}
-
 NTSTATUS safe_symlink_target_path(TALLOC_CTX *mem_ctx,
 				  const char *connectpath,
 				  const char *dir,
@@ -755,6 +690,7 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 	SMB_ASSERT(!(ucf_flags & UCF_DFS_PATHNAME));
 
 	if (is_fake_file_path(name_in)) {
+		const struct timespec omit = make_omit_timespec();
 		smb_fname = synthetic_smb_fname_split(mem_ctx, name_in, posix);
 		if (smb_fname == NULL) {
 			return NT_STATUS_NO_MEMORY;
@@ -762,15 +698,11 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 		smb_fname->st = (SMB_STRUCT_STAT){
 			.st_ex_nlink = 1,
 			.st_ex_mode = S_IFREG | 0644,
+			.st_ex_btime = omit,
+			.st_ex_atime = omit,
+			.st_ex_mtime = omit,
+			.st_ex_ctime = omit,
 		};
-		smb_fname->st.st_ex_btime =
-			(struct timespec){0, SAMBA_UTIME_OMIT};
-		smb_fname->st.st_ex_atime =
-			(struct timespec){0, SAMBA_UTIME_OMIT};
-		smb_fname->st.st_ex_mtime =
-			(struct timespec){0, SAMBA_UTIME_OMIT};
-		smb_fname->st.st_ex_ctime =
-			(struct timespec){0, SAMBA_UTIME_OMIT};
 
 		*_dirfsp = conn->cwd_fsp;
 		*_smb_fname = smb_fname;
@@ -1142,6 +1074,7 @@ NTSTATUS filename_convert_dirfsp(
 	char *target = NULL;
 	char *safe_target = NULL;
 	size_t symlink_redirects = 0;
+	int ret;
 
 next:
 	if (symlink_redirects > 40) {
@@ -1206,12 +1139,15 @@ next:
 	 * resolve all symlinks locally.
 	 */
 
-	target = symlink_target_path(mem_ctx,
-				     name_in,
-				     lnk->substitute_name,
-				     lnk->unparsed_path_length);
-	if (target == NULL) {
-		return NT_STATUS_NO_MEMORY;
+	ret = symlink_target_path(mem_ctx,
+				  name_in,
+				  lnk->unparsed_path_length,
+				  lnk->substitute_name,
+				  lnk->substitute_name[0] != '/',
+				  '/',
+				  &target);
+	if (ret != 0) {
+		return map_nt_error_from_unix(ret);
 	}
 
 	status = safe_symlink_target_path(mem_ctx,

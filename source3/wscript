@@ -86,10 +86,6 @@ def options(opt):
     opt.samba_add_onoff_option('fake-kaserver',
                           help=("Include AFS fake-kaserver support"), default=False)
 
-    opt.add_option('--with-libcephfs',
-                   help=("Directory under which libcephfs is installed"),
-                   action="store", dest='libcephfs_dir', default=None)
-
     opt.samba_add_onoff_option('glusterfs', with_name="enable", without_name="disable", default=True)
     opt.samba_add_onoff_option('cephfs', with_name="enable", without_name="disable", default=True)
 
@@ -118,6 +114,7 @@ def configure(conf):
 
     conf.CHECK_HEADERS('netdb.h')
     conf.CHECK_HEADERS('linux/falloc.h linux/ioctl.h')
+    conf.CHECK_HEADERS('linux/magic.h')
 
     conf.CHECK_FUNCS('getcwd fchown chmod fchmod mknod mknodat')
     conf.CHECK_FUNCS('strtol strchr strupr chflags fchflags')
@@ -531,6 +528,10 @@ return acl_get_perm_np(permset_d, perm);
     if conf.CHECK_FUNCS('dirfd'):
         conf.DEFINE('HAVE_DIRFD_DECL', 1)
 
+    conf.CHECK_CODE('struct statfs fsd; int r = fstatfs(AT_FDCWD, &fsd);',
+                    'HAVE_FSTATFS',
+                    msg='Checking for fstatfs',
+                    headers='sys/statfs.h fcntl.h')
     conf.CHECK_CODE('struct statfs fsd; fsid_t fsid = fsd.f_fsid; return statfs(".", &fsd);',
                     'HAVE_STATFS_F_FSID',
                     msg="vfs_fileid checking for statfs() and struct statfs.f_fsid",
@@ -1617,37 +1618,17 @@ int main(void) {
             conf.DEFINE('HAVE_LINUX_IOCTL', '1')
 
     conf.env['CFLAGS_CEPHFS'] = "-D_FILE_OFFSET_BITS=64"
-    if Options.options.libcephfs_dir:
-        Logs.error('''--with-libcephfs no longer supported, please use compiler
-                   flags instead, e.g. GCC LIBRARY_PATH and C_INCLUDE_PATH''')
-        sys.exit(1)
 
     if (Options.options.with_cephfs and
         conf.CHECK_HEADERS('cephfs/libcephfs.h', False, False, 'cephfs') and
         conf.CHECK_LIB('cephfs', shlib=True)):
         if (Options.options.with_acl_support and
-            conf.CHECK_FUNCS_IN('ceph_statx', 'cephfs',
+            conf.CHECK_FUNCS_IN('ceph_statx ceph_openat', 'cephfs',
                                 headers='cephfs/libcephfs.h')):
             conf.DEFINE('HAVE_CEPH', '1')
-            conf.CHECK_FUNCS_IN('ceph_select_filesystem', 'cephfs',
-                                headers='cephfs/libcephfs.h')
-            conf.DEFINE('HAVE_MANDATORY_CEPH_API', '1')
-            for api in ['ceph_mkdirat', 'ceph_openat', 'ceph_unlinkat',
-                        'ceph_symlinkat', 'ceph_readlinkat', 'ceph_statxat',
-                        'ceph_fdopendir']:
-                if not conf.CHECK_FUNCS_IN(api, 'cephfs',
-                                           headers='cephfs/libcephfs.h'):
-                    conf.undefine('HAVE_MANDATORY_CEPH_API')
-            if not conf.env.HAVE_MANDATORY_CEPH_API:
-                Logs.warn("Installed Ceph version support is at the verge of "
-                          "deprecation due to the absence of some mandatory "
-                          "libcephfs APIs. This warning there shall result in "
-                          "disabling the Ceph VFS module altogether with the "
-                          "next major Samba version. It is highly recommended "
-                          "to update to a more recent/active version of Ceph.")
         else:
             Logs.warn('''Ceph support disabled due to --without-acl-support
-                      or lack of ceph_statx support''')
+                      or lack of ceph_statx/ceph_openat support''')
             conf.undefine('HAVE_CEPH')
 
     if Options.options.with_glusterfs:

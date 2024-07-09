@@ -539,7 +539,7 @@ struct samr_Password *samdb_result_hash(TALLOC_CTX *mem_ctx, const struct ldb_me
 			return NULL;
 		}
 		talloc_keep_secret(hash);
-		memcpy(hash->hash, val->data, MIN(val->length, sizeof(hash->hash)));
+		memcpy(hash->hash, val->data, sizeof(hash->hash));
 	}
 	return hash;
 }
@@ -645,7 +645,7 @@ NTSTATUS samdb_result_passwords(TALLOC_CTX *mem_ctx,
 				const struct ldb_message *msg,
 				struct samr_Password **nt_pwd)
 {
-	uint16_t acct_flags;
+	uint32_t acct_flags;
 
 	acct_flags = samdb_result_acct_flags(msg,
 					     "msDS-User-Account-Control-Computed");
