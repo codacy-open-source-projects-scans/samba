@@ -154,7 +154,7 @@ bld.SAMBA3_LIBRARY('samba-passdb',
                                   ''',
                    abi_match=private_pdb_match,
                    abi_directory='passdb/ABI',
-                   vnum='0.28.0')
+                   vnum='0.29.0')
 
 bld.SAMBA3_SUBSYSTEM('pdb',
                    source='''
@@ -311,6 +311,14 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                         util_tdb
                         sys_rw
                         iov_buf
+                        ''')
+
+bld.SAMBA3_SUBSYSTEM('samba3-namearray',
+                   source='''
+                          lib/util_namearray.c
+                          ''',
+                   deps='''
+                        samba-passdb
                         ''')
 
 if bld.env.with_ctdb:
@@ -507,6 +515,7 @@ bld.SAMBA3_LIBRARY('ads',
                           libads/ldap_schema.c
                           libads/util.c
                           libads/net_ads_setspn.c
+                          libads/trusts_util.c
                           ''',
                    deps='''
                         cli-ldap-common
@@ -520,7 +529,9 @@ bld.SAMBA3_LIBRARY('ads',
                         libsmb
                         DCUTIL
                         smbldap
-                        trusts_util
+                        libcli_netlogon3
+                        msrpc3
+                        samba-passdb
                         NDR_ADS
                         ''',
                    private_library=True)
@@ -742,6 +753,7 @@ bld.SAMBA3_LIBRARY('smbd_base',
                         GNUTLS_HELPERS
                         fd_handle
                         cli_spoolss
+                        samba3-namearray
                    ''' +
                    bld.env['dmapi_lib'] +
                    bld.env['legacy_quota_libs'] +
@@ -971,15 +983,6 @@ bld.SAMBA3_SUBSYSTEM('DCUTIL',
                          libcli_lsa3
                          ''')
 
-bld.SAMBA3_LIBRARY('trusts_util',
-                   source='libsmb/trusts_util.c',
-                   deps='''
-                        libcli_netlogon3
-                        msrpc3
-                        samba-passdb
-                        ''',
-                   private_library=True)
-
 bld.SAMBA3_SUBSYSTEM('tdb-wrap3',
                     source='lib/util_tdb.c',
                     deps='talloc samba3-util')
@@ -990,7 +993,6 @@ bld.SAMBA3_LIBRARY('samba3-util',
                           lib/util_str.c
                           lib/adt_tree.c
                           lib/util_malloc.c
-                          lib/namearray.c
                           lib/file_id.c
                           lib/cbuf.c
                           lib/per_thread_cwd.c

@@ -65,7 +65,7 @@ bool change_to_guest(void)
  talloc free the conn->session_info if not used in the vuid cache.
 ****************************************************************************/
 
-static void free_conn_session_info_if_unused(connection_struct *conn)
+static void free_conn_state_if_unused(connection_struct *conn)
 {
 	unsigned int i;
 
@@ -74,11 +74,13 @@ static void free_conn_session_info_if_unused(connection_struct *conn)
 		ent = &conn->vuid_cache->array[i];
 		if (ent->vuid != UID_FIELD_INVALID &&
 				conn->session_info == ent->session_info) {
-			return;
+			break;
 		}
 	}
-	/* Not used, safe to free. */
-	TALLOC_FREE(conn->session_info);
+	if (i == VUID_CACHE_SIZE) {
+		/* Not used, safe to free. */
+		TALLOC_FREE(conn->session_info);
+	}
 }
 
 /****************************************************************************
@@ -131,6 +133,7 @@ NTSTATUS check_user_share_access(connection_struct *conn,
 	int snum = SNUM(conn);
 	uint32_t share_access = 0;
 	bool readonly_share = false;
+	bool ok;
 
 	if (!user_ok_token(session_info->unix_info->unix_name,
 			   session_info->info->domain_name,
@@ -138,11 +141,15 @@ NTSTATUS check_user_share_access(connection_struct *conn,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	readonly_share = is_share_read_only_for_token(
+	ok = is_share_read_only_for_token(
 		session_info->unix_info->unix_name,
 		session_info->info->domain_name,
 		session_info->security_token,
-		conn);
+		conn,
+		&readonly_share);
+	if (!ok) {
+		return NT_STATUS_ACCESS_DENIED;
+	}
 
 	share_access = create_share_access_mask(snum,
 					readonly_share,
@@ -184,12 +191,15 @@ static bool check_user_ok(connection_struct *conn,
 			const struct auth_session_info *session_info,
 			int snum)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	unsigned int i;
 	bool readonly_share = false;
 	bool admin_user = false;
 	struct vuid_cache_entry *ent = NULL;
 	uint32_t share_access = 0;
 	NTSTATUS status;
+	bool ok;
 
 	for (i=0; i<VUID_CACHE_SIZE; i++) {
 		ent = &conn->vuid_cache->array[i];
@@ -201,11 +211,13 @@ static bool check_user_ok(connection_struct *conn,
 				*/
 				continue;
 			}
-			free_conn_session_info_if_unused(conn);
+			free_conn_state_if_unused(conn);
 			conn->session_info = ent->session_info;
 			conn->read_only = ent->read_only;
 			conn->share_access = ent->share_access;
 			conn->vuid = ent->vuid;
+			conn->veto_list = ent->veto_list;
+			conn->hide_list = ent->hide_list;
 			return(True);
 		}
 	}
@@ -218,10 +230,17 @@ static bool check_user_ok(connection_struct *conn,
 		return false;
 	}
 
-	admin_user = token_contains_name_in_list(
+	ok = token_contains_name_in_list(
 		session_info->unix_info->unix_name,
 		session_info->info->domain_name,
-		NULL, session_info->security_token, lp_admin_users(snum));
+		NULL,
+		session_info->security_token,
+		lp_admin_users(snum),
+		&admin_user);
+	if (!ok) {
+		/* Log, but move on */
+		DBG_ERR("Couldn't apply 'admin users'\n");
+	}
 
 	ent = &conn->vuid_cache->array[conn->vuid_cache->next_entry];
 
@@ -229,6 +248,8 @@ static bool check_user_ok(connection_struct *conn,
 		(conn->vuid_cache->next_entry + 1) % VUID_CACHE_SIZE;
 
 	TALLOC_FREE(ent->session_info);
+	TALLOC_FREE(ent->veto_list);
+	TALLOC_FREE(ent->hide_list);
 
 	/*
 	 * If force_user was set, all session_info's are based on the same
@@ -260,8 +281,29 @@ static bool check_user_ok(connection_struct *conn,
 	ent->vuid = vuid;
 	ent->read_only = readonly_share;
 	ent->share_access = share_access;
-	free_conn_session_info_if_unused(conn);
+
+	/* Add veto/hide lists */
+	if (!IS_IPC(conn) && !IS_PRINT(conn)) {
+		ok = set_namearray(conn,
+				   lp_veto_files(talloc_tos(), lp_sub, snum),
+				   session_info->security_token,
+				   &ent->veto_list);
+		if (!ok) {
+			return false;
+		}
+		ok = set_namearray(conn,
+				   lp_hide_files(talloc_tos(), lp_sub, snum),
+				   session_info->security_token,
+				   &ent->hide_list);
+		if (!ok) {
+			return false;
+		}
+	}
+
+	free_conn_state_if_unused(conn);
 	conn->session_info = ent->session_info;
+	conn->veto_list = ent->veto_list;
+	conn->hide_list = ent->hide_list;
 	conn->vuid = ent->vuid;
 	if (vuid == UID_FIELD_INVALID) {
 		/*

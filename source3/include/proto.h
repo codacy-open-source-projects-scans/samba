@@ -27,6 +27,7 @@
 #include <regex.h>
 
 #include "lib/util/access.h"
+#include "nsswitch/libwbclient/wbclient.h"
 
 /* The following definitions come from lib/adt_tree.c  */
 
@@ -315,9 +316,20 @@ gid_t nametogid(const char *name);
 void smb_panic_s3(const char *why);
 void log_panic_action(const char *msg);
 const char *readdirname(DIR *p);
-bool is_in_path(const char *name, name_compare_entry *namelist, bool case_sensitive);
-void set_namearray(name_compare_entry **ppname_array, const char *namelist);
-void free_namearray(name_compare_entry *name_array);
+bool is_in_path(const char *name,
+		struct name_compare_entry *namelist,
+		bool case_sensitive);
+bool token_contains_name(TALLOC_CTX *mem_ctx,
+			 const char *username,
+			 const char *domain,
+			 const char *sharename,
+			 const struct security_token *token,
+			 const char *name,
+			 bool *match);
+bool set_namearray(TALLOC_CTX *mem_ctx,
+		   const char *namelist,
+		   const struct security_token *token,
+		   struct name_compare_entry **_name_array);
 bool fcntl_lock(int fd, int op, off_t offset, off_t count, int type);
 bool fcntl_getlock(int fd, int op, off_t *poffset, off_t *pcount, int *ptype, pid_t *ppid);
 int map_process_lock_to_ofd_lock(int op);
@@ -571,6 +583,7 @@ void flush_negative_conn_cache_for_domain(const char *domain);
 /* The following definitions come from libsmb/errormap.c  */
 
 NTSTATUS dos_to_ntstatus(uint8_t eclass, uint32_t ecode);
+NTSTATUS map_nt_error_from_wbcErr(wbcErr wbc_err);
 
 /* The following definitions come from libsmb/namecache.c  */
 

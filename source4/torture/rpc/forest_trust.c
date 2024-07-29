@@ -30,6 +30,7 @@
 #include "libcli/auth/libcli_auth.h"
 #include "torture/rpc/torture_rpc.h"
 #include "param/param.h"
+#include "source3/rpc_client/init_lsa.h"
 
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
@@ -103,6 +104,122 @@ static bool test_get_policy_handle(struct torture_context *tctx,
 	return true;
 }
 
+static bool test_set_forest_trust_info(struct dcerpc_pipe *p,
+				       struct torture_context *tctx,
+				       struct policy_handle *handle,
+				       struct dom_sid *domsid,
+				       const char *trust_name,
+				       const char *trust_name_dns)
+{
+	struct lsa_ForestTrustCollisionInfo *collision_info = NULL;
+	struct lsa_ForestTrustInformation *fti = NULL;
+	struct lsa_lsaRSetForestTrustInformation ft_info = {
+		.in = {
+			.handle = handle,
+			.highest_record_type = 2,
+		},
+		.out = {
+			.collision_info = &collision_info,
+		}
+	};
+
+	torture_comment(tctx, "\nTesting lsaRSetForestTrustInformation\n");
+
+	ft_info.in.trusted_domain_name = talloc_zero(tctx, struct lsa_StringLarge);
+	torture_assert_not_null(tctx, ft_info.in.trusted_domain_name, "No memory");
+	ft_info.in.trusted_domain_name->string = trust_name_dns;
+
+	fti = talloc_zero(tctx, struct lsa_ForestTrustInformation);
+	torture_assert_not_null(tctx, fti, "No memory");
+	fti->count = 2;
+	fti->entries = talloc_array(tctx, struct lsa_ForestTrustRecord *, 2);
+	fti->entries[0] = talloc_zero(tctx, struct lsa_ForestTrustRecord);
+	fti->entries[0]->flags = 0;
+	fti->entries[0]->type = LSA_FOREST_TRUST_TOP_LEVEL_NAME;
+	fti->entries[0]->time = 0;
+	fti->entries[0]->forest_trust_data.top_level_name.string = trust_name_dns;
+	fti->entries[1] = talloc_zero(tctx, struct lsa_ForestTrustRecord);
+	fti->entries[1]->flags = 0;
+	fti->entries[1]->type = LSA_FOREST_TRUST_DOMAIN_INFO;
+	fti->entries[1]->time = 0;
+	fti->entries[1]->forest_trust_data.domain_info.domain_sid = domsid;
+	fti->entries[1]->forest_trust_data.domain_info.dns_domain_name.string =
+		trust_name_dns;
+	fti->entries[1]
+		->forest_trust_data.domain_info.netbios_domain_name
+		.string = trust_name;
+
+	ft_info.in.forest_trust_info = fti;
+
+	torture_assert_ntstatus_ok(tctx,
+				   dcerpc_lsa_lsaRSetForestTrustInformation_r(
+					   p->binding_handle, tctx, &ft_info),
+				   "lsaRSetForestTrustInformation failed");
+	torture_assert_ntstatus_ok(tctx,
+				   ft_info.out.result,
+				   "lsaRSetForestTrustInformation failed");
+
+	/* There should be no collisions */
+	torture_assert(tctx, collision_info == NULL, "collision info returned");
+
+	return true;
+}
+
+static bool test_query_forest_trust_info(struct dcerpc_pipe *p,
+					 struct torture_context *tctx,
+					 struct policy_handle *handle,
+					 const char *trust_name_dns)
+{
+	struct lsa_String trusted_domain_name = {
+		.size = 0,
+	};
+	struct lsa_ForestTrustInformation *fti = NULL;
+	struct lsa_lsaRQueryForestTrustInformation r = {
+		.in = {
+			.handle = handle,
+			.highest_record_type = 2,
+			.trusted_domain_name = &trusted_domain_name,
+		},
+		.out = {
+			.forest_trust_info = &fti,
+		}
+	};
+	struct lsa_ForestTrustRecord *rec = NULL;
+
+	init_lsa_String(&trusted_domain_name, trust_name_dns);
+
+	torture_comment(tctx, "\nTesting lsaRQueryForestTrustInformation\n");
+
+
+	torture_assert_ntstatus_ok(tctx,
+				   dcerpc_lsa_lsaRQueryForestTrustInformation_r(
+					   p->binding_handle, tctx, &r),
+				   "lsaRQueryForestTrustInformation failed");
+	torture_assert_ntstatus_ok(tctx,
+				   r.out.result,
+				   "lsaRQueryForestTrustInformation failed");
+
+	torture_assert_not_null(tctx,
+				r.out.forest_trust_info,
+				"forest_trust_info is not set");
+	torture_assert_int_equal(tctx,
+				 fti->count,
+				 2,
+				 "Unexpected forest_trust_info count");
+
+	rec = fti->entries[0];
+	torture_assert_int_equal(tctx,
+				 rec->type,
+				 LSA_FOREST_TRUST_TOP_LEVEL_NAME,
+				 "Unexpedted type");
+	torture_assert_str_equal(tctx,
+				 rec->forest_trust_data.top_level_name.string,
+				 trust_name_dns,
+				 "Unexpected top level name");
+
+	return true;
+}
+
 static bool test_create_trust_and_set_info(struct dcerpc_pipe *p,
 					   struct torture_context *tctx,
 					   const char *trust_name,
@@ -111,8 +228,6 @@ static bool test_create_trust_and_set_info(struct dcerpc_pipe *p,
 					   struct lsa_TrustDomainInfoAuthInfoInternal *authinfo)
 {
 	struct policy_handle *handle;
-	struct lsa_lsaRSetForestTrustInformation fti;
-	struct lsa_ForestTrustCollisionInfo *collision_info = NULL;
 	struct lsa_Close cr;
 	struct policy_handle closed_handle;
 	struct lsa_CreateTrustedDomainEx2 r;
@@ -120,6 +235,7 @@ static bool test_create_trust_and_set_info(struct dcerpc_pipe *p,
 	struct policy_handle trustdom_handle;
 	struct lsa_QueryTrustedDomainInfo q;
 	union lsa_TrustedDomainInfo *info = NULL;
+	bool ok;
 
 	if (!test_get_policy_handle(tctx, p,
 				   (LSA_POLICY_VIEW_LOCAL_INFORMATION |
@@ -183,34 +299,16 @@ static bool test_create_trust_and_set_info(struct dcerpc_pipe *p,
 	torture_assert_int_equal(tctx, info->info_ex.trust_direction, trustinfo.trust_direction,
 				 "QueryTrustedDomainInfo of returned incorrect trust direction");
 
-	fti.in.handle = handle;
-	fti.in.trusted_domain_name = talloc_zero(tctx, struct lsa_StringLarge);
-	fti.in.trusted_domain_name->string = trust_name_dns;
-	fti.in.highest_record_type = 2;
-	fti.in.forest_trust_info = talloc_zero(tctx, struct lsa_ForestTrustInformation);
-	fti.in.forest_trust_info->count = 2;
-	fti.in.forest_trust_info->entries = talloc_array(tctx, struct lsa_ForestTrustRecord *, 2);
-	fti.in.forest_trust_info->entries[0] = talloc_zero(tctx, struct lsa_ForestTrustRecord);
-	fti.in.forest_trust_info->entries[0]->flags = 0;
-	fti.in.forest_trust_info->entries[0]->type = LSA_FOREST_TRUST_TOP_LEVEL_NAME;
-	fti.in.forest_trust_info->entries[0]->time = 0;
-	fti.in.forest_trust_info->entries[0]->forest_trust_data.top_level_name.string = trust_name_dns;
-	fti.in.forest_trust_info->entries[1] = talloc_zero(tctx, struct lsa_ForestTrustRecord);
-	fti.in.forest_trust_info->entries[1]->flags = 0;
-	fti.in.forest_trust_info->entries[1]->type = LSA_FOREST_TRUST_DOMAIN_INFO;
-	fti.in.forest_trust_info->entries[1]->time = 0;
-	fti.in.forest_trust_info->entries[1]->forest_trust_data.domain_info.domain_sid = domsid;
-	fti.in.forest_trust_info->entries[1]->forest_trust_data.domain_info.dns_domain_name.string = trust_name_dns;
-	fti.in.forest_trust_info->entries[1]->forest_trust_data.domain_info.netbios_domain_name.string = trust_name;
-	fti.in.check_only = 0;
-	fti.out.collision_info = &collision_info;
+	ok = test_set_forest_trust_info(
+		p, tctx, handle, domsid, trust_name, trust_name_dns);
+	if (!ok) {
+		return false;
+	}
 
-	torture_comment(tctx, "\nTesting SetForestTrustInformation\n");
-
-	torture_assert_ntstatus_ok(tctx,
-				   dcerpc_lsa_lsaRSetForestTrustInformation_r(p->binding_handle, tctx, &fti),
-				   "lsaRSetForestTrustInformation failed");
-	torture_assert_ntstatus_ok(tctx, fti.out.result, "lsaRSetForestTrustInformation failed");
+	ok = test_query_forest_trust_info(p, tctx, handle, trust_name_dns);
+	if (!ok) {
+		return false;
+	}
 
 	cr.in.handle = handle;
 	cr.out.handle = &closed_handle;
@@ -236,7 +334,7 @@ static bool get_and_set_info(struct dcerpc_pipe *p,
 	NTSTATUS status;
 	struct lsa_QueryTrustedDomainInfoByName qr;
 	struct lsa_SetTrustedDomainInfoByName sr;
-	union lsa_TrustedDomainInfo *info;
+	union lsa_TrustedDomainInfo *info = NULL;
 	struct lsa_Close cr;
 	struct policy_handle closed_handle;
 	size_t c;
@@ -273,7 +371,6 @@ static bool get_and_set_info(struct dcerpc_pipe *p,
 	sr.in.handle = handle;
 	sr.in.trusted_domain = talloc_zero(tctx, struct lsa_String);
 	sr.in.trusted_domain->string = name;
-	sr.in.info = info;
 
 	for (c = 0; il[c].info_level != -1; c++) {
 		torture_comment(tctx, "\nGetting/Setting dom info [%d]\n",il[c].info_level);
@@ -288,7 +385,7 @@ static bool get_and_set_info(struct dcerpc_pipe *p,
 					      "%s but %s\n",
 					      nt_errstr(il[c].get_result),
 					      nt_errstr(qr.out.result));
-			
+
 			/* We may be testing a server without support for this level */
 			if (qr.in.level == LSA_TRUSTED_DOMAIN_SUPPORTED_ENCRYPTION_TYPES && NT_STATUS_EQUAL(qr.out.result, NT_STATUS_INVALID_PARAMETER)) {
 				return true;

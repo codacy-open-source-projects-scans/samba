@@ -1802,9 +1802,6 @@ static NTSTATUS wcache_name_to_sid(struct winbindd_domain *domain,
 		DBG_DEBUG("cache entry not found\n");
 		return NT_STATUS_NOT_FOUND;
 	}
-	if (*type == SID_NAME_UNKNOWN) {
-		return NT_STATUS_NONE_MAPPED;
-	}
 
 	return NT_STATUS_OK;
 }
@@ -1819,17 +1816,18 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 			      enum lsa_SidType *type)
 {
 	NTSTATUS status;
-	bool old_status;
+	bool was_online;
 	const char *dom_name;
 
-	old_status = domain->online;
+	was_online = domain->online;
+
+	ZERO_STRUCTP(sid);
+	*type = SID_NAME_UNKNOWN;
 
 	status = wcache_name_to_sid(domain, domain_name, name, sid, type);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
 		return status;
 	}
-
-	ZERO_STRUCTP(sid);
 
 	DBG_DEBUG("name_to_sid: [Cached] - doing backend query for name for domain %s\n",
 		domain->name );
@@ -1839,30 +1837,23 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 					      name, flags, &dom_name, sid, type);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_IO_TIMEOUT) ||
-		NT_STATUS_EQUAL(status, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND)) {
-		if (!domain->internal && old_status) {
+	    NT_STATUS_EQUAL(status, NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND))
+	{
+		if (!domain->internal && was_online) {
+			/* Set the domain offline and query the cache again */
 			set_domain_offline(domain);
-		}
-		if (!domain->internal &&
-			!domain->online &&
-			old_status) {
-			NTSTATUS cache_status;
-			cache_status = wcache_name_to_sid(domain, domain_name, name, sid, type);
-			return cache_status;
+			return wcache_name_to_sid(domain,
+						  domain_name,
+						  name,
+						  sid,
+						  type);
 		}
 	}
 	/* and save it */
 
-	if (domain->online &&
-	    (NT_STATUS_IS_OK(status) || NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED))) {
-		enum lsa_SidType save_type = *type;
-
-		if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
-			save_type = SID_NAME_UNKNOWN;
-		}
-
+	if (domain->online && NT_STATUS_IS_OK(status)) {
 		wcache_save_name_to_sid(domain, status, domain_name, name, sid,
-					save_type);
+					*type);
 
 		/* Only save the reverse mapping if this was not a UPN */
 		if (!strchr(name, '@')) {
@@ -1871,7 +1862,7 @@ NTSTATUS wb_cache_name_to_sid(struct winbindd_domain *domain,
 			}
 			(void)strlower_m(discard_const_p(char, name));
 			wcache_save_sid_to_name(domain, status, sid,
-						dom_name, name, save_type);
+						dom_name, name, *type);
 		}
 	}
 

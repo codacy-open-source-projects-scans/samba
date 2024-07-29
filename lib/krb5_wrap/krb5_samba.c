@@ -1808,7 +1808,7 @@ krb5_error_code smb_krb5_kt_seek_and_delete_old_entries(krb5_context context,
 	}
 
 	DEBUG(3, (__location__ ": Will try to delete old keytab entries\n"));
-	while (!krb5_kt_next_entry(context, keytab, &kt_entry, &cursor)) {
+	while (!samba_krb5_kt_next_entry(context, keytab, &kt_entry, &cursor)) {
 		bool name_ok = false;
 		krb5_enctype kt_entry_enctype =
 			smb_krb5_kt_get_enctype_from_entry(&kt_entry);
@@ -1898,7 +1898,7 @@ krb5_error_code smb_krb5_kt_seek_and_delete_old_entries(krb5_context context,
 				  "failed (%s)\n", error_message(ret)));
 			goto out;
 		}
-		ret = krb5_kt_remove_entry(context, keytab, &kt_entry);
+		ret = samba_krb5_kt_remove_entry(context, keytab, &kt_entry);
 		if (ret) {
 			DEBUG(1, (__location__ ": krb5_kt_remove_entry() "
 				  "failed (%s)\n", error_message(ret)));
@@ -1933,116 +1933,6 @@ out:
 	if (!all_zero((uint8_t *)&cursor, sizeof(cursor))) {
 		krb5_kt_end_seq_get(context, keytab, &cursor);
 	}
-	return ret;
-}
-
-/**
- * @brief Add a keytab entry for the given principal
- *
- * @param[in]  context       The krb5 context to use.
- *
- * @param[in]  keytab        The keytab to add the entry to.
- *
- * @param[in]  kvno          The kvno to use.
- *
- * @param[in]  princ_s       The principal as a string.
- *
- * @param[in]  salt_principal The salt principal to salt the password with.
- *                            Only needed for keys which support salting.
- *                            If no salt is used set no_salt to false and
- *                            pass NULL here.
- *
- * @param[in]  enctype        The encryption type of the keytab entry.
- *
- * @param[in]  password       The password of the keytab entry.
- *
- * @retval 0 on Success
- *
- * @return A corresponding KRB5 error code.
- *
- * @see smb_krb5_kt_open()
- */
-krb5_error_code smb_krb5_kt_add_password(krb5_context context,
-					 krb5_keytab keytab,
-					 krb5_kvno kvno,
-					 const char *princ_s,
-					 const char *salt_principal,
-					 krb5_enctype enctype,
-					 krb5_data *password)
-{
-	krb5_error_code ret;
-	krb5_keytab_entry kt_entry;
-	krb5_principal princ = NULL;
-	krb5_keyblock *keyp;
-	krb5_principal salt_princ = NULL;
-
-	ZERO_STRUCT(kt_entry);
-
-	ret = smb_krb5_parse_name(context, princ_s, &princ);
-	if (ret) {
-		DEBUG(1, (__location__ ": smb_krb5_parse_name(%s) "
-			  "failed (%s)\n", princ_s, error_message(ret)));
-		goto out;
-	}
-
-	/* Seek and delete old keytab entries */
-	ret = smb_krb5_kt_seek_and_delete_old_entries(context,
-						      keytab,
-						      true, /* keep_old_kvno */
-						      kvno,
-						      true, /* enctype_only */
-						      enctype,
-						      princ_s,
-						      princ,
-						      false); /* flush */
-	if (ret) {
-		goto out;
-	}
-
-	/* If we get here, we have deleted all the old entries with kvno's
-	 * not equal to the current kvno-1. */
-
-	keyp = KRB5_KT_KEY(&kt_entry);
-
-	/* Now add keytab entries for all encryption types */
-	ret = smb_krb5_parse_name(context, salt_principal, &salt_princ);
-	if (ret) {
-		DBG_WARNING("krb5_parse_name(%s) failed (%s)\n",
-			    salt_principal, error_message(ret));
-		goto out;
-	}
-
-	ret = smb_krb5_create_key_from_string(context,
-					      salt_princ,
-					      NULL,
-					      password,
-					      enctype,
-					      keyp);
-	krb5_free_principal(context, salt_princ);
-	if (ret != 0) {
-		goto out;
-	}
-
-	kt_entry.principal = princ;
-	kt_entry.vno       = kvno;
-
-	DEBUG(3, (__location__ ": adding keytab entry for (%s) with "
-		  "encryption type (%d) and version (%d)\n",
-		  princ_s, enctype, kt_entry.vno));
-	ret = krb5_kt_add_entry(context, keytab, &kt_entry);
-	krb5_free_keyblock_contents(context, keyp);
-	ZERO_STRUCT(kt_entry);
-	if (ret) {
-		DEBUG(1, (__location__ ": adding entry to keytab "
-			  "failed (%s)\n", error_message(ret)));
-		goto out;
-	}
-
-out:
-	if (princ) {
-		krb5_free_principal(context, princ);
-	}
-
 	return ret;
 }
 
