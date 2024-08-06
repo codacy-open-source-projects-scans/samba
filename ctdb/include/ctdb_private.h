@@ -328,7 +328,7 @@ struct ctdb_context {
 
 	struct ctdb_reloadips_handle *reload_ips;
 
-	const char *nodes_file;
+	const char *nodes_source;
 	const char *public_addresses_file;
 	struct trbt_tree *child_processes; 
 
@@ -840,7 +840,7 @@ struct ctdb_node *ctdb_ip_to_node(struct ctdb_context *ctdb,
 uint32_t ctdb_ip_to_pnn(struct ctdb_context *ctdb,
 			const ctdb_sock_addr *nodeip);
 
-void ctdb_load_nodes_file(struct ctdb_context *ctdb);
+void ctdb_load_nodes(struct ctdb_context *ctdb);
 
 int ctdb_set_address(struct ctdb_context *ctdb, const char *address);
 

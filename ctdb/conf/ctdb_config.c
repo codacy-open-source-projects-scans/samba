@@ -57,6 +57,10 @@ static void setup_config_pointers(struct conf_context *conf)
 				   CLUSTER_CONF_SECTION,
 				   CLUSTER_CONF_RECOVERY_LOCK,
 				   &ctdb_config.recovery_lock);
+	conf_assign_string_pointer(conf,
+				   CLUSTER_CONF_SECTION,
+				   CLUSTER_CONF_NODES_LIST,
+				   &ctdb_config.nodes_list);
 	conf_assign_integer_pointer(conf,
 				    CLUSTER_CONF_SECTION,
 				    CLUSTER_CONF_LEADER_TIMEOUT,
@@ -134,7 +138,8 @@ static void setup_config_pointers(struct conf_context *conf)
 }
 
 int ctdb_config_load(TALLOC_CTX *mem_ctx,
-		     struct conf_context **result)
+		     struct conf_context **result,
+		     bool verbose)
 {
 	struct conf_context *conf = NULL;
 	int ret = 0;
@@ -165,7 +170,7 @@ int ctdb_config_load(TALLOC_CTX *mem_ctx,
 		ret = ENOMEM;
 		goto fail;
 	}
-	ret = conf_load(conf, conf_file, true);
+	ret = conf_load(conf, conf_file, true, verbose);
 	/* Configuration file does not need to exist */
 	if (ret != 0 && ret != ENOENT) {
 		D_ERR("Failed to load configuration file %s\n", conf_file);

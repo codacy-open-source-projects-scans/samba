@@ -28,6 +28,7 @@ struct ctdb_config {
 	const char *node_address;
 	const char *cluster_lock;
 	const char *recovery_lock;
+	const char *nodes_list;
 	int leader_timeout;
 	bool leader_capability;
 
@@ -54,6 +55,7 @@ struct ctdb_config {
 
 extern struct ctdb_config ctdb_config;
 
-int ctdb_config_load(TALLOC_CTX *mem_ctx, struct conf_context **conf);
+int ctdb_config_load(TALLOC_CTX *mem_ctx, struct conf_context **conf,
+		     bool verbose);
 
 #endif /* __CTDB_CONFIG_H__ */
