@@ -301,7 +301,7 @@ int net_rap_share(struct net_context *c, int argc, const char **argv)
 
 	if (argc == 0) {
 		struct cli_state *cli;
-		int ret;
+		NTSTATUS status;
 
 		if (c->display_usage) {
 			d_printf(_("Usage:\n"));
@@ -319,12 +319,12 @@ int net_rap_share(struct net_context *c, int argc, const char **argv)
 	"\nEnumerating shared resources (exports) on remote server:\n\n"
 	"\nShare name   Type     Description\n"
 	"----------   ----     -----------\n"));
-			ret = cli_RNetShareEnum(cli, long_share_fn, NULL);
+			status = cli_RNetShareEnum(cli, long_share_fn, NULL);
 		} else {
-			ret = cli_RNetShareEnum(cli, share_fn, NULL);
+			status = cli_RNetShareEnum(cli, share_fn, NULL);
 		}
 		cli_shutdown(cli);
-		return ret;
+		return NT_STATUS_IS_OK(status) ? 0 : -1;
 	}
 
 	return net_run_function(c, argc, argv, "net rap share", func);
@@ -535,7 +535,7 @@ static int net_rap_server_domain(struct net_context *c, int argc,
 				 const char **argv)
 {
 	struct cli_state *cli;
-	int ret;
+	NTSTATUS status;
 
 	if (c->display_usage) {
 		d_printf("%s\n%s",
@@ -552,10 +552,13 @@ static int net_rap_server_domain(struct net_context *c, int argc,
 		   "\tServer name          Server description\n"
 		   "\t-------------        ----------------------------\n"));
 
-	ret = cli_NetServerEnum(cli, cli->server_domain, SV_TYPE_ALL,
-				display_server_func,NULL);
+	status = cli_NetServerEnum(cli,
+				   cli->server_domain,
+				   SV_TYPE_ALL,
+				   display_server_func,
+				   NULL);
 	cli_shutdown(cli);
-	return ret;
+	return NT_STATUS_IS_OK(status) ? 0 : -1;
 }
 
 int net_rap_server(struct net_context *c, int argc, const char **argv)
@@ -598,7 +601,7 @@ int net_rap_domain_usage(struct net_context *c, int argc, const char **argv)
 int net_rap_domain(struct net_context *c, int argc, const char **argv)
 {
 	struct cli_state *cli;
-	int ret;
+	NTSTATUS status;
 
 	if (c->display_usage)
 		return net_rap_domain_usage(c, argc, argv);
@@ -610,10 +613,13 @@ int net_rap_domain(struct net_context *c, int argc, const char **argv)
 		   "\tDomain name          Server name of Browse Master\n"
 		   "\t-------------        ----------------------------\n"));
 
-	ret = cli_NetServerEnum(cli, cli->server_domain, SV_TYPE_DOMAIN_ENUM,
-				display_server_func,NULL);
+	status = cli_NetServerEnum(cli,
+				   cli->server_domain,
+				   SV_TYPE_DOMAIN_ENUM,
+				   display_server_func,
+				   NULL);
 	cli_shutdown(cli);
-	return ret;
+	return NT_STATUS_IS_OK(status) ? 0 : -1;
 }
 
 int net_rap_printq_usage(struct net_context *c, int argc, const char **argv)
@@ -1240,7 +1246,7 @@ int net_rap_password_usage(struct net_context *c, int argc, const char **argv)
 int net_rap_password(struct net_context *c, int argc, const char **argv)
 {
 	struct cli_state *cli;
-	int ret;
+	NTSTATUS status;
 
 	if (argc < 3 || c->display_usage)
                 return net_rap_password_usage(c, argc, argv);
@@ -1249,9 +1255,9 @@ int net_rap_password(struct net_context *c, int argc, const char **argv)
                 return -1;
 
 	/* BB Add check for password lengths? */
-	ret = cli_oem_change_password(cli, argv[0], argv[2], argv[1]);
+	status = cli_oem_change_password(cli, argv[0], argv[2], argv[1]);
 	cli_shutdown(cli);
-	return ret;
+	return NT_STATUS_IS_OK(status) ? 0 : -1;
 }
 
 int net_rap_admin_usage(struct net_context *c, int argc, const char **argv)

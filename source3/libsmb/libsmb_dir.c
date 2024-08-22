@@ -700,11 +700,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 
                         /* Now, list the stuff ... */
 
-                        if (!cli_NetServerEnum(srv->cli,
-                                               workgroup,
-                                               SV_TYPE_DOMAIN_ENUM,
-                                               list_unique_wg_fn,
-                                               (void *)dir)) {
+			status = cli_NetServerEnum(srv->cli,
+						   workgroup,
+						   SV_TYPE_DOMAIN_ENUM,
+						   list_unique_wg_fn,
+						   (void *)dir);
+			if (!NT_STATUS_IS_OK(status)) {
                                 continue;
                         }
                 }
@@ -761,6 +762,7 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				 */
 				char *wgroup = server;
 				fstring buserver;
+				NTSTATUS status;
 
 				dir->dir_type = SMBC_SERVER;
 
@@ -819,10 +821,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				}
 
 				/* Now, list the servers ... */
-				if (!cli_NetServerEnum(srv->cli, wgroup,
-                                                       0x0000FFFE, list_fn,
-						       (void *)dir)) {
-
+				status = cli_NetServerEnum(srv->cli,
+							   wgroup,
+							   0x0000FFFE,
+							   list_fn,
+							   (void *)dir);
+				if (!NT_STATUS_IS_OK(status)) {
 					if (dir) {
 						SAFE_FREE(dir->fname);
 						SAFE_FREE(dir);
@@ -869,21 +873,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 					 * Only call cli_RNetShareEnum()
 					 * on SMB1 connections, not SMB2+.
 					 */
-					int rc = cli_RNetShareEnum(srv->cli,
-							       list_fn,
-							       (void *)dir);
-					if (rc != 0) {
-						status = cli_nt_error(srv->cli);
-					} else {
-						status = NT_STATUS_OK;
-					}
+					status = cli_RNetShareEnum(
+						srv->cli,
+						list_fn,
+						(void *)dir);
 				}
 				if (!NT_STATUS_IS_OK(status)) {
-					/*
-					 * Set cli->raw_status so SMBC_errno()
-					 * will correctly return the error.
-					 */
-					srv->cli->raw_status = status;
 					if (dir != NULL) {
 						SAFE_FREE(dir->fname);
 						SAFE_FREE(dir);
@@ -996,12 +991,13 @@ SMBC_opendir_ctx(SMBCCTX *context,
                                         }
                                 }
 
-                                /*
-                                 * If there was an error and the server is no
-                                 * good any more...
-                                 */
-                                if (cli_is_error(targetcli) &&
-                                    smbc_getFunctionCheckServer(context)(context, srv)) {
+				/*
+				 * There was an error (we're in the
+				 * !NT_STATUS_IS_OK branch) and the
+				 * server good any more...
+				 */
+				if (smbc_getFunctionCheckServer(
+					    context)(context, srv)) {
 
                                         /* ... then remove it. */
                                         if (smbc_getFunctionRemoveUnusedServer(context)(context,

@@ -66,7 +66,6 @@ static int status_code(int ret)
 		errno = -ret;
 		return -1;
 	}
-	errno = 0;
 	return ret;
 }
 
@@ -76,7 +75,6 @@ static ssize_t lstatus_code(intmax_t ret)
 		errno = -((int)ret);
 		return -1;
 	}
-	errno = 0;
 	return (ssize_t)ret;
 }
 
@@ -161,10 +159,11 @@ static int cephmount_cache_remove(struct cephmount_cached *entry)
 static char *cephmount_get_cookie(TALLOC_CTX * mem_ctx, const int snum)
 {
 	const char *conf_file =
-	    lp_parm_const_string(snum, "ceph", "config_file", ".");
-	const char *user_id = lp_parm_const_string(snum, "ceph", "user_id", "");
+	    lp_parm_const_string(snum, "ceph_new", "config_file", ".");
+	const char *user_id =
+	    lp_parm_const_string(snum, "ceph_new", "user_id", "");
 	const char *fsname =
-	    lp_parm_const_string(snum, "ceph", "filesystem", "");
+	    lp_parm_const_string(snum, "ceph_new", "filesystem", "");
 	return talloc_asprintf(mem_ctx, "(%s/%s/%s)", conf_file, user_id,
 			       fsname);
 }
@@ -176,11 +175,11 @@ static struct ceph_mount_info *cephmount_mount_fs(const int snum)
 	struct ceph_mount_info *mnt = NULL;
 	/* if config_file and/or user_id are NULL, ceph will use defaults */
 	const char *conf_file =
-	    lp_parm_const_string(snum, "ceph", "config_file", NULL);
+	    lp_parm_const_string(snum, "ceph_new", "config_file", NULL);
 	const char *user_id =
-	    lp_parm_const_string(snum, "ceph", "user_id", NULL);
+	    lp_parm_const_string(snum, "ceph_new", "user_id", NULL);
 	const char *fsname =
-	    lp_parm_const_string(snum, "ceph", "filesystem", NULL);
+	    lp_parm_const_string(snum, "ceph_new", "filesystem", NULL);
 
 	DBG_DEBUG("[CEPH] calling: ceph_create\n");
 	ret = ceph_create(&mnt, user_id);
@@ -731,7 +730,7 @@ static int vfs_ceph_ll_lookup(const struct vfs_handle_struct *handle,
 	struct UserPerm *uperm = NULL;
 	int ret = -1;
 
-	DBG_DEBUG("[ceph] ceph_ll_lookup: parent-ino=%" PRIu64 " name=%s",
+	DBG_DEBUG("[ceph] ceph_ll_lookup: parent-ino=%" PRIu64 " name=%s\n",
 		  parent->ino, name);
 
 	uperm = vfs_ceph_userperm_new(handle);
@@ -1484,19 +1483,20 @@ static struct dirent *vfs_ceph_readdir(struct vfs_handle_struct *handle,
 {
 	const struct vfs_ceph_fh *dircfh = (const struct vfs_ceph_fh *)dirp;
 	struct dirent *result = NULL;
-	int errval = 0;
+	int saved_errno = errno;
 
 	DBG_DEBUG("[CEPH] readdir(%p, %p)\n", handle, dirp);
+
 	errno = 0;
 	result = vfs_ceph_ll_readdir(handle, dircfh);
-	errval = errno;
-	if ((result == NULL) && (errval != 0)) {
-		DBG_DEBUG("[CEPH] readdir(...) = %d\n", errval);
+	if ((result == NULL) && (errno != 0)) {
+		saved_errno = errno;
+		DBG_DEBUG("[CEPH] readdir(...) = %d\n", errno);
 	} else {
 		DBG_DEBUG("[CEPH] readdir(...) = %p\n", result);
 	}
-	/* re-assign errno to avoid possible over-write by DBG_DEBUG */
-	errno = errval;
+
+	errno = saved_errno;
 	return result;
 }
 
@@ -1874,7 +1874,8 @@ static int vfs_ceph_renameat(struct vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	struct vfs_ceph_fh *src_dircfh = NULL;
 	struct vfs_ceph_fh *dst_dircfh = NULL;
@@ -1884,6 +1885,11 @@ static int vfs_ceph_renameat(struct vfs_handle_struct *handle,
 	if (smb_fname_src->stream_name || smb_fname_dst->stream_name) {
 		errno = ENOENT;
 		return result;
+	}
+
+	if (how->flags != 0) {
+		errno = EINVAL;
+		return -1;
 	}
 
 	result = vfs_ceph_fetch_fh(handle, srcfsp, &src_dircfh);

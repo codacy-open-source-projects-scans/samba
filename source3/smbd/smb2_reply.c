@@ -166,6 +166,8 @@ NTSTATUS check_path_syntax(char *path, bool posix_path)
 					s++;
 					continue;
 				}
+			} else if (IS_SMBD_TMPNAME(s, NULL)) {
+				return NT_STATUS_OBJECT_NAME_INVALID;
 			}
 
 		}
@@ -1415,6 +1417,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 				true : conn->case_sensitive;
 	bool case_preserve = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
 				true : conn->case_preserve;
+	struct vfs_rename_how rhow = { .flags = 0, };
 
 	status = parent_dirname_compatible_open(conn, smb_fname_dst_in);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1755,7 +1758,8 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 			parent_dir_fname_src->fsp,
 			parent_dir_fname_src_atname,
 			parent_dir_fname_dst->fsp,
-			parent_dir_fname_dst_atname);
+			parent_dir_fname_dst_atname,
+			&rhow);
 	if (ret == 0) {
 		uint32_t create_options = fh_get_private_options(fsp->fh);
 

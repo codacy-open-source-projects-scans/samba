@@ -29,17 +29,20 @@ struct cli_state;
 
 /* The following definitions come from libsmb/clirap.c  */
 
-bool cli_api(struct cli_state *cli,
-	     char *param, int prcnt, int mprcnt,
-	     char *data, int drcnt, int mdrcnt,
-	     char **rparam, unsigned int *rprcnt,
-	     char **rdata, unsigned int *rdrcnt);
-int cli_RNetShareEnum(struct cli_state *cli, void (*fn)(const char *, uint32_t, const char *, void *), void *state);
-bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
-		       void (*fn)(const char *, uint32_t, const char *, void *),
-		       void *state);
-bool cli_oem_change_password(struct cli_state *cli, const char *user, const char *new_password,
-                             const char *old_password);
+NTSTATUS cli_RNetShareEnum(
+	struct cli_state *cli,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state);
+NTSTATUS cli_NetServerEnum(
+	struct cli_state *cli,
+	char *workgroup,
+	uint32_t stype,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state);
+NTSTATUS cli_oem_change_password(struct cli_state *cli,
+				 const char *user,
+				 const char *new_password,
+				 const char *old_password);
 NTSTATUS cli_setpathinfo_ext(struct cli_state *cli, const char *fname,
 			     struct timespec create_time,
 			     struct timespec access_time,
@@ -143,10 +146,6 @@ NTSTATUS cli_qpathinfo_basic_recv(struct tevent_req *req,
 				  SMB_STRUCT_STAT *sbuf, uint32_t *attributes);
 NTSTATUS cli_qpathinfo_basic(struct cli_state *cli, const char *name,
 			     SMB_STRUCT_STAT *sbuf, uint32_t *attributes);
-NTSTATUS cli_qpathinfo_standard(struct cli_state *cli, const char *fname,
-				uint64_t *allocated, uint64_t *size,
-				uint32_t *nlinks,
-				bool *is_del_pending, bool *is_dir);
 NTSTATUS cli_qpathinfo_alt_name(struct cli_state *cli, const char *fname, fstring alt_name);
 struct tevent_req *cli_qpathinfo_send(TALLOC_CTX *mem_ctx,
 				      struct tevent_context *ev,

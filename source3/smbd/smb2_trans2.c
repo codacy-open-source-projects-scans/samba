@@ -2040,8 +2040,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 	int snum = SNUM(conn);
 	const char *fstype = lp_fstype(SNUM(conn));
 	const char *filename = NULL;
-	const uint64_t bytes_per_sector = 512;
-	uint32_t additional_flags = 0;
+	uint64_t bytes_per_sector = 512;
 	struct smb_filename smb_fname;
 	SMB_STRUCT_STAT st;
 	NTSTATUS status = NT_STATUS_OK;
@@ -2172,24 +2171,9 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)st.st_ex_dev, (u
 		case SMB_QUERY_FS_ATTRIBUTE_INFO:
 		case SMB_FS_ATTRIBUTE_INFORMATION:
 
-			additional_flags = 0;
-#if defined(HAVE_SYS_QUOTAS)
-			additional_flags |= FILE_VOLUME_QUOTAS;
-#endif
-
-			if(lp_nt_acl_support(SNUM(conn))) {
-				additional_flags |= FILE_PERSISTENT_ACLS;
-			}
-
-			/* Capabilities are filled in at connection time through STATVFS call */
-			additional_flags |= conn->fs_capabilities;
-			additional_flags |= lp_parm_int(conn->params->service,
-							"share", "fake_fscaps",
-							0);
-
 			SIVAL(pdata,0,FILE_CASE_PRESERVED_NAMES|FILE_CASE_SENSITIVE_SEARCH|
 				FILE_SUPPORTS_OBJECT_IDS|FILE_UNICODE_ON_DISK|
-				additional_flags); /* FS ATTRIBUTES */
+				conn->fs_capabilities); /* FS ATTRIBUTES */
 
 			SIVAL(pdata,4,255); /* Max filename component length */
 			/* NOTE! the fstype must *not* be null terminated or win98 won't recognise it
@@ -2433,6 +2417,23 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 
 		case SMB_FS_SECTOR_SIZE_INFORMATION:
 		{
+			uint32_t bps_logical = lp_parm_ulong(
+				SNUM(conn),
+				"fs", "logical bytes per sector",
+				bytes_per_sector);
+			uint32_t bps_aligned = lp_parm_ulong(
+				SNUM(conn),
+				"fs", "aligned bytes per sector",
+				bytes_per_sector);
+			uint32_t bps_performance = lp_parm_ulong(
+				SNUM(conn),
+				"fs", "performance bytes per sector",
+				bytes_per_sector);
+			uint32_t bps_effective = lp_parm_ulong(
+				SNUM(conn),
+				"fs", "effective aligned bytes per sector",
+				bytes_per_sector);
+
 			data_len = 28;
 			/*
 			 * These values match a physical Windows Server 2012
@@ -2440,13 +2441,13 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 			 */
 			DEBUG(5, ("SMB_FS_SECTOR_SIZE_INFORMATION:"));
 			/* logical_bytes_per_sector */
-			SIVAL(pdata, 0, bytes_per_sector);
+			SIVAL(pdata, 0, bps_logical);
 			/* phys_bytes_per_sector_atomic */
-			SIVAL(pdata, 4, bytes_per_sector);
+			SIVAL(pdata, 4, bps_aligned);
 			/* phys_bytes_per_sector_perf */
-			SIVAL(pdata, 8, bytes_per_sector);
+			SIVAL(pdata, 8, bps_performance);
 			/* fs_effective_phys_bytes_per_sector_atomic */
-			SIVAL(pdata, 12, bytes_per_sector);
+			SIVAL(pdata, 12, bps_effective);
 			/* flags */
 			SIVAL(pdata, 16, SSINFO_FLAGS_ALIGNED_DEVICE
 				| SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE);
@@ -3915,13 +3916,13 @@ NTSTATUS smb_set_file_time(connection_struct *conn,
 	round_timespec(conn->ts_res, &ft->atime);
 	round_timespec(conn->ts_res, &ft->mtime);
 
-	DBG_DEBUG("smb_set_filetime: actime: %s\n ",
+	DBG_DEBUG("actime: %s\n ",
 		  timespec_string_buf(&ft->atime, true, &tbuf[0]));
-	DBG_DEBUG("smb_set_filetime: modtime: %s\n ",
+	DBG_DEBUG("modtime: %s\n ",
 		  timespec_string_buf(&ft->mtime, true, &tbuf[1]));
-	DBG_DEBUG("smb_set_filetime: ctime: %s\n ",
+	DBG_DEBUG("ctime: %s\n ",
 		  timespec_string_buf(&ft->ctime, true, &tbuf[2]));
-	DBG_DEBUG("smb_set_file_time: createtime: %s\n ",
+	DBG_DEBUG("createtime: %s\n ",
 		  timespec_string_buf(&ft->create_time, true, &tbuf[3]));
 
 	if (setting_write_time) {
@@ -3938,16 +3939,10 @@ NTSTATUS smb_set_file_time(connection_struct *conn,
 		DBG_DEBUG("setting pending modtime to %s\n",
 			  timespec_string_buf(&ft->mtime, true, &tbuf[0]));
 
-		if (set_fsp != NULL) {
-			set_sticky_write_time_fsp(set_fsp, ft->mtime);
-		} else {
-			set_sticky_write_time_path(
-				vfs_file_id_from_sbuf(conn, &smb_fname->st),
-				ft->mtime);
-		}
+		set_sticky_write_time_fsp(set_fsp, ft->mtime);
 	}
 
-	DEBUG(10,("smb_set_file_time: setting utimes to modified values.\n"));
+	DBG_DEBUG("setting utimes to modified values.\n");
 
 	ret = file_ntimes(conn, set_fsp, ft);
 	if (ret != 0) {
@@ -5075,6 +5070,8 @@ NTSTATUS smbd_do_setfilepathinfo(connection_struct *conn,
 		 "totdata=%d\n", smb_fname_str_dbg(smb_fname),
 		 fsp_fnum_dbg(fsp),
 		 info_level, total_data));
+
+	SMB_ASSERT(fsp != NULL);
 
 	switch (info_level) {
 

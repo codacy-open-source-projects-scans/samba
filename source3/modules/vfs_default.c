@@ -177,6 +177,16 @@ static uint32_t vfswrap_fs_capabilities(struct vfs_handle_struct *handle,
 		caps = statbuf.FsCapabilities;
 	}
 
+#if defined(HAVE_SYS_QUOTAS)
+	caps |= FILE_VOLUME_QUOTAS;
+#endif
+
+	if (lp_nt_acl_support(SNUM(conn))) {
+		caps |= FILE_PERSISTENT_ACLS;
+	}
+
+	caps |= lp_parm_int(SNUM(conn), "share", "fake_fscaps", 0);
+
 	*p_ts_res = TIMESTAMP_SET_SECONDS;
 
 	/* Work out what timestamp resolution we can
@@ -1277,19 +1287,32 @@ static int vfswrap_renameat(vfs_handle_struct *handle,
 			  files_struct *srcfsp,
 			  const struct smb_filename *smb_fname_src,
 			  files_struct *dstfsp,
-			  const struct smb_filename *smb_fname_dst)
+			  const struct smb_filename *smb_fname_dst,
+			  const struct vfs_rename_how *how)
 {
 	int result = -1;
+	int flags = 0;
 
 	START_PROFILE(syscall_renameat);
 
 	SMB_ASSERT(!is_named_stream(smb_fname_src));
 	SMB_ASSERT(!is_named_stream(smb_fname_dst));
 
-	result = renameat(fsp_get_pathref_fd(srcfsp),
-			smb_fname_src->base_name,
-			fsp_get_pathref_fd(dstfsp),
-			smb_fname_dst->base_name);
+	if (how->flags & ~VFS_RENAME_HOW_NO_REPLACE) {
+		END_PROFILE(syscall_renameat);
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (how->flags & VFS_RENAME_HOW_NO_REPLACE) {
+		flags |= RENAME_NOREPLACE;
+	}
+
+	result = renameat2(fsp_get_pathref_fd(srcfsp),
+			   smb_fname_src->base_name,
+			   fsp_get_pathref_fd(dstfsp),
+			   smb_fname_dst->base_name,
+			   flags);
 
 	END_PROFILE(syscall_renameat);
 	return result;
@@ -2030,7 +2053,16 @@ static struct tevent_req *vfswrap_offload_read_send(
 		return tevent_req_post(req, ev);
 	}
 
-	if (fsctl != FSCTL_SRV_REQUEST_RESUME_KEY) {
+	if (fsctl != FSCTL_SRV_REQUEST_RESUME_KEY &&
+	    fsctl != FSCTL_DUP_EXTENTS_TO_FILE)
+	{
+		tevent_req_nterror(req, NT_STATUS_INVALID_DEVICE_REQUEST);
+		return tevent_req_post(req, ev);
+	}
+
+	if (fsctl == FSCTL_DUP_EXTENTS_TO_FILE &&
+	    !(fsp->conn->fs_capabilities & FILE_SUPPORTS_BLOCK_REFCOUNTING))
+	{
 		tevent_req_nterror(req, NT_STATUS_INVALID_DEVICE_REQUEST);
 		return tevent_req_post(req, ev);
 	}
@@ -2109,7 +2141,7 @@ static void vfswrap_offload_write_cleanup(struct tevent_req *req,
 	state->dst_fsp = NULL;
 }
 
-static NTSTATUS vfswrap_offload_copy_file_range(struct tevent_req *req);
+static NTSTATUS vfswrap_offload_fast_copy(struct tevent_req *req, int fsctl);
 static NTSTATUS vfswrap_offload_write_loop(struct tevent_req *req);
 
 static struct tevent_req *vfswrap_offload_write_send(
@@ -2127,7 +2159,7 @@ static struct tevent_req *vfswrap_offload_write_send(
 	struct vfswrap_offload_write_state *state = NULL;
 	/* off_t is signed! */
 	off_t max_offset = INT64_MAX - to_copy;
-	size_t num = MIN(to_copy, COPYCHUNK_MAX_TOTAL_LEN);
+	off_t num = to_copy;
 	files_struct *src_fsp = NULL;
 	NTSTATUS status;
 	bool ok;
@@ -2157,27 +2189,22 @@ static struct tevent_req *vfswrap_offload_write_send(
 	tevent_req_set_cleanup_fn(req, vfswrap_offload_write_cleanup);
 
 	switch (fsctl) {
+	case FSCTL_DUP_EXTENTS_TO_FILE:
+		break;
+
 	case FSCTL_SRV_COPYCHUNK:
 	case FSCTL_SRV_COPYCHUNK_WRITE:
+		num = MIN(to_copy, COPYCHUNK_MAX_TOTAL_LEN);
 		break;
 
 	case FSCTL_OFFLOAD_WRITE:
 		tevent_req_nterror(req, NT_STATUS_NOT_IMPLEMENTED);
 		return tevent_req_post(req, ev);
 
-	case FSCTL_DUP_EXTENTS_TO_FILE:
-		DBG_DEBUG("COW clones not supported by vfs_default\n");
-		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
-		return tevent_req_post(req, ev);
-
 	default:
 		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return tevent_req_post(req, ev);
 	}
-
-	/*
-	 * From here on we assume a copy-chunk fsctl
-	 */
 
 	if (to_copy == 0) {
 		tevent_req_done(req);
@@ -2219,7 +2246,9 @@ static struct tevent_req *vfswrap_offload_write_send(
 		return tevent_req_post(req, ev);
 	}
 
-	DBG_DEBUG("server side copy chunk of length %" PRIu64 "\n", to_copy);
+	DBG_DEBUG("server side copy (%s) of length %" PRIu64 "\n",
+		  fsctl == FSCTL_DUP_EXTENTS_TO_FILE ? "reflink" : "chunk",
+		  to_copy);
 
 	status = vfs_offload_token_check_handles(fsctl, src_fsp, dest_fsp);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -2255,7 +2284,7 @@ static struct tevent_req *vfswrap_offload_write_send(
 		return tevent_req_post(req, ev);
 	}
 
-	status = vfswrap_offload_copy_file_range(req);
+	status = vfswrap_offload_fast_copy(req, fsctl);
 	if (NT_STATUS_IS_OK(status)) {
 		tevent_req_done(req);
 		return tevent_req_post(req, ev);
@@ -2279,7 +2308,7 @@ static struct tevent_req *vfswrap_offload_write_send(
 	return req;
 }
 
-static NTSTATUS vfswrap_offload_copy_file_range(struct tevent_req *req)
+static NTSTATUS vfswrap_offload_fast_copy(struct tevent_req *req, int fsctl)
 {
 	struct vfswrap_offload_write_state *state = tevent_req_data(
 		req, struct vfswrap_offload_write_state);
@@ -2290,10 +2319,6 @@ static NTSTATUS vfswrap_offload_copy_file_range(struct tevent_req *req)
 	bool ok;
 	static bool try_copy_file_range = true;
 
-	if (!try_copy_file_range) {
-		return NT_STATUS_MORE_PROCESSING_REQUIRED;
-	}
-
 	same_file = file_id_equal(&state->src_fsp->file_id,
 				  &state->dst_fsp->file_id);
 	if (same_file &&
@@ -2302,12 +2327,44 @@ static NTSTATUS vfswrap_offload_copy_file_range(struct tevent_req *req)
 				  state->remaining,
 				  state->dst_off))
 	{
+		if (fsctl == FSCTL_DUP_EXTENTS_TO_FILE) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
 		return NT_STATUS_MORE_PROCESSING_REQUIRED;
 	}
 
 	if (fsp_is_alternate_stream(state->src_fsp) ||
 	    fsp_is_alternate_stream(state->dst_fsp))
 	{
+		if (fsctl == FSCTL_DUP_EXTENTS_TO_FILE) {
+			return NT_STATUS_NOT_SUPPORTED;
+		}
+		return NT_STATUS_MORE_PROCESSING_REQUIRED;
+	}
+
+	if (fsctl == FSCTL_DUP_EXTENTS_TO_FILE) {
+		int ret;
+
+		ok = change_to_user_and_service_by_fsp(state->dst_fsp);
+		if (!ok) {
+			return NT_STATUS_INTERNAL_ERROR;
+		}
+
+		ret = copy_reflink(fsp_get_io_fd(state->src_fsp),
+				   state->src_off,
+				   fsp_get_io_fd(state->dst_fsp),
+				   state->dst_off,
+				   state->to_copy);
+		if (ret == -1) {
+			DBG_INFO("copy_reflink() failed: %s\n", strerror(errno));
+			return map_nt_error_from_unix(errno);
+		}
+
+		state->copied = state->to_copy;
+		goto done;
+	}
+
+	if (!try_copy_file_range) {
 		return NT_STATUS_MORE_PROCESSING_REQUIRED;
 	}
 
@@ -2402,6 +2459,7 @@ static NTSTATUS vfswrap_offload_copy_file_range(struct tevent_req *req)
 		state->remaining -= nwritten;
 	}
 
+done:
 	/*
 	 * Tell the req cleanup function there's no need to call
 	 * change_to_user_and_service_by_fsp() on the dst handle.

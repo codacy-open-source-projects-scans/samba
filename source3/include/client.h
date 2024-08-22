@@ -48,8 +48,6 @@ struct cli_state {
 	 * A list of subsidiary connections for DFS.
 	 */
         struct cli_state *prev, *next;
-	int rap_error;
-	NTSTATUS raw_status; /* maybe via NT_STATUS_DOS() */
 	bool map_dos_errors;
 
 	/*

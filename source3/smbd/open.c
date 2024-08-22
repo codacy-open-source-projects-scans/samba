@@ -47,6 +47,8 @@
 #include <linux/magic.h>
 #endif
 
+static NTSTATUS inherit_new_acl(files_struct *dirfsp, files_struct *fsp);
+
 extern const struct generic_mapping file_generic_mapping;
 
 struct deferred_open_record {
@@ -85,14 +87,12 @@ static bool parent_override_delete(connection_struct *conn,
 					uint32_t access_mask,
 					uint32_t rejected_mask)
 {
-	if ((access_mask & DELETE_ACCESS) &&
-		    (rejected_mask & DELETE_ACCESS) &&
-		    can_delete_file_in_directory(conn,
-				dirfsp,
-				smb_fname))
-	{
-		return true;
+	if ((access_mask & DELETE_ACCESS) && (rejected_mask & DELETE_ACCESS)) {
+		bool ok;
+		ok = can_delete_file_in_directory(conn, dirfsp, smb_fname);
+		return ok;
 	}
+
 	return false;
 }
 
@@ -4541,13 +4541,129 @@ unlock:
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS apply_new_nt_acl(struct files_struct *dirfsp,
+				 struct files_struct *fsp,
+				 struct security_descriptor *sd)
+{
+	NTSTATUS status;
+
+	if (sd != NULL) {
+		/*
+		 * According to the MS documentation, the only time the security
+		 * descriptor is applied to the opened file is iff we *created* the
+		 * file; an existing file stays the same.
+		 *
+		 * Also, it seems (from observation) that you can open the file with
+		 * any access mask but you can still write the sd. We need to override
+		 * the granted access before we call set_sd
+		 * Patch for bug #2242 from Tom Lackemann <cessnatomny@yahoo.com>.
+		 */
+
+		uint32_t sec_info_sent;
+		uint32_t saved_access_mask = fsp->access_mask;
+
+		sec_info_sent = get_sec_info(sd);
+
+		fsp->access_mask = FILE_GENERIC_ALL;
+
+		if (sec_info_sent & (SECINFO_OWNER|
+					SECINFO_GROUP|
+					SECINFO_DACL|
+					SECINFO_SACL)) {
+			status = set_sd(fsp, sd, sec_info_sent);
+		} else {
+			status = NT_STATUS_OK;
+		}
+
+		fsp->access_mask = saved_access_mask;
+
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("set_sd() failed for '%s': %s\n",
+				    fsp_str_dbg(fsp), nt_errstr(status));
+			return status;
+		}
+
+		return NT_STATUS_OK;
+	}
+
+	if (!lp_inherit_acls(SNUM(fsp->conn))) {
+		return NT_STATUS_OK;
+	}
+
+	/* Inherit from parent. Errors here are not fatal. */
+	status = inherit_new_acl(dirfsp, fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("inherit_new_acl failed for %s with %s\n",
+			    fsp_str_dbg(fsp), nt_errstr(status));
+	}
+
+	return NT_STATUS_OK;
+}
+
+bool smbd_is_tmpname(const char *n, int *_unlink_flags)
+{
+	const char *p = n;
+	int unlink_flags = INT_MAX;
+	struct server_id id;
+	bool exists;
+
+	if (_unlink_flags != NULL) {
+		*_unlink_flags = INT_MAX;
+	}
+
+	if (!IS_SMBD_TMPNAME_PREFIX(n)) {
+		return false;
+	}
+	p += sizeof(SMBD_TMPNAME_PREFIX) - 1;
+	switch (p[0]) {
+	case 'D':
+		unlink_flags = AT_REMOVEDIR;
+		break;
+	default:
+		return false;
+	}
+	p += 1;
+	if (p[0] != ':') {
+		return false;
+	}
+	p += 1;
+
+	id = server_id_from_string_ex(get_my_vnn(), '%', p);
+	if (id.pid == UINT64_MAX) {
+		return false;
+	}
+	if (id.unique_id == 0) {
+		return false;
+	}
+	if (id.unique_id == SERVERID_UNIQUE_ID_NOT_TO_VERIFY) {
+		return false;
+	}
+
+	if (_unlink_flags == NULL) {
+		return true;
+	}
+
+	exists = serverid_exists(&id);
+	if (!exists) {
+		/*
+		 * let the caller know it's stale
+		 * and should be removed
+		 */
+		*_unlink_flags = unlink_flags;
+	}
+
+	return true;
+}
+
 static NTSTATUS mkdir_internal(connection_struct *conn,
 			       struct smb_filename *parent_dir_fname, /* parent. */
 			       struct smb_filename *smb_fname_atname, /* atname relative to parent. */
 			       struct smb_filename *smb_dname, /* full pathname from root of share. */
+			       struct security_descriptor *sd,
 			       uint32_t file_attributes,
 			       struct files_struct *fsp)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 	mode_t mode;
@@ -4555,12 +4671,23 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 	bool posix_open = false;
 	bool need_re_stat = false;
 	uint32_t access_mask = SEC_DIR_ADD_SUBDIR;
+	struct smb_filename *first_atname = NULL;
+	struct smb_filename *tmp_atname = NULL;
+	char *orig_dname = NULL;
+	char *tmp_dname = NULL;
+	int vfs_use_tmp = lp_vfs_mkdir_use_tmp_name(SNUM(conn));
+	bool need_tmpname = false;
+	struct server_id id = messaging_server_id(conn->sconn->msg_ctx);
+	struct server_id_buf idbuf;
+	char *idstr = server_id_str_buf_unique_ex(id, '%', &idbuf);
 	struct vfs_open_how how = { .flags = O_RDONLY|O_DIRECTORY, };
+	struct vfs_rename_how rhow = { .flags = VFS_RENAME_HOW_NO_REPLACE, };
 	int ret;
 
 	if (!CAN_WRITE(conn) || (access_mask & ~(conn->share_access))) {
-		DEBUG(5,("mkdir_internal: failing share access "
-			 "%s\n", lp_servicename(talloc_tos(), lp_sub, SNUM(conn))));
+		DBG_INFO("failing share access %s\n",
+			 lp_servicename(talloc_tos(), lp_sub, SNUM(conn)));
+		TALLOC_FREE(frame);
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
@@ -4581,6 +4708,7 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 			smb_fname_str_dbg(parent_dir_fname),
 			smb_dname->base_name,
 			nt_errstr(status));
+		TALLOC_FREE(frame);
 		return status;
 	}
 
@@ -4588,14 +4716,86 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 		if (directory_has_default_acl_fsp(parent_dir_fname->fsp)) {
 			mode = (0777 & lp_directory_mask(SNUM(conn)));
 		}
+		need_tmpname = true;
+	} else if (lp_store_dos_attributes(SNUM(conn))) {
+		need_tmpname = true;
+	} else if (lp_inherit_permissions(SNUM(conn))) {
+		need_tmpname = true;
+	} else if (lp_inherit_owner(SNUM(conn)) != INHERIT_OWNER_NO) {
+		need_tmpname = true;
+	} else if (lp_nt_acl_support(SNUM(conn)) && sd != NULL) {
+		need_tmpname = true;
 	}
 
+	if (vfs_use_tmp != Auto) {
+		need_tmpname = vfs_use_tmp;
+	}
+
+	if (!need_tmpname) {
+		first_atname = smb_fname_atname;
+		goto mkdir_first;
+	}
+
+	/*
+	 * In order to avoid races where other clients could
+	 * see the directory before it is setup completely
+	 * we use a temporary name and rename it
+	 * when everything is ready.
+	 */
+
+	orig_dname = smb_dname->base_name;
+
+	tmp_atname = cp_smb_filename(frame,
+				     smb_fname_atname);
+	if (tmp_atname == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+	TALLOC_FREE(tmp_atname->base_name);
+	tmp_atname->base_name = talloc_asprintf(tmp_atname,
+						"%s%s:%s",
+						SMBD_TMPDIR_PREFIX,
+						idstr,
+						smb_fname_atname->base_name);
+	if (tmp_atname == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+	SMB_ASSERT(smbd_is_tmpname(tmp_atname->base_name, NULL));
+	if (!ISDOT(parent_dir_fname->base_name)) {
+		tmp_dname = talloc_asprintf(frame,
+					    "%s/%s",
+					    parent_dir_fname->base_name,
+					    tmp_atname->base_name);
+		if (tmp_dname == NULL) {
+			TALLOC_FREE(frame);
+			return NT_STATUS_NO_MEMORY;
+		}
+	} else {
+		tmp_dname = talloc_strdup(frame, tmp_atname->base_name);
+		if (tmp_dname == NULL) {
+			TALLOC_FREE(frame);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	smb_dname->base_name = tmp_dname;
+
+	DBG_DEBUG("temporary replace '%s' by '%s'\n",
+		  orig_dname, tmp_dname);
+
+	first_atname = tmp_atname;
+
+mkdir_first:
 	ret = SMB_VFS_MKDIRAT(conn,
 			      parent_dir_fname->fsp,
-			      smb_fname_atname,
+			      first_atname,
 			      mode);
 	if (ret != 0) {
-		return map_nt_error_from_unix(errno);
+		status = map_nt_error_from_unix(errno);
+		DBG_NOTICE("MKDIRAT failed for '%s': %s\n",
+			   smb_fname_str_dbg(smb_dname), nt_errstr(status));
+		goto restore_orig;
 	}
 
 	/*
@@ -4604,9 +4804,11 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 	 */
 	fsp->fsp_flags.is_pathref = true;
 
-	status = fd_openat(parent_dir_fname->fsp, smb_fname_atname, fsp, &how);
+	status = fd_openat(parent_dir_fname->fsp, first_atname, fsp, &how);
 	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+		DBG_ERR("fd_openat() failed for '%s': %s\n",
+			smb_fname_str_dbg(smb_dname), nt_errstr(status));
+		goto restore_orig;
 	}
 
 	/* Ensure we're checking for a symlink here.... */
@@ -4614,15 +4816,16 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 
 	status = vfs_stat_fsp(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(2, ("Could not stat directory '%s' just created: %s\n",
-			  smb_fname_str_dbg(smb_dname), nt_errstr(status)));
-		return status;
+		DBG_ERR("Could not stat directory '%s' just created: %s\n",
+			smb_fname_str_dbg(smb_dname), nt_errstr(status));
+		goto restore_orig;
 	}
 
 	if (!S_ISDIR(smb_dname->st.st_ex_mode)) {
-		DEBUG(0, ("Directory '%s' just created is not a directory !\n",
-			  smb_fname_str_dbg(smb_dname)));
-		return NT_STATUS_NOT_A_DIRECTORY;
+		DBG_ERR("Directory '%s' just created is not a directory !\n",
+			smb_fname_str_dbg(smb_dname));
+		status = NT_STATUS_NOT_A_DIRECTORY;
+		goto restore_orig;
 	}
 
 	if (lp_store_dos_attributes(SNUM(conn))) {
@@ -4665,16 +4868,148 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 	if (need_re_stat) {
 		status = vfs_stat_fsp(fsp);
 		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(2, ("Could not stat directory '%s' just created: %s\n",
-			  smb_fname_str_dbg(smb_dname), nt_errstr(status)));
-			return status;
+			DBG_ERR("Could not stat directory '%s' just created: %s\n",
+				smb_fname_str_dbg(smb_dname), nt_errstr(status));
+			goto restore_orig;
 		}
 	}
+
+	if (lp_nt_acl_support(SNUM(conn))) {
+		status = apply_new_nt_acl(parent_dir_fname->fsp,
+					  fsp,
+					  sd);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("apply_new_nt_acl() failed for %s with %s\n",
+				    fsp_str_dbg(fsp),
+				    nt_errstr(status));
+			goto do_unlink;
+		}
+	}
+
+	if (!need_tmpname) {
+		goto done;
+	}
+
+	/*
+	 * A rename needs a valid stat for the source,
+	 * see vfs_fruit.c ...
+	 */
+	tmp_atname->st = smb_dname->st;
+
+	/*
+	 * We first try VFS_RENAME_HOW_NO_REPLACE,
+	 * if it's implemented in the kernel,
+	 * we'll always get EEXIST if the target
+	 * exist, as it's handled at the linux vfs
+	 * layer. But if it doesn't exist we
+	 * can still get EINVAL if the actual
+	 * filesystem doesn't support RENAME_NOREPLACE.
+	 *
+	 * If the kernel doesn't support rename2()
+	 * we get EINVAL instead of ENOSYS (this
+	 * is mapped in the libreplace replacement
+	 * (as well as the glibc replacement).
+	 */
+	ret = SMB_VFS_RENAMEAT(conn,
+			       parent_dir_fname->fsp,
+			       tmp_atname,
+			       parent_dir_fname->fsp,
+			       smb_fname_atname,
+			       &rhow);
+	if (ret == -1 && errno == EINVAL) {
+		/*
+		 * This is the strategie we use without having
+		 * renameat2(RENAME_NOREPLACE):
+		 *
+		 * renameat() is able to replace a directory if the source is
+		 * also a directory.
+		 *
+		 * So in order to avoid races as much as possible we do a
+		 * mkdirat() with mode 0 in order to catch EEXIST almost
+		 * atomically, when this code runs by two processes at the same
+		 * time.
+		 *
+		 * Then a renameat() makes the temporary directory available for
+		 * clients.
+		 *
+		 * This a much smaller window where the other clients may see
+		 * the incomplete directory, which has a mode of 0.
+		 */
+
+		rhow.flags &= ~VFS_RENAME_HOW_NO_REPLACE;
+
+		DBG_DEBUG("MKDIRAT/RENAMEAT '%s' -> '%s'\n",
+			  tmp_dname, orig_dname);
+
+		ret = SMB_VFS_MKDIRAT(conn,
+				      parent_dir_fname->fsp,
+				      smb_fname_atname,
+				      0);
+		if (ret != 0) {
+			status = map_nt_error_from_unix(errno);
+			DBG_NOTICE("MKDIRAT failed for '%s': %s\n",
+				   orig_dname, nt_errstr(status));
+			goto do_unlink;
+		}
+
+		ret = SMB_VFS_RENAMEAT(conn,
+				       parent_dir_fname->fsp,
+				       tmp_atname,
+				       parent_dir_fname->fsp,
+				       smb_fname_atname,
+				       &rhow);
+	}
+
+	if (ret != 0) {
+		status = map_nt_error_from_unix(errno);
+		DBG_NOTICE("RENAMEAT failed for '%s' -> '%s': %s\n",
+			   tmp_dname, orig_dname, nt_errstr(status));
+		goto do_unlink;
+	}
+	smb_fname_atname->st = tmp_atname->st;
+	smb_dname->base_name = orig_dname;
+
+done:
+	DBG_DEBUG("Created directory '%s'\n",
+		  smb_fname_str_dbg(smb_dname));
 
 	notify_fname(conn, NOTIFY_ACTION_ADDED, FILE_NOTIFY_CHANGE_DIR_NAME,
 		     smb_dname->base_name);
 
+	TALLOC_FREE(frame);
 	return NT_STATUS_OK;
+
+do_unlink:
+	DBG_NOTICE("%s: rollback and unlink '%s'\n",
+		   nt_errstr(status),
+		   tmp_dname);
+	ret = SMB_VFS_UNLINKAT(conn,
+			       parent_dir_fname->fsp,
+			       tmp_atname,
+			       AT_REMOVEDIR);
+	if (ret == 0) {
+		DBG_NOTICE("SMB_VFS_UNLINKAT(%s): OK\n",
+			   tmp_dname);
+	} else {
+		NTSTATUS status2 = map_nt_error_from_unix(errno);
+		DBG_WARNING("SMB_VFS_UNLINKAT(%s) ignoring %s\n",
+			    tmp_dname, nt_errstr(status2));
+	}
+
+restore_orig:
+	if (!need_tmpname) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+	DBG_NOTICE("%s: restoring '%s' -> '%s'\n",
+		   nt_errstr(status),
+		   tmp_dname,
+		   orig_dname);
+	SET_STAT_INVALID(smb_fname_atname->st);
+	smb_dname->base_name = orig_dname;
+	SET_STAT_INVALID(smb_dname->st);
+	TALLOC_FREE(frame);
+	return status;
 }
 
 /****************************************************************************
@@ -4690,6 +5025,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 			       uint32_t file_attributes,
 			       struct smb_filename *parent_dir_fname,
 			       struct smb_filename *smb_fname_atname,
+			       struct security_descriptor *sd,
 			       int *pinfo,
 			       struct files_struct *fsp)
 {
@@ -4779,6 +5115,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 						parent_dir_fname,
 						smb_fname_atname,
 						smb_dname,
+						sd,
 						file_attributes,
 						fsp);
 
@@ -4810,6 +5147,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 							parent_dir_fname,
 							smb_fname_atname,
 							smb_dname,
+							sd,
 							file_attributes,
 							fsp);
 
@@ -6316,6 +6654,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 					file_attributes,
 					dirfsp->fsp_name,
 					smb_fname_atname,
+					sd,
 					&info,
 					fsp);
 	} else {
@@ -6372,6 +6711,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 						file_attributes,
 						dirfsp->fsp_name,
 						smb_fname_atname,
+						sd,
 						&info,
 						fsp);
 		}
@@ -6419,47 +6759,14 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 	}
 
 	if ((info == FILE_WAS_CREATED) &&
+	    !S_ISDIR(fsp->fsp_name->st.st_ex_mode) &&
 	    lp_nt_acl_support(SNUM(conn)) &&
 	    !fsp_is_alternate_stream(fsp)) {
-		if (sd != NULL) {
-			/*
-			 * According to the MS documentation, the only time the security
-			 * descriptor is applied to the opened file is iff we *created* the
-			 * file; an existing file stays the same.
-			 *
-			 * Also, it seems (from observation) that you can open the file with
-			 * any access mask but you can still write the sd. We need to override
-			 * the granted access before we call set_sd
-			 * Patch for bug #2242 from Tom Lackemann <cessnatomny@yahoo.com>.
-			 */
-
-			uint32_t sec_info_sent;
-			uint32_t saved_access_mask = fsp->access_mask;
-
-			sec_info_sent = get_sec_info(sd);
-
-			fsp->access_mask = FILE_GENERIC_ALL;
-
-			if (sec_info_sent & (SECINFO_OWNER|
-						SECINFO_GROUP|
-						SECINFO_DACL|
-						SECINFO_SACL)) {
-				status = set_sd(fsp, sd, sec_info_sent);
-			}
-
-			fsp->access_mask = saved_access_mask;
-
-			if (!NT_STATUS_IS_OK(status)) {
-				goto fail;
-			}
-		} else if (lp_inherit_acls(SNUM(conn))) {
-			/* Inherit from parent. Errors here are not fatal. */
-			status = inherit_new_acl(dirfsp, fsp);
-			if (!NT_STATUS_IS_OK(status)) {
-				DEBUG(10,("inherit_new_acl: failed for %s with %s\n",
-					fsp_str_dbg(fsp),
-					nt_errstr(status) ));
-			}
+		status = apply_new_nt_acl(dirfsp, fsp, sd);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("apply_new_nt_acl(): failed for %s with %s\n",
+				    fsp_str_dbg(fsp), nt_errstr(status));
+			goto fail;
 		}
 	}
 

@@ -23,26 +23,6 @@
 #include "libsmb/libsmb.h"
 #include "../libcli/smb/smbXcli_base.h"
 
-/****************************************************************************
- Return the 32-bit NT status code from the last packet.
-****************************************************************************/
-
-NTSTATUS cli_nt_error(struct cli_state *cli)
-{
-	/* Deal with socket errors first. */
-	if (!cli_state_is_connected(cli)) {
-		return NT_STATUS_CONNECTION_DISCONNECTED;
-	}
-
-	if (NT_STATUS_IS_DOS(cli->raw_status)) {
-		int e_class = NT_STATUS_DOS_CLASS(cli->raw_status);
-		int code = NT_STATUS_DOS_CODE(cli->raw_status);
-		return dos_to_ntstatus(e_class, code);
-	}
-
-	return cli->raw_status;
-}
-
 int cli_status_to_errno(NTSTATUS status)
 {
 	int err;
@@ -68,41 +48,6 @@ int cli_status_to_errno(NTSTATUS status)
 	DBG_NOTICE("0x%"PRIx32" -> %d\n", NT_STATUS_V(status), err);
 
 	return err;
-}
-
-/* Return a UNIX errno appropriate for the error received in the last
-   packet. */
-
-int cli_errno(struct cli_state *cli)
-{
-	bool connected;
-	int err;
-
-	connected = cli_state_is_connected(cli);
-	if (!connected) {
-		return EPIPE;
-	}
-
-	err = cli_status_to_errno(cli->raw_status);
-	return err;
-}
-
-/* Return true if the last packet was in error */
-
-bool cli_is_error(struct cli_state *cli)
-{
-	/* A socket error is always an error. */
-	if (!cli_state_is_connected(cli)) {
-		return true;
-	}
-
-	if (NT_STATUS_IS_DOS(cli->raw_status)) {
-		/* Return error if error class in non-zero */
-		uint8_t rcls = NT_STATUS_DOS_CLASS(cli->raw_status);
-		return rcls != 0;
-	}
-
-	return NT_STATUS_IS_ERR(cli->raw_status);
 }
 
 bool cli_state_is_connected(struct cli_state *cli)

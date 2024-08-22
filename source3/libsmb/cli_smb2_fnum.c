@@ -49,6 +49,7 @@
 struct smb2_hnd {
 	uint64_t fid_persistent;
 	uint64_t fid_volatile;
+	bool posix; /* Opened with posix context */
 };
 
 /*
@@ -56,23 +57,29 @@ struct smb2_hnd {
  */
 
 /***************************************************************
- Allocate a new fnum between 1 and 0xFFFE from an smb2_hnd.
+ Allocate a new fnum between 1 and 0xFFFE from an smb2 file id.
  Ensures handle is owned by cli struct.
 ***************************************************************/
 
 static NTSTATUS map_smb2_handle_to_fnum(struct cli_state *cli,
-				const struct smb2_hnd *ph,	/* In */
-				uint16_t *pfnum)		/* Out */
+					uint64_t fid_persistent,
+					uint64_t fid_volatile,
+					bool posix,
+					uint16_t *pfnum)
 {
 	int ret;
 	struct idr_context *idp = cli->smb2.open_handles;
-	struct smb2_hnd *owned_h = talloc_memdup(cli,
-						ph,
-						sizeof(struct smb2_hnd));
+	struct smb2_hnd *owned_h = NULL;
 
+	owned_h = talloc(cli, struct smb2_hnd);
 	if (owned_h == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
+	*owned_h = (struct smb2_hnd){
+		.fid_persistent = fid_persistent,
+		.fid_volatile = fid_volatile,
+		.posix = posix,
+	};
 
 	if (idp == NULL) {
 		/* Lazy init */
@@ -342,22 +349,30 @@ static void cli_smb2_create_fnum_done(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct cli_smb2_create_fnum_state *state = tevent_req_data(
 		req, struct cli_smb2_create_fnum_state);
-	struct smb2_hnd h;
+	uint64_t fid_persistent, fid_volatile;
+	struct smb2_create_blob *posix = NULL;
 	NTSTATUS status;
 
-	status = smb2cli_create_recv(
-		subreq,
-		&h.fid_persistent,
-		&h.fid_volatile, &state->cr,
-		state,
-		&state->out_cblobs,
-		&state->symlink);
+	status = smb2cli_create_recv(subreq,
+				     &fid_persistent,
+				     &fid_volatile,
+				     &state->cr,
+				     state,
+				     &state->out_cblobs,
+				     &state->symlink);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
 
-	status = map_smb2_handle_to_fnum(state->cli, &h, &state->fnum);
+	posix = smb2_create_blob_find(&state->in_cblobs,
+				      SMB2_CREATE_TAG_POSIX);
+
+	status = map_smb2_handle_to_fnum(state->cli,
+					 fid_persistent,
+					 fid_volatile,
+					 (posix != NULL),
+					 &state->fnum);
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
@@ -388,7 +403,6 @@ NTSTATUS cli_smb2_create_fnum_recv(
 		    (symlink != NULL)) {
 			*symlink = talloc_move(mem_ctx, &state->symlink);
 		}
-		state->cli->raw_status = status;
 		return status;
 	}
 	if (pfnum != NULL) {
@@ -404,8 +418,19 @@ NTSTATUS cli_smb2_create_fnum_recv(
 				mem_ctx, &state->out_cblobs.blobs),
 		};
 	}
-	state->cli->raw_status = NT_STATUS_OK;
 	return NT_STATUS_OK;
+}
+
+bool cli_smb2_fnum_is_posix(struct cli_state *cli, uint16_t fnum)
+{
+	struct smb2_hnd *ph = NULL;
+	NTSTATUS status;
+
+	status = map_fnum_to_smb2_handle(cli, fnum, &ph);
+	if (!NT_STATUS_IS_OK(status)) {
+		return false;
+	}
+	return ph->posix;
 }
 
 NTSTATUS cli_smb2_create_fnum(
@@ -541,15 +566,7 @@ static void cli_smb2_close_fnum_done(struct tevent_req *subreq)
 
 NTSTATUS cli_smb2_close_fnum_recv(struct tevent_req *req)
 {
-	struct cli_smb2_close_fnum_state *state = tevent_req_data(
-		req, struct cli_smb2_close_fnum_state);
-	NTSTATUS status = NT_STATUS_OK;
-
-	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
-	}
-	tevent_req_received(req);
-	return status;
+	return tevent_req_simple_recv_ntstatus(req);
 }
 
 NTSTATUS cli_smb2_close_fnum(struct cli_state *cli, uint16_t fnum)
@@ -748,20 +765,7 @@ static void cli_smb2_delete_on_close_done(struct tevent_req *subreq)
 
 NTSTATUS cli_smb2_delete_on_close_recv(struct tevent_req *req)
 {
-	struct cli_smb2_delete_on_close_state *state =
-		tevent_req_data(req,
-		struct cli_smb2_delete_on_close_state);
-	NTSTATUS status;
-
-	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
-		tevent_req_received(req);
-		return status;
-	}
-
-	state->cli->raw_status = NT_STATUS_OK;
-	tevent_req_received(req);
-	return NT_STATUS_OK;
+	return tevent_req_simple_recv_ntstatus(req);
 }
 
 NTSTATUS cli_smb2_delete_on_close(struct cli_state *cli, uint16_t fnum, bool flag)
@@ -2369,8 +2373,6 @@ NTSTATUS cli_smb2_setpathinfo(struct cli_state *cli,
 		cli_smb2_close_fnum(cli, fnum);
 	}
 
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -2484,7 +2486,6 @@ NTSTATUS cli_smb2_setattrE(struct cli_state *cli,
 		FSCC_FILE_BASIC_INFORMATION, /* in_file_info_class */
 		&inbuf,			     /* in_input_buffer */
 		0);			     /* in_additional_info */
-	cli->raw_status = status;
 	return status;
 }
 
@@ -2580,8 +2581,6 @@ NTSTATUS cli_smb2_dskattr(struct cli_state *cli, const char *path,
 		cli_smb2_close_fnum(cli, fnum);
 	}
 
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -2667,8 +2666,6 @@ fail:
 		cli_smb2_close_fnum(cli, fnum);
 	}
 
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -2741,8 +2738,6 @@ fail:
 	if (fnum != 0xffff) {
 		cli_smb2_close_fnum(cli, fnum);
 	}
-
-	cli->raw_status = status;
 
 	TALLOC_FREE(frame);
 	return status;
@@ -2861,8 +2856,6 @@ fail:
 	if (fnum != 0xffff) {
 		cli_smb2_close_fnum(cli, fnum);
 	}
-
-	cli->raw_status = status;
 
 	TALLOC_FREE(frame);
 	return status;
@@ -3038,7 +3031,6 @@ NTSTATUS cli_smb2_query_mxac(struct cli_state *cli,
 	status = cli_smb2_query_mxac_recv(req, _mxac);
 
 fail:
-	cli->raw_status = status;
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3371,9 +3363,6 @@ NTSTATUS cli_smb2_set_ea_fnum(struct cli_state *cli,
 		0);			       /* in_additional_info */
 
   fail:
-
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3423,9 +3412,6 @@ NTSTATUS cli_smb2_set_ea_path(struct cli_state *cli,
 	if (fnum != 0xffff) {
 		cli_smb2_close_fnum(cli, fnum);
 	}
-
-	cli->raw_status = status;
-
 	return status;
 }
 
@@ -3519,8 +3505,6 @@ NTSTATUS cli_smb2_get_ea_list_path(struct cli_state *cli,
 	if (fnum != 0xffff) {
 		cli_smb2_close_fnum(cli, fnum);
 	}
-
-	cli->raw_status = status;
 
 	TALLOC_FREE(frame);
 	return status;
@@ -3623,8 +3607,6 @@ NTSTATUS cli_smb2_get_user_quota(struct cli_state *cli,
 	}
 
 fail:
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3696,8 +3678,6 @@ NTSTATUS cli_smb2_list_user_quota_step(struct cli_state *cli,
 				       pqt_list);
 
 cleanup:
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3742,8 +3722,6 @@ NTSTATUS cli_smb2_get_fs_quota_info(struct cli_state *cli,
 	status = parse_fs_quota_buffer(outbuf.data, outbuf.length, pqt);
 
 cleanup:
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3782,9 +3760,6 @@ NTSTATUS cli_smb2_set_user_quota(struct cli_state *cli,
 		&inbuf,			  /* in_input_buffer */
 		0);			  /* in_additional_info */
 cleanup:
-
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 
 	return status;
@@ -3819,8 +3794,6 @@ NTSTATUS cli_smb2_set_fs_quota_info(struct cli_state *cli,
 		&inbuf,			   /* in_input_buffer */
 		0);			   /* in_additional_info */
 cleanup:
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -3917,7 +3890,6 @@ NTSTATUS cli_smb2_read_recv(struct tevent_req *req,
 				req, struct cli_smb2_read_state);
 
 	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
 		return status;
 	}
 	/*
@@ -3927,7 +3899,6 @@ NTSTATUS cli_smb2_read_recv(struct tevent_req *req,
 	 */
 	*received = (ssize_t)state->received;
 	*rcvbuf = state->buf;
-	state->cli->raw_status = NT_STATUS_OK;
 	return NT_STATUS_OK;
 }
 
@@ -4026,7 +3997,6 @@ NTSTATUS cli_smb2_write_recv(struct tevent_req *req,
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
 		tevent_req_received(req);
 		return status;
 	}
@@ -4034,7 +4004,6 @@ NTSTATUS cli_smb2_write_recv(struct tevent_req *req,
 	if (pwritten != NULL) {
 		*pwritten = (size_t)state->written;
 	}
-	state->cli->raw_status = NT_STATUS_OK;
 	tevent_req_received(req);
 	return NT_STATUS_OK;
 }
@@ -4192,13 +4161,11 @@ NTSTATUS cli_smb2_writeall_recv(struct tevent_req *req,
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
 		return status;
 	}
 	if (pwritten != NULL) {
 		*pwritten = (size_t)state->written;
 	}
-	state->cli->raw_status = NT_STATUS_OK;
 	return NT_STATUS_OK;
 }
 
@@ -4459,14 +4426,12 @@ NTSTATUS cli_smb2_splice_recv(struct tevent_req *req, off_t *written)
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
-		state->cli->raw_status = status;
 		tevent_req_received(req);
 		return status;
 	}
 	if (written != NULL) {
 		*written = state->written;
 	}
-	state->cli->raw_status = NT_STATUS_OK;
 	tevent_req_received(req);
 	return NT_STATUS_OK;
 }
@@ -4686,8 +4651,6 @@ NTSTATUS cli_smb2_shadow_copy_data(TALLOC_CTX *mem_ctx,
 						pnames,
 						pnum_names);
  fail:
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -4728,9 +4691,6 @@ NTSTATUS cli_smb2_ftruncate(struct cli_state *cli,
 		0);
 
   fail:
-
-	cli->raw_status = status;
-
 	TALLOC_FREE(frame);
 	return status;
 }

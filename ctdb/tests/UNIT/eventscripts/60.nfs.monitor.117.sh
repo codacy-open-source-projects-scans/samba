@@ -2,7 +2,7 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "NFS RPC service down, stats change, 10 iterations"
+define_test "NFS RPC service timeout, stats change, 10 iterations"
 
 setup
 
@@ -18,4 +18,4 @@ service_debug_cmd="program_stack_traces nfsd 5"
 service_stats_cmd="date --rfc-3339=ns | grep ."
 EOF
 
-nfs_iterate_test 10 "nfs"
+nfs_iterate_test 10 "nfs:TIMEOUT"

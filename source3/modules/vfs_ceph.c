@@ -66,7 +66,6 @@ static inline int status_code(int ret)
 		errno = -ret;
 		return -1;
 	}
-	errno = 0;
 	return ret;
 }
 
@@ -76,7 +75,6 @@ static inline ssize_t lstatus_code(intmax_t ret)
 		errno = -((int)ret);
 		return -1;
 	}
-	errno = 0;
 	return (ssize_t)ret;
 }
 
@@ -379,8 +377,9 @@ static uint32_t cephwrap_fs_capabilities(
 	struct vfs_handle_struct *handle,
 	enum timestamp_set_resolution *p_ts_res)
 {
-	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
+	uint32_t caps;
 
+	caps = SMB_VFS_NEXT_FS_CAPABILITIES(handle, p_ts_res);
 	*p_ts_res = TIMESTAMP_SET_NT_OR_BETTER;
 
 	return caps;
@@ -714,7 +713,8 @@ static int cephwrap_renameat(struct vfs_handle_struct *handle,
 			files_struct *srcfsp,
 			const struct smb_filename *smb_fname_src,
 			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst)
+			const struct smb_filename *smb_fname_dst,
+			const struct vfs_rename_how *how)
 {
 	struct smb_filename *full_fname_src = NULL;
 	struct smb_filename *full_fname_dst = NULL;
@@ -724,6 +724,11 @@ static int cephwrap_renameat(struct vfs_handle_struct *handle,
 	if (smb_fname_src->stream_name || smb_fname_dst->stream_name) {
 		errno = ENOENT;
 		return result;
+	}
+
+	if (how->flags != 0) {
+		errno = EINVAL;
+		return -1;
 	}
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),

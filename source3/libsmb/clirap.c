@@ -35,82 +35,25 @@
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
 
-#define PIPE_LANMAN   "\\PIPE\\LANMAN"
-
-/****************************************************************************
- Call a remote api
-****************************************************************************/
-
-bool cli_api(struct cli_state *cli,
-	     char *param, int prcnt, int mprcnt,
-	     char *data, int drcnt, int mdrcnt,
-	     char **rparam, unsigned int *rprcnt,
-	     char **rdata, unsigned int *rdrcnt)
-{
-	NTSTATUS status;
-
-	uint8_t *my_rparam, *my_rdata;
-	uint32_t num_my_rparam, num_my_rdata;
-
-	status = cli_trans(talloc_tos(), cli, SMBtrans,
-			   PIPE_LANMAN, 0, /* name, fid */
-			   0, 0,	   /* function, flags */
-			   NULL, 0, 0,	   /* setup */
-			   (uint8_t *)param, prcnt, mprcnt, /* Params, length, max */
-			   (uint8_t *)data, drcnt, mdrcnt,  /* Data, length, max */
-			   NULL,		 /* recv_flags2 */
-			   NULL, 0, NULL,	 /* rsetup */
-			   &my_rparam, 0, &num_my_rparam,
-			   &my_rdata, 0, &num_my_rdata);
-	if (!NT_STATUS_IS_OK(status)) {
-		return false;
-	}
-
-	/*
-	 * I know this memcpy massively hurts, but there are just tons
-	 * of callers of cli_api that eventually need changing to
-	 * talloc
-	 */
-
-	*rparam = (char *)smb_memdup(my_rparam, num_my_rparam);
-	if (*rparam == NULL) {
-		goto fail;
-	}
-	*rprcnt = num_my_rparam;
-	TALLOC_FREE(my_rparam);
-
-	*rdata = (char *)smb_memdup(my_rdata, num_my_rdata);
-	if (*rdata == NULL) {
-		goto fail;
-	}
-	*rdrcnt = num_my_rdata;
-	TALLOC_FREE(my_rdata);
-
-	return true;
-fail:
-	TALLOC_FREE(my_rdata);
-	TALLOC_FREE(my_rparam);
-	*rparam = NULL;
-	*rprcnt = 0;
-	*rdata = NULL;
-	*rdrcnt = 0;
-	return false;
-}
-
 /****************************************************************************
  Call a NetShareEnum - try and browse available connections on a host.
 ****************************************************************************/
 
-int cli_RNetShareEnum(struct cli_state *cli, void (*fn)(const char *, uint32_t, const char *, void *), void *state)
+NTSTATUS cli_RNetShareEnum(
+	struct cli_state *cli,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state)
 {
-	char *rparam = NULL;
-	char *rdata = NULL;
-	char *p;
+	uint8_t *rparam = NULL;
+	uint8_t *rdata = NULL;
+	char *rdata_end = NULL;
+	char *p = NULL;
 	unsigned int rdrcnt,rprcnt;
 	char param[1024];
 	int count = -1;
-	bool ok;
+	int i, converter;
 	int res;
+	NTSTATUS status;
 
 	/* now send a SMBtrans command with api RNetShareEnum */
 	p = param;
@@ -128,86 +71,102 @@ int cli_RNetShareEnum(struct cli_state *cli, void (*fn)(const char *, uint32_t, 
 	SSVAL(p,2,0xFFE0);
 	p += 4;
 
-	ok = cli_api(
-		cli,
-		param, PTR_DIFF(p,param), 1024,  /* Param, length, maxlen */
-		NULL, 0, 0xFFE0,            /* data, length, maxlen - Win2k needs a small buffer here too ! */
-		&rparam, &rprcnt,                /* return params, length */
-		&rdata, &rdrcnt);                /* return data, length */
-	if (!ok) {
+	status = cli_trans(talloc_tos(),       /* mem_ctx */
+			   cli,		       /* cli */
+			   SMBtrans,	       /* cmd */
+			   "\\PIPE\\LANMAN",	       /* name */
+			   0,		       /* fid */
+			   0,		       /* function */
+			   0,		       /* flags */
+			   NULL,	       /* setup */
+			   0,		       /* num_setup */
+			   0,		       /* max_setup */
+			   (uint8_t *)param,   /* param */
+			   PTR_DIFF(p, param), /* num_param */
+			   1024,	       /* max_param */
+			   NULL,	       /* data */
+			   0,		       /* num_data */
+			   0xFFE0,	       /* max_data, for W2K */
+			   NULL,	       /* recv_flags2 */
+			   NULL,	       /* rsetup */
+			   0,		       /* min_rsetup */
+			   NULL,	       /* num_rsetup */
+			   &rparam,	       /* rparam */
+			   6,		       /* min_rparam */
+			   &rprcnt,	       /* num_rparam */
+			   &rdata,	       /* rdata */
+			   0,		       /* min_rdata */
+			   &rdrcnt);	       /* num_rdata */
+	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(4,("NetShareEnum failed\n"));
 		goto done;
 	}
 
-	if (rprcnt < 6) {
-		DBG_ERR("Got invalid result: rprcnt=%u\n", rprcnt);
+	res = PULL_LE_U16(rparam, 0);
+
+	if (!(res == 0 || res == ERRmoredata)) {
+		DEBUG(4,("NetShareEnum res=%d\n", res));
+		status = werror_to_ntstatus(W_ERROR(res));
 		goto done;
 	}
 
-	res = rparam? SVAL(rparam,0) : -1;
+	converter = SVAL(rparam,2);
+	rdata_end = (char *)rdata + rdrcnt;
 
-	if (res == 0 || res == ERRmoredata) {
-		int converter=SVAL(rparam,2);
-		int i;
-		char *rdata_end = rdata + rdrcnt;
+	count=SVAL(rparam,4);
+	p = (char *)rdata;
 
-		count=SVAL(rparam,4);
-		p = rdata;
+	for (i=0;i<count;i++,p+=20) {
+		char *sname;
+		int type;
+		int comment_offset;
+		const char *cmnt;
+		const char *p1;
+		char *s1, *s2;
+		size_t len;
+		TALLOC_CTX *frame = talloc_stackframe();
 
-		for (i=0;i<count;i++,p+=20) {
-			char *sname;
-			int type;
-			int comment_offset;
-			const char *cmnt;
-			const char *p1;
-			char *s1, *s2;
-			size_t len;
-			TALLOC_CTX *frame = talloc_stackframe();
-
-			if (p + 20 > rdata_end) {
-				TALLOC_FREE(frame);
-				break;
-			}
-
-			sname = p;
-			type = SVAL(p,14);
-			comment_offset = (IVAL(p,16) & 0xFFFF) - converter;
-			if (comment_offset < 0 ||
-			    comment_offset > (int)rdrcnt) {
-				TALLOC_FREE(frame);
-				break;
-			}
-			cmnt = comment_offset?(rdata+comment_offset):"";
-
-			/* Work out the comment length. */
-			for (p1 = cmnt, len = 0; *p1 &&
-				     p1 < rdata_end; len++)
-				p1++;
-			if (!*p1) {
-				len++;
-			}
-			pull_string_talloc(frame,rdata,0,
-					   &s1,sname,14,STR_ASCII);
-			pull_string_talloc(frame,rdata,0,
-					   &s2,cmnt,len,STR_ASCII);
-			if (!s1 || !s2) {
-				TALLOC_FREE(frame);
-				continue;
-			}
-
-			fn(s1, type, s2, state);
-
+		if (p + 20 > rdata_end) {
 			TALLOC_FREE(frame);
+			break;
 		}
-	} else {
-			DEBUG(4,("NetShareEnum res=%d\n", res));
+
+		sname = p;
+		type = SVAL(p,14);
+		comment_offset = (IVAL(p,16) & 0xFFFF) - converter;
+		if (comment_offset < 0 ||
+		    comment_offset > (int)rdrcnt) {
+			TALLOC_FREE(frame);
+			break;
+		}
+		cmnt = comment_offset ? ((char *)rdata + comment_offset) : "";
+
+		/* Work out the comment length. */
+		for (p1 = cmnt, len = 0; *p1 &&
+			     p1 < rdata_end; len++)
+			p1++;
+		if (!*p1) {
+			len++;
+		}
+		pull_string_talloc(frame,rdata,0,
+				   &s1,sname,14,STR_ASCII);
+		pull_string_talloc(frame,rdata,0,
+				   &s2,cmnt,len,STR_ASCII);
+		if (!s1 || !s2) {
+			TALLOC_FREE(frame);
+			continue;
+		}
+
+		fn(s1, type, s2, state);
+
+		TALLOC_FREE(frame);
 	}
 
 done:
-	SAFE_FREE(rparam);
-	SAFE_FREE(rdata);
+	TALLOC_FREE(rparam);
+	TALLOC_FREE(rdata);
 
-	return count;
+	return status;
 }
 
 /****************************************************************************
@@ -218,14 +177,17 @@ done:
  the comment and a state pointer.
 ****************************************************************************/
 
-bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
-		       void (*fn)(const char *, uint32_t, const char *, void *),
-		       void *state)
+NTSTATUS cli_NetServerEnum(
+	struct cli_state *cli,
+	char *workgroup,
+	uint32_t stype,
+	void (*fn)(const char *, uint32_t, const char *, void *),
+	void *state)
 {
-	char *rparam = NULL;
-	char *rdata = NULL;
+	uint8_t *rparam = NULL;
+	uint8_t *rdata = NULL;
 	char *rdata_end = NULL;
-	unsigned int rdrcnt,rprcnt;
+	uint32_t rdrcnt, rprcnt;
 	char *p;
 	char param[1024];
 	int uLevel = 1;
@@ -235,8 +197,7 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 	int total_cnt = 0;
 	int return_cnt = 0;
 	int res;
-
-	errno = 0; /* reset */
+	NTSTATUS status;
 
 	/*
 	 * This may take more than one transaction, so we should loop until
@@ -275,7 +236,7 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 
 		if (len == 0) {
 			SAFE_FREE(last_entry);
-			return false;
+			return NT_STATUS_INTERNAL_ERROR;
 		}
 		p += len;
 
@@ -287,7 +248,7 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 
 			if (len == 0) {
 				SAFE_FREE(last_entry);
-				return false;
+				return NT_STATUS_INTERNAL_ERROR;
 			}
 			p += len;
 		}
@@ -295,29 +256,43 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 		/* Next time through we need to use the continue api */
 		func = RAP_NetServerEnum3;
 
-		if (!cli_api(cli,
-			param, PTR_DIFF(p,param), 8, /* params, length, max */
-			NULL, 0, CLI_BUFFER_SIZE, /* data, length, max */
-		            &rparam, &rprcnt, /* return params, return size */
-		            &rdata, &rdrcnt)) { /* return data, return size */
-
+		status = cli_trans(talloc_tos(),       /* mem_ctx */
+				   cli,		       /* cli */
+				   SMBtrans,	       /* cmd */
+				   "\\PIPE\\LANMAN",	       /* name */
+				   0,		       /* fid */
+				   0,		       /* function */
+				   0,		       /* flags */
+				   NULL,	       /* setup */
+				   0,		       /* num_setup */
+				   0,		       /* max_setup */
+				   (uint8_t *)param,   /* param */
+				   PTR_DIFF(p, param), /* num_param */
+				   8,		       /* max_param */
+				   NULL,	       /* data */
+				   0,		       /* num_data */
+				   CLI_BUFFER_SIZE,    /* max_data */
+				   NULL,	       /* recv_flags2 */
+				   NULL,	       /* rsetup */
+				   0,		       /* min_rsetup */
+				   NULL,	       /* num_rsetup */
+				   &rparam,	       /* rparam */
+				   6,		       /* min_rparam */
+				   &rprcnt,	       /* num_rparam */
+				   &rdata,	       /* rdata */
+				   0,		       /* min_rdata */
+				   &rdrcnt);	       /* num_rdata */
+		if (!NT_STATUS_IS_OK(status)) {
 			/* break out of the loop on error */
 		        res = -1;
 		        break;
 		}
 
-		rdata_end = rdata + rdrcnt;
+		rdata_end = (char *)rdata + rdrcnt;
 
-		if (rprcnt < 6) {
-			DBG_ERR("Got invalid result: rprcnt=%u\n", rprcnt);
-			res = -1;
-			break;
-		}
+		res = PULL_LE_U16(rparam, 0);
 
-		res = rparam ? SVAL(rparam,0) : -1;
-
-		if (res == 0 || res == ERRmoredata ||
-                    (res != -1 && cli_errno(cli) == 0)) {
+		if (res == 0 || res == ERRmoredata) {
 			char *sname = NULL;
 			int i, count;
 			int converter=SVAL(rparam,2);
@@ -336,7 +311,7 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 
 			/* Keep track of how many we have read */
 			return_cnt += count;
-			p = rdata;
+			p = (char *)rdata;
 
 			/* The last name in the previous NetServerEnum reply is
 			 * sent back to server in the NetServerEnum3 request
@@ -354,7 +329,7 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 				(strncmp(last_entry, p, 16) == 0)) {
 			    count -= 1; /* Skip this entry */
 			    return_cnt = -1; /* Not part of total, so don't count. */
-			    p = rdata + 26; /* Skip the whole record */
+			    p = (char *)rdata + 26; /* Skip the whole record */
 			}
 
 			for (i = 0; i < count; i++, p += 26) {
@@ -372,7 +347,9 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 
 				sname = p;
 				comment_offset = (IVAL(p,22) & 0xFFFF)-converter;
-				cmnt = comment_offset?(rdata+comment_offset):"";
+				cmnt = comment_offset ? ((char *)rdata +
+							 comment_offset)
+						      : "";
 
 				if (comment_offset < 0 || comment_offset >= (int)rdrcnt) {
 					TALLOC_FREE(frame);
@@ -415,61 +392,53 @@ bool cli_NetServerEnum(struct cli_state *cli, char *workgroup, uint32_t stype,
 
 			/* If we have more data, but no last entry then error out */
 			if (!last_entry && (res == ERRmoredata)) {
-			        errno = EINVAL;
 			        res = 0;
 			}
 
 		}
 
-		SAFE_FREE(rparam);
-		SAFE_FREE(rdata);
+		TALLOC_FREE(rparam);
+		TALLOC_FREE(rdata);
 	} while ((res == ERRmoredata) && (total_cnt > return_cnt));
 
-	SAFE_FREE(rparam);
-	SAFE_FREE(rdata);
+	TALLOC_FREE(rparam);
+	TALLOC_FREE(rdata);
 	SAFE_FREE(last_entry);
 
-	if (res == -1) {
-		errno = cli_errno(cli);
-	} else {
-		if (!return_cnt) {
-			/* this is a very special case, when the domain master for the
-			   work group isn't part of the work group itself, there is something
-			   wild going on */
-			errno = ENOENT;
-		}
-	    }
-
-	return(return_cnt > 0);
+	if (return_cnt == 0) {
+		return NT_STATUS_NO_MORE_ENTRIES;
+	}
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************
  Send a SamOEMChangePassword command.
 ****************************************************************************/
 
-bool cli_oem_change_password(struct cli_state *cli, const char *user, const char *new_password,
-                             const char *old_password)
+NTSTATUS cli_oem_change_password(struct cli_state *cli,
+				 const char *user,
+				 const char *new_password,
+				 const char *old_password)
 {
 	char param[1024];
-	unsigned char data[532];
+	uint8_t data[532];
 	char *p = param;
 	unsigned char old_pw_hash[16];
 	unsigned char new_pw_hash[16];
-	unsigned int data_len;
 	unsigned int param_len = 0;
-	char *rparam = NULL;
-	char *rdata = NULL;
-	unsigned int rprcnt, rdrcnt;
+	uint8_t *rparam = NULL;
+	uint32_t rprcnt;
 	gnutls_cipher_hd_t cipher_hnd = NULL;
 	gnutls_datum_t old_pw_key = {
 		.data = old_pw_hash,
 		.size = sizeof(old_pw_hash),
 	};
-	int rc;
+	int rc, res;
+	NTSTATUS status;
 
 	if (strlen(user) >= sizeof(fstring)-1) {
-		DEBUG(0,("cli_oem_change_password: user name %s is too long.\n", user));
-		return False;
+		DBG_ERR("user name %s is too long.\n", user);
+		return NT_STATUS_NAME_TOO_LONG;
 	}
 
 	SSVAL(p,0,214); /* SamOEMChangePassword command. */
@@ -504,14 +473,18 @@ bool cli_oem_change_password(struct cli_state *cli, const char *user, const char
 	if (rc < 0) {
 		DBG_ERR("gnutls_cipher_init failed: %s\n",
 			gnutls_strerror(rc));
-		return false;
+		status = gnutls_error_to_ntstatus(
+			rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		return status;
 	}
 	rc = gnutls_cipher_encrypt(cipher_hnd,
 			      data,
 			      516);
 	gnutls_cipher_deinit(cipher_hnd);
 	if (rc < 0) {
-		return false;
+		status = gnutls_error_to_ntstatus(
+			rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		return status;
 	}
 
 	/*
@@ -522,35 +495,47 @@ bool cli_oem_change_password(struct cli_state *cli, const char *user, const char
 	rc = E_old_pw_hash( new_pw_hash, old_pw_hash, (uchar *)&data[516]);
 	if (rc != 0) {
 		DBG_ERR("E_old_pw_hash failed: %s\n", gnutls_strerror(rc));
-		return false;
+		status = gnutls_error_to_ntstatus(
+			rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		return status;
 	}
 
-	data_len = 532;
-
-	if (!cli_api(cli,
-		     param, param_len, 4,		/* param, length, max */
-		     (char *)data, data_len, 0,		/* data, length, max */
-		     &rparam, &rprcnt,
-		     &rdata, &rdrcnt)) {
-		DEBUG(0,("cli_oem_change_password: Failed to send password change for user %s\n",
-			user ));
-		return False;
+	status = cli_trans(talloc_tos(),     /* mem_ctx */
+			   cli,		     /* cli */
+			   SMBtrans,	     /* cmd */
+			   "\\PIPE\\LANMAN", /* name */
+			   0,		     /* fid */
+			   0,		     /* function */
+			   0,		     /* flags */
+			   NULL,	     /* setup */
+			   0,		     /* num_setup */
+			   0,		     /* max_setup */
+			   (uint8_t *)param, /* param */
+			   param_len,	     /* num_param */
+			   4,		     /* max_param */
+			   data,	     /* data */
+			   sizeof(data),     /* num_data */
+			   0,		     /* max_data */
+			   NULL,	     /* recv_flags2 */
+			   NULL,	     /* rsetup */
+			   0,		     /* min_rsetup */
+			   NULL,	     /* num_rsetup */
+			   &rparam,	     /* rparam */
+			   2,		     /* min_rparam */
+			   &rprcnt,	     /* num_rparam */
+			   NULL,	     /* rdata */
+			   0,		     /* min_rdata */
+			   NULL);	     /* num_rdata */
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
 	}
+	res = PULL_LE_U16(rparam, 0);
 
-	if (rdrcnt < 2) {
-		cli->rap_error = ERRbadformat;
-		goto done;
-	}
+	status = werror_to_ntstatus(W_ERROR(res));
 
-	if (rparam) {
-		cli->rap_error = SVAL(rparam,0);
-	}
+	TALLOC_FREE(rparam);
 
-done:
-	SAFE_FREE(rparam);
-	SAFE_FREE(rdata);
-
-	return (cli->rap_error == 0);
+	return status;
 }
 
 static void prep_basic_information_buf(
@@ -1505,9 +1490,6 @@ NTSTATUS cli_qfileinfo_basic(
 		write_time,
 		change_time,
 		ino);
-
-	/* cli_smb2_query_info_fnum_recv doesn't set this */
-	cli->raw_status = status;
 fail:
 	TALLOC_FREE(frame);
 	return status;
@@ -1672,10 +1654,13 @@ NTSTATUS cli_qpathinfo_alt_name(struct cli_state *cli, const char *fname, fstrin
  Send a qpathinfo SMB_QUERY_FILE_STANDARD_INFO call.
 ****************************************************************************/
 
-NTSTATUS cli_qpathinfo_standard(struct cli_state *cli, const char *fname,
-				uint64_t *allocated, uint64_t *size,
-				uint32_t *nlinks,
-				bool *is_del_pending, bool *is_dir)
+static NTSTATUS cli_qpathinfo_standard(struct cli_state *cli,
+				       const char *fname,
+				       uint64_t *allocated,
+				       uint64_t *size,
+				       uint32_t *nlinks,
+				       bool *is_del_pending,
+				       bool *is_dir)
 {
 	uint8_t *rdata;
 	uint32_t num_rdata;
