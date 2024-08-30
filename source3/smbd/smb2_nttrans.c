@@ -177,6 +177,7 @@ static bool check_smb2_posix_chmod_ace(const struct files_struct *fsp,
 					struct security_descriptor *psd,
 					mode_t *pmode)
 {
+	struct security_ace *ace = NULL;
 	int cmp;
 
 	/*
@@ -203,18 +204,18 @@ static bool check_smb2_posix_chmod_ace(const struct files_struct *fsp,
 	if (psd->dacl->num_aces != 1) {
 		return false;
 	}
+	ace = &psd->dacl->aces[0];
 
-	if (psd->dacl->aces[0].trustee.num_auths != 3) {
+	if (ace->trustee.num_auths != 3) {
 		return false;
 	}
 
-	cmp = dom_sid_compare_domain(&global_sid_Unix_NFS_Mode,
-				     &psd->dacl->aces[0].trustee);
+	cmp = dom_sid_compare_domain(&global_sid_Unix_NFS_Mode, &ace->trustee);
 	if (cmp != 0) {
 		return false;
 	}
 
-	*pmode = (mode_t)psd->dacl->aces[0].trustee.sub_auths[2];
+	*pmode = (mode_t)ace->trustee.sub_auths[2];
 	*pmode &= (S_IRWXU | S_IRWXG | S_IRWXO);
 
 	return true;
@@ -317,9 +318,9 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 		goto out;
 	}
 
-	DEBUG(10,("copy_internals: doing file copy %s to %s\n",
+	DBG_DEBUG("doing file copy %s to %s\n",
 		  smb_fname_str_dbg(smb_fname_src),
-		  smb_fname_str_dbg(smb_fname_dst)));
+		  smb_fname_str_dbg(smb_fname_dst));
 
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
@@ -439,9 +440,10 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	}
  out:
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(3,("copy_internals: Error %s copy file %s to %s\n",
-			nt_errstr(status), smb_fname_str_dbg(smb_fname_src),
-			smb_fname_str_dbg(smb_fname_dst)));
+		DBG_NOTICE("Error %s copy file %s to %s\n",
+			   nt_errstr(status),
+			   smb_fname_str_dbg(smb_fname_src),
+			   smb_fname_str_dbg(smb_fname_dst));
 	}
 
 	return status;
@@ -457,7 +459,7 @@ static NTSTATUS get_null_nt_acl(TALLOC_CTX *mem_ctx, struct security_descriptor 
 
 	*ppsd = make_standard_sec_desc( mem_ctx, &global_sid_World, &global_sid_World, NULL, &sd_size);
 	if(!*ppsd) {
-		DEBUG(0,("get_null_nt_acl: Unable to malloc space for security descriptor.\n"));
+		DBG_ERR("Unable to malloc space for security descriptor.\n");
 		return NT_STATUS_NO_MEMORY;
 	}
 

@@ -1044,36 +1044,36 @@ _PUBLIC_ enum ndr_err_code ndr_token_store(TALLOC_CTX *mem_ctx,
 /*
   retrieve a token from a ndr context, using cmp_fn to match the tokens
 */
-_PUBLIC_ enum ndr_err_code ndr_token_retrieve_cmp_fn(struct ndr_token_list *list,
-						     const void *key, uint32_t *v,
-						     comparison_fn_t _cmp_fn,
-						     bool erase)
+static enum ndr_err_code ndr_token_find(struct ndr_token_list *list,
+					const void *key,
+					uint32_t *v,
+					comparison_fn_t _cmp_fn,
+					unsigned *_i)
 {
 	struct ndr_token *tokens = list->tokens;
 	unsigned i;
-	if (_cmp_fn) {
-		for (i = list->count - 1; i < list->count; i--) {
-			if (_cmp_fn(tokens[i].key, key) == 0) {
-				goto found;
-			}
-		}
-	} else {
-		for (i = list->count - 1; i < list->count; i--) {
-			if (tokens[i].key == key) {
-				goto found;
-			}
+	for (i = list->count - 1; i < list->count; i--) {
+		if (_cmp_fn(tokens[i].key, key) == 0) {
+			*_i = i;
+			*v = tokens[i].value;
+			return NDR_ERR_SUCCESS;
 		}
 	}
 	return NDR_ERR_TOKEN;
-found:
-	*v = tokens[i].value;
-	if (erase) {
-		if (i != list->count - 1) {
-			tokens[i] = tokens[list->count - 1];
-		}
-		list->count--;
-	}
-	return NDR_ERR_SUCCESS;
+}
+
+_PUBLIC_ enum ndr_err_code ndr_token_peek_cmp_fn(struct ndr_token_list *list,
+						 const void *key,
+						 uint32_t *v,
+						 comparison_fn_t _cmp_fn)
+{
+	unsigned i;
+	return ndr_token_find(list, key, v, _cmp_fn, &i);
+}
+
+static int token_cmp_ptr(const void *a, const void *b)
+{
+	return (a == b) ? 0 : 1;
 }
 
 /*
@@ -1082,7 +1082,22 @@ found:
 _PUBLIC_ enum ndr_err_code ndr_token_retrieve(struct ndr_token_list *list,
 					      const void *key, uint32_t *v)
 {
-	return ndr_token_retrieve_cmp_fn(list, key, v, NULL, true);
+	enum ndr_err_code err;
+	uint32_t last;
+	unsigned i;
+
+	err = ndr_token_find(list, key, v, token_cmp_ptr, &i);
+	if (!NDR_ERR_CODE_IS_SUCCESS(err)) {
+		return err;
+	}
+
+	last = list->count - 1;
+	if (i != last) {
+		list->tokens[i] = list->tokens[last];
+	}
+	list->count--;
+
+	return NDR_ERR_SUCCESS;
 }
 
 /*
@@ -1091,7 +1106,8 @@ _PUBLIC_ enum ndr_err_code ndr_token_retrieve(struct ndr_token_list *list,
 _PUBLIC_ enum ndr_err_code ndr_token_peek(struct ndr_token_list *list,
 					  const void *key, uint32_t *v)
 {
-	return ndr_token_retrieve_cmp_fn(list, key, v, NULL, false);
+	unsigned i;
+	return ndr_token_find(list, key, v, token_cmp_ptr, &i);
 }
 
 /*
@@ -2007,41 +2023,83 @@ _PUBLIC_ enum ndr_err_code ndr_pull_relative_ptr2(struct ndr_pull *ndr, const vo
 	return ndr_pull_set_offset(ndr, rel_offset);
 }
 
-static const struct {
-	enum ndr_err_code err;
-	const char *string;
-} ndr_err_code_strings[] = {
-	{ NDR_ERR_SUCCESS, "Success" },
-	{ NDR_ERR_ARRAY_SIZE, "Bad Array Size" },
-	{ NDR_ERR_BAD_SWITCH, "Bad Switch" },
-	{ NDR_ERR_OFFSET, "Offset Error" },
-	{ NDR_ERR_RELATIVE, "Relative Pointer Error" },
-	{ NDR_ERR_CHARCNV, "Character Conversion Error" },
-	{ NDR_ERR_LENGTH, "Length Error" },
-	{ NDR_ERR_SUBCONTEXT, "Subcontext Error" },
-	{ NDR_ERR_COMPRESSION, "Compression Error" },
-	{ NDR_ERR_STRING, "String Error" },
-	{ NDR_ERR_VALIDATE, "Validate Error" },
-	{ NDR_ERR_BUFSIZE, "Buffer Size Error" },
-	{ NDR_ERR_ALLOC, "Allocation Error" },
-	{ NDR_ERR_RANGE, "Range Error" },
-	{ NDR_ERR_TOKEN, "Token Error" },
-	{ NDR_ERR_IPV4ADDRESS, "IPv4 Address Error" },
-	{ NDR_ERR_INVALID_POINTER, "Invalid Pointer" },
-	{ NDR_ERR_UNREAD_BYTES, "Unread Bytes" },
-	{ NDR_ERR_NDR64, "NDR64 assertion error" },
-	{ NDR_ERR_INCOMPLETE_BUFFER, "Incomplete Buffer" },
-	{ NDR_ERR_MAX_RECURSION_EXCEEDED, "Maximum Recursion Exceeded" },
-	{ NDR_ERR_UNDERFLOW, "Underflow" },
-	{ 0, NULL }
-};
-
 _PUBLIC_ const char *ndr_map_error2string(enum ndr_err_code ndr_err)
 {
-	int i;
-	for (i = 0; ndr_err_code_strings[i].string != NULL; i++) {
-		if (ndr_err_code_strings[i].err == ndr_err)
-			return ndr_err_code_strings[i].string;
+	const char *ret = "Unknown error";
+
+	switch (ndr_err) {
+	case NDR_ERR_SUCCESS:
+		ret = "Success";
+		break;
+	case NDR_ERR_ARRAY_SIZE:
+		ret = "Bad Array Size";
+		break;
+	case NDR_ERR_BAD_SWITCH:
+		ret = "Bad Switch";
+		break;
+	case NDR_ERR_OFFSET:
+		ret = "Offset Error";
+		break;
+	case NDR_ERR_RELATIVE:
+		ret = "Relative Pointer Error";
+		break;
+	case NDR_ERR_CHARCNV:
+		ret = "Character Conversion Error";
+		break;
+	case NDR_ERR_LENGTH:
+		ret = "Length Error";
+		break;
+	case NDR_ERR_SUBCONTEXT:
+		ret = "Subcontext Error";
+		break;
+	case NDR_ERR_COMPRESSION:
+		ret = "Compression Error";
+		break;
+	case NDR_ERR_STRING:
+		ret = "String Error";
+		break;
+	case NDR_ERR_VALIDATE:
+		ret = "Validate Error";
+		break;
+	case NDR_ERR_BUFSIZE:
+		ret = "Buffer Size Error";
+		break;
+	case NDR_ERR_ALLOC:
+		ret = "Allocation Error";
+		break;
+	case NDR_ERR_RANGE:
+		ret = "Range Error";
+		break;
+	case NDR_ERR_TOKEN:
+		ret = "Token Error";
+		break;
+	case NDR_ERR_IPV4ADDRESS:
+		ret = "IPv4 Address Error";
+		break;
+	case NDR_ERR_INVALID_POINTER:
+		ret = "Invalid Pointer";
+		break;
+	case NDR_ERR_UNREAD_BYTES:
+		ret = "Unread Bytes";
+		break;
+	case NDR_ERR_NDR64:
+		ret = "NDR64 assertion error";
+		break;
+	case NDR_ERR_INCOMPLETE_BUFFER:
+		ret = "Incomplete Buffer";
+		break;
+	case NDR_ERR_MAX_RECURSION_EXCEEDED:
+		ret = "Maximum Recursion Exceeded";
+		break;
+	case NDR_ERR_UNDERFLOW:
+		ret = "Underflow";
+		break;
+	case NDR_ERR_IPV6ADDRESS:
+		ret = "Invalid IPv6 address";
+		break;
+	case NDR_ERR_FLAGS:
+		ret = "Invalid NDR flags";
+		break;
 	}
-	return "Unknown error";
+	return ret;
 }

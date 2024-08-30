@@ -151,6 +151,7 @@ if [ ! -L "$required_path" ] && [ ! -e "$required_path" ] ; then
 			 01.reclock
 			 05.system
 			 10.interface
+			 95.database
 			 "
 	for t in $default_scripts ; do
 		tgt="%{_datadir}/ctdb/events/legacy/${t}.script"
@@ -198,6 +199,7 @@ fi
 %doc doc/examples
 %dir %{_sysconfdir}/ctdb
 %{_sysconfdir}/ctdb/functions
+%{_sysconfdir}/ctdb/ctdb-backup-persistent-tdbs.sh
 %dir %{_sysconfdir}/ctdb/events
 %{_sysconfdir}/ctdb/events/*
 %dir %{_sysconfdir}/ctdb/nfs-checks.d

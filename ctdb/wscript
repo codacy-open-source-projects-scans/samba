@@ -685,28 +685,9 @@ def build(bld):
                      includes='include',
                      install_path='${CTDB_HELPER_BINDIR}')
 
-    bld.SAMBA_GENERATOR('ctdb-smnotify-h',
-                        source='utils/smnotify/smnotify.x',
-                        target='utils/smnotify/smnotify.h',
-                        rule='rpcgen -h ${SRC} > ${TGT}')
-
-    xdr_buf_hack = 'grep -Fv "register int32_t *buf;"'
-
-    bld.SAMBA_GENERATOR('ctdb-smnotify-x',
-                        source='utils/smnotify/smnotify.x',
-                        target='utils/smnotify/gen_xdr.c',
-                        rule='rpcgen -c ${SRC} | ' + xdr_buf_hack + ' > ${TGT}')
-
-    bld.SAMBA_GENERATOR('ctdb-smnotify-c',
-                        source='utils/smnotify/smnotify.x',
-                        target='utils/smnotify/gen_smnotify.c',
-                        rule='rpcgen -l ${SRC} > ${TGT}')
-
-    bld.SAMBA_BINARY('smnotify',
-                     source=bld.SUBDIR('utils/smnotify',
-                                       'smnotify.c gen_smnotify.c gen_xdr.c'),
-                     deps='ctdb-smnotify-h ctdb-smnotify-c ctdb-smnotify-x popt tirpc',
-                     includes='utils utils/smnotify',
+    bld.SAMBA_BINARY('ctdb_smnotify_helper',
+                     source=('failover/smnotify_helper.c'),
+                     deps='sys_rw replace',
                      install_path='${CTDB_HELPER_BINDIR}')
 
     bld.SAMBA_BINARY('ping_pong',
@@ -882,6 +863,7 @@ def build(bld):
                                 '01.reclock',
                                 '05.system',
                                 '10.interface',
+                                '95.database',
                               ]
             for t in default_scripts:
                 tgt = os.path.join(bld.env.CTDB_DATADIR, fmt % (t))
@@ -895,6 +877,7 @@ def build(bld):
     bld.INSTALL_FILES(bld.env.CTDB_ETCDIR, 'functions', destname='functions')
 
     etc_scripts = [
+        'ctdb-backup-persistent-tdbs.sh',
         'ctdb-crash-cleanup.sh',
         'debug-hung-script.sh',
         'debug_locks.sh',

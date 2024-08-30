@@ -515,12 +515,6 @@ enum ndr_compression_alg {
 	if (unlikely(!(s))) return ndr_pull_error(ndr, NDR_ERR_ALLOC, "Alloc %zu * %s failed: %s\n", (size_t)n, # s, __location__); \
 } while (0)
 
-
-#define NDR_PUSH_ALLOC_SIZE(ndr, s, size) do { \
-       (s) = talloc_array(ndr, uint8_t, size); \
-       if (unlikely(!(s))) return ndr_push_error(ndr, NDR_ERR_ALLOC, "push alloc %zu failed: %s\n", (size_t)size, __location__); \
-} while (0)
-
 #define NDR_PUSH_ALLOC(ndr, s) do { \
        (s) = talloc_ptrtype(ndr, (s)); \
        if (unlikely(!(s))) return ndr_push_error(ndr, NDR_ERR_ALLOC, "push alloc %s failed: %s\n", # s, __location__); \
@@ -721,8 +715,11 @@ enum ndr_err_code ndr_token_store(TALLOC_CTX *mem_ctx,
 			 struct ndr_token_list *list,
 			 const void *key,
 			 uint32_t value);
-enum ndr_err_code ndr_token_retrieve_cmp_fn(struct ndr_token_list *list, const void *key, uint32_t *v,
-					    int(*_cmp_fn)(const void*,const void*), bool erase);
+enum ndr_err_code ndr_token_peek_cmp_fn(struct ndr_token_list *list,
+					const void *key,
+					uint32_t *v,
+					int (*_cmp_fn)(const void *,
+						       const void *));
 enum ndr_err_code ndr_token_retrieve(struct ndr_token_list *list, const void *key, uint32_t *v);
 enum ndr_err_code ndr_token_peek(struct ndr_token_list *list, const void *key, uint32_t *v);
 enum ndr_err_code ndr_pull_array_size(struct ndr_pull *ndr, const void *p);
