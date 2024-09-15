@@ -837,9 +837,9 @@ _PUBLIC_ enum ndr_err_code ndr_pull_subcontext_start(struct ndr_pull *ndr,
 	subndr->data_size = r_content_size;
 
 	if (force_le) {
-		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_LITTLE_ENDIAN);
+		ndr_set_flags(&subndr->flags, LIBNDR_FLAG_LITTLE_ENDIAN);
 	} else if (force_be) {
-		ndr_set_flags(&ndr->flags, LIBNDR_FLAG_BIGENDIAN);
+		ndr_set_flags(&subndr->flags, LIBNDR_FLAG_BIGENDIAN);
 	}
 
 	*_subndr = subndr;
@@ -1675,7 +1675,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_relative_ptr1(struct ndr_push *ndr, const vo
 				      NDR_TOKEN_MAX_LIST_SIZE);
 	}
 	NDR_CHECK(ret);
-	return ndr_push_uint32(ndr, NDR_SCALARS, 0xFFFFFFFF);
+	return ndr_push_uint32(ndr, NDR_SCALARS, UINT32_MAX);
 }
 
 /*

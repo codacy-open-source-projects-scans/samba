@@ -26,10 +26,10 @@
 #define __LIBNDR_H__
 
 #include <talloc.h>
-#include "../lib/util/discard.h" /* for discard_const */
-#include "../lib/util/data_blob.h"
-#include "../lib/util/time.h"
-#include "../lib/util/charset/charset.h"
+#include "lib/util/discard.h" /* for discard_const */
+#include "lib/util/data_blob.h"
+#include "lib/util/time.h"
+#include "lib/util/charset/charset.h"
 
 /*
   this provides definitions for the libcli/rpc/ MSRPC library
@@ -533,7 +533,7 @@ typedef enum ndr_err_code (*ndr_pull_flags_fn_t)(struct ndr_pull *, ndr_flags_ty
 typedef void (*ndr_print_fn_t)(struct ndr_print *, const char *, const void *);
 typedef void (*ndr_print_function_t)(struct ndr_print *, const char *, ndr_flags_type, const void *);
 
-#include "../libcli/util/error.h"
+#include "libcli/util/error.h"
 #include "librpc/gen_ndr/misc.h"
 
 extern const struct ndr_syntax_id ndr_transfer_syntax_ndr;
@@ -834,7 +834,6 @@ enum ndr_err_code ndr_push_ref_ptr(struct ndr_push *ndr);
 void ndr_print_struct(struct ndr_print *ndr, const char *name, const char *type);
 void ndr_print_null(struct ndr_print *ndr);
 void ndr_print_enum(struct ndr_print *ndr, const char *name, const char *type, const char *val, uint32_t value);
-void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint32_t flag, uint32_t value);
 void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint32_t flag, uint32_t value);
 void ndr_print_ptr(struct ndr_print *ndr, const char *name, const void *p);
 void ndr_print_union(struct ndr_print *ndr, const char *name, int level, const char *type);
