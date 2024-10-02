@@ -26,6 +26,7 @@ from samba.dcerpc.security import dom_sid
 from samba import reparse_symlink
 import os
 import subprocess
+import stat
 
 def posix_context(mode):
     return (libsmb.SMB2_CREATE_TAG_POSIX, mode.to_bytes(4, 'little'))
@@ -68,6 +69,13 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             posix=posix2)
 
         return (conn1, conn2)
+
+    def wire_mode_to_unix(self, wire):
+        mode = libsmb.wire_mode_to_unix(wire)
+        type = stat.S_IFMT(mode)
+        perms = mode & (stat.S_IRWXU|stat.S_IRWXG|stat.S_IRWXO|
+                        stat.S_ISUID|stat.S_ISGID|stat.S_ISVTX)
+        return (type, perms)
 
     def test_negotiate_context_posix(self):
         c = libsmb.Conn(
@@ -289,25 +297,36 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             for fname,perm in test_files.items():
                 self.assertIn(get_string(fname), found_files.keys(),
                               'Test file not found')
-                self.assertEqual(test_files[fname], found_files[fname]['perms'],
+
+                found_unixmode = found_files[fname]['perms']
+                found_perms = found_unixmode & (stat.S_IRWXU|
+                                                stat.S_IRWXG|
+                                                stat.S_IRWXO|
+                                                stat.S_ISUID|
+                                                stat.S_ISGID|
+                                                stat.S_ISVTX)
+
+                self.assertEqual(test_files[fname], found_perms,
                                  'Requested %04o, Received %04o' % \
-                                         (test_files[fname], found_files[fname]['perms']))
+                                 (test_files[fname], found_perms))
 
                 self.assertEqual(found_files[fname]['reparse_tag'],
                                  libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
-                self.assertEqual(found_files[fname]['perms'], perm)
+                self.assertEqual(found_perms, perm)
                 self.assertEqual(found_files[fname]['owner_sid'],
                                  self.samsid + "-1000")
                 self.assertTrue(found_files[fname]['group_sid'].startswith("S-1-22-2-"))
 
                 if fname.startswith("testfile"):
+                    self.assertTrue(stat.S_ISREG(found_unixmode))
                     self.assertEqual(found_files[fname]['nlink'], 1)
                     self.assertEqual(found_files[fname]['size'], 4)
-                    self.assertEqual(found_files[fname]['allocaction_size'],
+                    self.assertEqual(found_files[fname]['allocation_size'],
                                      4096)
                     self.assertEqual(found_files[fname]['attrib'],
                                      libsmb.FILE_ATTRIBUTE_ARCHIVE)
                 else:
+                    self.assertTrue(stat.S_ISDIR(found_unixmode))
                     # Note: btrfs always reports the link count of directories as one.
                     if self.fstype == "btrfs":
                         self.assertEqual(found_files[fname]['nlink'], 1)
@@ -363,7 +382,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             self.assertEqual(cc.nlinks, 1)
             self.assertEqual(cc.reparse_tag, libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
-            self.assertEqual(cc.posix_perms, 0o600)
+            self.assertEqual(cc.posix_mode, 0o600)
             self.assertEqual(cc.owner, dom_sid(self.samsid + "-1000"))
             self.assertTrue(str(cc.group).startswith("S-1-22-2-"))
 
@@ -384,7 +403,11 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                 self.assertEqual(cc.nlinks, 2)
 
             self.assertEqual(cc.reparse_tag, libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
-            self.assertEqual(cc.posix_perms, 0o700)
+
+            (type, perms) = self.wire_mode_to_unix(cc.posix_mode);
+            self.assertEqual(type, stat.S_IFDIR)
+            self.assertEqual(perms, 0o700)
+
             self.assertEqual(cc.owner, dom_sid(self.samsid + "-1000"))
             self.assertTrue(str(cc.group).startswith("S-1-22-2-"))
 

@@ -1266,7 +1266,7 @@ static NTSTATUS parse_finfo_posix_info(const uint8_t *dir_data,
 	finfo->st_ex_dev = info.device;
 	finfo->st_ex_nlink = info.cc.nlinks;
 	finfo->reparse_tag = info.cc.reparse_tag;
-	finfo->st_ex_mode = wire_perms_to_unix(info.cc.posix_perms);
+	finfo->st_ex_mode = wire_mode_to_unix(info.cc.posix_mode);
 	sid_copy(&finfo->owner_sid, &info.cc.owner);
 	sid_copy(&finfo->group_sid, &info.cc.group);
 
@@ -3005,7 +3005,7 @@ NTSTATUS cli_smb2_query_mxac(struct cli_state *cli,
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct tevent_context *ev = NULL;
 	struct tevent_req *req = NULL;
-	NTSTATUS status = NT_STATUS_INTERNAL_ERROR;
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
 	bool ok;
 
 	if (smbXcli_conn_has_async_calls(cli->conn)) {

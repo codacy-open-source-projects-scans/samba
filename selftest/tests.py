@@ -69,8 +69,20 @@ planpythontestsuite("none", "samba.tests.blackbox.ndrdump")
 planpythontestsuite("none", "samba.tests.blackbox.check_output")
 
 # LDB tests for standalone operation
-planpythontestsuite("none", "api",
-                    name="ldb.python.api",
+planpythontestsuite("none", "api_misc",
+                    name="ldb.python.api_misc",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_search",
+                    name="ldb.python.api_search",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_add_modify",
+                    name="ldb.python.api_add_modify",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_simple",
+                    name="ldb.python.api_simple",
                     extra_path=['lib/ldb/tests/python'],
                     environ={'HAVE_LMDB': str(int(have_lmdb))})
 planpythontestsuite("none", "crash",
@@ -89,8 +101,23 @@ planpythontestsuite("none", "repack",
 # LDB tests for standalone operation, in the tr_TR.UTF-8 to cover
 # dotless i locales, see
 # https://bugzilla.samba.org/show_bug.cgi?id=15248
-planpythontestsuite("none", "api",
-                    name="ldb.python.api.tr",
+planpythontestsuite("none", "api_misc",
+                    name="ldb.python.api_misc.tr",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'LC_ALL': 'tr_TR.UTF-8',
+                             'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_search",
+                    name="ldb.python.api_search.tr",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'LC_ALL': 'tr_TR.UTF-8',
+                             'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_add_modify",
+                    name="ldb.python.api_add_modify.tr",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'LC_ALL': 'tr_TR.UTF-8',
+                             'HAVE_LMDB': str(int(have_lmdb))})
+planpythontestsuite("none", "api_simple",
+                    name="ldb.python.api_simple.tr",
                     extra_path=['lib/ldb/tests/python'],
                     environ={'LC_ALL': 'tr_TR.UTF-8',
                              'HAVE_LMDB': str(int(have_lmdb))})

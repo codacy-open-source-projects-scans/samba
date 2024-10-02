@@ -888,48 +888,12 @@ static struct ea_list *ea_list_union(struct ea_list *name_list, struct ea_list *
 }
 
 /****************************************************************************
- Return the filetype for UNIX extensions.
-****************************************************************************/
-
-static uint32_t unix_filetype(mode_t mode)
-{
-	if(S_ISREG(mode))
-		return UNIX_TYPE_FILE;
-	else if(S_ISDIR(mode))
-		return UNIX_TYPE_DIR;
-#ifdef S_ISLNK
-	else if(S_ISLNK(mode))
-		return UNIX_TYPE_SYMLINK;
-#endif
-#ifdef S_ISCHR
-	else if(S_ISCHR(mode))
-		return UNIX_TYPE_CHARDEV;
-#endif
-#ifdef S_ISBLK
-	else if(S_ISBLK(mode))
-		return UNIX_TYPE_BLKDEV;
-#endif
-#ifdef S_ISFIFO
-	else if(S_ISFIFO(mode))
-		return UNIX_TYPE_FIFO;
-#endif
-#ifdef S_ISSOCK
-	else if(S_ISSOCK(mode))
-		return UNIX_TYPE_SOCKET;
-#endif
-
-	DEBUG(0,("unix_filetype: unknown filetype %u\n", (unsigned)mode));
-	return UNIX_TYPE_UNKNOWN;
-}
-
-/****************************************************************************
  Map wire perms onto standard UNIX permissions. Obey share restrictions.
 ****************************************************************************/
 
 NTSTATUS unix_perms_from_wire(connection_struct *conn,
 			      const SMB_STRUCT_STAT *psbuf,
 			      uint32_t perms,
-			      enum perm_type ptype,
 			      mode_t *ret_perms)
 {
 	mode_t ret = 0;
@@ -937,31 +901,12 @@ NTSTATUS unix_perms_from_wire(connection_struct *conn,
 	if (perms == SMB_MODE_NO_CHANGE) {
 		if (!VALID_STAT(*psbuf)) {
 			return NT_STATUS_INVALID_PARAMETER;
-		} else {
-			*ret_perms = psbuf->st_ex_mode;
-			return NT_STATUS_OK;
 		}
+		*ret_perms = psbuf->st_ex_mode;
+		return NT_STATUS_OK;
 	}
 
 	ret = wire_perms_to_unix(perms);
-
-	if (ptype == PERM_NEW_FILE) {
-		/*
-		 * "create mask"/"force create mode" are
-		 * only applied to new files, not existing ones.
-		 */
-		ret &= lp_create_mask(SNUM(conn));
-		/* Add in force bits */
-		ret |= lp_force_create_mode(SNUM(conn));
-	} else if (ptype == PERM_NEW_DIR) {
-		/*
-		 * "directory mask"/"force directory mode" are
-		 * only applied to new directories, not existing ones.
-		 */
-		ret &= lp_directory_mask(SNUM(conn));
-		/* Add in force bits */
-		ret |= lp_force_directory_mode(SNUM(conn));
-	}
 
 	*ret_perms = ret;
 	return NT_STATUS_OK;
@@ -1746,6 +1691,7 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 				.fixed_buf_size = true,
 			};
 			enum ndr_err_code ndr_err;
+			uint32_t tag = 0;
 
 			DBG_DEBUG("SMB2_FILE_POSIX_INFORMATION\n");
 
@@ -1756,8 +1702,20 @@ static NTSTATUS smbd_marshall_dir_entry(TALLOC_CTX *ctx,
 				return NT_STATUS_INVALID_LEVEL;
 			}
 
+			if (mode & FILE_ATTRIBUTE_REPARSE_POINT) {
+				status = fsctl_get_reparse_tag(smb_fname->fsp,
+							       &tag);
+				if (!NT_STATUS_IS_OK(status)) {
+					DBG_DEBUG("Could not get reparse "
+						  "tag for %s: %s\n",
+						  smb_fname_str_dbg(smb_fname),
+						  nt_errstr(status));
+					return status;
+				}
+			}
+
 			smb3_file_posix_information_init(
-				conn, &smb_fname->st, 0, mode, &info);
+				conn, &smb_fname->st, tag, mode, &info);
 
 			ndr_err = ndr_push_smb3_file_posix_information(
 				&ndr, NDR_SCALARS|NDR_BUFFERS, &info);
@@ -2784,7 +2742,7 @@ char *store_file_unix_basic(connection_struct *conn,
 	SIVAL(pdata,4,0);
 	pdata += 8;
 
-	SIVAL(pdata,0,unix_filetype(psbuf->st_ex_mode));
+	SIVAL(pdata, 0, unix_filetype_to_wire(psbuf->st_ex_mode));
 	pdata += 4;
 
 	if (S_ISBLK(psbuf->st_ex_mode) || S_ISCHR(psbuf->st_ex_mode)) {

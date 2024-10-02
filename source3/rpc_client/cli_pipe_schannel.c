@@ -73,7 +73,26 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 		return status;
 	}
 
-	status = rpccli_setup_netlogon_creds(cli, transport,
+	if (table == &ndr_table_netlogon) {
+		status = rpccli_connect_netlogon(cli,
+						 transport,
+						 remote_name,
+						 remote_sockaddr,
+						 netlogon_creds,
+						 false, /* force_reauth */
+						 cli_creds,
+						 &result);
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(frame);
+			return status;
+		}
+		goto done;
+	}
+
+	status = rpccli_setup_netlogon_creds(cli,
+					     transport,
+					     remote_name,
+					     remote_sockaddr,
 					     netlogon_creds,
 					     false, /* force_reauth */
 					     cli_creds);
@@ -110,6 +129,7 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 		}
 	}
 
+done:
 	*presult = result;
 	if (pcreds != NULL) {
 		*pcreds = talloc_move(mem_ctx, &netlogon_creds);

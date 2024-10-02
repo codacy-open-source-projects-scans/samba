@@ -47,9 +47,6 @@ NTSTATUS rpc_pipe_open_np_recv(
 	struct tevent_req *req,
 	TALLOC_CTX *mem_ctx,
 	struct rpc_pipe_client **_result);
-NTSTATUS rpc_pipe_open_np(struct cli_state *cli,
-			  const struct ndr_interface_table *table,
-			  struct rpc_pipe_client **presult);
 
 unsigned int rpccli_set_timeout(struct rpc_pipe_client *cli,
 				unsigned int timeout);
@@ -84,6 +81,11 @@ NTSTATUS cli_rpc_pipe_open_noauth(struct cli_state *cli,
 				  const struct ndr_interface_table *table,
 				  struct rpc_pipe_client **presult);
 
+NTSTATUS cli_rpc_pipe_client_prepare_alter(struct rpc_pipe_client *p,
+					   bool new_auth_context,
+					   const struct ndr_interface_table *table,
+					   bool new_pres_context);
+
 NTSTATUS cli_rpc_pipe_open_noauth_transport(struct cli_state *cli,
 					    enum dcerpc_transport_t transport,
 					    const struct ndr_interface_table *table,
@@ -107,6 +109,10 @@ NTSTATUS cli_rpc_pipe_open_with_creds(struct cli_state *cli,
 				      struct cli_credentials *creds,
 				      struct rpc_pipe_client **presult);
 
+NTSTATUS cli_rpc_pipe_client_auth_schannel(
+	struct rpc_pipe_client *rpccli,
+	const struct ndr_interface_table *table,
+	struct netlogon_creds_cli_context *netlogon_creds);
 NTSTATUS cli_rpc_pipe_open_bind_schannel(
 	struct cli_state *cli,
 	const struct ndr_interface_table *table,
@@ -133,10 +139,6 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 				    struct rpc_pipe_client **presult,
 				    TALLOC_CTX *mem_ctx,
 				    struct netlogon_creds_cli_context **pcreds);
-
-NTSTATUS cli_get_session_key(TALLOC_CTX *mem_ctx,
-			     struct rpc_pipe_client *cli,
-			     DATA_BLOB *session_key);
 
 #endif /* _CLI_PIPE_H */
 

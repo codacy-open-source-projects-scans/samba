@@ -701,8 +701,6 @@ static void wb_domain_request_initialized(struct tevent_req *subreq)
 		}
 	}
 
-	state->domain->native_mode =
-			(*state->r.out.flags & WB_DOMINFO_DOMAIN_NATIVE);
 	state->domain->active_directory =
 			(*state->r.out.flags & WB_DOMINFO_DOMAIN_AD);
 	state->domain->initialized = true;
@@ -2062,7 +2060,7 @@ static void winbindd_sig_hup_handler(struct tevent_context *ev,
 {
 	const char *file = (const char *)private_data;
 
-	DEBUG(1,("Reloading services after SIGHUP\n"));
+	DBG_NOTICE("Reloading services after SIGHUP\n");
 	flush_caches_noinit();
 	winbindd_reload_services_file(file);
 }

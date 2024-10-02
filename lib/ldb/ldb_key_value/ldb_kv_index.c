@@ -361,6 +361,23 @@ enum dn_list_will_be_read_only {
 	DN_LIST_WILL_BE_READ_ONLY = 1,
 };
 
+struct ldb_dn_list_state {
+	struct ldb_module *module;
+	struct dn_list *list;
+};
+
+static int ldb_kv_index_idxptr_wrapper(TDB_DATA tdb_key,
+				       TDB_DATA tdb_data,
+				       void *private_data)
+{
+	struct ldb_dn_list_state *state = private_data;
+
+	/* The caller will check for NULL */
+	state->list = ldb_kv_index_idxptr(state->module, tdb_data);
+
+	return 0;
+}
+
 /*
   return the @IDX list in an index entry for a dn as a
   struct dn_list
@@ -372,12 +389,13 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 			       enum dn_list_will_be_read_only read_only)
 {
 	struct ldb_message *msg;
-	int ret, version;
+	int ret = -1, version;
 	struct ldb_message_element *el;
-	TDB_DATA rec = {0};
-	struct dn_list *list2;
 	bool from_primary_cache = false;
 	TDB_DATA key = {0};
+	struct ldb_dn_list_state state = {
+		.module = module,
+	};
 
 	*list = (struct dn_list){};
 	/*
@@ -397,23 +415,25 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 	 * if the record is not cached it will need to be read from disk.
 	 */
 	if (ldb_kv->nested_idx_ptr != NULL) {
-		rec = tdb_fetch(ldb_kv->nested_idx_ptr->itdb, key);
+		ret = tdb_parse_record(ldb_kv->nested_idx_ptr->itdb,
+				       key,
+				       ldb_kv_index_idxptr_wrapper,
+				       &state);
 	}
-	if (rec.dptr == NULL) {
+	if (ret == -1 /* not found */) {
 		from_primary_cache = true;
-		rec = tdb_fetch(ldb_kv->idxptr->itdb, key);
+		ret = tdb_parse_record(ldb_kv->idxptr->itdb,
+				       key,
+				       ldb_kv_index_idxptr_wrapper,
+				       &state);
 	}
-	if (rec.dptr == NULL) {
+	if (ret == -1 /* not found */) {
 		goto normal_index;
 	}
 
-	/* we've found an in-memory index entry */
-	list2 = ldb_kv_index_idxptr(module, rec);
-	if (list2 == NULL) {
-		free(rec.dptr);
+	if (ret != 0 || state.list == NULL) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
-	free(rec.dptr);
 
 	/*
 	 * If this is a read only transaction the indexes will not be
@@ -422,7 +442,7 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 	 * In this case make an early return
 	 */
 	if (read_only == DN_LIST_WILL_BE_READ_ONLY) {
-		*list = *list2;
+		*list = *state.list;
 		return LDB_SUCCESS;
 	}
 
@@ -431,7 +451,7 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 	 * already copied the primary cache record
 	 */
 	if (!from_primary_cache) {
-		*list = *list2;
+		*list = *state.list;
 		return LDB_SUCCESS;
 	}
 
@@ -439,7 +459,7 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 	 * No index sub transaction active, so no need to cache a copy
 	 */
 	if (ldb_kv->nested_idx_ptr == NULL) {
-		*list = *list2;
+		*list = *state.list;
 		return LDB_SUCCESS;
 	}
 
@@ -474,12 +494,12 @@ static int ldb_kv_dn_list_load(struct ldb_module *module,
 	 * These acrobatics do not affect read-only operations.
 	 */
 	list->dn = talloc_memdup(list,
-				 list2->dn,
-				 talloc_get_size(list2->dn));
+				 state.list->dn,
+				 talloc_get_size(state.list->dn));
 	if (list->dn == NULL) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
-	list->count = list2->count;
+	list->count = state.list->count;
 	return LDB_SUCCESS;
 
 	/*
@@ -821,6 +841,9 @@ static int ldb_kv_dn_list_store(struct ldb_module *module,
 	int ret = LDB_SUCCESS;
 	struct dn_list *list2 = NULL;
 	struct ldb_kv_idxptr *idxptr = NULL;
+	struct ldb_dn_list_state state = {
+		.module = module,
+	};
 
 	key.dptr = discard_const_p(unsigned char, ldb_dn_get_linearized(dn));
 	if (key.dptr == NULL) {
@@ -845,14 +868,16 @@ static int ldb_kv_dn_list_store(struct ldb_module *module,
 	 * the dn_list directly.
 	 *
 	 */
-	rec = tdb_fetch(idxptr->itdb, key);
-	if (rec.dptr != NULL) {
-		list2 = ldb_kv_index_idxptr(module, rec);
+	ret = tdb_parse_record(idxptr->itdb,
+			       key,
+			       ldb_kv_index_idxptr_wrapper,
+			       &state);
+	if (ret == 0) {
+		list2 = state.list;
 		if (list2 == NULL) {
 			free(rec.dptr);
 			return LDB_ERR_OPERATIONS_ERROR;
 		}
-		free(rec.dptr);
 		/* Now put the updated pointer back in the cache */
 		if (list->dn == NULL) {
 			list2->dn = NULL;
@@ -3863,6 +3888,9 @@ static int ldb_kv_sub_transaction_traverse(
 	TDB_DATA rec = {0};
 	struct dn_list *index_in_subtransaction = NULL;
 	struct dn_list *index_in_top_level = NULL;
+	struct ldb_dn_list_state sub_state = {
+		.module = module,
+	};
 	int ret = 0;
 
 	/*
@@ -3883,10 +3911,12 @@ static int ldb_kv_sub_transaction_traverse(
 	 * The TDB and so the fetched rec contains NO DATA, just a
 	 * pointer to data held in memory.
 	 */
-	rec = tdb_fetch(ldb_kv->idxptr->itdb, key);
-	if (rec.dptr != NULL) {
-		index_in_top_level = ldb_kv_index_idxptr(module, rec);
-		free(rec.dptr);
+	ret = tdb_parse_record(ldb_kv->idxptr->itdb,
+			       key,
+			       ldb_kv_index_idxptr_wrapper,
+			       &sub_state);
+	if (ret == 0) {
+		index_in_top_level = sub_state.list;
 		if (index_in_top_level == NULL) {
 			abort();
 		}
@@ -4011,7 +4041,7 @@ int ldb_kv_index_sub_transaction_commit(struct ldb_kv_private *ldb_kv)
 	if (ldb_kv->nested_idx_ptr->itdb == NULL) {
 		return LDB_SUCCESS;
 	}
-	tdb_traverse(
+	tdb_traverse_read(
 	    ldb_kv->nested_idx_ptr->itdb,
 	    ldb_kv_sub_transaction_traverse,
 	    ldb_kv->module);
