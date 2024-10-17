@@ -272,6 +272,7 @@ struct dcesrv_connection {
 	struct dcesrv_call_state *call_list;
 
 	/* the maximum size the client wants to receive */
+	uint16_t transport_max_recv_frag;
 	uint16_t max_recv_frag;
 	uint16_t max_xmit_frag;
 
@@ -305,6 +306,7 @@ struct dcesrv_connection {
 	struct dcesrv_auth *default_auth_state;
 	size_t max_auth_states;
 	struct dcesrv_auth *auth_states;
+	bool got_explicit_auth_level_non_connect;
 	bool got_explicit_auth_level_connect;
 	struct dcesrv_auth *default_auth_level_connect;
 	bool client_hdr_signing;

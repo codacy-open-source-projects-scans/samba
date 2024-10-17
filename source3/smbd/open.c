@@ -2464,7 +2464,7 @@ struct delay_for_oplock_state {
 	bool first_open_attempt;
 	bool got_handle_lease;
 	bool got_oplock;
-	bool have_other_lease;
+	bool disallow_write_lease;
 	uint32_t total_lease_types;
 	bool delay;
 	struct blocker_debug_state *blocker_debug_state;
@@ -2572,15 +2572,27 @@ static bool delay_for_oplock_fn(
 	}
 
 	if (!state->got_oplock &&
+	    (e->op_type != NO_OPLOCK) &&
 	    (e->op_type != LEASE_OPLOCK) &&
 	    !share_entry_stale_pid(e)) {
 		state->got_oplock = true;
 	}
 
-	if (!state->have_other_lease &&
+	/*
+	 * Two things prevent a write lease
+	 * to be granted:
+	 *
+	 * 1. Any oplock or lease (even broken to NONE)
+	 * 2. An open with an access mask other than
+	 *    FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES
+	 *    or SYNCHRONIZE_ACCESS
+	 */
+	if (!state->disallow_write_lease &&
+	    (e->op_type != NO_OPLOCK || !is_oplock_stat_open(e->access_mask)) &&
 	    !is_same_lease(fsp, e, lease) &&
-	    !share_entry_stale_pid(e)) {
-		state->have_other_lease = true;
+	    !share_entry_stale_pid(e))
+	{
+		state->disallow_write_lease = true;
 	}
 
 	if (e_is_lease && is_lease_stat_open(fsp->access_mask)) {
@@ -2814,9 +2826,11 @@ grant:
 		granted &= ~SMB2_LEASE_READ;
 	}
 
-	if (state.have_other_lease) {
+	if (state.disallow_write_lease) {
 		/*
-		 * Can grant only one writer
+		 * Can grant only a write lease
+		 * if there are no other leases
+		 * and no other non-stat opens.
 		 */
 		granted &= ~SMB2_LEASE_WRITE;
 	}
@@ -3375,6 +3389,7 @@ static NTSTATUS check_and_store_share_mode(
 	struct share_mode_lock *lck,
 	uint32_t create_disposition,
 	uint32_t access_mask,
+	uint32_t open_access_mask,
 	uint32_t share_access,
 	int oplock_request,
 	const struct smb2_lease *lease,
@@ -3401,7 +3416,7 @@ static NTSTATUS check_and_store_share_mode(
 	status = handle_share_mode_lease(fsp,
 					 lck,
 					 create_disposition,
-					 access_mask,
+					 open_access_mask,
 					 share_access,
 					 oplock_request,
 					 lease,
@@ -3731,6 +3746,7 @@ struct open_ntcreate_lock_state {
 	struct smb_request *req;
 	uint32_t create_disposition;
 	uint32_t access_mask;
+	uint32_t open_access_mask;
 	uint32_t share_access;
 	int oplock_request;
 	const struct smb2_lease *lease;
@@ -3759,6 +3775,7 @@ static void open_ntcreate_lock_add_entry(struct share_mode_lock *lck,
 						   lck,
 						   state->create_disposition,
 						   state->access_mask,
+						   state->open_access_mask,
 						   state->share_access,
 						   state->oplock_request,
 						   state->lease,
@@ -4393,6 +4410,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		.req			= req,
 		.create_disposition	= create_disposition,
 		.access_mask		= access_mask,
+		.open_access_mask	= open_access_mask,
 		.share_access		= share_access,
 		.oplock_request		= oplock_request,
 		.lease			= lease,
@@ -6917,6 +6935,56 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 	return status;
 }
 
+static NTSTATUS check_posix_create_context(connection_struct *conn,
+				struct smb_request *req,
+				const struct smb2_create_blobs *in_context_blobs,
+				uint32_t create_options,
+				uint32_t *file_attributes)
+{
+	uint32_t wire_mode_bits = 0;
+	NTSTATUS status;
+	mode_t mode_bits = 0;
+	SMB_STRUCT_STAT sbuf = { 0 };
+	struct smb2_create_blob *posx = NULL;
+
+	if (req == NULL || !req->posix_pathnames) {
+		return NT_STATUS_OK;
+	}
+
+	posx = smb2_create_blob_find(
+		in_context_blobs, SMB2_CREATE_TAG_POSIX);
+	if (posx == NULL) {
+		return NT_STATUS_OK;
+	}
+
+	if (posx->data.length != 4) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	wire_mode_bits = IVAL(posx->data.data, 0);
+	status = unix_perms_from_wire(conn,
+				      &sbuf,
+				      wire_mode_bits,
+				      &mode_bits);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	if (create_options & FILE_DIRECTORY_FILE) {
+		mode_bits = apply_conf_dir_mask(conn, mode_bits);
+	} else {
+		mode_bits = apply_conf_file_mask(conn, mode_bits);
+	}
+	/*
+	 * Remove type info from mode, leaving only the
+	 * permissions and setuid/gid bits.
+	 */
+	mode_bits &= ~S_IFMT;
+
+	*file_attributes = (FILE_FLAG_POSIX_SEMANTICS | mode_bits);
+
+	return NT_STATUS_OK;
+}
+
 NTSTATUS create_file_default(connection_struct *conn,
 			     struct smb_request *req,
 			     struct files_struct *dirfsp,
@@ -6941,7 +7009,6 @@ NTSTATUS create_file_default(connection_struct *conn,
 	files_struct *fsp = NULL;
 	NTSTATUS status;
 	bool stream_name = false;
-	struct smb2_create_blob *posx = NULL;
 
 	DBG_DEBUG("access_mask = 0x%" PRIu32
 		  " file_attributes = 0x%" PRIu32
@@ -7025,38 +7092,13 @@ NTSTATUS create_file_default(connection_struct *conn,
 		}
 	}
 
-	posx = smb2_create_blob_find(
-		in_context_blobs, SMB2_CREATE_TAG_POSIX);
-	if (posx != NULL) {
-		uint32_t wire_mode_bits = 0;
-		mode_t mode_bits = 0;
-		SMB_STRUCT_STAT sbuf = { 0 };
-
-		if (posx->data.length != 4) {
-			status = NT_STATUS_INVALID_PARAMETER;
-			goto fail;
-		}
-
-		wire_mode_bits = IVAL(posx->data.data, 0);
-		status = unix_perms_from_wire(conn,
-					      &sbuf,
-					      wire_mode_bits,
-					      &mode_bits);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-		if (create_options & FILE_DIRECTORY_FILE) {
-			mode_bits = apply_conf_dir_mask(conn, mode_bits);
-		} else {
-			mode_bits = apply_conf_file_mask(conn, mode_bits);
-		}
-		/*
-		 * Remove type info from mode, leaving only the
-		 * permissions and setuid/gid bits.
-		 */
-		mode_bits &= ~S_IFMT;
-
-		file_attributes = (FILE_FLAG_POSIX_SEMANTICS | mode_bits);
+	status = check_posix_create_context(conn,
+					    req,
+					    in_context_blobs,
+					    create_options,
+					    &file_attributes);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
 	}
 
 	status = create_file_unixpath(conn,
