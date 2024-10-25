@@ -18,6 +18,15 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from sysconfig import get_path
 import platform
+import ssl
+import shutil
+
+def get_libc_version():
+    import ctypes
+    libc = ctypes.CDLL("libc.so.6")
+    gnu_get_libc_version = libc.gnu_get_libc_version
+    gnu_get_libc_version.restype = ctypes.c_char_p
+    return gnu_get_libc_version().decode()
 
 import logging
 
@@ -168,6 +177,17 @@ builddirs = {
 
 ctdb_configure_params = " --enable-developer ${PREFIX}"
 samba_configure_params = " ${ENABLE_COVERAGE} ${PREFIX} --with-profiling-data"
+
+# We cannot configure himmelblau on old systems missing openssl 3, with glibc
+# older than version 2.32, or when cargo isn't available.
+himmelblau_configure_params = ''
+rust_configure_param = ''
+glibc_vers = float('.'.join(get_libc_version().split('.')[:2]))
+cargo = shutil.which('cargo')
+if glibc_vers >= 2.32 and cargo != None:
+    rust_configure_param = ' --enable-rust'
+if ssl.OPENSSL_VERSION_INFO[0] >= 3 and rust_configure_param:
+    himmelblau_configure_params = rust_configure_param + ' --with-himmelblau'
 
 samba_libs_envvars = "PYTHONPATH=${PYTHON_PREFIX}:$PYTHONPATH"
 samba_libs_envvars += " PKG_CONFIG_PATH=$PKG_CONFIG_PATH:${PREFIX_DIR}/lib/pkgconfig"
@@ -818,7 +838,7 @@ tasks = {
     "samba-o3": {
         "sequence": [
             ("random-sleep", random_sleep(300, 900)),
-            ("configure", "ADDITIONAL_CFLAGS='-O3 -Wp,-D_FORTIFY_SOURCE=2' ./configure.developer --abi-check-disable" + samba_configure_params),
+            ("configure", "ADDITIONAL_CFLAGS='-O3 -Wp,-D_FORTIFY_SOURCE=2' ./configure.developer --abi-check-disable" + himmelblau_configure_params + samba_configure_params),
             ("make", "make -j"),
             ("test", make_test(cmd='make test', TESTS="--exclude=selftest/slow-none", include_envs=["none"])),
             ("quicktest", make_test(cmd='make quicktest', include_envs=["ad_dc", "ad_dc_smb1", "ad_dc_smb1_done"])),

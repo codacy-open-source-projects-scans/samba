@@ -20,8 +20,10 @@ dnf install -y \
     bind-utils \
     binutils \
     bison \
+    cargo \
     ccache \
     chrpath \
+    clang-devel \
     codespell \
     crypto-policies-scripts \
     cups-devel \
@@ -75,6 +77,7 @@ dnf install -y \
     mold \
     ncurses-devel \
     openldap-devel \
+    openssl-devel \
     pam-devel \
     patch \
     perl \
@@ -114,6 +117,7 @@ dnf install -y \
     tar \
     tracker-devel \
     tree \
+    utf8proc-devel \
     wget \
     which \
     xfsprogs-devel \

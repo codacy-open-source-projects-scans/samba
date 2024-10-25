@@ -64,6 +64,7 @@ COMMON = [
     'tar',
     'tree',
     'wget',
+    'cargo',
 ]
 
 
@@ -83,6 +84,9 @@ PKGS = [
     ('libcap-dev', 'libcap-devel'),
     ('libacl1-dev', 'libacl-devel'),
     ('libattr1-dev', 'libattr-devel'),
+    ('libutf8proc-dev', 'utf8proc-devel'),
+    ('libssl-dev', 'openssl-devel'),
+    ('libclang-dev', 'clang-devel'),
 
     # libNAME1-dev, NAME2-devel
     ('libpopt-dev', 'popt-devel'),
@@ -244,6 +248,11 @@ set -xueo pipefail
 yum update -y
 yum install -y dnf-plugins-core
 yum install -y epel-release
+yum install -y centos-release-ceph-pacific
+
+sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Ceph-*
+sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Ceph-*
+sed -i 's/$contentdir/centos/g' /etc/yum.repos.d/CentOS-Ceph-*
 
 yum -v repolist all
 yum config-manager --set-enabled powertools -y
@@ -252,6 +261,7 @@ yum update -y
 
 yum install -y \
     --setopt=install_weak_deps=False \
+    --setopt=centos-ceph-pacific.module_hotfixes=true \
     {pkgs}
 
 yum clean all
@@ -443,6 +453,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'shfmt': '',
+            'cargo': '', # included cargo is broken
         }
     },
     'debian11-32bit': {
@@ -451,6 +462,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'shfmt': '',
+            'cargo': '', # included cargo is broken
         }
     },
     'debian12': {
@@ -459,6 +471,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'libtracker-sparql-2.0-dev': '',  # only tracker 3.x is available
+            'cargo': '', # included cargo is broken
         }
     },
     'debian12-32bit': {
@@ -467,6 +480,7 @@ DEB_DISTS = {
         'replace': {
             'language-pack-en': '',   # included in locales
             'libtracker-sparql-2.0-dev': '',  # only tracker 3.x is available
+            'cargo': '', # included cargo is broken
         }
     },
     'ubuntu1804': {

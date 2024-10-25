@@ -12,6 +12,7 @@ import shutil
 import wafsamba, samba_dist, samba_git, samba_version, samba_utils
 from waflib import Options, Scripting, Logs, Context, Errors
 from waflib.Tools import bison
+import ssl
 
 samba_dist.DIST_DIRS('.')
 samba_dist.DIST_BLACKLIST('.gitignore .bzrignore source4/selftest/provisions')
@@ -168,6 +169,10 @@ def options(opt):
                    dest='SAMBA_VERSION_VENDOR_SUFFIX',
                    default=None)
 
+    opt.add_option('--with-himmelblau', default=False,
+                  help=('Build with Azure Entra ID support.'),
+                  action='store_true', dest='enable_himmelblau')
+
 
 def configure(conf):
     if Options.options.SAMBA_VERSION_VENDOR_SUFFIX:
@@ -217,6 +222,8 @@ def configure(conf):
 
     conf.SAMBA_CHECK_PYTHON()
     conf.SAMBA_CHECK_PYTHON_HEADERS()
+
+    conf.SAMBA_CHECK_RUST()
 
     if sys.platform == 'darwin' and not conf.env['HAVE_ENVIRON_DECL']:
         # Mac OSX needs to have this and it's also needed that the python is compiled with this
@@ -501,6 +508,17 @@ def configure(conf):
 
     if Options.options.with_smb1server is not False:
         conf.DEFINE('WITH_SMB1SERVER', '1')
+
+    conf.env.debug = Options.options.debug
+    conf.env.developer = Options.options.developer
+    conf.env.enable_himmelblau = Options.options.enable_himmelblau
+    if Options.options.enable_himmelblau:
+        if not conf.env.enable_rust:
+            conf.fatal('--with-himmelblau cannot be specified without '
+                       '--enable-rust')
+        if ssl.OPENSSL_VERSION_INFO[0] < 3:
+            conf.fatal('--with-himmelblau cannot be specified with '
+                       '%s' % ssl.OPENSSL_VERSION)
 
     #
     # FreeBSD is broken. It doesn't include 'extern char **environ'

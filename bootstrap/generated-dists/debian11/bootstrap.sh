@@ -50,6 +50,7 @@ apt-get -y install \
     libbsd-dev \
     libcap-dev \
     libcephfs-dev \
+    libclang-dev \
     libcups2-dev \
     libdbus-1-dev \
     libglib2.0-dev \
@@ -68,12 +69,14 @@ apt-get -y install \
     libpcap-dev \
     libpopt-dev \
     libreadline-dev \
+    libssl-dev \
     libsystemd-dev \
     libtasn1-bin \
     libtasn1-dev \
     libtracker-sparql-2.0-dev \
     libunwind-dev \
     liburing-dev \
+    libutf8proc-dev \
     lmdb-utils \
     locales \
     lsb-release \

@@ -8,8 +8,10 @@ packages:
   - bind-utils
   - binutils
   - bison
+  - cargo
   - ccache
   - chrpath
+  - clang-devel
   - codespell
   - crypto-policies-scripts
   - cups-devel
@@ -60,6 +62,7 @@ packages:
   - mingw64-gcc
   - ncurses-devel
   - openldap2-devel
+  - openssl-devel
   - pam-devel
   - patch
   - perl
@@ -94,6 +97,7 @@ packages:
   - tar
   - tracker-devel
   - tree
+  - utf8proc-devel
   - wget
   - which
   - xfsprogs-devel
