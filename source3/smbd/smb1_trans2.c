@@ -347,10 +347,8 @@ static NTSTATUS smb_set_posix_lock(connection_struct *conn,
 	}
 
 	smblctx = (uint64_t)IVAL(pdata, POSIX_LOCK_PID_OFFSET);
-	offset = (((uint64_t) IVAL(pdata,(POSIX_LOCK_START_OFFSET+4))) << 32) |
-			((uint64_t) IVAL(pdata,POSIX_LOCK_START_OFFSET));
-	count = (((uint64_t) IVAL(pdata,(POSIX_LOCK_LEN_OFFSET+4))) << 32) |
-			((uint64_t) IVAL(pdata,POSIX_LOCK_LEN_OFFSET));
+	offset = PULL_LE_U64(pdata, POSIX_LOCK_START_OFFSET);
+	count = PULL_LE_U64(pdata, POSIX_LOCK_LEN_OFFSET);
 
 	DBG_DEBUG("file %s, lock_type = %u, smblctx = %"PRIu64", "
 		  "count = %"PRIu64", offset = %"PRIu64"\n",
@@ -1508,7 +1506,7 @@ static void call_trans2findnext(connection_struct *conn,
 	 */
 
 	if(!continue_bit && resume_name && *resume_name) {
-		bool posix_open = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN);
+		bool posix_open = fsp->fsp_flags.posix_open;
 		char *last_name_sent = NULL;
 		bool sequential;
 
@@ -2183,22 +2181,18 @@ static NTSTATUS smb_q_unix_info2(
 	return NT_STATUS_OK;
 }
 
-#if defined(HAVE_POSIX_ACLS)
 /****************************************************************************
  Utility function to open a fsp for a POSIX handle operation.
 ****************************************************************************/
 
 static NTSTATUS get_posix_fsp(connection_struct *conn,
 			      struct smb_request *req,
+			      struct files_struct *dirfsp,
 			      struct smb_filename *smb_fname,
 			      uint32_t access_mask,
 			      files_struct **ret_fsp)
 {
 	NTSTATUS status;
-	uint32_t create_disposition = FILE_OPEN;
-	uint32_t share_access = FILE_SHARE_READ|
-				FILE_SHARE_WRITE|
-				FILE_SHARE_DELETE;
 	struct smb2_create_blobs *posx = NULL;
 
 	/*
@@ -2206,7 +2200,6 @@ static NTSTATUS get_posix_fsp(connection_struct *conn,
 	 * but set reasonable defaults.
 	 */
 	uint32_t file_attributes = 0664;
-	uint32_t oplock = NO_OPLOCK;
 	uint32_t create_options = FILE_NON_DIRECTORY_FILE;
 
 	/* File or directory must exist. */
@@ -2236,30 +2229,33 @@ static NTSTATUS get_posix_fsp(connection_struct *conn,
 	}
 
 	status = SMB_VFS_CREATE_FILE(
-		conn,           /* conn */
-		req,            /* req */
-		NULL,		/* dirfsp */
-		smb_fname,      /* fname */
-		access_mask,    /* access_mask */
-		share_access,   /* share_access */
-		create_disposition,/* create_disposition*/
-		create_options, /* create_options */
-		file_attributes,/* file_attributes */
-		oplock,         /* oplock_request */
-		NULL,           /* lease */
-		0,              /* allocation_size */
-		0,              /* private_flags */
-		NULL,           /* sd */
-		NULL,           /* ea_list */
-		ret_fsp,	/* result */
-		NULL,           /* pinfo */
-		posx,           /* in_context */
-		NULL);          /* out_context */
+		conn,	     /* conn */
+		req,	     /* req */
+		dirfsp,	     /* dirfsp */
+		smb_fname,   /* fname */
+		access_mask, /* access_mask */
+		FILE_SHARE_READ | FILE_SHARE_WRITE |
+			FILE_SHARE_DELETE, /* share_access */
+		FILE_OPEN,		   /* create_disposition*/
+		create_options,		   /* create_options */
+		file_attributes,	   /* file_attributes */
+		NO_OPLOCK,		   /* oplock_request */
+		NULL,			   /* lease */
+		0,			   /* allocation_size */
+		0,			   /* private_flags */
+		NULL,			   /* sd */
+		NULL,			   /* ea_list */
+		ret_fsp,		   /* result */
+		NULL,			   /* pinfo */
+		posx,			   /* in_context */
+		NULL);			   /* out_context */
 
 done:
 	TALLOC_FREE(posx);
 	return status;
 }
+
+#if defined(HAVE_POSIX_ACLS)
 
 /****************************************************************************
  Utility function to count the number of entries in a POSIX acl.
@@ -2389,34 +2385,11 @@ static NTSTATUS smb_q_posix_acl(
 	uint16_t num_def_acls = 0;
 	unsigned int size_needed = 0;
 	NTSTATUS status;
-	bool ok;
-	bool close_fsp = false;
+	bool ok, refuse;
 
-	/*
-	 * Ensure we always operate on a file descriptor, not just
-	 * the filename.
-	 */
-	if (fsp == NULL || !fsp->fsp_flags.is_fsa) {
-		uint32_t access_mask = SEC_STD_READ_CONTROL|
-					FILE_READ_ATTRIBUTES|
-					FILE_WRITE_ATTRIBUTES;
-
-		status = get_posix_fsp(conn,
-					req,
-					smb_fname,
-					access_mask,
-					&fsp);
-
-		if (!NT_STATUS_IS_OK(status)) {
-			goto out;
-		}
-		close_fsp = true;
-	}
-
-	SMB_ASSERT(fsp != NULL);
-
-	status = refuse_symlink_fsp(fsp);
-	if (!NT_STATUS_IS_OK(status)) {
+	refuse = refuse_symlink_fsp(fsp);
+	if (refuse) {
+		status = NT_STATUS_ACCESS_DENIED;
 		goto out;
 	}
 
@@ -2510,29 +2483,19 @@ static NTSTATUS smb_q_posix_acl(
 	status = NT_STATUS_OK;
 
   out:
-
-	if (close_fsp) {
-		/*
-		 * Ensure the stat struct in smb_fname is up to
-		 * date. Structure copy.
-		 */
-		smb_fname->st = fsp->fsp_name->st;
-		(void)close_file_free(req, &fsp, NORMAL_CLOSE);
-	}
-
 	TALLOC_FREE(file_acl);
 	TALLOC_FREE(def_acl);
 	return status;
 #endif
 }
 
-static NTSTATUS smb_q_posix_symlink(
-	struct connection_struct *conn,
-	struct smb_request *req,
-	struct files_struct *dirfsp,
-	struct smb_filename *smb_fname,
-	char **ppdata,
-	int *ptotal_data)
+static NTSTATUS smb_q_posix_symlink(struct connection_struct *conn,
+				    struct smb_request *req,
+				    struct files_struct *dirfsp,
+				    struct smb_filename *smb_fname,
+				    struct smb_filename *smb_fname_rel,
+				    char **ppdata,
+				    int *ptotal_data)
 {
 	char *target = NULL;
 	size_t needed, len;
@@ -2556,16 +2519,9 @@ static NTSTATUS smb_q_posix_symlink(
 					 NULL,
 					 &target);
 	} else {
-		struct smb_filename smb_fname_rel = *smb_fname;
-		char *slash = NULL;
-
-		slash = strrchr_m(smb_fname->base_name, '/');
-		if (slash != NULL) {
-			smb_fname_rel.base_name = slash + 1;
-		}
 		status = readlink_talloc(talloc_tos(),
 					 dirfsp,
-					 &smb_fname_rel,
+					 smb_fname_rel,
 					 &target);
 	}
 
@@ -2612,6 +2568,7 @@ static void call_trans2qpathinfo(
 	char *params = *pparams;
 	uint16_t info_level;
 	struct smb_filename *smb_fname = NULL;
+	struct smb_filename *smb_fname_rel = NULL;
 	bool delete_pending = False;
 	struct timespec write_time_ts = { .tv_sec = 0, };
 	struct files_struct *dirfsp = NULL;
@@ -2681,13 +2638,15 @@ static void call_trans2qpathinfo(
 		reply_nterror(req, status);
 		return;
 	}
-	status = filename_convert_dirfsp(req,
-					 conn,
-					 fname,
-					 ucf_flags,
-					 twrp,
-					 &dirfsp,
-					 &smb_fname);
+	status = filename_convert_dirfsp_rel(req,
+					     conn,
+					     conn->cwd_fsp,
+					     fname,
+					     ucf_flags,
+					     twrp,
+					     &dirfsp,
+					     &smb_fname,
+					     &smb_fname_rel);
 	if (!NT_STATUS_IS_OK(status)) {
 		if (NT_STATUS_EQUAL(status,NT_STATUS_PATH_NOT_COVERED)) {
 			reply_botherror(req,
@@ -2767,24 +2726,34 @@ static void call_trans2qpathinfo(
 			&total_data);
 		break;
 
-	case SMB_QUERY_POSIX_ACL:
+	case SMB_QUERY_POSIX_ACL: {
+		struct files_struct *posix_fsp = NULL;
+
+		status = get_posix_fsp(conn,
+				       req,
+				       dirfsp,
+				       smb_fname,
+				       SEC_STD_READ_CONTROL |
+					       FILE_READ_ATTRIBUTES |
+					       FILE_WRITE_ATTRIBUTES,
+				       &posix_fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			break;
+		}
 		status = smb_q_posix_acl(
-			conn,
-			req,
-			smb_fname,
-			smb_fname->fsp,
-			ppdata,
-			&total_data);
+			conn, req, smb_fname, posix_fsp, ppdata, &total_data);
+		(void)close_file_free(req, &posix_fsp, NORMAL_CLOSE);
 		break;
+	}
 
 	case SMB_QUERY_FILE_UNIX_LINK:
-		status = smb_q_posix_symlink(
-			conn,
-			req,
-			dirfsp,
-			smb_fname,
-			ppdata,
-			&total_data);
+		status = smb_q_posix_symlink(conn,
+					     req,
+					     dirfsp,
+					     smb_fname,
+					     smb_fname_rel,
+					     ppdata,
+					     &total_data);
 		break;
 	}
 
@@ -3151,6 +3120,7 @@ static NTSTATUS smb_posix_mkdir(connection_struct *conn,
 				struct smb_request *req,
 				char **ppdata,
 				int total_data,
+				struct files_struct *dirfsp,
 				struct smb_filename *smb_fname,
 				int *pdata_return_size)
 {
@@ -3192,7 +3162,7 @@ static NTSTATUS smb_posix_mkdir(connection_struct *conn,
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
 		req,					/* req */
-		NULL,					/* dirfsp */
+		dirfsp,					/* dirfsp */
 		smb_fname,				/* fname */
 		FILE_READ_ATTRIBUTES,			/* access_mask */
 		FILE_SHARE_NONE,			/* share_access */
@@ -3305,11 +3275,13 @@ static NTSTATUS smb_posix_open(connection_struct *conn,
 	wire_open_mode = IVAL(pdata,4);
 
 	if (wire_open_mode == (SMB_O_CREAT|SMB_O_DIRECTORY)) {
-		return smb_posix_mkdir(conn, req,
-					ppdata,
-					total_data,
-					smb_fname,
-					pdata_return_size);
+		return smb_posix_mkdir(conn,
+				       req,
+				       ppdata,
+				       total_data,
+				       dirfsp,
+				       smb_fname,
+				       pdata_return_size);
 	}
 
 	switch (wire_open_mode & SMB_ACCMODE) {
@@ -3436,10 +3408,10 @@ static NTSTATUS smb_posix_open(connection_struct *conn,
 		create_options |= FILE_DIRECTORY_FILE;
 	}
 
-	DEBUG(10,("smb_posix_open: file %s, smb_posix_flags = %u, mode 0%o\n",
-		smb_fname_str_dbg(smb_fname),
-		(unsigned int)wire_open_mode,
-		(unsigned int)unixmode ));
+	DBG_DEBUG("file %s, smb_posix_flags = %" PRIu32 ", mode 0%o\n",
+		  smb_fname_str_dbg(smb_fname),
+		  wire_open_mode,
+		  (unsigned int)unixmode);
 
         status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
@@ -3999,9 +3971,9 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 	}
 
 	DBG_DEBUG("SMB_SET_FILE_UNIX_BASIC: name = "
-		  "%s size = %.0f, uid = %u, gid = %u, raw perms = 0%o\n",
+		  "%s size = %jd, uid = %u, gid = %u, raw perms = 0%o\n",
 		  smb_fname_str_dbg(smb_fname),
-		  (double)size,
+		  (intmax_t)size,
 		  (unsigned int)set_owner,
 		  (unsigned int)set_grp,
 		  (int)raw_unixmode);
@@ -4049,10 +4021,10 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		}
 
-		DEBUG(10,("smb_set_file_unix_basic: SMB_SET_FILE_UNIX_BASIC "
+		DBG_DEBUG("SMB_SET_FILE_UNIX_BASIC "
 			  "setting mode 0%o for file %s\n",
 			  (unsigned int)unixmode,
-			  smb_fname_str_dbg(smb_fname)));
+			  smb_fname_str_dbg(smb_fname));
 		ret = SMB_VFS_FCHMOD(fsp, unixmode);
 		if (ret != 0) {
 			return map_nt_error_from_unix(errno);
@@ -4170,8 +4142,11 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 				&ft,
 				false);
 	if (modify_mtime) {
-		notify_fname(conn, NOTIFY_ACTION_MODIFIED,
-			FILE_NOTIFY_CHANGE_LAST_WRITE, smb_fname->base_name);
+		notify_fname(conn,
+			     NOTIFY_ACTION_MODIFIED,
+			     FILE_NOTIFY_CHANGE_LAST_WRITE,
+			     smb_fname,
+			     NULL);
 	}
 	return status;
 }
@@ -4269,7 +4244,7 @@ static NTSTATUS smb_set_posix_acl(connection_struct *conn,
 	NTSTATUS status;
 	unsigned int size_needed;
 	unsigned int total_data;
-	bool close_fsp = false;
+	bool refuse;
 
 	if (total_data_in < 0) {
 		status = NT_STATUS_INVALID_PARAMETER;
@@ -4330,34 +4305,9 @@ static NTSTATUS smb_set_posix_acl(connection_struct *conn,
 		goto out;
 	}
 
-	/*
-	 * Ensure we always operate on a file descriptor, not just
-	 * the filename.
-	 */
-	if (fsp == NULL || !fsp->fsp_flags.is_fsa) {
-		uint32_t access_mask = SEC_STD_WRITE_OWNER|
-					SEC_STD_WRITE_DAC|
-					SEC_STD_READ_CONTROL|
-					FILE_READ_ATTRIBUTES|
-					FILE_WRITE_ATTRIBUTES;
-
-		status = get_posix_fsp(conn,
-					req,
-					smb_fname,
-					access_mask,
-					&fsp);
-
-		if (!NT_STATUS_IS_OK(status)) {
-			goto out;
-		}
-		close_fsp = true;
-	}
-
-	/* Here we know fsp != NULL */
-	SMB_ASSERT(fsp != NULL);
-
-	status = refuse_symlink_fsp(fsp);
-	if (!NT_STATUS_IS_OK(status)) {
+	refuse = refuse_symlink_fsp(fsp);
+	if (refuse) {
+		status = NT_STATUS_ACCESS_DENIED;
 		goto out;
 	}
 
@@ -4404,10 +4354,6 @@ static NTSTATUS smb_set_posix_acl(connection_struct *conn,
 	status = NT_STATUS_OK;
 
   out:
-
-	if (close_fsp) {
-		(void)close_file_free(req, &fsp, NORMAL_CLOSE);
-	}
 	return status;
 #endif
 }
@@ -4568,21 +4514,34 @@ static void call_trans2setpathinfo(
 						 smb_fname->fsp,
 						 smb_fname);
 		break;
-	case SMB_SET_POSIX_ACL:
+	case SMB_SET_POSIX_ACL: {
+		struct files_struct *posix_fsp = NULL;
+
+		status = get_posix_fsp(conn,
+				       req,
+				       dirfsp,
+				       smb_fname,
+				       SEC_STD_WRITE_OWNER |
+					       SEC_STD_WRITE_DAC |
+					       SEC_STD_READ_CONTROL |
+					       FILE_READ_ATTRIBUTES |
+					       FILE_WRITE_ATTRIBUTES,
+				       &posix_fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			break;
+		}
+
 		status = smb_set_posix_acl(
-			conn, req, *ppdata, total_data, NULL, smb_fname);
+			conn, req, *ppdata, total_data, posix_fsp, smb_fname);
+		(void)close_file_free(req, &posix_fsp, NORMAL_CLOSE);
 		break;
+	}
 	}
 
 	if (info_level_handled) {
 		goto done;
 	}
 
-	/*
-	 * smb_fname->fsp may be NULL if smb_fname points at a symlink
-	 * and we're in POSIX context, so be careful when using fsp
-	 * below, it can still be NULL.
-	 */
 	fsp = smb_fname->fsp;
 	if (fsp == NULL) {
 		status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
@@ -4595,8 +4554,9 @@ static void call_trans2setpathinfo(
 		req,
 		info_level,
 		fsp,
+		NULL,
 		smb_fname,
-		ppdata,
+		*ppdata,
 		total_data,
 		&data_return_size);
 
@@ -4701,10 +4661,10 @@ static void call_trans2setfileinfo(
 				*ppdata, 0,
 				max_data_bytes);
 			return;
-		} else {
-			reply_nterror(req, NT_STATUS_OBJECT_PATH_NOT_FOUND);
-			return;
 		}
+
+		reply_nterror(req, NT_STATUS_OBJECT_PATH_NOT_FOUND);
+		return;
 	} else {
 		/*
 		 * Original code - this is an open file.
@@ -4771,8 +4731,9 @@ static void call_trans2setfileinfo(
 		req,
 		info_level,
 		fsp,
+		NULL,
 		smb_fname,
-		ppdata,
+		*ppdata,
 		total_data,
 		&data_return_size);
 

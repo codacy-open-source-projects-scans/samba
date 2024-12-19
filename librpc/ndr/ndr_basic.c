@@ -1127,7 +1127,7 @@ _PUBLIC_ void ndr_print_enum(struct ndr_print *ndr, const char *name, const char
 	}
 }
 
-_PUBLIC_ void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint32_t flag, uint32_t value)
+_PUBLIC_ void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint64_t flag, uint64_t value)
 {
 	if (flag == 0) {
 		return;
@@ -1141,9 +1141,9 @@ _PUBLIC_ void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const ch
 		value >>= 1;
 	}
 	if (flag == 1) {
-		ndr->print(ndr, "   %"PRIu32": %-25s", value, flag_name);
+		ndr->print(ndr, "   %"PRIu64": %-25s", value, flag_name);
 	} else {
-		ndr->print(ndr, "0x%02"PRIx32": %-25s (%"PRIu32")", value, flag_name, value);
+		ndr->print(ndr, "0x%02"PRIx64": %-25s (%"PRIu64")", value, flag_name, value);
 	}
 }
 
@@ -1288,7 +1288,7 @@ _PUBLIC_ void ndr_print_NTTIME_hyper(struct ndr_print *ndr, const char *name, NT
 _PUBLIC_ void ndr_print_time_t(struct ndr_print *ndr, const char *name, time_t t)
 {
 	if (t == (time_t)-1 || t == 0) {
-		ndr->print(ndr, "%-25s: (time_t)%d", name, (int)t);
+		ndr->print(ndr, "%-25s: (time_t)%" PRIi64, name, (int64_t)t);
 	} else {
 		ndr->print(ndr, "%-25s: %s", name, timestring(ndr, t));
 	}

@@ -414,6 +414,7 @@ bool lp_scan_idmap_domains(bool (*fn)(const char *domname,
 
 NTSTATUS init_locator_child(TALLOC_CTX *mem_ctx);
 struct winbindd_child *locator_child(void);
+bool is_locator_child(const struct winbindd_child *child);
 struct dcerpc_binding_handle *locator_child_handle(void);
 
 /* The following definitions come from winbindd/winbindd_misc.c  */
@@ -501,8 +502,6 @@ NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 
 struct winbindd_domain *domain_list(void);
 struct winbindd_domain *wb_next_domain(struct winbindd_domain *domain);
-bool set_routing_domain(struct winbindd_domain *domain,
-			struct winbindd_domain *routing_domain);
 bool add_trusted_domain_from_auth(uint16_t validation_level,
 				  struct info3_text *info3,
 				  struct info6_text *info6);
@@ -740,24 +739,6 @@ struct tevent_req *winbindd_getgroups_send(TALLOC_CTX *mem_ctx,
 					   struct winbindd_request *request);
 NTSTATUS winbindd_getgroups_recv(struct tevent_req *req,
 				 struct winbindd_response *response);
-
-struct tevent_req *wb_seqnum_send(TALLOC_CTX *mem_ctx,
-				  struct tevent_context *ev,
-				  struct winbindd_domain *domain);
-NTSTATUS wb_seqnum_recv(struct tevent_req *req, uint32_t *seqnum);
-
-struct tevent_req *wb_seqnums_send(TALLOC_CTX *mem_ctx,
-				   struct tevent_context *ev);
-NTSTATUS wb_seqnums_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-			 int *num_domains, struct winbindd_domain ***domains,
-			 NTSTATUS **statuses, uint32_t **seqnums);
-
-struct tevent_req *winbindd_show_sequence_send(TALLOC_CTX *mem_ctx,
-					       struct tevent_context *ev,
-					       struct winbindd_cli_state *cli,
-					       struct winbindd_request *request);
-NTSTATUS winbindd_show_sequence_recv(struct tevent_req *req,
-				     struct winbindd_response *response);
 
 struct tevent_req *wb_group_members_send(TALLOC_CTX *mem_ctx,
 					 struct tevent_context *ev,

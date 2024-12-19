@@ -25,6 +25,7 @@
 #include "ads.h"
 #include "libads/sitename_cache.h"
 #include "libads/cldap.h"
+#include "libads/netlogon_ping.h"
 #include "../lib/tsocket/tsocket.h"
 #include "../lib/addns/dnsquery.h"
 #include "../libds/common/flags.h"
@@ -273,13 +274,6 @@ static bool ads_fill_cldap_reply(ADS_STRUCT *ads,
 
 	/* Check the CLDAP reply flags */
 
-	if (!(cldap_reply->server_type & NBT_SERVER_LDAP)) {
-		DBG_WARNING("%s's CLDAP reply says it is not an LDAP server!\n",
-			    addr);
-		ret = false;
-		goto out;
-	}
-
 	/* Fill in the ads->config values */
 
 	ADS_TALLOC_CONST_FREE(ads->config.workgroup);
@@ -288,12 +282,6 @@ static bool ads_fill_cldap_reply(ADS_STRUCT *ads,
 	ADS_TALLOC_CONST_FREE(ads->config.ldap_server_name);
 	ADS_TALLOC_CONST_FREE(ads->config.server_site_name);
 	ADS_TALLOC_CONST_FREE(ads->config.client_site_name);
-
-	if (!check_cldap_reply_required_flags(cldap_reply->server_type,
-					      ads->config.flags)) {
-		ret = false;
-		goto out;
-	}
 
 	ads->config.ldap_server_name = talloc_strdup(ads,
 						     cldap_reply->pdc_dns_name);
@@ -388,7 +376,11 @@ static bool ads_try_connect(ADS_STRUCT *ads, bool gc,
 	DBG_INFO("ads_try_connect: sending CLDAP request to %s (realm: %s)\n",
 		 addr, ads->server.realm);
 
-	ok = ads_cldap_netlogon_5(frame, ss, ads->server.realm, &cldap_reply);
+	ok = ads_cldap_netlogon_5(frame,
+				  ss,
+				  ads->server.realm,
+				  ads->config.flags | DS_ONLY_LDAP_NEEDED,
+				  &cldap_reply);
 	if (!ok) {
 		DBG_NOTICE("ads_cldap_netlogon_5(%s, %s) failed.\n",
 			   addr, ads->server.realm);
@@ -423,7 +415,6 @@ static NTSTATUS cldap_ping_list(ADS_STRUCT *ads,
 	struct timeval endtime = timeval_current_ofs(MAX(3,lp_ldap_timeout()/2), 0);
 	uint32_t nt_version = NETLOGON_NT_VERSION_5 | NETLOGON_NT_VERSION_5EX;
 	struct tsocket_address **ts_list = NULL;
-	const struct tsocket_address * const *ts_list_const = NULL;
 	struct samba_sockaddr **req_sa_list = NULL;
 	struct netlogon_samlogon_response **responses = NULL;
 	size_t num_requests = 0;
@@ -499,15 +490,22 @@ again:
 		return status;
 	}
 
-	ts_list_const = (const struct tsocket_address * const *)ts_list;
-
-	status = cldap_multi_netlogon(frame,
-				      ts_list_const, num_requests,
-				      ads->server.realm, NULL,
-				      nt_version,
-				      1, endtime, &responses);
+	status = netlogon_pings(frame, /* mem_ctx */
+				lp_client_netlogon_ping_protocol(), /* proto */
+				ts_list,      /* servers */
+				num_requests, /* num_servers */
+				(struct netlogon_ping_filter){
+					.ntversion = nt_version,
+					.domain = ads->server.realm,
+					.acct_ctrl = -1,
+					.required_flags = ads->config.flags |
+							  DS_ONLY_LDAP_NEEDED,
+				},
+				1,	 /* min_servers */
+				endtime, /* timeout */
+				&responses);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_WARNING("cldap_multi_netlogon(realm=%s, num_requests=%zu) "
+		DBG_WARNING("netlogon_pings(realm=%s, num_requests=%zu) "
 			    "for count[%zu] - %s\n",
 			    ads->server.realm,
 			    num_requests, count,

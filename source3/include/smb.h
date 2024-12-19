@@ -401,6 +401,7 @@ struct interface {
 #define NOTIFY_ACTION_ADDED_STREAM 6
 #define NOTIFY_ACTION_REMOVED_STREAM 7
 #define NOTIFY_ACTION_MODIFIED_STREAM 8
+#define NOTIFY_ACTION_DIRLEASE_BREAK 256 /* Flag ORed to the above actions */
 
 /* where to find the base of the SMB packet proper */
 #define smb_base(buf) (((const char *)(buf))+4)
@@ -606,7 +607,10 @@ struct ea_list {
 	struct ea_struct ea;
 };
 
-/* EA names used internally in Samba. KEEP UP TO DATE with prohibited_ea_names in trans2.c !. */
+/*
+ * EA names used internally in Samba. KEEP UP TO DATE with
+ * samba_private_attr_name() in smb2_trans2.c !.
+ */
 #define SAMBA_POSIX_INHERITANCE_EA_NAME "user.SAMBA_PAI"
 /* EA to use for DOS attributes */
 #define SAMBA_XATTR_DOS_ATTRIB "user.DOSATTRIB"

@@ -1158,6 +1158,7 @@ sub setup_ad_member_rfc2307
         idmap config $dcvars->{DOMAIN} : bind_path_group = ou=idmap,dc=samba,dc=example,dc=com
 
         password server = $dcvars->{SERVER}
+	client netlogon ping protocol = starttls
 ";
 
 	my $ret = $self->provision(
@@ -1467,6 +1468,7 @@ sub setup_ad_member_idmap_ad
 	gensec_gssapi:requested_life_time = 5
 	winbind scan trusted domains = yes
 	winbind expand groups = 1
+	client netlogon ping protocol = ldaps
 ";
 
 	my $ret = $self->provision(
@@ -1571,6 +1573,7 @@ sub setup_ad_member_oneway
 	idmap config * : backend = tdb
 	idmap config * : range = 1000000-1999999
 	gensec_gssapi:requested_life_time = 5
+	client netlogon ping protocol = ldap
 ";
 
 	my $ret = $self->provision(
@@ -2780,6 +2783,9 @@ sub provision($$)
 	my $recycle_shrdir="$shrdir/recycle";
 	push(@dirs,$recycle_shrdir);
 
+	my $recycle_shrdir2="$shrdir/recycle2";
+	push(@dirs,$recycle_shrdir2);
+
 	my $fakedircreatetimes_shrdir="$shrdir/fakedircreatetimes";
 	push(@dirs,$fakedircreatetimes_shrdir);
 
@@ -3714,6 +3720,15 @@ sub provision($$)
 	recycle : repository = .trash
 	recycle : exclude = *.tmp
 	recycle : directory_mode = 755
+
+[recycle2]
+	copy = tmp
+	path = $recycle_shrdir2
+	vfs objects = recycle crossrename
+	recycle : repository = .trash
+	recycle : exclude = *.tmp
+	recycle : directory_mode = 755
+	wide links = yes
 
 [fakedircreatetimes]
 	copy = tmp

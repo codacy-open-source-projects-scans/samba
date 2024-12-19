@@ -273,7 +273,7 @@ static struct tevent_req *smbd_smb2_query_directory_send(TALLOC_CTX *mem_ctx,
 	char *p;
 	bool stop = false;
 	bool ok;
-	bool posix_dir_handle = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN);
+	bool posix_dir_handle = fsp->fsp_flags.posix_open;
 
 	req = tevent_req_create(mem_ctx, &state,
 				struct smbd_smb2_query_directory_state);
@@ -301,7 +301,7 @@ static struct tevent_req *smbd_smb2_query_directory_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	if (strcmp(state->in_file_name, "") == 0) {
+	if (state->in_file_name[0] == '\0') {
 		tevent_req_nterror(req, NT_STATUS_OBJECT_NAME_INVALID);
 		return tevent_req_post(req, ev);
 	}
@@ -368,11 +368,11 @@ static struct tevent_req *smbd_smb2_query_directory_send(TALLOC_CTX *mem_ctx,
 		break;
 
 	case SMB2_FIND_POSIX_INFORMATION:
-		if (!(fsp->posix_flags & FSP_POSIX_FLAGS_OPEN)) {
+		if (!fsp->fsp_flags.posix_open) {
 			tevent_req_nterror(req, NT_STATUS_INVALID_LEVEL);
 			return tevent_req_post(req, ev);
 		}
-		state->info_level = SMB2_FILE_POSIX_INFORMATION;
+		state->info_level = FSCC_FILE_POSIX_INFORMATION;
 		break;
 	default:
 		tevent_req_nterror(req, NT_STATUS_INVALID_INFO_CLASS);
@@ -381,21 +381,17 @@ static struct tevent_req *smbd_smb2_query_directory_send(TALLOC_CTX *mem_ctx,
 
 	if (in_flags & SMB2_CONTINUE_FLAG_REOPEN) {
 		struct vfs_open_how how = { .flags = O_RDONLY, };
-
-		status = fd_close(fsp);
-		if (tevent_req_nterror(req, status)) {
-			return tevent_req_post(req, ev);
-		}
-
-		/*
-		 * fd_close() will close and invalidate the fsp's file
-		 * descriptor. So we have to reopen it.
-		 */
+		bool file_was_created;
 
 #ifdef O_DIRECTORY
 		how.flags |= O_DIRECTORY;
 #endif
-		status = fd_openat(conn->cwd_fsp, fsp->fsp_name, fsp, &how);
+
+		status = reopen_from_fsp(conn->cwd_fsp,
+					 fsp->fsp_name,
+					 fsp,
+					 &how,
+					 &file_was_created);
 		if (tevent_req_nterror(req, status)) {
 			return tevent_req_post(req, ev);
 		}

@@ -1,6 +1,7 @@
 #!/bin/sh
 
-# statd must be configured to use this script as its high availability call-out.
+# statd must be configured to use statd_callout, CTDB's binary
+# counterpart to this script, as its availability call-out.
 #
 # Modern NFS utils versions use /etc/nfs.conf:
 #
@@ -24,7 +25,7 @@
 # silently if /proc/fs/lockd/nlm_end_grace is not found.
 #
 
-if [ -z "$CTDB_BASE" ] ; then
+if [ -z "$CTDB_BASE" ]; then
 	export CTDB_BASE="/usr/local/etc/ctdb"
 fi
 
@@ -36,6 +37,8 @@ die()
 	script_log "statd_callout_helper" "$@"
 	exit 1
 }
+
+load_script_options "service" "60.nfs"
 
 ############################################################
 
@@ -78,8 +81,49 @@ create_add_del_client_dir()
 # shellcheck disable=SC2154
 statd_callout_state_dir="${script_state_dir}/statd_callout"
 
-statd_callout_db="ctdb.tdb"
-statd_callout_queue_dir="${statd_callout_state_dir}/queue"
+# Set default value, if necessary
+: "${CTDB_STATD_CALLOUT_SHARED_STORAGE:=persistent_db}"
+
+statd_callout_mode="${CTDB_STATD_CALLOUT_SHARED_STORAGE%%:*}"
+statd_callout_location="${CTDB_STATD_CALLOUT_SHARED_STORAGE#*:}"
+# If not given then mode determines the default location
+if [ "$statd_callout_location" = "$CTDB_STATD_CALLOUT_SHARED_STORAGE" ]; then
+	statd_callout_location=""
+fi
+
+case "$statd_callout_mode" in
+persistent_db)
+	statd_callout_db="${statd_callout_location:-ctdb_statd_callout.tdb}"
+	statd_callout_queue_dir="${statd_callout_state_dir}/queue"
+	;;
+shared_dir)
+	statd_callout_shared_dir="${statd_callout_location:-statd}"
+	case "$statd_callout_shared_dir" in
+	/*)
+		:
+		;;
+	*)
+		if [ -z "$CTDB_NFS_SHARED_STATE_DIR" ]; then
+			die "CTDB_NFS_SHARED_STATE_DIR is not set"
+		fi
+		t="${CTDB_NFS_SHARED_STATE_DIR}/${statd_callout_shared_dir}"
+		statd_callout_shared_dir="$t"
+		;;
+	esac
+
+	if [ -n "$CTDB_TEST_MODE" ]; then
+		t="${CTDB_TEST_TMP_DIR}${statd_callout_shared_dir}"
+		statd_callout_shared_dir="$t"
+	fi
+	;;
+none)
+	:
+	;;
+*)
+	mode="$statd_callout_mode"
+	die "error: unknown CTDB_STATD_CALLOUT_SHARED_STORAGE mode ${mode}"
+	;;
+esac
 
 ############################################################
 
@@ -139,7 +183,83 @@ send_notifies()
 	done
 }
 
-delete_records()
+############################################################
+
+# Use file/key names of the form statd-state@<server-IP>@<client-IP>
+# to track the last "add-client" or "del-client".  These files contain
+# the key and a value, quoted and ready to pass to "ctdb ptrans".  For
+# add-client the value is the date (for debugging) and for del-client
+# the value is empty (representing a delete).  These get pushed to
+# $statd_callout_db during "update", which will generally be run once each
+# "monitor" cycle.  In this way we avoid scalability problems with
+# flood of persistent transactions after a "notify" when all the
+# clients reclaim their locks.
+
+startup_persistent_db()
+{
+	_config_file="$1"
+
+	create_add_del_client_dir "$statd_callout_queue_dir"
+
+	$CTDB attach "$statd_callout_db" persistent
+
+	cat >"$_config_file" <<EOF
+persistent_db
+${statd_callout_queue_dir}
+${CTDB_MY_PUBLIC_IPS_CACHE}
+EOF
+}
+
+# Used via 'grep -F -f "$persistent_db_grep_filter"' to match database
+# keys currently hosted public IPs
+persistent_db_grep_filter="${statd_callout_state_dir}/.grep_filter"
+
+persistent_db_make_grep_filter()
+{
+	while read -r _ip; do
+		echo "statd-state@${_ip}@"
+	done <"$CTDB_MY_PUBLIC_IPS_CACHE" >"$persistent_db_grep_filter"
+}
+
+update_persistent_db()
+{
+	_files="${statd_callout_state_dir}/.file_list"
+	find "$statd_callout_queue_dir" -name "statd-state@*" >"$_files"
+	if [ ! -s "$_files" ]; then
+		# No files!
+		rm "$_files"
+		exit 0
+	fi
+
+	persistent_db_make_grep_filter
+
+	# Use cat instead of direct grep since POSIX grep does not
+	# have -h
+	_items="${statd_callout_state_dir}/.items"
+	xargs cat <"$_files" | grep -F -f "$persistent_db_grep_filter" >"$_items"
+
+	if [ -s "$_items" ]; then
+		if $CTDB ptrans "$statd_callout_db" <"$_items"; then
+			xargs rm -f <"$_files"
+		fi
+	fi
+
+	rm -f "$_files" "$persistent_db_grep_filter" "$_items"
+}
+
+list_records_persistent_db()
+{
+	persistent_db_make_grep_filter
+
+	$CTDB catdb "$statd_callout_db" |
+		sed -n -e 's|^key([0-9]*) = "\([^"]*\)".*|\1|p' |
+		grep -F -f "$persistent_db_grep_filter" |
+		sed -e 's|statd-state@\([^@]*\)@\(.*\)|\1 \2|'
+
+	rm -f "$persistent_db_grep_filter"
+}
+
+delete_records_persistent_db()
 {
 	while read -r _sip _cip; do
 		_key="statd-state@${_sip}@${_cip}"
@@ -147,28 +267,150 @@ delete_records()
 	done | $CTDB ptrans "$statd_callout_db"
 }
 
+cleanup_persistent_db()
+{
+	# Remove any stale touch files (i.e. for IPs not currently
+	# hosted on this node and created since the last "update").
+	# There's nothing else we can do with them at this stage.
+	_pnn=$(ctdb_get_pnn)
+	_ctdb_all_ips=$($CTDB ip all | tail -n +2)
+	echo "$_ctdb_all_ips" |
+		awk -v pnn="$_pnn" 'pnn != $2 { print $1 }' |
+		while read -r _sip; do
+			rm -f "${statd_callout_queue_dir}/statd-state@${_sip}@"*
+		done
+}
+
 ############################################################
 
-# Keep a file per server-IP/client-IP pair, to keep track of the last
-# "add-client" or "del-client'.  These get pushed to a database during
-# "update", which will generally be run once each "monitor" cycle.  In
-# this way we avoid scalability problems with flood of persistent
-# transactions after a "notify" when all the clients re-take their
-# locks.
+# Use file/key names of the form statd-state@<server-IP>@<client-IP>
+# to track the "add-client" and "del-client".  statd_callout add and
+# removes files directly in $statd_callout_shared_dir.  This may
+# result in performance problems if thousands of clients reclaim locks
+# after failover and the cluster filesystem is unable to handle the
+# load.
 
-startup()
+startup_shared_dir()
 {
-	create_add_del_client_dir "$statd_callout_queue_dir"
+	_config_file="$1"
 
-	$CTDB attach "$statd_callout_db" persistent
+	create_add_del_client_dir "$statd_callout_shared_dir"
 
-	_default="${CTDB_SCRIPT_VARDIR}/statd_callout.conf"
-	_config_file="${CTDB_STATD_CALLOUT_CONFIG_FILE:-"${_default}"}"
 	cat >"$_config_file" <<EOF
-persistent_db
-${statd_callout_queue_dir}
+shared_dir
+${statd_callout_shared_dir}
 ${CTDB_MY_PUBLIC_IPS_CACHE}
 EOF
+}
+
+update_shared_dir()
+{
+	:
+}
+
+list_records_shared_dir()
+{
+	while read -r _ip; do
+		ls "${statd_callout_shared_dir}/statd-state@${_ip}@"*
+	done <"$CTDB_MY_PUBLIC_IPS_CACHE" |
+		while read -r _f; do
+			if [ ! -f "$_f" ]; then
+				continue
+			fi
+			_t="${_f#"${statd_callout_shared_dir}/statd-state@"}"
+			_sip="${_t%@*}"
+			_cip="${_t#*@}"
+			echo "$_sip" "$_cip"
+		done
+}
+
+delete_records_shared_dir()
+{
+	while read -r _sip _cip; do
+		echo "${statd_callout_shared_dir}/statd-state@${_sip}@${_cip}"
+	done | xargs rm -f
+}
+
+cleanup_shared_dir()
+{
+	:
+}
+
+############################################################
+
+# No-op implementation
+
+startup_none()
+{
+	_config_file="$1"
+
+	cat >"$_config_file" <<EOF
+none
+EOF
+}
+
+update_none()
+{
+	:
+}
+
+list_records_none()
+{
+	:
+}
+
+delete_records_none()
+{
+	:
+}
+
+cleanup_none()
+{
+	:
+}
+
+############################################################
+
+# Per-mode initialisation
+startup()
+{
+	_default="${CTDB_SCRIPT_VARDIR}/statd_callout.conf"
+	_config_file="${CTDB_STATD_CALLOUT_CONFIG_FILE:-"${_default}"}"
+
+	mkdir -p "$statd_callout_state_dir"
+
+	"startup_${statd_callout_mode}" "$_config_file"
+}
+
+# Process a record queue in local storage and use it to update cluster
+# storage.  For implementations that update cluster storage directly,
+# this will be a no-op.
+update()
+{
+	"update_${statd_callout_mode}"
+}
+
+# Query cluster storage for entries matching this node's server IPs
+# and Write pairs of:
+#   server-IP client-IP
+# to stdout.
+list_records()
+{
+	"list_records_${statd_callout_mode}" | sort
+}
+
+# Read pairs of:
+#   server-IP client-IP
+# from stdin and delete associated records during notify.
+delete_records()
+{
+	"delete_records_${statd_callout_mode}"
+}
+
+# Do any required cleanup
+cleanup()
+{
+	"cleanup_${statd_callout_mode}"
 }
 
 ############################################################
@@ -179,25 +421,7 @@ startup)
 	;;
 
 update)
-	cd "$statd_callout_queue_dir" ||
-		die "Failed to change directory to \"${statd_callout_queue_dir}\""
-	files=$(echo statd-state@*)
-	if [ "$files" = "statd-state@*" ]; then
-		# No files!
-		exit 0
-	fi
-	sed_expr=$(awk '{
-		ip = $1; gsub(/\./, "\\.", ip);
-		printf "/statd-state@%s@/p\n", ip }' "$CTDB_MY_PUBLIC_IPS_CACHE")
-	# Intentional multi-word expansion for multiple files
-	# shellcheck disable=SC2086
-	items=$(sed -n "$sed_expr" $files)
-	if [ -n "$items" ]; then
-		if echo "$items" | $CTDB ptrans "$statd_callout_db"; then
-			# shellcheck disable=SC2086
-			rm $files
-		fi
-	fi
+	update
 	;;
 
 notify)
@@ -205,12 +429,6 @@ notify)
 	# a clusterwide grace period (so other clients don't take out
 	# conflicting locks through other nodes before all locks have been
 	# reclaimed)
-
-	# we need these settings to make sure that no tcp connections survive
-	# across a very fast failover/failback
-	#echo 10 > /proc/sys/net/ipv4/tcp_fin_timeout
-	#echo 0 > /proc/sys/net/ipv4/tcp_max_tw_buckets
-	#echo 0 > /proc/sys/net/ipv4/tcp_max_orphans
 
 	# Delete the notification list for statd, we don't want it to
 	# ping any clients
@@ -227,53 +445,19 @@ notify)
 	sleep 2
 	"$CTDB_NFS_CALLOUT" "start" "nlockmgr" >/dev/null 2>&1
 
-	# we now need to send out additional statd notifications to ensure
-	# that clients understand that the lockmanager has restarted.
-	# we have three cases:
-	# 1, clients that ignore the ip address the stat notification came from
-	#    and ONLY care about the 'name' in the notify packet.
-	#    these clients ONLY work with lock failover IFF that name
-	#    can be resolved into an ipaddress that matches the one used
-	#    to mount the share.  (==linux clients)
-	#    This is handled when starting lockmanager above,  but those
-	#    packets are sent from the "wrong" ip address, something linux
-	#    clients are ok with, buth other clients will barf at.
-	# 2, Some clients only accept statd packets IFF they come from the
-	#    'correct' ip address.
-	#    Send out the notification using the 'correct' ip address and also
-	#    specify the 'correct' hostname in the statd packet.
-	#    Some clients require both the correct source address and also the
-	#    correct name. (these clients also ONLY work if the ip addresses
-	#    used to map the share can be resolved into the name returned in
-	#    the notify packet.)
-	#
-	# For all IPs we serve, collect info and push to the config database
+	statd_state="${statd_callout_state_dir}/.statd_state"
+	list_records >"$statd_state"
 
-	# Construct a sed expression to take catdb output and produce pairs of:
-	#   server-IP client-IP
-	# but only for the server-IPs that are hosted on this node.
-	sed_expr=$(awk '{
-		       ip = $1; gsub(/\./, "\\.", ip);
-		       printf "s/^key.*=.*statd-state@\\(%s\\)@\\([^\"]*\\).*/\\1 \\2/p\n", ip }' \
-			       "$CTDB_MY_PUBLIC_IPS_CACHE")
+	if [ ! -s "$statd_state" ]; then
+		rm -f "$statd_state"
+		exit 0
+	fi
 
-	statd_state=$($CTDB catdb "$statd_callout_db" |
-		sed -n "$sed_expr" |
-		sort)
-	[ -n "$statd_state" ] || exit 0
+	delete_records <"$statd_state"
+	send_notifies <"$statd_state"
 
-	echo "$statd_state" | send_notifies
-	echo "$statd_state" | delete_records
+	rm -f "$statd_state"
 
-	# Remove any stale touch files (i.e. for IPs not currently
-	# hosted on this node and created since the last "update").
-	# There's nothing else we can do with them at this stage.
-	pnn=$(ctdb_get_pnn)
-	$CTDB ip all |
-		tail -n +2 |
-		awk -v pnn="$pnn" 'pnn != $2 { print $1 }' |
-		while read -r sip; do
-			rm -f "${statd_callout_queue_dir}/statd-state@${sip}@"*
-		done
+	cleanup
 	;;
 esac

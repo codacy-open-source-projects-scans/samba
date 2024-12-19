@@ -407,6 +407,7 @@ class KerberosCredentials(Credentials):
         'forced_salt',
         'kvno',
         'sid',
+        'guid',
         'spn',
         'tgs_supported_enctypes',
         'upn',
@@ -440,6 +441,7 @@ class KerberosCredentials(Credentials):
         self.upn = None
         self.spn = None
         self.sid = None
+        self.guid = None
         self.account_type = None
 
         self.user_account_control = None
@@ -588,6 +590,12 @@ class KerberosCredentials(Credentials):
 
     def get_sid(self):
         return self.sid
+
+    def set_guid(self, guid):
+        self.guid = guid
+
+    def get_guid(self):
+        return self.guid
 
     def get_rid(self):
         sid = self.get_sid()
@@ -4062,7 +4070,7 @@ class RawKerberosTest(TestCase):
                     else:
                         self.assertNotIn(PADATA_REQ_ENC_PA_REP, enc_pa_dict)
 
-                    if PADATA_SUPPORTED_ETYPES in enc_pa_dict:
+                    if PADATA_SUPPORTED_ETYPES in enc_pa_dict and self.strict_checking:
                         expected_supported_etypes = kdc_exchange_dict[
                             'expected_supported_etypes']
 
@@ -5120,9 +5128,10 @@ class RawKerberosTest(TestCase):
                 require_strict.add(PADATA_ENCRYPTED_CHALLENGE)
 
             got_patypes = tuple(pa['padata-type'] for pa in rep_padata)
+            TD_CMS_DIGEST_ALGORITHMS = 111
             self.assertSequenceElementsEqual(expected_patypes, got_patypes,
                                              require_strict=require_strict,
-                                             unchecked={PADATA_PW_SALT})
+                                             unchecked={PADATA_PW_SALT,TD_CMS_DIGEST_ALGORITHMS})
 
             if not expected_patypes:
                 return None

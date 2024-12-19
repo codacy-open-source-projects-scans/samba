@@ -215,7 +215,7 @@ static const struct loadparm_service _sDefault =
 	.follow_symlinks = true,
 	.sync_always = false,
 	.strict_allocate = false,
-	.strict_rename = false,
+	._strict_rename = false,
 	.strict_sync = true,
 	.mangling_char = '~',
 	.copymap = NULL,
@@ -879,6 +879,7 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.smb2_max_trans = DEFAULT_SMB2_MAX_TRANSACT;
 	Globals.smb2_max_credits = DEFAULT_SMB2_MAX_CREDITS;
 	Globals.smb2_leases = true;
+	Globals._smb3_directory_leases = Auto;
 	Globals.server_multi_channel_support = true;
 
 	lpcfg_string_set(Globals.ctx, &Globals.ncalrpc_dir,
@@ -941,8 +942,6 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	TALLOC_FREE(s);
 
 	Globals.nsupdate_command = str_list_make_v3_const(NULL, "/usr/bin/nsupdate -g", NULL);
-
-	Globals.cldap_port = 389;
 
 	Globals.dgram_port = NBT_DGRAM_SERVICE_PORT;
 
@@ -4686,7 +4685,7 @@ enum brl_flavour lp_posix_cifsu_locktype(files_struct *fsp)
 	if (posix_default_lock_was_set) {
 		return posix_cifsx_locktype;
 	} else {
-		return (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+		return fsp->fsp_flags.posix_open ?
 			POSIX_LOCK : WINDOWS_LOCK;
 	}
 }
@@ -4920,4 +4919,26 @@ uint32_t lp_get_async_dns_timeout(void)
 	 * as per the man page.
 	 */
 	return MAX(Globals.async_dns_timeout, 1);
+}
+
+bool lp_strict_rename(int snum)
+{
+	if (lp_smb3_directory_leases()){
+		return true;
+	}
+	return lp__strict_rename(snum);
+}
+
+int lp_smb3_directory_leases(void)
+{
+	bool dirleases = lp__smb3_directory_leases();
+
+	if (lp__smb3_directory_leases() == Auto) {
+		dirleases &= !lp_clustering();
+	}
+
+	dirleases &= lp_smb2_leases();
+	dirleases &= lp_oplocks(GLOBAL_SECTION_SNUM);
+	dirleases &= !lp_kernel_oplocks(GLOBAL_SECTION_SNUM);
+	return dirleases;
 }

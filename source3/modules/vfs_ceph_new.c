@@ -155,8 +155,8 @@ struct vfs_ceph_config {
 	CEPH_FN(ceph_userperm_destroy);
 	CEPH_FN(ceph_userperm_new);
 	CEPH_FN(ceph_version);
-	CEPH_FN(ceph_readdir);
 	CEPH_FN(ceph_rewinddir);
+	CEPH_FN(ceph_readdir_r);
 };
 
 /*
@@ -171,39 +171,55 @@ struct vfs_ceph_config {
 
 static struct cephmount_cached {
 	char *cookie;
-	uint32_t count;
+	int32_t count;
 	struct ceph_mount_info *mount;
 	struct cephmount_cached *next, *prev;
 	uint64_t fd_index;
 } *cephmount_cached;
 
-static int cephmount_cache_add(const char *cookie,
-			       struct ceph_mount_info *mount,
-			       struct cephmount_cached **out_entry)
+static bool cephmount_cache_add(const char *cookie,
+				struct ceph_mount_info *mount,
+				struct cephmount_cached **out_entry)
 {
 	struct cephmount_cached *entry = NULL;
 
 	entry = talloc_zero(NULL, struct cephmount_cached);
 	if (entry == NULL) {
 		errno = ENOMEM;
-		return -1;
+		return false;
 	}
 
 	entry->cookie = talloc_strdup(entry, cookie);
 	if (entry->cookie == NULL) {
 		talloc_free(entry);
 		errno = ENOMEM;
-		return -1;
+		return false;
 	}
 
 	entry->mount = mount;
 	entry->count = 1;
 
-	DBG_DEBUG("[CEPH] adding mount cache entry for %s\n", entry->cookie);
+	DBG_DEBUG("[CEPH] adding mount cache entry: cookie='%s'\n",
+		  entry->cookie);
 	DLIST_ADD(cephmount_cached, entry);
 
 	*out_entry = entry;
-	return 0;
+	return true;
+}
+
+static bool cephmount_cache_change_ref(struct cephmount_cached *entry, int n)
+{
+	entry->count += n;
+
+	DBG_DEBUG("[CEPH] updated mount cache entry: count=%" PRId32
+		  "change=%+d cookie='%s'\n", entry->count, n, entry->cookie);
+
+	if (entry->count && (n < 0)) {
+		DBG_DEBUG("[CEPH] mount cache entry still in use: "
+			  "count=%" PRId32 " cookie='%s'\n",
+			  entry->count, entry->cookie);
+	}
+	return (entry->count == 0);
 }
 
 static struct cephmount_cached *cephmount_cache_update(const char *cookie)
@@ -212,29 +228,25 @@ static struct cephmount_cached *cephmount_cache_update(const char *cookie)
 
 	for (entry = cephmount_cached; entry; entry = entry->next) {
 		if (strcmp(entry->cookie, cookie) == 0) {
-			entry->count++;
-			DBG_DEBUG("[CEPH] updated mount cache: count is [%"
-				  PRIu32 "]\n", entry->count);
+			cephmount_cache_change_ref(entry, 1);
 			return entry;
 		}
 	}
 
-	errno = ENOENT;
 	return NULL;
 }
 
-static int cephmount_cache_remove(struct cephmount_cached *entry)
+static bool cephmount_cache_remove(struct cephmount_cached *entry)
 {
-	if (--entry->count) {
-		DBG_DEBUG("[CEPH] updated mount cache: count is [%"
-			  PRIu32 "]\n", entry->count);
-		return entry->count;
+	if (!cephmount_cache_change_ref(entry, -1)) {
+		return false;
 	}
 
-	DBG_DEBUG("[CEPH] removing mount cache entry for %s\n", entry->cookie);
+	DBG_DEBUG("[CEPH] removing mount cache entry: cookie='%s'\n",
+		  entry->cookie);
 	DLIST_REMOVE(cephmount_cached, entry);
 	talloc_free(entry);
-	return 0;
+	return true;
 }
 
 static char *cephmount_get_cookie(TALLOC_CTX * mem_ctx,
@@ -246,6 +258,18 @@ static char *cephmount_get_cookie(TALLOC_CTX * mem_ctx,
 			       config->fsname);
 }
 
+static int cephmount_update_conf(struct vfs_ceph_config *config,
+				 struct ceph_mount_info *mnt,
+				 const char *option,
+				 const char *value)
+{
+	DBG_DEBUG("[CEPH] calling ceph_conf_set: option='%s' value='%s'\n",
+		  option,
+		  value);
+
+	return config->ceph_conf_set_fn(mnt, option, value);
+}
+
 static struct ceph_mount_info *cephmount_mount_fs(
 	struct vfs_ceph_config *config)
 {
@@ -254,35 +278,43 @@ static struct ceph_mount_info *cephmount_mount_fs(
 	struct ceph_mount_info *mnt = NULL;
 	/* if config_file and/or user_id are NULL, ceph will use defaults */
 
-	DBG_DEBUG("[CEPH] calling: ceph_create\n");
+	DBG_DEBUG("[CEPH] calling ceph_create: user_id='%s'\n",
+		  (config->user_id != NULL) ? config->user_id : "");
 	ret = config->ceph_create_fn(&mnt, config->user_id);
 	if (ret) {
 		errno = -ret;
 		return NULL;
 	}
 
-	DBG_DEBUG("[CEPH] calling: ceph_conf_read_file with %s\n",
-		  (config->conf_file == NULL ? "default path" : config->conf_file));
+	DBG_DEBUG("[CEPH] calling ceph_conf_read_file: conf_file='%s'\n",
+		  (config->conf_file == NULL) ? "default path"
+					      : config->conf_file);
 	ret = config->ceph_conf_read_file_fn(mnt, config->conf_file);
 	if (ret) {
-		goto err_cm_release;
+		goto out;
 	}
 
-	DBG_DEBUG("[CEPH] calling: ceph_conf_get\n");
-	ret = config->ceph_conf_get_fn(mnt, "log file", buf, sizeof(buf));
+	DBG_DEBUG("[CEPH] calling ceph_conf_get: option='%s'\n", "log_file");
+	ret = config->ceph_conf_get_fn(mnt, "log_file", buf, sizeof(buf));
 	if (ret < 0) {
-		goto err_cm_release;
+		goto out;
 	}
 
 	/* libcephfs disables POSIX ACL support by default, enable it... */
-	ret = config->ceph_conf_set_fn(mnt, "client_acl_type", "posix_acl");
+	ret = cephmount_update_conf(config,
+				    mnt,
+				    "client_acl_type",
+				    "posix_acl");
 	if (ret < 0) {
-		goto err_cm_release;
+		goto out;
 	}
 	/* tell libcephfs to perform local permission checks */
-	ret = config->ceph_conf_set_fn(mnt, "fuse_default_permissions", "false");
+	ret = cephmount_update_conf(config,
+				    mnt,
+				    "fuse_default_permissions",
+				    "false");
 	if (ret < 0) {
-		goto err_cm_release;
+		goto out;
 	}
 	/*
 	 * select a cephfs file system to use:
@@ -290,28 +322,34 @@ static struct ceph_mount_info *cephmount_mount_fs(
 	 * 'pacific'. Permit different shares to access different file systems.
 	 */
 	if (config->fsname != NULL) {
+		DBG_DEBUG("[CEPH] calling ceph_select_filesystem: "
+			  "fsname='%s'\n", config->fsname);
 		ret = config->ceph_select_filesystem_fn(mnt, config->fsname);
 		if (ret < 0) {
-			goto err_cm_release;
+			goto out;
 		}
 	}
 
-	DBG_DEBUG("[CEPH] calling: ceph_mount\n");
+	DBG_DEBUG("[CEPH] calling ceph_mount: mnt=%p\n", mnt);
 	ret = config->ceph_mount_fn(mnt, NULL);
-	if (ret >= 0) {
-		goto cm_done;
+	if (ret < 0) {
+		goto out;
 	}
+	ret = 0;
 
-      err_cm_release:
-	config->ceph_release_fn(mnt);
-	mnt = NULL;
-	DBG_DEBUG("[CEPH] Error mounting fs: %s\n", strerror(-ret));
-      cm_done:
-	/*
-	 * Handle the error correctly. Ceph returns -errno.
-	 */
-	if (ret) {
+out:
+	if (ret != 0) {
+		config->ceph_release_fn(mnt);
+		mnt = NULL;
+		DBG_ERR("[CEPH] mount failed: user_id='%s' fsname='%s' %s",
+			(config->user_id != NULL) ? config->user_id : "",
+			(config->fsname != NULL) ? config->fsname : "",
+			strerror(-ret));
 		errno = -ret;
+	} else {
+		DBG_DEBUG("[CEPH] mount done: user_id='%s' fsname='%s'",
+			  (config->user_id != NULL) ? config->user_id : "",
+			  (config->fsname != NULL) ? config->fsname : "");
 	}
 	return mnt;
 }
@@ -403,8 +441,8 @@ static bool vfs_cephfs_load_lib(struct vfs_ceph_config *config)
 	CHECK_CEPH_FN(libhandle, ceph_userperm_destroy);
 	CHECK_CEPH_FN(libhandle, ceph_userperm_new);
 	CHECK_CEPH_FN(libhandle, ceph_version);
-	CHECK_CEPH_FN(libhandle, ceph_readdir);
 	CHECK_CEPH_FN(libhandle, ceph_rewinddir);
+	CHECK_CEPH_FN(libhandle, ceph_readdir_r);
 
 	config->libhandle = libhandle;
 
@@ -509,15 +547,19 @@ static int vfs_ceph_connect(struct vfs_handle_struct *handle,
 		goto connect_fail;
 	}
 
-	ret = cephmount_cache_add(cookie, mount, &entry);
-	if (ret != 0) {
+	ok = cephmount_cache_add(cookie, mount, &entry);
+	if (!ok) {
+		ret = -1;
 		goto connect_fail;
 	}
 
 connect_ok:
 	config->mount = entry->mount;
 	config->mount_entry = entry;
-	DBG_WARNING("Connection established with the server: %s\n", cookie);
+	DBG_INFO("[CEPH] connection established with the server: "
+		 "snum=%d cookie='%s'\n",
+		 SNUM(handle->conn),
+		 cookie);
 
 	/*
 	 * Unless we have an async implementation of getxattrat turn this off.
@@ -538,20 +580,22 @@ static void vfs_ceph_disconnect(struct vfs_handle_struct *handle)
 
 	mount = config->mount;
 
-	ret = cephmount_cache_remove(config->mount_entry);
-	if (ret > 0) {
-		DBG_DEBUG("[CEPH] mount cache entry still in use\n");
+	if (!cephmount_cache_remove(config->mount_entry)) {
 		return;
 	}
 
 	ret = config->ceph_unmount_fn(mount);
 	if (ret < 0) {
-		DBG_ERR("[CEPH] failed to unmount: %s\n", strerror(-ret));
+		DBG_ERR("[CEPH] failed to unmount: snum=%d %s\n",
+			SNUM(handle->conn),
+			strerror(-ret));
 	}
 
 	ret = config->ceph_release_fn(mount);
 	if (ret < 0) {
-		DBG_ERR("[CEPH] failed to release: %s\n", strerror(-ret));
+		DBG_ERR("[CEPH] failed to release: snum=%d %s\n",
+			SNUM(handle->conn),
+			strerror(-ret));
 	}
 
 	config->mount_entry = NULL;
@@ -625,7 +669,9 @@ struct vfs_ceph_fh {
 	struct vfs_ceph_config *config;
 	struct vfs_ceph_iref iref;
 	struct Fh *fh;
+	struct dirent *de;
 	int fd;
+	int o_flags;
 };
 
 static int cephmount_next_fd(struct cephmount_cached *cme)
@@ -642,12 +688,29 @@ static int cephmount_next_fd(struct cephmount_cached *cme)
 	return (int)next;
 }
 
+static struct dirent *vfs_ceph_get_fh_dirent(struct vfs_ceph_fh *cfh)
+{
+	if (cfh->de == NULL) {
+		cfh->de = talloc_zero_size(cfh->fsp, sizeof(*(cfh->de)));
+	}
+	return cfh->de;
+}
+
+static void vfs_ceph_put_fh_dirent(struct vfs_ceph_fh *cfh)
+{
+	if (cfh->de != NULL) {
+		TALLOC_FREE(cfh->de);
+		cfh->de = NULL;
+	}
+}
+
 static int vfs_ceph_release_fh(struct vfs_ceph_fh *cfh)
 {
 	int ret = 0;
 
 	if (cfh->fh != NULL) {
-		DBG_DEBUG("[ceph] ceph_ll_close: fd=%d\n", cfh->fd);
+		DBG_DEBUG("[ceph] ceph_ll_close: fd=%d o_flags=0x%x\n",
+			  cfh->fd, cfh->o_flags);
 		ret = cfh->config->ceph_ll_close_fn(cfh->cme->mount, cfh->fh);
 		cfh->fh = NULL;
 	}
@@ -661,6 +724,7 @@ static int vfs_ceph_release_fh(struct vfs_ceph_fh *cfh)
 		vfs_ceph_userperm_del(cfh->config, cfh->uperm);
 		cfh->uperm = NULL;
 	}
+	vfs_ceph_put_fh_dirent(cfh);
 	cfh->fd = -1;
 
 	return ret;
@@ -1011,6 +1075,7 @@ static int vfs_ceph_ll_create(const struct vfs_handle_struct *handle,
 	cfh->iref.ino = (long)stx.stx_ino;
 	cfh->iref.owner = true;
 	cfh->fh = fh;
+	cfh->o_flags = oflags;
 	vfs_ceph_assign_fh_fd(cfh);
 
 	return 0;
@@ -1146,6 +1211,7 @@ static int vfs_ceph_ll_open(const struct vfs_handle_struct *handle,
 				      cfh->uperm);
 	if (ret == 0) {
 		cfh->fh = fh;
+		cfh->o_flags = flags;
 		vfs_ceph_assign_fh_fd(cfh);
 	}
 	return ret;
@@ -1167,18 +1233,20 @@ static int vfs_ceph_ll_opendir(const struct vfs_handle_struct *handle,
 					  cfh->uperm);
 }
 
-static struct dirent *vfs_ceph_ll_readdir(const struct vfs_handle_struct *hndl,
-					  const struct vfs_ceph_fh *dircfh)
+static int vfs_ceph_ll_readdir(const struct vfs_handle_struct *hndl,
+			       const struct vfs_ceph_fh *dircfh)
 {
 	struct vfs_ceph_config *config = NULL;
 
 	SMB_VFS_HANDLE_GET_DATA(hndl, config, struct vfs_ceph_config,
-				return NULL);
+				return -ENOMEM);
 
 	DBG_DEBUG("[ceph] ceph_readdir: ino=%" PRIu64 " fd=%d\n",
 		  dircfh->iref.ino, dircfh->fd);
 
-	return config->ceph_readdir_fn(config->mount, dircfh->dirp.cdr);
+	return config->ceph_readdir_r_fn(config->mount,
+					 dircfh->dirp.cdr,
+					 dircfh->de);
 }
 
 static void vfs_ceph_ll_rewinddir(const struct vfs_handle_struct *handle,
@@ -1748,7 +1816,7 @@ static int vfs_ceph_iget(const struct vfs_handle_struct *handle,
 	iref->inode = inode;
 	iref->ino = ino;
 	iref->owner = true;
-	DBG_DEBUG("[CEPH] get-inode: %s ino=%" PRIu64 "\n", name, iref->ino);
+	DBG_DEBUG("[CEPH] iget: %s ino=%" PRIu64 "\n", name, iref->ino);
 	return 0;
 }
 
@@ -1960,21 +2028,35 @@ static struct dirent *vfs_ceph_readdir(struct vfs_handle_struct *handle,
 				       struct files_struct *dirfsp,
 				       DIR *dirp)
 {
-	const struct vfs_ceph_fh *dircfh = (const struct vfs_ceph_fh *)dirp;
+	struct vfs_ceph_fh *dircfh = (struct vfs_ceph_fh *)dirp;
 	struct dirent *result = NULL;
 	int saved_errno = errno;
+	int ret = -1;
 
 	DBG_DEBUG("[CEPH] readdir(%p, %p)\n", handle, dirp);
 
-	errno = 0;
-	result = vfs_ceph_ll_readdir(handle, dircfh);
-	if ((result == NULL) && (errno != 0)) {
-		saved_errno = errno;
-		DBG_DEBUG("[CEPH] readdir(...) = %d\n", errno);
-	} else {
-		DBG_DEBUG("[CEPH] readdir(...) = %p\n", result);
+	result = vfs_ceph_get_fh_dirent(dircfh);
+	if (result == NULL) {
+		/* Memory allocation failure */
+		return NULL;
 	}
 
+	/* The low-level call uses 'dircfh->de' which is now 'result' */
+	ret = vfs_ceph_ll_readdir(handle, dircfh);
+	if (ret < 0) {
+		/* Error case */
+		DBG_DEBUG("[CEPH] readdir(...) = %d\n", ret);
+		vfs_ceph_put_fh_dirent(dircfh);
+		result = NULL;
+		saved_errno = ret;
+	} else if (ret == 0) {
+		/* End of directory stream */
+		vfs_ceph_put_fh_dirent(dircfh);
+		result = NULL;
+	} else {
+		/* Normal case */
+		DBG_DEBUG("[CEPH] readdir(...) = %p\n", result);
+	}
 	errno = saved_errno;
 	return result;
 }
@@ -2092,6 +2174,7 @@ static int vfs_ceph_openat(struct vfs_handle_struct *handle,
 			 * Cephfs' Inode* from the above lookup so there is no
 			 * need to go via expensive ceph_ll_open for Fh*.
 			 */
+			cfh->o_flags = flags;
 			vfs_ceph_assign_fh_fd(cfh);
 			result = cfh->fd;
 			goto out;
@@ -2177,7 +2260,12 @@ static struct tevent_req *vfs_ceph_pread_send(struct vfs_handle_struct *handle,
 	struct vfs_ceph_pread_state *state = NULL;
 	int ret = -1;
 
-	DBG_DEBUG("[CEPH] %s\n", __func__);
+	DBG_DEBUG("[CEPH] pread_send(%p, %p, %p, %zu, %zd)\n",
+		  handle,
+		  fsp,
+		  data,
+		  n,
+		  offset);
 	req = tevent_req_create(mem_ctx, &state, struct vfs_ceph_pread_state);
 	if (req == NULL) {
 		return NULL;
@@ -2208,7 +2296,7 @@ static ssize_t vfs_ceph_pread_recv(struct tevent_req *req,
 	struct vfs_ceph_pread_state *state =
 		tevent_req_data(req, struct vfs_ceph_pread_state);
 
-	DBG_DEBUG("[CEPH] %s\n", __func__);
+	DBG_DEBUG("[CEPH] pread_recv: bytes_read=%zd\n", state->bytes_read);
 	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
 		return -1;
 	}
@@ -2262,7 +2350,12 @@ static struct tevent_req *vfs_ceph_pwrite_send(struct vfs_handle_struct *handle,
 	struct vfs_ceph_pwrite_state *state = NULL;
 	int ret = -1;
 
-	DBG_DEBUG("[CEPH] %s\n", __func__);
+	DBG_DEBUG("[CEPH] pwrite_send(%p, %p, %p, %zu, %zd)\n",
+		  handle,
+		  fsp,
+		  data,
+		  n,
+		  offset);
 	req = tevent_req_create(mem_ctx, &state, struct vfs_ceph_pwrite_state);
 	if (req == NULL) {
 		return NULL;
@@ -2293,7 +2386,8 @@ static ssize_t vfs_ceph_pwrite_recv(struct tevent_req *req,
 	struct vfs_ceph_pwrite_state *state =
 		tevent_req_data(req, struct vfs_ceph_pwrite_state);
 
-	DBG_DEBUG("[CEPH] %s\n", __func__);
+	DBG_DEBUG("[CEPH] pwrite_recv: bytes_written=%zd\n",
+		  state->bytes_written);
 	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
 		return -1;
 	}
@@ -2309,7 +2403,8 @@ static off_t vfs_ceph_lseek(struct vfs_handle_struct *handle,
 	struct vfs_ceph_fh *cfh = NULL;
 	intmax_t result = 0;
 
-	DBG_DEBUG("[CEPH] vfs_ceph_lseek\n");
+	DBG_DEBUG(
+		"[CEPH] lseek(%p, %p, %zd, %d)\n", handle, fsp, offset, whence);
 	result = vfs_ceph_fetch_io_fh(handle, fsp, &cfh);
 	if (result != 0) {
 		goto out;
@@ -2330,7 +2425,13 @@ static ssize_t vfs_ceph_sendfile(struct vfs_handle_struct *handle,
 	/*
 	 * We cannot support sendfile because libcephfs is in user space.
 	 */
-	DBG_DEBUG("[CEPH] vfs_ceph_sendfile\n");
+	DBG_DEBUG("[CEPH] sendfile(%p, %d, %p, %p, %zd, %zu)\n",
+		  handle,
+		  tofd,
+		  fromfsp,
+		  hdr,
+		  offset,
+		  n);
 	errno = ENOTSUP;
 	return -1;
 }
@@ -2344,7 +2445,12 @@ static ssize_t vfs_ceph_recvfile(struct vfs_handle_struct *handle,
 	/*
 	 * We cannot support recvfile because libcephfs is in user space.
 	 */
-	DBG_DEBUG("[CEPH] vfs_ceph_recvfile\n");
+	DBG_DEBUG("[CEPH] recvfile(%p, %d, %p, %zd, %zu)\n",
+		  handle,
+		  fromfd,
+		  tofsp,
+		  offset,
+		  n);
 	errno = ENOTSUP;
 	return -1;
 }
@@ -2360,7 +2466,13 @@ static int vfs_ceph_renameat(struct vfs_handle_struct *handle,
 	struct vfs_ceph_fh *dst_dircfh = NULL;
 	int result = -1;
 
-	DBG_DEBUG("[CEPH] vfs_ceph_renameat\n");
+	DBG_DEBUG("[CEPH] renameat(%p, %p, %s, %p, %s)\n",
+		  handle,
+		  srcfsp,
+		  smb_fname_src->base_name,
+		  dst_dircfh,
+		  smb_fname_dst->base_name);
+
 	if (smb_fname_src->stream_name || smb_fname_dst->stream_name) {
 		errno = ENOENT;
 		return result;
@@ -2404,7 +2516,7 @@ static struct tevent_req *vfs_ceph_fsync_send(struct vfs_handle_struct *handle,
 	struct vfs_aio_state *state = NULL;
 	int ret = -1;
 
-	DBG_DEBUG("[CEPH] vfs_ceph_fsync_send\n");
+	DBG_DEBUG("[CEPH] fsync_send(%p, %p)\n", handle, fsp);
 
 	req = tevent_req_create(mem_ctx, &state, struct vfs_aio_state);
 	if (req == NULL) {
@@ -2437,7 +2549,9 @@ static int vfs_ceph_fsync_recv(struct tevent_req *req,
 	struct vfs_aio_state *state =
 		tevent_req_data(req, struct vfs_aio_state);
 
-	DBG_DEBUG("[CEPH] vfs_ceph_fsync_recv\n");
+	DBG_DEBUG("[CEPH] fsync_recv: error=%d duration=%" PRIu64 "\n",
+		  state->error,
+		  state->duration);
 
 	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
 		return -1;
@@ -2814,7 +2928,13 @@ static bool vfs_ceph_lock(struct vfs_handle_struct *handle,
 			  off_t count,
 			  int type)
 {
-	DBG_DEBUG("[CEPH] lock\n");
+	DBG_DEBUG("[CEPH] lock(%p, %p, %d, %zd, %zd, %d)\n",
+		  handle,
+		  fsp,
+		  op,
+		  offset,
+		  count,
+		  type);
 	return true;
 }
 

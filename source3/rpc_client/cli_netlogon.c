@@ -181,12 +181,6 @@ static NTSTATUS rpccli_setup_netlogon_creds_locked(
 			action = "overwrite";
 		}
 
-		if (cli != NULL) {
-			remote_name = smbXcli_conn_remote_name(cli->conn);
-		} else {
-			remote_name = "<UNKNOWN>";
-		}
-
 		DEBUG(5,("%s: %s cached netlogon_creds cli[%s/%s] to %s\n",
 			 __FUNCTION__, action,
 			 creds->account_name, creds->computer_name,
@@ -397,6 +391,7 @@ again:
 		if (!retry && NT_STATUS_EQUAL(status, NT_STATUS_NETWORK_ACCESS_DENIED)) {
 			DBG_DEBUG("Retrying with serverauthenticate\n");
 			TALLOC_FREE(lck);
+			force_reauth = true;
 			retry = true;
 			goto again;
 		}

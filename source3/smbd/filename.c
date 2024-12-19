@@ -41,11 +41,7 @@ uint32_t ucf_flags_from_smb_request(struct smb_request *req)
 	}
 
 	if (req->posix_pathnames) {
-		ucf_flags |= UCF_POSIX_PATHNAMES;
-
-		if (!conn_using_smb2(req->sconn)) {
-			ucf_flags |= UCF_LCOMP_LNK_OK;
-		}
+		ucf_flags |= (UCF_POSIX_PATHNAMES|UCF_LCOMP_LNK_OK);
 	}
 	if (req->flags2 & FLAGS2_DFS_PATHNAMES) {
 		ucf_flags |= UCF_DFS_PATHNAME;
@@ -57,7 +53,9 @@ uint32_t ucf_flags_from_smb_request(struct smb_request *req)
 	return ucf_flags;
 }
 
-uint32_t filename_create_ucf_flags(struct smb_request *req, uint32_t create_disposition)
+uint32_t filename_create_ucf_flags(struct smb_request *req,
+				   uint32_t create_disposition,
+				   uint32_t create_options)
 {
 	uint32_t ucf_flags = 0;
 
@@ -73,6 +71,10 @@ uint32_t filename_create_ucf_flags(struct smb_request *req, uint32_t create_disp
 	case FILE_OVERWRITE_IF:
 		ucf_flags |= UCF_PREP_CREATEFILE;
 		break;
+	}
+
+	if (create_options & FILE_OPEN_REPARSE_POINT) {
+		ucf_flags |= UCF_LCOMP_LNK_OK;
 	}
 
 	return ucf_flags;
@@ -326,7 +328,6 @@ NTSTATUS get_real_filename_full_scan_at(struct files_struct *dirfsp,
 	/* now scan for matching names */
 	while ((dname = ReadDirName(cur_dir, &talloced))) {
 
-		/* Is it dot or dot dot. */
 		if (ISDOT(dname) || ISDOTDOT(dname)) {
 			TALLOC_FREE(talloced);
 			continue;
@@ -664,15 +665,17 @@ fail:
  * Split up name_in as sent by the client into a directory pathref fsp
  * and a relative smb_filename.
  */
-static NTSTATUS filename_convert_dirfsp_nosymlink(
-	TALLOC_CTX *mem_ctx,
-	connection_struct *conn,
-	const char *name_in,
-	uint32_t ucf_flags,
-	NTTIME twrp,
-	struct files_struct **_dirfsp,
-	struct smb_filename **_smb_fname,
-	struct reparse_data_buffer **_symlink_err)
+NTSTATUS
+filename_convert_dirfsp_nosymlink(TALLOC_CTX *mem_ctx,
+				  connection_struct *conn,
+				  struct files_struct *basedir,
+				  const char *name_in,
+				  uint32_t ucf_flags,
+				  NTTIME twrp,
+				  struct files_struct **_dirfsp,
+				  struct smb_filename **_smb_fname,
+				  struct smb_filename **_smb_fname_rel,
+				  struct reparse_data_buffer **_symlink_err)
 {
 	struct smb_filename *smb_dirname = NULL;
 	struct smb_filename *smb_fname_rel = NULL;
@@ -704,7 +707,7 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 			.st_ex_ctime = omit,
 		};
 
-		*_dirfsp = conn->cwd_fsp;
+		*_dirfsp = basedir;
 		*_smb_fname = smb_fname;
 		return NT_STATUS_OK;
 	}
@@ -750,15 +753,19 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 	}
 
 	if (dirname[0] == '\0') {
-		status = synthetic_pathref(
+		smb_dirname = synthetic_smb_fname(
 			mem_ctx,
-			conn->cwd_fsp,
 			".",
 			NULL,
 			NULL,
 			0,
-			posix ? SMB_FILENAME_POSIX_PATH : 0,
-			&smb_dirname);
+			posix ? SMB_FILENAME_POSIX_PATH : 0);
+		if (smb_dirname == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		status = openat_pathref_fsp_lcomp(basedir,
+						  smb_dirname,
+						  UCF_POSIX_PATHNAMES);
 	} else {
 		status = normalize_filename_case(conn, dirname, ucf_flags);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -770,7 +777,7 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 
 		status = openat_pathref_fsp_nosymlink(mem_ctx,
 						      conn,
-						      conn->cwd_fsp,
+						      basedir,
 						      dirname,
 						      twrp,
 						      posix,
@@ -796,8 +803,6 @@ static NTSTATUS filename_convert_dirfsp_nosymlink(
 			}
 
 			lnk->unparsed_path_length = unparsed;
-			*_symlink_err = symlink_err;
-
 			goto fail;
 		}
 	}
@@ -1038,10 +1043,12 @@ done:
 	*_symlink_err = symlink_err;
 
 	smb_fname_fsp_unlink(smb_fname_rel);
-	TALLOC_FREE(smb_fname_rel);
+	*_smb_fname_rel = smb_fname_rel;
 	return NT_STATUS_OK;
 
 fail:
+	*_symlink_err = symlink_err;
+
 	/*
 	 * If open_stream_pathref_fsp() returns an error, smb_fname_rel->fsp
 	 * has been set to NULL, so we must free base_fsp separately
@@ -1059,19 +1066,21 @@ fail:
 	return status;
 }
 
-NTSTATUS filename_convert_dirfsp(
-	TALLOC_CTX *mem_ctx,
-	connection_struct *conn,
-	const char *name_in,
-	uint32_t ucf_flags,
-	NTTIME twrp,
-	struct files_struct **_dirfsp,
-	struct smb_filename **_smb_fname)
+NTSTATUS filename_convert_dirfsp_rel(TALLOC_CTX *mem_ctx,
+				     connection_struct *conn,
+				     struct files_struct *basedir,
+				     const char *name_in,
+				     uint32_t ucf_flags,
+				     NTTIME twrp,
+				     struct files_struct **_dirfsp,
+				     struct smb_filename **_smb_fname,
+				     struct smb_filename **_smb_fname_rel)
 {
 	struct reparse_data_buffer *symlink_err = NULL;
 	struct symlink_reparse_struct *lnk = NULL;
 	NTSTATUS status;
 	char *target = NULL;
+	char *base_name = NULL;
 	char *safe_target = NULL;
 	size_t symlink_redirects = 0;
 	int ret;
@@ -1083,11 +1092,13 @@ next:
 
 	status = filename_convert_dirfsp_nosymlink(mem_ctx,
 						   conn,
+						   basedir,
 						   name_in,
 						   ucf_flags,
 						   twrp,
 						   _dirfsp,
 						   _smb_fname,
+						   _smb_fname_rel,
 						   &symlink_err);
 
 	if (NT_STATUS_IS_OK(status) && S_ISLNK((*_smb_fname)->st.st_ex_mode)) {
@@ -1105,6 +1116,8 @@ next:
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_STOPPED_ON_SYMLINK)) {
 		return status;
 	}
+	TALLOC_FREE(*_smb_fname_rel);
+
 	lnk = &symlink_err->parsed.lnk;
 
 	/*
@@ -1147,12 +1160,17 @@ next:
 				  '/',
 				  &target);
 	if (ret != 0) {
+		TALLOC_FREE(symlink_err);
 		return map_nt_error_from_unix(ret);
+	}
+
+	if (basedir != conn->cwd_fsp) {
+		base_name = basedir->fsp_name->base_name;
 	}
 
 	status = safe_symlink_target_path(mem_ctx,
 					  conn->connectpath,
-					  NULL,
+					  base_name,
 					  target,
 					  lnk->unparsed_path_length,
 					  &safe_target);
@@ -1161,10 +1179,35 @@ next:
 		return status;
 	}
 	name_in = safe_target;
+	basedir = conn->cwd_fsp;
 
 	symlink_redirects += 1;
 
 	goto next;
+}
+
+NTSTATUS filename_convert_dirfsp(TALLOC_CTX *ctx,
+				 connection_struct *conn,
+				 const char *name_in,
+				 uint32_t ucf_flags,
+				 NTTIME twrp,
+				 struct files_struct **_dirfsp,
+				 struct smb_filename **_smb_name)
+{
+	struct smb_filename *smb_fname_rel = NULL;
+	NTSTATUS status;
+
+	status = filename_convert_dirfsp_rel(ctx,
+					     conn,
+					     conn->cwd_fsp,
+					     name_in,
+					     ucf_flags,
+					     twrp,
+					     _dirfsp,
+					     _smb_name,
+					     &smb_fname_rel);
+	TALLOC_FREE(smb_fname_rel);
+	return status;
 }
 
 char *full_path_from_dirfsp_at_basename(TALLOC_CTX *mem_ctx,

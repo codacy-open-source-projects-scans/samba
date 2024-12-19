@@ -663,15 +663,52 @@ void ndr_print_debug_helper(struct ndr_print *ndr, const char *format, ...) PRIN
 void ndr_print_debugc_helper(struct ndr_print *ndr, const char *format, ...) PRINTF_ATTRIBUTE(2,3);
 void ndr_print_printf_helper(struct ndr_print *ndr, const char *format, ...) PRINTF_ATTRIBUTE(2,3);
 void ndr_print_string_helper(struct ndr_print *ndr, const char *format, ...) PRINTF_ATTRIBUTE(2,3);
-bool ndr_print_debug(int level, ndr_print_fn_t fn, const char *name, void *ptr, const char *location, const char *function);
-void ndr_print_debugc(int dbgc_class, ndr_print_fn_t fn, const char *name, void *ptr);
-void ndr_print_union_debug(ndr_print_fn_t fn, const char *name, uint32_t level, void *ptr);
-void ndr_print_function_debug(ndr_print_function_t fn, const char *name, ndr_flags_type flags, void *ptr);
-char *ndr_print_struct_string(TALLOC_CTX *mem_ctx, ndr_print_fn_t fn, const char *name, void *ptr);
-char *ndr_print_union_string(TALLOC_CTX *mem_ctx, ndr_print_fn_t fn, const char *name, uint32_t level, void *ptr);
+bool ndr_print_debug(int level,
+		     ndr_print_fn_t fn,
+		     const char *name,
+		     const void *ptr,
+		     const char *location,
+		     const char *function);
+void ndr_print_debugc(int dbgc_class,
+		      ndr_print_fn_t fn,
+		      const char *name,
+		      const void *ptr);
+void ndr_print_union_debug(ndr_print_fn_t fn,
+			   const char *name,
+			   uint32_t level,
+			   const void *ptr);
+void ndr_print_function_debug(ndr_print_function_t fn,
+			      const char *name,
+			      ndr_flags_type flags,
+			      const void *ptr);
+char *ndr_print_struct_string(TALLOC_CTX *mem_ctx,
+			      ndr_print_fn_t fn,
+			      const char *name,
+			      const void *ptr);
+char *ndr_print_struct_secret_string(TALLOC_CTX *mem_ctx,
+				     ndr_print_fn_t fn,
+				     const char *name,
+				     const void *ptr);
+char *ndr_print_union_string(TALLOC_CTX *mem_ctx,
+			     ndr_print_fn_t fn,
+			     const char *name,
+			     uint32_t level,
+			     const void *ptr);
+char *ndr_print_union_secret_string(TALLOC_CTX *mem_ctx,
+				    ndr_print_fn_t fn,
+				    const char *name,
+				    uint32_t level,
+				    const void *ptr);
 char *ndr_print_function_string(TALLOC_CTX *mem_ctx,
-				ndr_print_function_t fn, const char *name,
-				ndr_flags_type flags, void *ptr);
+				ndr_print_function_t fn,
+				const char *name,
+				ndr_flags_type flags,
+				const void *ptr);
+char *ndr_print_function_secret_string(TALLOC_CTX *mem_ctx,
+				       ndr_print_function_t fn,
+				       const char *name,
+				       ndr_flags_type flags,
+				       const void *ptr);
 void ndr_set_flags(libndr_flags *pflags, libndr_flags new_flags);
 enum ndr_err_code _ndr_pull_error(struct ndr_pull *ndr,
 				  enum ndr_err_code ndr_err,
@@ -759,6 +796,16 @@ enum ndr_err_code ndr_pull_struct_blob_all_noalloc(const DATA_BLOB *blob,
 enum ndr_err_code ndr_pull_union_blob(const DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p, uint32_t level, ndr_pull_flags_fn_t fn);
 enum ndr_err_code ndr_pull_union_blob_all(const DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p, uint32_t level, ndr_pull_flags_fn_t fn);
 
+enum ndr_err_code _ndr_deepcopy_struct(ndr_push_flags_fn_t push_fn,
+				       const void *src,
+				       ndr_pull_flags_fn_t pull_fn,
+				       TALLOC_CTX *dst_mem, void *dst);
+#define ndr_deepcopy_struct(type, src, dst_mem, dst) \
+	_ndr_deepcopy_struct((ndr_push_flags_fn_t)ndr_push_ ## type, \
+			     src, \
+			     (ndr_pull_flags_fn_t)ndr_pull_ ## type, \
+			     dst_mem, dst)
+
 /* from libndr_basic.h */
 #define NDR_SCALAR_PROTO(name, type) \
 enum ndr_err_code ndr_push_ ## name(struct ndr_push *ndr, ndr_flags_type ndr_flags, type v); \
@@ -834,7 +881,7 @@ enum ndr_err_code ndr_push_ref_ptr(struct ndr_push *ndr);
 void ndr_print_struct(struct ndr_print *ndr, const char *name, const char *type);
 void ndr_print_null(struct ndr_print *ndr);
 void ndr_print_enum(struct ndr_print *ndr, const char *name, const char *type, const char *val, uint32_t value);
-void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint32_t flag, uint32_t value);
+void ndr_print_bitmap_flag(struct ndr_print *ndr, size_t size, const char *flag_name, uint64_t flag, uint64_t value);
 void ndr_print_ptr(struct ndr_print *ndr, const char *name, const void *p);
 void ndr_print_union(struct ndr_print *ndr, const char *name, int level, const char *type);
 void ndr_print_bad_level(struct ndr_print *ndr, const char *name, uint16_t level);

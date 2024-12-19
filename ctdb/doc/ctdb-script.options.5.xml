@@ -105,11 +105,101 @@
       <title>10.interface</title>
 
       <para>
-	This event script handles monitoring of interfaces using by
-	public IP addresses.
+	This event script handles public IP address release and
+	takeover, as well as monitoring interfaces used by public IP
+	addresses.
       </para>
 
       <variablelist>
+
+	<varlistentry>
+	  <term>
+	    CTDB_KILLTCP_USE_SS_KILL=yes|try|no
+	  </term>
+	  <listitem>
+	    <para>
+	      Whether to use <command>ss -K/--kill</command> to reset
+	      incoming TCP connections to public IP addresses during
+	      <command>releaseip</command>.
+	    </para>
+
+	    <para>
+	      CTDB's standard method of resetting incoming TCP
+	      connections during <command>releaseip</command> is via
+	      its custom <command>ctdb_killtcp</command> command.
+	      This uses network trickery to reset each connection:
+	      send a "tickle ACK", capture the reply to extract the
+	      TCP sequence number, send a reset (containing the
+	      correct sequence number).
+	    </para>
+
+	    <para>
+	      <command>ss -K</command> has been supported in
+	      <command>ss</command> since iproute 4.5 in March 2016
+	      and in the Linux kernel since 4.4 in December 2015.
+	      However, the required kernel configuration item
+	      <code>CONFIG_INET_DIAG_DESTROY</code> is disabled by
+	      default.  Although enabled in Debian kernels since ~2017
+	      and in Ubuntu since at least 18.04, this has only
+	      recently been enabled in distributions such as RHEL.
+	      There seems to be no way, including running <command>ss
+	      -K</command>, to determine if this is supported, so use
+	      of this feature needs to be configurable.  When
+	      available, it should be the fastest, most reliable way
+	      of killing connections.
+	    </para>
+
+	    <para>
+	      Supported values are:
+	      <variablelist>
+		<varlistentry>
+		  <term>
+		    yes
+		  </term>
+		  <listitem>
+		    <para>
+		      Use <command>ss -K</command> and make no other
+		      attempt to kill any remaining connections.  This
+		      is sane on modern Linux distributions that are
+		      guaranteed to have
+		      <code>CONFIG_INET_DIAG_DESTROY</code> enabled.
+		    </para>
+		  </listitem>
+		</varlistentry>
+
+		<varlistentry>
+		  <term>
+		    try
+		  </term>
+		  <listitem>
+		    <para>
+		      Attempt to use <command>ss -K</command> and fall
+		      back to <command>ctdb_killtcp</command> for any
+		      remaining connections.  This may be a good value
+		      when <command>ss</command> supports the
+		      <command>-K</command> option but it is uncertain
+		      whether <code>CONFIG_INET_DIAG_DESTROY</code> is
+		      enabled.
+		    </para>
+		  </listitem>
+		</varlistentry>
+
+		<varlistentry>
+		  <term>
+		    no
+		  </term>
+		  <listitem>
+		    <para>
+		      Never attempt to use <command>ss -K</command>.
+		      Rely only on <command>ctdb_killtcp</command>.
+		    </para>
+		  </listitem>
+		</varlistentry>
+	      </variablelist>
+	      Default is "no".
+	    </para>
+	  </listitem>
+	</varlistentry>
 
 	<varlistentry>
 	  <term>
@@ -887,6 +977,19 @@ CTDB_PER_IP_ROUTING_TABLE_ID_HIGH=9000
 
 	<varlistentry>
 	  <term>
+	    CTDB_NFS_SHARED_STATE_DIR=<parameter>DIRECTORY</parameter>
+	  </term>
+	  <listitem>
+	    <para>
+	      DIRECTORY where clustered NFS shared state will be
+	      located.  DIRECTORY should be in a cluster filesystem
+	      that is shared between the nodes.  No default.
+	    </para>
+	  </listitem>
+	</varlistentry>
+
+	<varlistentry>
+	  <term>
 	    CTDB_NFS_SKIP_SHARE_CHECK=yes|no
 	  </term>
 	  <listitem>
@@ -940,25 +1043,81 @@ CTDB_PER_IP_ROUTING_TABLE_ID_HIGH=9000
 
 	<varlistentry>
 	  <term>
-	    CTDB_NFS_STATE_FS_TYPE=<parameter>TYPE</parameter>
+	    CTDB_STATD_CALLOUT_SHARED_STORAGE=<parameter>LOCATION</parameter>
 	  </term>
 	  <listitem>
 	    <para>
-	      The type of filesystem used for a clustered NFS' shared
-	      state. No default.
+	      LOCATION where NFSv3 statd state will be stored.  Valid
+	      values are:
 	    </para>
-	  </listitem>
-	</varlistentry>
-
-	<varlistentry>
-	  <term>
-	    CTDB_NFS_STATE_MNT=<parameter>DIR</parameter>
-	  </term>
-	  <listitem>
-	    <para>
-	      The directory where a clustered NFS' shared state will be
-	      located. No default.
-	    </para>
+	    <variablelist>
+	      <varlistentry>
+		<term>
+		  persistent_db<optional>:<parameter>TDB</parameter></optional>
+		</term>
+		<listitem>
+		  <para>
+		    Data is queued to local storage and then dequeued
+		    to TDB during monitor events.  This means there is
+		    a window where locking state may be lost.
+		    However, this works around performance limitations
+		    in CTDB's persistent database handling.
+		  </para>
+		  <para>
+		    If :TDB is omitted then TDB defaults to
+		    <filename>ctdb_statd_callout.tdb</filename>.
+		  </para>
+		</listitem>
+	      </varlistentry>
+	      <varlistentry>
+		<term>
+		  shared_dir<optional>:<parameter>DIRECTORY</parameter></optional>
+		</term>
+		<listitem>
+		  <para>
+		    DIRECTORY is a directory in a cluster filesystem
+		    that is shared between the nodes.  If DIRECTORY is
+		    relative (i.e. does not start with '/') then it is
+		    appended to CTDB_NFS_SHARED_STATE_DIR.  If
+		    :DIRECTORY is omitted then DIRECTORY defaults to
+		    <filename>statd</filename>.
+		  </para>
+		  <para>
+		    Using a shared directory may result in performance
+		    and/or stability problems.  rpc.statd is
+		    single-threaded and its HA callout is called
+		    synchronously, causing any latency introduced by
+		    the callout to be cumulative.  Stability issues
+		    are most likely if thousands of clients reclaim
+		    locks after failover and use of the cluster
+		    filesystem introduces too much additional
+		    latency.  Too much latency in in the HA callout
+		    may cause rpc.statd to fail health monitoring.
+		  </para>
+		</listitem>
+	      </varlistentry>
+	      <varlistentry>
+		<term>
+		  none
+		</term>
+		<listitem>
+		  <para>
+		    No cluster-aware handling of NFSv3 statd state is
+		    done.  NFSv3 lock reclaim will not occur and
+		    applications that use locking over NFSv3 are
+		    likely to lose or corrupt data.
+		  </para>
+		  <para>
+		    This should be used with care and only in the case
+		    where no applications are using POSIX locks in
+		    NFSv3 mounts.  It should probably be considered an
+		    option to test the latency of
+		    <filename>statd_callout</filename>, without
+		    including any storage costs.
+		  </para>
+		</listitem>
+	      </varlistentry>
+	    </variablelist>
 	  </listitem>
 	</varlistentry>
 

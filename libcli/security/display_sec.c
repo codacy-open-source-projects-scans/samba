@@ -110,20 +110,18 @@ void display_sec_ace_flags(uint8_t flags)
  ****************************************************************************/
 static void disp_sec_ace_object(struct security_ace_object *object)
 {
-	char *str;
+	struct GUID_txt_buf buf;
+
 	if (object->flags & SEC_ACE_OBJECT_TYPE_PRESENT) {
-		str = GUID_string(NULL, &object->type.type);
-		if (str == NULL) return;
 		printf("Object type: SEC_ACE_OBJECT_TYPE_PRESENT\n");
-		printf("Object GUID: %s\n", str);
-		talloc_free(str);
+		printf("Object GUID: %s\n",
+		       GUID_buf_string(&object->type.type, &buf));
 	}
 	if (object->flags & SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT) {
-		str = GUID_string(NULL, &object->inherited_type.inherited_type);
-		if (str == NULL) return;
 		printf("Object type: SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT\n");
-		printf("Object GUID: %s\n", str);
-		talloc_free(str);
+		printf("Object GUID: %s\n",
+		       GUID_buf_string(&object->inherited_type.inherited_type,
+				       &buf));
 	}
 }
 
@@ -186,8 +184,9 @@ void display_sec_acl(struct security_acl *sec_acl)
 {
 	uint32_t i;
 
-	printf("\tACL\tNum ACEs:\t%u\trevision:\t%x\n",
-	       sec_acl->num_aces, sec_acl->revision);
+	printf("\tACL\tNum ACEs:\t%" PRIu32 "\trevision:\t%x\n",
+	       sec_acl->num_aces,
+	       sec_acl->revision);
 	printf("\t---\n");
 
 	if (sec_acl->size != 0 && sec_acl->num_aces != 0) {

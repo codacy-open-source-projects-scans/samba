@@ -414,6 +414,13 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		capabilities |= SMB2_CAP_ENCRYPTION;
 	}
 
+	if (protocol >= PROTOCOL_SMB3_00 &&
+	    in_capabilities & SMB2_CAP_DIRECTORY_LEASING &&
+	    lp_smb3_directory_leases())
+	{
+		capabilities |= SMB2_CAP_DIRECTORY_LEASING;
+	}
+
 	/*
 	 * 0x10000 (65536) is the maximum allowed message size
 	 * for SMB 2.0
@@ -911,10 +918,7 @@ static void smbd_smb2_request_process_negprot_mc_done(struct tevent_req *subreq)
 						NT_STATUS_CONNECTION_IN_USE);
 		smbd_server_connection_terminate(xconn,
 						 "passed connection");
-		/*
-		 * smbd_server_connection_terminate() should not return!
-		 */
-		smb_panic(__location__);
+		exit_server_cleanly("connection passed");
 		return;
 	}
 	if (!NT_STATUS_IS_OK(status)) {
@@ -927,10 +931,7 @@ static void smbd_smb2_request_process_negprot_mc_done(struct tevent_req *subreq)
 		 * The connection was passed to another process
 		 */
 		smbd_server_connection_terminate(xconn, nt_errstr(status));
-		/*
-		 * smbd_server_connection_terminate() should not return!
-		 */
-		smb_panic(__location__);
+		exit_server_cleanly("connection passed");
 		return;
 	}
 
@@ -959,10 +960,7 @@ static void smbd_smb2_request_process_negprot_mc_done(struct tevent_req *subreq)
 	 * The connection was passed to another process
 	 */
 	smbd_server_connection_terminate(xconn, nt_errstr(status));
-	/*
-	 * smbd_server_connection_terminate() should not return!
-	 */
-	smb_panic(__location__);
+	exit_server_cleanly("connection passed");
 	return;
 }
 

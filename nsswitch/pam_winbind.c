@@ -2527,11 +2527,12 @@ static char* winbind_upn_to_username(struct pwb_context *ctx,
 	/* Convert the UPN to a SID */
 
 	wbc_status = wbcCtxLookupName(ctx->wbc_ctx, domain, name, &sid, &type);
+	TALLOC_FREE(name);
 	if (!WBC_ERROR_IS_OK(wbc_status)) {
 		return NULL;
 	}
 
-	/* Convert the the SID back to the sAMAccountName */
+	/* Convert the SID back to the sAMAccountName */
 
 	wbc_status = wbcCtxLookupSid(ctx->wbc_ctx, &sid, &domain, &name, &type);
 	if (!WBC_ERROR_IS_OK(wbc_status)) {

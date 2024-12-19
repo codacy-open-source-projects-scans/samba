@@ -302,19 +302,6 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 	return NT_STATUS_OK;
 }
 
-bool set_routing_domain(struct winbindd_domain *domain,
-			struct winbindd_domain *routing_domain)
-{
-	if (domain->routing_domain == NULL) {
-		domain->routing_domain = routing_domain;
-		return true;
-	}
-	if (domain->routing_domain != routing_domain) {
-		return false;
-	}
-	return true;
-}
-
 bool add_trusted_domain_from_auth(uint16_t validation_level,
 				  struct info3_text *info3,
 				  struct info6_text *info6)
@@ -951,12 +938,6 @@ bool add_trusted_domains_dc(void)
 				   nt_errstr(status));
 			return false;
 		}
-
-		if (domains[i]->trust_type == LSA_TRUST_TYPE_UPLEVEL) {
-			domain->active_directory = true;
-		}
-		domain->domain_type = domains[i]->trust_type;
-		domain->domain_trust_attribs = domains[i]->trust_attributes;
 	}
 
 	for (i = 0; i < num_domains; i++) {

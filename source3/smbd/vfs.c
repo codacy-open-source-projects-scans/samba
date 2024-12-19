@@ -649,10 +649,13 @@ int vfs_set_filelen(files_struct *fsp, off_t len)
 	DEBUG(10,("vfs_set_filelen: ftruncate %s to len %.0f\n",
 		  fsp_str_dbg(fsp), (double)len));
 	if ((ret = SMB_VFS_FTRUNCATE(fsp, len)) != -1) {
-		notify_fname(fsp->conn, NOTIFY_ACTION_MODIFIED,
-			     FILE_NOTIFY_CHANGE_SIZE
-			     | FILE_NOTIFY_CHANGE_ATTRIBUTES,
-			     fsp->fsp_name->base_name);
+		notify_fname(fsp->conn,
+			     NOTIFY_ACTION_MODIFIED |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
+			     FILE_NOTIFY_CHANGE_SIZE |
+				     FILE_NOTIFY_CHANGE_ATTRIBUTES,
+			     fsp->fsp_name,
+			     fsp_get_smb2_lease(fsp));
 	}
 
 	contend_level2_oplocks_end(fsp, LEVEL2_CONTEND_SET_FILE_LEN);
@@ -1019,6 +1022,9 @@ struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 	if (!lp_getwd_cache()) {
 		goto nocache;
 	}
+	if (fsp_get_pathref_fd(conn->cwd_fsp) == -1) {
+		goto nocache;
+	}
 
 	smb_fname_dot = synthetic_smb_fname(ctx,
 					    ".",
@@ -1083,7 +1089,7 @@ struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 		goto out;
 	}
 
-	if (lp_getwd_cache() && VALID_STAT(smb_fname_dot->st)) {
+	if ((smb_fname_dot != NULL) && VALID_STAT(smb_fname_dot->st)) {
 		key = vfs_file_id_from_sbuf(conn, &smb_fname_dot->st);
 
 		/*
@@ -1172,7 +1178,7 @@ NTSTATUS vfs_stat_fsp(files_struct *fsp)
 	}
 
 	if (fsp_get_pathref_fd(fsp) == -1) {
-		if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
+		if (fsp->fsp_flags.posix_open) {
 			ret = SMB_VFS_LSTAT(fsp->conn, fsp->fsp_name);
 		} else {
 			ret = SMB_VFS_STAT(fsp->conn, fsp->fsp_name);

@@ -109,26 +109,23 @@ static bool check_integer_range(const struct ace_condition_token *tok)
 	return true;
 }
 
-
-static ssize_t pull_integer(TALLOC_CTX *mem_ctx,
-			uint8_t *data, size_t length,
-			struct ace_condition_int *tok)
+static ssize_t pull_integer(uint8_t *data,
+			    size_t length,
+			    struct ace_condition_int *tok)
 {
-	ssize_t bytes_used;
+	size_t consumed;
 	enum ndr_err_code ndr_err;
-	DATA_BLOB v = data_blob_const(data, length);
-	struct ndr_pull *ndr = ndr_pull_init_blob(&v, mem_ctx);
-	if (ndr == NULL) {
-		return -1;
-	}
-	ndr_err = ndr_pull_ace_condition_int(ndr, NDR_SCALARS|NDR_BUFFERS, tok);
+
+	ndr_err = ndr_pull_struct_blob_noalloc(
+		data,
+		length,
+		tok,
+		(ndr_pull_flags_fn_t)ndr_pull_ace_condition_int,
+		&consumed);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		TALLOC_FREE(ndr);
 		return -1;
 	}
-	bytes_used = ndr->offset;
-	TALLOC_FREE(ndr);
-	return bytes_used;
+	return consumed;
 }
 
 static ssize_t push_integer(uint8_t *data, size_t available,
@@ -335,8 +332,7 @@ static ssize_t pull_composite(TALLOC_CTX *mem_ctx,
 		case CONDITIONAL_ACE_TOKEN_INT16:
 		case CONDITIONAL_ACE_TOKEN_INT32:
 		case CONDITIONAL_ACE_TOKEN_INT64:
-			consumed = pull_integer(mem_ctx,
-						el_data,
+			consumed = pull_integer(el_data,
 						available,
 						&el->data.int64);
 			ok = check_integer_range(el);
@@ -507,7 +503,7 @@ static ssize_t pull_end_padding(uint8_t *data, size_t length)
 	 *
 	 * zero is also called CONDITIONAL_ACE_TOKEN_INVALID_OR_PADDING.
 	 */
-	ssize_t i;
+	size_t i;
 	if (length > 2) {
 		return -1;
 	}
@@ -592,8 +588,7 @@ struct ace_condition_script *parse_conditional_ace(TALLOC_CTX *mem_ctx,
 		case CONDITIONAL_ACE_TOKEN_INT16:
 		case CONDITIONAL_ACE_TOKEN_INT32:
 		case CONDITIONAL_ACE_TOKEN_INT64:
-			consumed = pull_integer(program,
-						tok_data,
+			consumed = pull_integer(tok_data,
 						available,
 						&tok->data.int64);
 			ok = check_integer_range(tok);

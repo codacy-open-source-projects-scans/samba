@@ -34,18 +34,17 @@ struct security_descriptor *security_descriptor_initialise(TALLOC_CTX *mem_ctx)
 	if (!sd) {
 		return NULL;
 	}
+	*sd = (struct security_descriptor){
+		.revision = SD_REVISION,
 
-	sd->revision = SD_REVISION;
-	/* we mark as self relative, even though it isn't while it remains
-	   a pointer in memory because this simplifies the ndr code later.
-	   All SDs that we store/emit are in fact SELF_RELATIVE
-	*/
-	sd->type = SEC_DESC_SELF_RELATIVE;
-
-	sd->owner_sid = NULL;
-	sd->group_sid = NULL;
-	sd->sacl = NULL;
-	sd->dacl = NULL;
+		/*
+		 * we mark as self relative, even though it isn't
+		 * while it remains a pointer in memory because this
+		 * simplifies the ndr code later.  All SDs that we
+		 * store/emit are in fact SELF_RELATIVE
+		 */
+		.type = SEC_DESC_SELF_RELATIVE,
+	};
 
 	return sd;
 }
@@ -299,7 +298,8 @@ static NTSTATUS security_descriptor_acl_add(struct security_descriptor *sd,
 
 	if (idx < 0) {
 		return NT_STATUS_ARRAY_BOUNDS_EXCEEDED;
-	} else if (idx > acl->num_aces) {
+	}
+	if (idx > acl->num_aces) {
 		return NT_STATUS_ARRAY_BOUNDS_EXCEEDED;
 	}
 
@@ -399,7 +399,10 @@ static NTSTATUS security_descriptor_acl_del(struct security_descriptor *sd,
 	}
 
 	/* there can be multiple ace's for one trustee */
-	for (i=0;i<acl->num_aces;i++) {
+
+	i = 0;
+
+	while (i<acl->num_aces) {
 		if (dom_sid_equal(trustee, &acl->aces[i].trustee)) {
 			ARRAY_DEL_ELEMENT(acl->aces, i, acl->num_aces);
 			acl->num_aces--;
@@ -407,7 +410,8 @@ static NTSTATUS security_descriptor_acl_del(struct security_descriptor *sd,
 				acl->aces = NULL;
 			}
 			found = true;
-			--i;
+		} else {
+			i += 1;
 		}
 	}
 

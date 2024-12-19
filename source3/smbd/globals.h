@@ -144,8 +144,10 @@ NTSTATUS smbd_do_setfilepathinfo(connection_struct *conn,
 				TALLOC_CTX *mem_ctx,
 				uint16_t info_level,
 				files_struct *fsp,
+				struct share_mode_lock **lck,
 				struct smb_filename *smb_fname,
-				char **ppdata, int total_data,
+				char *data,
+				int total_data,
 				int *ret_data_size);
 
 NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,

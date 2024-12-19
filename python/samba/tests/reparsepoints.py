@@ -22,9 +22,12 @@ from samba import reparse_symlink
 import samba.tests.libsmb
 import stat
 
+def posix_context(mode):
+    return (libsmb.SMB2_CREATE_TAG_POSIX, mode.to_bytes(4, 'little'))
+
 class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
-    def connection(self):
+    def connection(self, posix=False):
         share = samba.tests.env_get_var_value("SHARENAME", allow_missing=True)
         if not share:
             share = "tmp"
@@ -34,6 +37,7 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
             share,
             self.lp,
             self.creds,
+            posix=posix,
             force_smb1=smb1)
         return conn
 
@@ -199,6 +203,10 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
         dirents = conn.list("", filename)
         self.assertEqual(
+            dirents[0]["attrib"],
+            libsmb.FILE_ATTRIBUTE_REPARSE_POINT|
+            libsmb.FILE_ATTRIBUTE_ARCHIVE)
+        self.assertEqual(
             dirents[0]["reparse_tag"],
             libsmb.IO_REPARSE_TAG_SYMLINK)
 
@@ -229,10 +237,14 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
             err = e.args[0]
             if (err != ntstatus.NT_STATUS_ACCESS_DENIED):
                 raise
+        finally:
+            conn.close(dir_fd)
+            self.clean_file(conn, dirname)
 
         if (err == ntstatus.NT_STATUS_ACCESS_DENIED):
             self.fail("Could not set reparse point on directory")
-            conn.delete_on_close(fd, 1)
+            conn.close(dir_fd)
+            self.clean_file(conn, dirname)
             return
 
         with self.assertRaises(NTSTATUSError) as e:
@@ -246,6 +258,15 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
         conn.delete_on_close(dir_fd, 1)
         conn.close(dir_fd)
+
+        dirents = conn.list("", dirname)
+        self.assertEqual(
+            dirents[0]["attrib"],
+            libsmb.FILE_ATTRIBUTE_REPARSE_POINT|
+            libsmb.FILE_ATTRIBUTE_DIRECTORY)
+        self.assertEqual(dirents[0]["reparse_tag"], 0x80000025)
+
+        self.clean_file(conn, dirname)
 
     # Only empty directories can carry reparse points
 
@@ -384,21 +405,29 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
 
     def do_test_nfs_reparse(self, filename, filetype, nfstype):
         """Test special file reparse tag"""
-        smb2 = self.connection()
+        smb2 = self.connection(posix=True)
         smb1 = self.connection_posix()
 
         self.clean_file(smb2, filename)
         smb1.mknod(filename, filetype | 0o755)
 
-        fd = smb2.create(
+        fd,_,_ = smb2.create_ex(
             filename,
             DesiredAccess=sec.SEC_FILE_READ_ATTRIBUTE|sec.SEC_STD_DELETE,
             CreateOptions=libsmb.FILE_OPEN_REPARSE_POINT,
-            CreateDisposition=libsmb.FILE_OPEN)
+            CreateDisposition=libsmb.FILE_OPEN,
+            ShareAccess=(libsmb.FILE_SHARE_READ|libsmb.FILE_SHARE_WRITE|libsmb.FILE_SHARE_DELETE),
+            CreateContexts=[posix_context(0o600)])
         smb2.delete_on_close(fd, 1)
 
         info = smb2.qfileinfo(fd, libsmb.FSCC_FILE_ATTRIBUTE_TAG_INFORMATION);
         self.assertEqual(info['tag'], libsmb.IO_REPARSE_TAG_NFS)
+
+        info = smb2.qfileinfo(fd, libsmb.FSCC_FILE_POSIX_INFORMATION);
+        self.assertEqual(info['reparse_tag'], libsmb.IO_REPARSE_TAG_NFS)
+
+        type, perms = self.wire_mode_to_unix(info['perms'])
+        self.assertEqual(type, filetype)
 
         reparse = smb2.fsctl(fd, libsmb.FSCTL_GET_REPARSE_POINT, b'', 1024)
         (tag, ) = reparse_symlink.get(reparse)
@@ -411,6 +440,34 @@ class ReparsePoints(samba.tests.libsmb.LibsmbTests):
     def test_sock_reparse(self):
         """Test SOCK reparse tag"""
         self.do_test_nfs_reparse('sock', stat.S_IFSOCK, 'NFS_SPECFILE_SOCK')
+
+    def test_reparsepoint_posix_type(self):
+        conn = self.connection(posix=True)
+        filename = 'reparse'
+        self.clean_file(conn, filename)
+
+        fd,_,_ = conn.create_ex(
+            filename,
+            DesiredAccess=sec.SEC_FILE_WRITE_ATTRIBUTE,
+            CreateDisposition=libsmb.FILE_CREATE,
+            CreateContexts=[posix_context(0o600)])
+        b = reparse_symlink.symlink_put("y", "y", 0, 0)
+        conn.fsctl(fd, libsmb.FSCTL_SET_REPARSE_POINT, b, 0)
+        conn.close(fd)
+
+        dirents = conn.list("", filename,info_level=libsmb.SMB2_FIND_POSIX_INFORMATION)
+        self.assertEqual(
+            dirents[0]["attrib"],
+            libsmb.FILE_ATTRIBUTE_REPARSE_POINT|
+            libsmb.FILE_ATTRIBUTE_ARCHIVE)
+        self.assertEqual(
+            dirents[0]["reparse_tag"],
+            libsmb.IO_REPARSE_TAG_SYMLINK)
+
+        type, perms = self.wire_mode_to_unix(dirents[0]['perms'])
+        self.assertEqual(type, stat.S_IFLNK)
+
+        self.clean_file(conn, filename)
 
 if __name__ == '__main__':
     import unittest

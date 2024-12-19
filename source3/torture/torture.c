@@ -55,6 +55,8 @@
 #include "lib/util/string_wrappers.h"
 #include "source3/lib/substitute.h"
 #include "ads.h"
+#include "source4/lib/tls/tls.h"
+#include <ldb.h>
 
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
@@ -12427,9 +12429,38 @@ static bool run_tldap(int dummy)
 	}
 
 	if (use_tls && !tldap_has_tls_tstream(ld)) {
-		tldap_set_starttls_needed(ld, use_starttls);
+		struct tstream_tls_params *tls_params = NULL;
 
-		rc = tldap_tls_connect(ld, lp_ctx, host);
+		if (use_starttls) {
+			rc = tldap_extended(ld,
+					    LDB_EXTENDED_START_TLS_OID,
+					    NULL,
+					    NULL,
+					    0,
+					    NULL,
+					    0,
+					    NULL,
+					    NULL,
+					    NULL);
+			if (!TLDAP_RC_IS_SUCCESS(rc)) {
+				DBG_ERR("tldap_extended(%s) failed: %s\n",
+					LDB_EXTENDED_START_TLS_OID,
+					tldap_errstr(talloc_tos(), ld, rc));
+				return false;
+			}
+		}
+
+		status = tstream_tls_params_client_lpcfg(talloc_tos(),
+							 lp_ctx,
+							 host,
+							 &tls_params);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("tstream_tls_params_client_lpcfg failed: %s\n",
+				nt_errstr(status));
+			return false;
+		}
+
+		rc = tldap_tls_connect(ld, tls_params);
 		if (!TLDAP_RC_IS_SUCCESS(rc)) {
 			DBG_ERR("tldap_tls_connect(%s) failed: %s\n",
 				host, tldap_errstr(talloc_tos(), ld, rc));

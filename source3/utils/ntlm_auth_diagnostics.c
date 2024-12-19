@@ -200,7 +200,7 @@ static bool test_ntlm_in_lm(bool lanman_support_expected)
 	uchar lm_hash[16];
 	uchar user_session_key[16];
 	DATA_BLOB chall = get_challenge();
-	char *error_string;
+	char *error_string = NULL;
 
 	ZERO_STRUCT(user_session_key);
 
@@ -231,6 +231,7 @@ static bool test_ntlm_in_lm(bool lanman_support_expected)
 		SAFE_FREE(error_string);
 		return False;
 	}
+	SAFE_FREE(error_string);
 
 	/* If we are told the DC is Samba4, expect an LM key of zeros */
 	if (!lanman_support_expected) {
@@ -289,7 +290,7 @@ static bool test_ntlm_in_both(bool lanman_support_expected)
 	uint8_t user_session_key[16];
 	uint8_t nt_hash[16];
 	DATA_BLOB chall = get_challenge();
-	char *error_string;
+	char *error_string = NULL;
 
 	ZERO_STRUCT(lm_key);
 	ZERO_STRUCT(user_session_key);
@@ -323,6 +324,7 @@ static bool test_ntlm_in_both(bool lanman_support_expected)
 		SAFE_FREE(error_string);
 		return False;
 	}
+	SAFE_FREE(error_string);
 
 	/* If we are told the DC is Samba4, expect an LM key of zeros */
 	if (!lanman_support_expected) {
@@ -375,7 +377,7 @@ static bool test_lmv2_ntlmv2_broken(enum ntlm_break break_which)
 	uint8_t authoritative = 1;
 	uchar user_session_key[16];
 	DATA_BLOB chall = get_challenge();
-	char *error_string;
+	char *error_string = NULL;
 
 	ZERO_STRUCT(user_session_key);
 
@@ -428,6 +430,8 @@ static bool test_lmv2_ntlmv2_broken(enum ntlm_break break_which)
 		SAFE_FREE(error_string);
 		return break_which == BREAK_NT;
 	}
+
+	SAFE_FREE(error_string);
 
 	if (break_which != NO_NT && break_which != BREAK_NT && memcmp(ntlmv2_session_key.data, user_session_key,
 		   sizeof(user_session_key)) != 0) {
@@ -509,7 +513,7 @@ static bool test_plaintext(enum ntlm_break break_which)
 	uchar lm_key[16];
 	static const uchar zeros[8] = { 0, };
 	DATA_BLOB chall = data_blob(zeros, sizeof(zeros));
-	char *error_string;
+	char *error_string = NULL;
 
 	ZERO_STRUCT(user_session_key);
 
@@ -583,6 +587,7 @@ static bool test_plaintext(enum ntlm_break break_which)
 		SAFE_FREE(error_string);
 		return break_which == BREAK_NT;
 	}
+	SAFE_FREE(error_string);
 
         return break_which != BREAK_NT;
 }

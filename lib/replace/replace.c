@@ -970,7 +970,7 @@ int rep_memset_s(void *dest, size_t destsz, int ch, size_t count)
 	}
 
 #if defined(HAVE_MEMSET_EXPLICIT)
-	memset_explicit(dest, destsz, ch, count);
+	memset_explicit(dest, ch, count);
 #else /* HAVE_MEMSET_EXPLICIT */
 	memset(dest, ch, count);
 # if defined(HAVE_GCC_VOLATILE_MEMORY_PROTECTION)
@@ -1231,3 +1231,6 @@ int rep_renameat2(int __oldfd, const char *__old, int __newfd,
 	return renameat(__oldfd, __old, __newfd, __new);
 }
 #endif /* ! HAVE_RENAMEAT2 */
+
+const char hexchars_lower[] = "0123456789abcdef";
+const char hexchars_upper[] = "0123456789ABCDEF";

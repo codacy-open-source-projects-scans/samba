@@ -158,18 +158,14 @@ static char *stream_dir(vfs_handle_struct *handle,
 	SMB_STRUCT_STAT base_sbuf_tmp;
 	char *tmp = NULL;
 	uint8_t first, second;
-	char *id_hex;
 	struct file_id id;
 	uint8_t id_buf[16];
-	bool check_valid;
+	char id_hex[sizeof(id_buf) * 2 + 1];
 	char *rootdir = NULL;
 	struct smb_filename *rootdir_fname = NULL;
 	struct smb_filename *tmp_fname = NULL;
 	struct vfs_rename_how rhow = { .flags = 0, };
 	int ret;
-
-	check_valid = lp_parm_bool(SNUM(handle->conn),
-		      "streams_depot", "check_valid", true);
 
 	rootdir = stream_rootdir(handle,
 				 talloc_tos());
@@ -223,17 +219,10 @@ static char *stream_dir(vfs_handle_struct *handle,
 	first = hash & 0xff;
 	second = (hash >> 8) & 0xff;
 
-	id_hex = hex_encode_talloc(talloc_tos(), id_buf, sizeof(id_buf));
-
-	if (id_hex == NULL) {
-		errno = ENOMEM;
-		goto fail;
-	}
+	hex_encode_buf(id_hex, id_buf, sizeof(id_buf));
 
 	result = talloc_asprintf(talloc_tos(), "%s/%2.2X/%2.2X/%s", rootdir,
 				 first, second, id_hex);
-
-	TALLOC_FREE(id_hex);
 
 	if (result == NULL) {
 		errno = ENOMEM;
@@ -254,12 +243,17 @@ static char *stream_dir(vfs_handle_struct *handle,
 	if (SMB_VFS_NEXT_STAT(handle, smb_fname_hash) == 0) {
 		struct smb_filename *smb_fname_new = NULL;
 		char *newname;
-		bool delete_lost;
+		bool check_valid, delete_lost;
 
 		if (!S_ISDIR(smb_fname_hash->st.st_ex_mode)) {
 			errno = EINVAL;
 			goto fail;
 		}
+
+		check_valid = lp_parm_bool(SNUM(handle->conn),
+					   "streams_depot",
+					   "check_valid",
+					   true);
 
 		if (!check_valid ||
 		    file_is_valid(handle, smb_fname)) {
@@ -277,9 +271,9 @@ static char *stream_dir(vfs_handle_struct *handle,
 					   "delete_lost", false);
 
 		if (delete_lost) {
-			DEBUG(3, ("Someone has recreated a file under an "
-			      "existing inode. Removing: %s\n",
-			      smb_fname_hash->base_name));
+			DBG_NOTICE("Someone has recreated a file under an "
+				   "existing inode. Removing: %s\n",
+				   smb_fname_hash->base_name);
 			recursive_rmdir(talloc_tos(), handle->conn,
 					smb_fname_hash);
 			SMB_VFS_NEXT_UNLINKAT(handle,
@@ -289,10 +283,10 @@ static char *stream_dir(vfs_handle_struct *handle,
 		} else {
 			newname = talloc_asprintf(talloc_tos(), "lost-%lu",
 						  random());
-			DEBUG(3, ("Someone has recreated a file under an "
-			      "existing inode. Renaming: %s to: %s\n",
-			      smb_fname_hash->base_name,
-			      newname));
+			DBG_NOTICE("Someone has recreated a file under an "
+				   "existing inode. Renaming: %s to: %s\n",
+				   smb_fname_hash->base_name,
+				   newname);
 			if (newname == NULL) {
 				errno = ENOMEM;
 				goto fail;

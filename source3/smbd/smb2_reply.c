@@ -1165,30 +1165,6 @@ static NTSTATUS can_rename(connection_struct *conn, files_struct *fsp,
 		}
 	}
 
-	if (S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
-		if (fsp->posix_flags & FSP_POSIX_FLAGS_RENAME) {
-			return NT_STATUS_OK;
-		}
-
-		/* If no pathnames are open below this
-		   directory, allow the rename. */
-
-		if (lp_strict_rename(SNUM(conn))) {
-			/*
-			 * Strict rename, check open file db.
-			 */
-			if (have_file_open_below(fsp->conn, fsp->fsp_name)) {
-				return NT_STATUS_ACCESS_DENIED;
-			}
-		} else if (file_find_subpath(fsp)) {
-			/*
-			 * No strict rename, just look in local process.
-			 */
-			return NT_STATUS_ACCESS_DENIED;
-		}
-		return NT_STATUS_OK;
-	}
-
 	status = check_any_access_fsp(fsp, DELETE_ACCESS | FILE_WRITE_ATTRIBUTES);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -1303,10 +1279,12 @@ static bool rename_path_prefix_equal(const struct smb_filename *smb_fname_src,
  * Do the notify calls from a rename
  */
 
-static void notify_rename(connection_struct *conn, bool is_dir,
+static void notify_rename(struct connection_struct *conn,
+			  struct files_struct *fsp,
 			  const struct smb_filename *smb_fname_src,
 			  const struct smb_filename *smb_fname_dst)
 {
+	bool is_dir = fsp->fsp_flags.is_directory;
 	char *parent_dir_src = NULL;
 	char *parent_dir_dst = NULL;
 	uint32_t mask;
@@ -1322,26 +1300,43 @@ static void notify_rename(connection_struct *conn, bool is_dir,
 	}
 
 	if (strcmp(parent_dir_src, parent_dir_dst) == 0) {
-		notify_fname(conn, NOTIFY_ACTION_OLD_NAME, mask,
-			     smb_fname_src->base_name);
-		notify_fname(conn, NOTIFY_ACTION_NEW_NAME, mask,
-			     smb_fname_dst->base_name);
+		notify_fname(conn,
+			     NOTIFY_ACTION_OLD_NAME,
+			     mask,
+			     smb_fname_src,
+			     NULL);
+		notify_fname(conn,
+			     NOTIFY_ACTION_NEW_NAME |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
+			     mask,
+			     smb_fname_dst,
+			     fsp_get_smb2_lease(fsp));
 	}
 	else {
-		notify_fname(conn, NOTIFY_ACTION_REMOVED, mask,
-			     smb_fname_src->base_name);
-		notify_fname(conn, NOTIFY_ACTION_ADDED, mask,
-			     smb_fname_dst->base_name);
+		notify_fname(conn,
+			     NOTIFY_ACTION_REMOVED |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
+			     mask,
+			     smb_fname_src,
+			     fsp_get_smb2_lease(fsp));
+		notify_fname(conn,
+			     NOTIFY_ACTION_ADDED |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
+			     mask,
+			     smb_fname_dst,
+			     fsp_get_smb2_lease(fsp));
 	}
 
 	/* this is a strange one. w2k3 gives an additional event for
 	   CHANGE_ATTRIBUTES and CHANGE_CREATION on the new file when renaming
 	   files, but not directories */
 	if (!is_dir) {
-		notify_fname(conn, NOTIFY_ACTION_MODIFIED,
-			     FILE_NOTIFY_CHANGE_ATTRIBUTES
-			     |FILE_NOTIFY_CHANGE_CREATION,
-			     smb_fname_dst->base_name);
+		notify_fname(conn,
+			     NOTIFY_ACTION_MODIFIED,
+			     FILE_NOTIFY_CHANGE_ATTRIBUTES |
+				     FILE_NOTIFY_CHANGE_CREATION,
+			     smb_fname_dst,
+			     NULL);
 	}
  out:
 	TALLOC_FREE(parent_dir_src);
@@ -1397,6 +1392,7 @@ static NTSTATUS parent_dirname_compatible_open(connection_struct *conn,
 
 NTSTATUS rename_internals_fsp(connection_struct *conn,
 			files_struct *fsp,
+			struct share_mode_lock **_lck,
 			struct smb_filename *smb_fname_dst_in,
 			const char *dst_original_lcomp,
 			uint32_t attrs,
@@ -1413,9 +1409,9 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 	uint32_t access_mask = SEC_DIR_ADD_FILE;
 	bool dst_exists, old_is_stream, new_is_stream;
 	int ret;
-	bool case_sensitive = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+	bool case_sensitive = fsp->fsp_flags.posix_open ?
 				true : conn->case_sensitive;
-	bool case_preserve = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+	bool case_preserve = fsp->fsp_flags.posix_open ?
 				true : conn->case_preserve;
 	struct vfs_rename_how rhow = { .flags = 0, };
 
@@ -1474,7 +1470,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 		 * can check them separately.
 		 */
 
-		if (fsp->posix_flags & FSP_POSIX_FLAGS_PATHNAMES) {
+		if (fsp->fsp_flags.posix_open) {
 			/* POSIX - no stream component. */
 			orig_lcomp_path = talloc_strdup(ctx,
 						dst_original_lcomp);
@@ -1745,7 +1741,11 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 	 */
 	parent_dir_fname_src_atname->st = fsp->fsp_name->st;
 
-	lck = get_existing_share_mode_lock(talloc_tos(), fsp->file_id);
+	if (_lck != NULL) {
+		lck = talloc_move(talloc_tos(), _lck);
+	} else {
+		lck = get_existing_share_mode_lock(talloc_tos(), fsp->file_id);
+	}
 
 	/*
 	 * We have the file open ourselves, so not being able to get the
@@ -1762,17 +1762,19 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 			&rhow);
 	if (ret == 0) {
 		uint32_t create_options = fh_get_private_options(fsp->fh);
+		struct smb_filename *old_fname = NULL;
 
 		DBG_NOTICE("succeeded doing rename on "
 			   "%s -> %s\n",
 			   smb_fname_str_dbg(fsp->fsp_name),
 			   smb_fname_str_dbg(smb_fname_dst));
 
-		notify_rename(conn,
-			      fsp->fsp_flags.is_directory,
-			      fsp->fsp_name,
-			      smb_fname_dst);
-
+		old_fname = cp_smb_filename(talloc_tos(), fsp->fsp_name);
+		if (old_fname == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			TALLOC_FREE(lck);
+			goto out;
+		}
 		rename_open_files(conn, lck, fsp->file_id, fsp->name_hash,
 				  smb_fname_dst);
 
@@ -1819,7 +1821,15 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 				fsp->fsp_flags.initial_delete_on_close = true;
 			}
 		}
+
 		TALLOC_FREE(lck);
+
+		notify_rename(conn,
+			      fsp,
+			      old_fname,
+			      smb_fname_dst);
+
+		TALLOC_FREE(old_fname);
 		status = NT_STATUS_OK;
 		goto out;
 	}
@@ -1950,8 +1960,18 @@ NTSTATUS rename_internals(TALLOC_CTX *ctx,
 		goto out;
 	}
 
+	/*
+	 * If no pathnames are open below this directory, allow the rename.
+	 */
+	if (have_file_open_below(fsp)) {
+		status = NT_STATUS_ACCESS_DENIED;
+		close_file_free(req, &fsp, NORMAL_CLOSE);
+		goto out;
+	}
+
 	status = rename_internals_fsp(conn,
 					fsp,
+					NULL,
 					smb_fname_dst,
 					dst_original_lcomp,
 					attrs,

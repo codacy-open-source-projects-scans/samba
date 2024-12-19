@@ -687,7 +687,9 @@ static uint32_t dos_mode_post(uint32_t dosmode,
 	dosmode |= dos_mode_from_name(fsp->conn, smb_fname->base_name, dosmode);
 
 	if (S_ISDIR(smb_fname->st.st_ex_mode)) {
-		dosmode |= FILE_ATTRIBUTE_DIRECTORY;
+		if (!(dosmode & FILE_ATTRIBUTE_REPARSE_POINT)) {
+			dosmode |= FILE_ATTRIBUTE_DIRECTORY;
+		}
 	} else if (dosmode == 0) {
 		dosmode = FILE_ATTRIBUTE_NORMAL;
 	}
@@ -721,16 +723,27 @@ uint32_t fdos_mode(struct files_struct *fsp)
 	}
 
 	switch (fsp->fsp_name->st.st_ex_mode & S_IFMT) {
-	case S_IFLNK:
-		return FILE_ATTRIBUTE_NORMAL;
+	case S_IFREG:
+	case S_IFDIR:
 		break;
-	case S_IFIFO:
-	case S_IFSOCK:
-	case S_IFBLK:
-	case S_IFCHR:
-		return FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_REPARSE_POINT;
+	case S_IFLNK:
+		if (fsp->fsp_flags.posix_open &&
+		    !conn_using_smb2(fsp->conn->sconn)) {
+			/*
+			 * SMB1 posix doesn't like the reparse point flag
+			 */
+			result = FILE_ATTRIBUTE_NORMAL;
+		} else {
+			/*
+			 * Everybody else wants to see symlinks as
+			 * reparse points
+			 */
+			result = FILE_ATTRIBUTE_REPARSE_POINT;
+		}
+
 		break;
 	default:
+		return FILE_ATTRIBUTE_REPARSE_POINT;
 		break;
 	}
 
@@ -947,7 +960,7 @@ int file_set_dosmode(connection_struct *conn,
 		return -1;
 	}
 
-	if ((smb_fname->fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) &&
+	if (smb_fname->fsp->fsp_flags.posix_open &&
 	    !lp_store_dos_attributes(SNUM(conn)))
 	{
 		return 0;
@@ -1071,9 +1084,12 @@ int file_set_dosmode(connection_struct *conn,
 
 done:
 	if (!newfile) {
-		notify_fname(conn, NOTIFY_ACTION_MODIFIED,
+		notify_fname(conn,
+			     NOTIFY_ACTION_MODIFIED |
+			     NOTIFY_ACTION_DIRLEASE_BREAK,
 			     FILE_NOTIFY_CHANGE_ATTRIBUTES,
-			     smb_fname->base_name);
+			     smb_fname,
+			     fsp_get_smb2_lease(smb_fname->fsp));
 	}
 	if (ret == 0) {
 		smb_fname->st.st_ex_mode = unixmode;
@@ -1173,9 +1189,12 @@ NTSTATUS file_set_sparse(connection_struct *conn,
 		return status;
 	}
 
-	notify_fname(conn, NOTIFY_ACTION_MODIFIED,
+	notify_fname(conn,
+		     NOTIFY_ACTION_MODIFIED |
+		     NOTIFY_ACTION_DIRLEASE_BREAK,
 		     FILE_NOTIFY_CHANGE_ATTRIBUTES,
-		     fsp->fsp_name->base_name);
+		     fsp->fsp_name,
+		     fsp_get_smb2_lease(fsp));
 
 	fsp->fsp_name->st.cached_dos_attributes = new_dosmode;
 	fsp->fsp_flags.is_sparse = sparse;

@@ -21,7 +21,7 @@
 
 #include "includes.h"
 #include "torture/torture.h"
-#include "libcli/cldap/cldap.h"
+#include "source3/libads/netlogon_ping.h"
 #include "../lib/tsocket/tsocket.h"
 #include "librpc/gen_ndr/ndr_lsa_c.h"
 #include "librpc/gen_ndr/netlogon.h"
@@ -2953,6 +2953,7 @@ static bool check_pw_with_ServerAuthenticate3(struct dcerpc_pipe *p,
 					   a.in.secure_channel_type,
 					   &credentials1, &credentials2,
 					   new_password, &credentials3,
+					   negotiate_flags,
 					   negotiate_flags);
 
 	torture_assert(tctx, creds != NULL, "memory allocation");
@@ -2978,6 +2979,7 @@ static bool check_pw_with_ServerAuthenticate3(struct dcerpc_pipe *p,
 						   a.in.secure_channel_type,
 						   &credentials1, &credentials2,
 						   old_password, &credentials3,
+						   negotiate_flags,
 						   negotiate_flags);
 
 		torture_assert(tctx, creds != NULL, "memory allocation");
@@ -4368,8 +4370,10 @@ static bool check_dom_trust_pw(struct dcerpc_pipe *p,
 	const char *trusted_netbios_name = trusted->netbios_name.string;
 	const char *trusted_dns_name = trusted->domain_name.string;
 	struct tsocket_address *dest_addr;
-	struct cldap_socket *cldap;
-	struct cldap_netlogon cldap1;
+	struct netlogon_samlogon_response **responses = NULL;
+	struct netlogon_samlogon_response *resp = NULL;
+	enum dcerpc_AuthType auth_type;
+	enum dcerpc_AuthLevel auth_level;
 
 	incoming_creds = cli_credentials_init(tctx);
 	torture_assert(tctx, incoming_creds, "cli_credentials_init");
@@ -4417,45 +4421,59 @@ static bool check_dom_trust_pw(struct dcerpc_pipe *p,
 			talloc_asprintf(tctx,"Failed to resolve %s: %s",
 					nbt_name.name, nt_errstr(status)));
 
-	rc = tsocket_address_inet_from_strings(tctx, "ip",
-					       ip,
-					       lpcfg_cldap_port(tctx->lp_ctx),
-					       &dest_addr);
-	torture_assert_int_equal(tctx, rc, 0,
-				 talloc_asprintf(tctx,
-						 "tsocket_address_inet_from_strings failed parsing %s:%d",
-						 host, lpcfg_cldap_port(tctx->lp_ctx)));
+	rc = tsocket_address_inet_from_strings(
+		tctx, "ip", ip, 389, &dest_addr);
+	torture_assert_int_equal(
+		tctx,
+		rc,
+		0,
+		talloc_asprintf(tctx,
+				"tsocket_address_inet_from_strings failed "
+				"parsing %s:%d",
+				host,
+				389));
 
-	/* cldap_socket_init should now know about the dest. address */
-	status = cldap_socket_init(tctx, NULL, dest_addr, &cldap);
-	torture_assert_ntstatus_ok(tctx, status, "cldap_socket_init");
+	status = netlogon_pings(tctx, /* mem_ctx */
+				lpcfg_client_netlogon_ping_protocol(
+					tctx->lp_ctx), /* proto */
+				&dest_addr,	       /* servers */
+				1,		       /* num_servers */
+				(struct netlogon_ping_filter){
+					.ntversion = NETLOGON_NT_VERSION_5 |
+						     NETLOGON_NT_VERSION_5EX,
+					.acct_ctrl = (secure_channel_type ==
+						      SEC_CHAN_DNS_DOMAIN)
+							     ? ACB_AUTOLOCK
+							     : ACB_DOMTRUST,
+					.user = account,
+				},
+				1, /* min_servers */
+				tevent_timeval_current_ofs(2, 0), /* timeout */
+				&responses);
+	torture_assert_ntstatus_ok(tctx, status, "netlogon_pings");
 
-	ZERO_STRUCT(cldap1);
-	cldap1.in.dest_address = NULL;
-	cldap1.in.dest_port = 0;
-	cldap1.in.version = NETLOGON_NT_VERSION_5 | NETLOGON_NT_VERSION_5EX;
-	cldap1.in.user = account;
-	if (secure_channel_type == SEC_CHAN_DNS_DOMAIN) {
-		cldap1.in.acct_control = ACB_AUTOLOCK;
-	} else {
-		cldap1.in.acct_control = ACB_DOMTRUST;
-	}
-	status = cldap_netlogon(cldap, tctx, &cldap1);
-	torture_assert_ntstatus_ok(tctx, status, "cldap_netlogon");
-	torture_assert_int_equal(tctx, cldap1.out.netlogon.ntver,
+	resp = responses[0];
+
+	torture_assert_int_equal(tctx,
+				 resp->ntver,
 				 NETLOGON_NT_VERSION_5EX,
 				 "ntver");
-	torture_assert_int_equal(tctx, cldap1.out.netlogon.data.nt5_ex.nt_version,
-				 NETLOGON_NT_VERSION_1 | NETLOGON_NT_VERSION_5EX,
+	torture_assert_int_equal(tctx,
+				 resp->data.nt5_ex.nt_version,
+				 NETLOGON_NT_VERSION_1 |
+					 NETLOGON_NT_VERSION_5EX,
 				 "nt_version");
-	torture_assert_int_equal(tctx, cldap1.out.netlogon.data.nt5_ex.command,
+	torture_assert_int_equal(tctx,
+				 resp->data.nt5_ex.command,
 				 LOGON_SAM_LOGON_RESPONSE_EX,
 				 "command");
-	torture_assert_str_equal(tctx, cldap1.out.netlogon.data.nt5_ex.user_name,
-				 cldap1.in.user,
+	torture_assert_str_equal(tctx,
+				 resp->data.nt5_ex.user_name,
+				 account,
 				 "user_name");
-	server_name = talloc_asprintf(tctx, "\\\\%s",
-			cldap1.out.netlogon.data.nt5_ex.pdc_dns_name);
+	server_name = talloc_asprintf(tctx,
+				      "\\\\%s",
+				      resp->data.nt5_ex.pdc_dns_name);
 	torture_assert(tctx, server_name, __location__);
 
 	status = dcerpc_parse_binding(tctx, binding, &b2);
@@ -4525,15 +4543,14 @@ static bool check_dom_trust_pw(struct dcerpc_pipe *p,
 	netlogon_creds_client_authenticator(creds, &req_auth);
 	ZERO_STRUCT(rep_auth);
 
-	if (creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-		netlogon_creds_aes_encrypt(creds,
-					   samr_crypt_password.data,
-					   516);
-	} else {
-		netlogon_creds_arcfour_crypt(creds,
-					     samr_crypt_password.data,
-					     516);
-	}
+	dcerpc_binding_handle_auth_info(p2->binding_handle,
+					&auth_type,
+					&auth_level);
+	status = netlogon_creds_encrypt_samr_CryptPassword(creds,
+							   &samr_crypt_password,
+							   auth_type,
+							   auth_level);
+	torture_assert_ntstatus_ok(tctx, status, "encrypt_samr_CryptPassword");
 
 	memcpy(netr_crypt_password.data,
 	       samr_crypt_password.data, 512);

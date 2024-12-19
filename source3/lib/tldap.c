@@ -86,7 +86,6 @@ struct tldap_ctx_attribute {
 struct tldap_context {
 	int ld_version;
 	struct tstream_context *plain;
-	bool starttls_needed;
 	struct tstream_context *tls;
 	struct tstream_context *gensec;
 	struct tstream_context *active;
@@ -175,26 +174,41 @@ static int tldap_next_msgid(struct tldap_context *ld)
 	return result;
 }
 
-struct tldap_context *tldap_context_create(TALLOC_CTX *mem_ctx, int fd)
+struct tldap_context *tldap_context_create_from_plain_stream(
+	TALLOC_CTX *mem_ctx, struct tstream_context **stream)
 {
 	struct tldap_context *ctx;
-	int ret;
 
 	ctx = talloc_zero(mem_ctx, struct tldap_context);
 	if (ctx == NULL) {
 		return NULL;
 	}
-	ret = tstream_bsd_existing_socket(ctx, fd, &ctx->plain);
-	if (ret == -1) {
-		TALLOC_FREE(ctx);
-		return NULL;
-	}
+	ctx->plain = talloc_move(ctx, stream);
 	ctx->active = ctx->plain;
 	ctx->msgid = 1;
 	ctx->ld_version = 3;
 	ctx->outgoing = tevent_queue_create(ctx, "tldap_outgoing");
 	if (ctx->outgoing == NULL) {
 		TALLOC_FREE(ctx);
+		return NULL;
+	}
+	return ctx;
+}
+
+struct tldap_context *tldap_context_create(TALLOC_CTX *mem_ctx, int fd)
+{
+	struct tldap_context *ctx = NULL;
+	struct tstream_context *stream = NULL;
+	int ret;
+
+	ret = tstream_bsd_existing_socket(mem_ctx, fd, &stream);
+	if (ret == -1) {
+		return NULL;
+	}
+
+	ctx = tldap_context_create_from_plain_stream(mem_ctx, &stream);
+	if (ctx == NULL) {
+		TALLOC_FREE(stream);
 		return NULL;
 	}
 	return ctx;
@@ -228,24 +242,6 @@ static size_t tldap_pending_reqs(struct tldap_context *ld)
 struct tstream_context *tldap_get_plain_tstream(struct tldap_context *ld)
 {
 	return ld->plain;
-}
-
-void tldap_set_starttls_needed(struct tldap_context *ld, bool needed)
-{
-	if (ld == NULL) {
-		return;
-	}
-
-	ld->starttls_needed = needed;
-}
-
-bool tldap_get_starttls_needed(struct tldap_context *ld)
-{
-	if (ld == NULL) {
-		return false;
-	}
-
-	return ld->starttls_needed;
 }
 
 bool tldap_has_tls_tstream(struct tldap_context *ld)

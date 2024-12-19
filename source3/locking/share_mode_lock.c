@@ -1425,11 +1425,10 @@ static void share_mode_watch_done(struct tevent_req *subreq);
 struct tevent_req *share_mode_watch_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
-	struct share_mode_lock *lck,
+	struct file_id *id,
 	struct server_id blocker)
 {
-	struct file_id id = share_mode_lock_file_id(lck);
-	TDB_DATA key = locking_key(&id);
+	TDB_DATA key = locking_key(id);
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct share_mode_watch_state *state = NULL;
 
@@ -1743,9 +1742,12 @@ NTSTATUS fetch_share_mode_recv(struct tevent_req *req,
 
 struct share_mode_forall_state {
 	TDB_DATA key;
-	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
-		  void *private_data);
+	int (*ro_fn)(struct file_id fid,
+		     const struct share_mode_data *data,
+		     void *private_data);
+	int (*rw_fn)(struct file_id fid,
+		     struct share_mode_data *data,
+		     void *private_data);
 	void *private_data;
 };
 
@@ -1785,7 +1787,11 @@ static void share_mode_forall_dump_fn(
 		return;
 	}
 
-	state->fn(fid, d, state->private_data);
+	if (state->ro_fn != NULL) {
+		state->ro_fn(fid, d, state->private_data);
+	} else {
+		state->rw_fn(fid, d, state->private_data);
+	}
 	TALLOC_FREE(d);
 }
 
@@ -1806,13 +1812,36 @@ static int share_mode_forall_fn(TDB_DATA key, void *private_data)
 	return 0;
 }
 
+int share_mode_forall_read(int (*fn)(struct file_id fid,
+				     const struct share_mode_data *data,
+				     void *private_data),
+			   void *private_data)
+{
+	struct share_mode_forall_state state = {
+		.ro_fn = fn,
+		.private_data = private_data
+	};
+	int ret;
+
+	if (lock_ctx == NULL) {
+		return 0;
+	}
+
+	ret = g_lock_locks_read(
+		lock_ctx, share_mode_forall_fn, &state);
+	if (ret < 0) {
+		DBG_ERR("g_lock_locks failed\n");
+	}
+	return ret;
+}
+
 int share_mode_forall(int (*fn)(struct file_id fid,
-				const struct share_mode_data *data,
+				struct share_mode_data *data,
 				void *private_data),
 		      void *private_data)
 {
 	struct share_mode_forall_state state = {
-		.fn = fn,
+		.rw_fn = fn,
 		.private_data = private_data
 	};
 	int ret;
@@ -1831,11 +1860,15 @@ int share_mode_forall(int (*fn)(struct file_id fid,
 
 struct share_entry_forall_state {
 	struct file_id fid;
-	const struct share_mode_data *data;
-	int (*fn)(struct file_id fid,
-		  const struct share_mode_data *data,
-		  const struct share_mode_entry *entry,
-		  void *private_data);
+	struct share_mode_data *data;
+	int (*ro_fn)(struct file_id fid,
+		     const struct share_mode_data *data,
+		     const struct share_mode_entry *entry,
+		     void *private_data);
+	int (*rw_fn)(struct file_id fid,
+		     struct share_mode_data *data,
+		     struct share_mode_entry *entry,
+		     void *private_data);
 	void *private_data;
 	int ret;
 };
@@ -1846,15 +1879,37 @@ static bool share_entry_traverse_walker(
 	void *private_data)
 {
 	struct share_entry_forall_state *state = private_data;
+	int ret;
 
-	state->ret = state->fn(
-		state->fid, state->data, e, state->private_data);
-	return (state->ret != 0);
+	if (state->ro_fn != NULL) {
+		ret = state->ro_fn(state->fid,
+				   state->data,
+				   e,
+				   state->private_data);
+	} else {
+		ret = state->rw_fn(state->fid,
+				   state->data,
+				   e,
+				   state->private_data);
+	}
+	if (ret == 0) {
+		/* Continue the whole traverse */
+		return 0;
+	} else if (ret == 1) {
+		/*
+		 * Just stop share_mode_entry loop: by not setting
+		 * state->ret (which was initialized to 0), the
+		 * share_mode_data traverse will continue.
+		 */
+		return 1;
+	}
+	state->ret = ret;
+	return 1;
 }
 
-static int share_entry_traverse_fn(struct file_id fid,
-				   const struct share_mode_data *data,
-				   void *private_data)
+static int share_entry_ro_traverse_fn(struct file_id fid,
+				      const struct share_mode_data *data,
+				      void *private_data)
 {
 	struct share_entry_forall_state *state = private_data;
 	struct share_mode_lock lck = {
@@ -1864,7 +1919,33 @@ static int share_entry_traverse_fn(struct file_id fid,
 	bool ok;
 
 	state->fid = fid;
+	state->data = discard_const_p(struct share_mode_data, data);
+	state->ret = 0;
+
+	ok = share_mode_forall_entries(
+		&lck, share_entry_traverse_walker, state);
+	if (!ok) {
+		DBG_ERR("share_mode_forall_entries failed\n");
+		return false;
+	}
+
+	return state->ret;
+}
+
+static int share_entry_rw_traverse_fn(struct file_id fid,
+				      struct share_mode_data *data,
+				      void *private_data)
+{
+	struct share_entry_forall_state *state = private_data;
+	struct share_mode_lock lck = {
+		.id = fid,
+		.cached_data = data,
+	};
+	bool ok;
+
+	state->fid = fid;
 	state->data = data;
+	state->ret = 0;
 
 	ok = share_mode_forall_entries(
 		&lck, share_entry_traverse_walker, state);
@@ -1878,19 +1959,41 @@ static int share_entry_traverse_fn(struct file_id fid,
 
 /*******************************************************************
  Call the specified function on each entry under management by the
- share mode system.
+ share mode system.  If the callback function returns:
+
+  0 ... continue traverse
+  1 ... stop loop over share_mode_entries, but continue share_mode_data traverse
+ -1 ... stop whole share_mode_data traverse
+
+ Any other return value is treated as -1.
 ********************************************************************/
 
+int share_entry_forall_read(int (*fn)(struct file_id fid,
+				      const struct share_mode_data *data,
+				      const struct share_mode_entry *entry,
+				      void *private_data),
+			    void *private_data)
+{
+	struct share_entry_forall_state state = {
+		.ro_fn = fn,
+		.private_data = private_data,
+	};
+
+	return share_mode_forall_read(share_entry_ro_traverse_fn, &state);
+}
+
 int share_entry_forall(int (*fn)(struct file_id fid,
-				 const struct share_mode_data *data,
-				 const struct share_mode_entry *entry,
+				 struct share_mode_data *data,
+				 struct share_mode_entry *entry,
 				 void *private_data),
 		      void *private_data)
 {
 	struct share_entry_forall_state state = {
-		.fn = fn, .private_data = private_data };
+		.rw_fn = fn,
+		.private_data = private_data,
+	};
 
-	return share_mode_forall(share_entry_traverse_fn, &state);
+	return share_mode_forall(share_entry_rw_traverse_fn, &state);
 }
 
 static int share_mode_entry_cmp(
@@ -2022,7 +2125,7 @@ bool set_share_mode(struct share_mode_lock *lck,
 		.time.tv_usec = fsp->open_time.tv_usec,
 		.share_file_id = fh_get_gen_id(fsp->fh),
 		.uid = (uint32_t)uid,
-		.flags = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
+		.flags = fsp->fsp_flags.posix_open ?
 			SHARE_MODE_FLAG_POSIX_OPEN : 0,
 		.name_hash = fsp->name_hash,
 	};

@@ -30,6 +30,7 @@
 #include "lib/util/string_wrappers.h"
 #include "libcli/smb/reparse.h"
 #include "source3/smbd/dir.h"
+#include "source3/include/serverid.h"
 
 /*
    This module implements directory related functions for Samba.
@@ -210,7 +211,7 @@ NTSTATUS dptr_create(connection_struct *conn,
 	DBG_INFO("dir=%s\n", fsp_str_dbg(fsp));
 
 	if (sconn == NULL) {
-		DEBUG(0,("dptr_create: called with fake connection_struct\n"));
+		DBG_ERR("called with fake connection_struct\n");
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 
@@ -220,9 +221,8 @@ NTSTATUS dptr_create(connection_struct *conn,
 
 	status = check_any_access_fsp(fsp, SEC_DIR_LIST);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_INFO("dptr_create: directory %s "
-			"not open for LIST access\n",
-			fsp_str_dbg(fsp));
+		DBG_INFO("directory %s not open for LIST access\n",
+			 fsp_str_dbg(fsp));
 		return status;
 	}
 	status = OpenDir_fsp(NULL, conn, fsp, wcard, attr, &dir_hnd);
@@ -232,7 +232,7 @@ NTSTATUS dptr_create(connection_struct *conn,
 
 	dptr = talloc_zero(NULL, struct dptr_struct);
 	if(!dptr) {
-		DEBUG(0,("talloc fail in dptr_create.\n"));
+		DBG_ERR("talloc failed\n");
 		TALLOC_FREE(dir_hnd);
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1065,17 +1065,55 @@ NTSTATUS OpenDir_from_pathref(TALLOC_CTX *mem_ctx,
 			      uint32_t attr,
 			      struct smb_Dir **_dir_hnd)
 {
-	struct files_struct *fsp = NULL;
+	struct connection_struct *conn = dirfsp->conn;
+	struct files_struct *new_fsp = NULL;
 	struct smb_Dir *dir_hnd = NULL;
+	const struct vfs_open_how how = {.flags = O_RDONLY | O_DIRECTORY};
+	int old_fd;
 	NTSTATUS status;
 
-	status = openat_internal_dir_from_pathref(dirfsp, O_RDONLY, &fsp);
+	status = create_internal_dirfsp(conn, dirfsp->fsp_name, &new_fsp);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
-	status = OpenDir_fsp(mem_ctx, fsp->conn, fsp, mask, attr, &dir_hnd);
+	if (dirfsp->fsp_flags.have_proc_fds &&
+	    ((old_fd = fsp_get_pathref_fd(dirfsp)) != -1))
+	{
+		struct sys_proc_fd_path_buf buf;
+		struct smb_filename proc_fname = {
+			.base_name = sys_proc_fd_path(old_fd, &buf),
+		};
+		int new_fd;
+
+		new_fd = SMB_VFS_OPENAT(
+			conn, conn->cwd_fsp, &proc_fname, new_fsp, &how);
+		if (new_fd == -1) {
+			status = map_nt_error_from_unix(errno);
+			DBG_DEBUG("SMB_VFS_OPENAT(%s) returned %s\n",
+				  proc_fname.base_name, strerror(errno));
+			file_free(NULL, new_fsp);
+			return status;
+		}
+		fsp_set_fd(new_fsp, new_fd);
+	} else {
+		status = fd_openat(conn->cwd_fsp,
+				   dirfsp->fsp_name,
+				   new_fsp,
+				   &how);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("fd_openat(%s) returned %s\n",
+				  dirfsp->fsp_name->base_name,
+				  nt_errstr(status));
+			file_free(NULL, new_fsp);
+			return status;
+		}
+	}
+
+	status = OpenDir_fsp(mem_ctx, conn, new_fsp, mask, attr, &dir_hnd);
 	if (!NT_STATUS_IS_OK(status)) {
+		fd_close(new_fsp);
+		file_free(NULL, new_fsp);
 		return status;
 	}
 
@@ -1133,7 +1171,7 @@ static NTSTATUS OpenDir_fsp(
 		goto fail;
 	}
 	dir_hnd->fsp = fsp;
-	if (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) {
+	if (fsp->fsp_flags.posix_open) {
 		dir_hnd->case_sensitive = true;
 	} else {
 		dir_hnd->case_sensitive = conn->case_sensitive;
@@ -1184,11 +1222,12 @@ const char *ReadDirName(struct smb_Dir *dir_hnd, char **ptalloced)
 			continue;
 		}
 		/*
-		 * ignore tmp directories, see mkdir_internals()
+		 * ignore tmp directories, see mkdir_internal()
 		 */
 		if (IS_SMBD_TMPNAME(n, &unlink_flags)) {
+			struct files_struct *dirfsp = dir_hnd->fsp;
+			const char *dirname = dirfsp->fsp_name->base_name;
 			struct smb_filename *atname = NULL;
-			const char *fp = NULL;
 			int ret;
 
 			atname = synthetic_smb_fname(talloc_tos(),
@@ -1201,17 +1240,9 @@ const char *ReadDirName(struct smb_Dir *dir_hnd, char **ptalloced)
 				TALLOC_FREE(talloced);
 				continue;
 			}
-			fp = full_path_from_dirfsp_at_basename(atname,
-							       dir_hnd->fsp,
-							       n);
-			if (fp == NULL) {
-				TALLOC_FREE(atname);
-				TALLOC_FREE(talloced);
-				continue;
-			}
 
 			if (unlink_flags == INT_MAX) {
-				DBG_NOTICE("ignoring %s\n", fp);
+				DBG_NOTICE("ignoring %s/%s\n", dirname, n);
 				TALLOC_FREE(atname);
 				TALLOC_FREE(talloced);
 				continue;
@@ -1221,18 +1252,23 @@ const char *ReadDirName(struct smb_Dir *dir_hnd, char **ptalloced)
 			 * We remove the stale tmpname
 			 * as root and ignore any errors
 			 */
-			DBG_NOTICE("unlink stale %s\n", fp);
+			DBG_NOTICE("unlink stale %s/%s\n", dirname, n);
 			become_root();
 			ret = SMB_VFS_UNLINKAT(conn,
-					       dir_hnd->fsp,
+					       dirfsp,
 					       atname,
 					       unlink_flags);
 			unbecome_root();
 			if (ret == 0) {
-				DBG_NOTICE("unlinked stale %s\n", fp);
+				DBG_NOTICE("unlinked stale %s/%s\n",
+					   dirname,
+					   n);
 			} else {
-				DBG_WARNING("failed to unlink stale %s: %s\n",
-					    fp, strerror(errno));
+				DBG_WARNING(
+					"failed to unlink stale %s/%s: %s\n",
+					dirname,
+					n,
+					strerror(errno));
 			}
 			TALLOC_FREE(atname);
 			TALLOC_FREE(talloced);
@@ -1256,28 +1292,95 @@ void RewindDir(struct smb_Dir *dir_hnd)
 	dir_hnd->file_number = 0;
 }
 
-struct files_below_forall_state {
+struct have_file_open_below_state {
+	bool found_one;
+};
+
+static int have_file_open_below_fn(const struct share_mode_data *data,
+				   const struct share_mode_entry *e,
+				   void *private_data)
+{
+	struct have_file_open_below_state *state = private_data;
+	bool exists;
+
+	if (e->stale) {
+		return 0;
+	}
+
+	if (e->flags & SHARE_MODE_FLAG_POSIX_OPEN) {
+		/* Ignore POSIX opens */
+		return 0;
+	}
+
+	exists = serverid_exists(&e->pid);
+	if (!exists) {
+		return 0;
+	}
+
+	state->found_one = true;
+	return -1;
+}
+
+bool have_file_open_below(struct files_struct *fsp)
+{
+	struct have_file_open_below_state state = {
+		.found_one = false,
+	};
+	int ret;
+
+	if (!lp_strict_rename(SNUM(fsp->conn))) {
+		if (file_find_subpath(fsp)) {
+			return true;
+		}
+		return false;
+	}
+
+	if (!VALID_STAT(fsp->fsp_name->st)) {
+		return false;
+	}
+	if (!S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
+		return false;
+	}
+
+	ret = opens_below_forall_read(fsp->conn,
+				      fsp->fsp_name,
+				      have_file_open_below_fn,
+				      &state);
+	if (ret == -1) {
+		return false;
+	}
+
+	return state.found_one;
+}
+
+struct opens_below_forall_read_state {
 	char *dirpath;
 	ssize_t dirpath_len;
-	int (*fn)(struct file_id fid, const struct share_mode_data *data,
+	int (*fn)(const struct share_mode_data *data,
+		  const struct share_mode_entry *e,
 		  void *private_data);
 	void *private_data;
 };
 
-static int files_below_forall_fn(struct file_id fid,
-				 const struct share_mode_data *data,
-				 void *private_data)
+static int opens_below_forall_read_fn(struct file_id fid,
+				      const struct share_mode_data *data,
+				      const struct share_mode_entry *entry,
+				      void *private_data)
 {
-	struct files_below_forall_state *state = private_data;
+	struct opens_below_forall_read_state *state = private_data;
 	char tmpbuf[PATH_MAX];
-	char *fullpath, *to_free;
+	char *fullpath = NULL;
+	char *to_free = NULL;
 	ssize_t len;
 
-	len = full_path_tos(data->servicepath, data->base_name,
-			    tmpbuf, sizeof(tmpbuf),
-			    &fullpath, &to_free);
+	len = full_path_tos(data->servicepath,
+			    data->base_name,
+			    tmpbuf,
+			    sizeof(tmpbuf),
+			    &fullpath,
+			    &to_free);
 	if (len == -1) {
-		return 0;
+		return -1;
 	}
 	if (state->dirpath_len >= len) {
 		/*
@@ -1301,213 +1404,231 @@ static int files_below_forall_fn(struct file_id fid,
 	}
 
 	TALLOC_FREE(to_free);
-	return state->fn(fid, data, state->private_data);
+	return state->fn(data, entry, state->private_data);
 
 out:
 	TALLOC_FREE(to_free);
-	return 0;
-}
-
-static int files_below_forall(connection_struct *conn,
-			      const struct smb_filename *dir_name,
-			      int (*fn)(struct file_id fid,
-					const struct share_mode_data *data,
-					void *private_data),
-			      void *private_data)
-{
-	struct files_below_forall_state state = {
-			.fn = fn,
-			.private_data = private_data,
-	};
-	int ret;
-	char tmpbuf[PATH_MAX];
-	char *to_free;
-
-	state.dirpath_len = full_path_tos(conn->connectpath,
-					  dir_name->base_name,
-					  tmpbuf, sizeof(tmpbuf),
-					  &state.dirpath, &to_free);
-	if (state.dirpath_len == -1) {
-		return -1;
-	}
-
-	ret = share_mode_forall(files_below_forall_fn, &state);
-	TALLOC_FREE(to_free);
-	return ret;
-}
-
-struct have_file_open_below_state {
-	bool found_one;
-};
-
-static int have_file_open_below_fn(struct file_id fid,
-				   const struct share_mode_data *data,
-				   void *private_data)
-{
-	struct have_file_open_below_state *state = private_data;
-	state->found_one = true;
 	return 1;
 }
 
-bool have_file_open_below(connection_struct *conn,
-				 const struct smb_filename *name)
+bool opens_below_forall_read(struct connection_struct *conn,
+			     const struct smb_filename *dir_name,
+			     int (*fn)(const struct share_mode_data *data,
+				       const struct share_mode_entry *e,
+				       void *private_data),
+			     void *private_data)
 {
-	struct have_file_open_below_state state = {
-		.found_one = false,
+	struct opens_below_forall_read_state state = {
+		.fn = fn,
+		.private_data = private_data,
 	};
 	int ret;
+	char tmpbuf[PATH_MAX];
+	char *to_free = NULL;
 
-	if (!VALID_STAT(name->st)) {
+	state.dirpath_len = full_path_tos(conn->connectpath,
+					  dir_name->base_name,
+					  tmpbuf,
+					  sizeof(tmpbuf),
+					  &state.dirpath,
+					  &to_free);
+	if (state.dirpath_len == -1) {
 		return false;
 	}
-	if (!S_ISDIR(name->st.st_ex_mode)) {
-		return false;
-	}
 
-	ret = files_below_forall(conn, name, have_file_open_below_fn, &state);
+	ret = share_entry_forall_read(opens_below_forall_read_fn, &state);
+	TALLOC_FREE(to_free);
 	if (ret == -1) {
 		return false;
 	}
+	return true;
+}
 
-	return state.found_one;
+struct opens_below_forall_state {
+	char *dirpath;
+	ssize_t dirpath_len;
+	int (*fn)(struct share_mode_data *data,
+		  struct share_mode_entry *e,
+		  void *private_data);
+	void *private_data;
+};
+
+static int opens_below_forall_fn(struct file_id fid,
+				 struct share_mode_data *data,
+				 struct share_mode_entry *entry,
+				 void *private_data)
+{
+	struct opens_below_forall_state *state = private_data;
+	char tmpbuf[PATH_MAX];
+	char *fullpath = NULL;
+	char *to_free = NULL;
+	ssize_t len;
+
+	len = full_path_tos(data->servicepath,
+			    data->base_name,
+			    tmpbuf,
+			    sizeof(tmpbuf),
+			    &fullpath,
+			    &to_free);
+	if (len == -1) {
+		return -1;
+	}
+	if (state->dirpath_len >= len) {
+		/*
+		 * Filter files above dirpath
+		 */
+		goto out;
+	}
+	if (fullpath[state->dirpath_len] != '/') {
+		/*
+		 * Filter file that don't have a path separator at the end of
+		 * dirpath's length
+		 */
+		goto out;
+	}
+
+	if (memcmp(state->dirpath, fullpath, state->dirpath_len) != 0) {
+		/*
+		 * Not a parent
+		 */
+		goto out;
+	}
+
+	TALLOC_FREE(to_free);
+	return state->fn(data, entry, state->private_data);
+
+out:
+	TALLOC_FREE(to_free);
+	return 1;
+}
+
+bool opens_below_forall(struct connection_struct *conn,
+			const struct smb_filename *dir_name,
+			int (*fn)(struct share_mode_data *data,
+				  struct share_mode_entry *e,
+				  void *private_data),
+			void *private_data)
+{
+	struct opens_below_forall_state state = {
+		.fn = fn,
+		.private_data = private_data,
+	};
+	int ret;
+	char tmpbuf[PATH_MAX];
+	char *to_free = NULL;
+
+	state.dirpath_len = full_path_tos(conn->connectpath,
+					  dir_name->base_name,
+					  tmpbuf,
+					  sizeof(tmpbuf),
+					  &state.dirpath,
+					  &to_free);
+	if (state.dirpath_len == -1) {
+		return false;
+	}
+
+	ret = share_entry_forall(opens_below_forall_fn, &state);
+	TALLOC_FREE(to_free);
+	if (ret == -1) {
+		return false;
+	}
+	return true;
 }
 
 /*****************************************************************
  Is this directory empty ?
 *****************************************************************/
 
-NTSTATUS can_delete_directory_fsp(files_struct *fsp)
+NTSTATUS can_delete_directory_hnd(struct smb_Dir *dir_hnd)
 {
 	NTSTATUS status = NT_STATUS_OK;
 	const char *dname = NULL;
 	char *talloced = NULL;
-	struct connection_struct *conn = fsp->conn;
-	struct smb_Dir *dir_hnd = NULL;
-
-	status = OpenDir(
-		talloc_tos(), conn, fsp->fsp_name, NULL, 0, &dir_hnd);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
+	struct files_struct *dirfsp = dir_hnd_fetch_fsp(dir_hnd);
+	struct connection_struct *conn = dirfsp->conn;
+	bool delete_veto = lp_delete_veto_files(SNUM(conn));
 
 	while ((dname = ReadDirName(dir_hnd, &talloced))) {
-		struct smb_filename *smb_dname_full = NULL;
 		struct smb_filename *direntry_fname = NULL;
-		char *fullname = NULL;
-		int ret;
 
 		if (ISDOT(dname) || (ISDOTDOT(dname))) {
 			TALLOC_FREE(talloced);
 			continue;
 		}
-		if (IS_VETO_PATH(conn, dname)) {
+		if (delete_veto && IS_VETO_PATH(conn, dname)) {
 			TALLOC_FREE(talloced);
 			continue;
 		}
 
-		fullname = talloc_asprintf(talloc_tos(),
-					   "%s/%s",
-					   fsp->fsp_name->base_name,
-					   dname);
-		if (fullname == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-                        break;
-		}
+		direntry_fname = synthetic_smb_fname(talloc_tos(),
+						     dname,
+						     NULL,
+						     NULL,
+						     dirfsp->fsp_name->twrp,
+						     dirfsp->fsp_name->flags);
+		TALLOC_FREE(talloced);
+		dname = NULL;
 
-		smb_dname_full = synthetic_smb_fname(talloc_tos(),
-						     fullname,
-						     NULL,
-						     NULL,
-						     fsp->fsp_name->twrp,
-						     fsp->fsp_name->flags);
-		if (smb_dname_full == NULL) {
-			TALLOC_FREE(talloced);
-			TALLOC_FREE(fullname);
+		if (direntry_fname == NULL) {
 			status = NT_STATUS_NO_MEMORY;
 			break;
 		}
 
-		ret = SMB_VFS_LSTAT(conn, smb_dname_full);
-		if (ret != 0) {
-			status = map_nt_error_from_unix(errno);
-			TALLOC_FREE(talloced);
-			TALLOC_FREE(fullname);
-			TALLOC_FREE(smb_dname_full);
-			break;
-		}
+		status = openat_pathref_fsp_lcomp(
+			dirfsp,
+			direntry_fname,
+			UCF_POSIX_PATHNAMES /* no ci fallback */);
 
-		if (S_ISLNK(smb_dname_full->st.st_ex_mode)) {
-			/* Could it be an msdfs link ? */
-			if (lp_host_msdfs() &&
-			    lp_msdfs_root(SNUM(conn))) {
-				struct smb_filename *smb_dname;
-				smb_dname = synthetic_smb_fname(talloc_tos(),
-							dname,
-							NULL,
-							&smb_dname_full->st,
-							fsp->fsp_name->twrp,
-							fsp->fsp_name->flags);
-				if (smb_dname == NULL) {
-					TALLOC_FREE(talloced);
-					TALLOC_FREE(fullname);
-					TALLOC_FREE(smb_dname_full);
-					status = NT_STATUS_NO_MEMORY;
-					break;
-				}
-				if (is_msdfs_link(fsp, smb_dname)) {
-					TALLOC_FREE(talloced);
-					TALLOC_FREE(fullname);
-					TALLOC_FREE(smb_dname_full);
-					TALLOC_FREE(smb_dname);
-					DBG_DEBUG("got msdfs link name %s "
-						"- can't delete directory %s\n",
-						dname,
-						fsp_str_dbg(fsp));
-					status = NT_STATUS_DIRECTORY_NOT_EMPTY;
-					break;
-				}
-				TALLOC_FREE(smb_dname);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_DEBUG("Could not open %s: %s\n",
+				  direntry_fname->base_name,
+				  nt_errstr(status));
+
+			TALLOC_FREE(direntry_fname);
+
+			if (NT_STATUS_EQUAL(status,
+					    NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+				/* race between readdir and unlink */
+				continue;
 			}
+			status = NT_STATUS_DIRECTORY_NOT_EMPTY;
+			break;
+		}
+
+		if (S_ISLNK(direntry_fname->st.st_ex_mode)) {
+			int ret;
+
+			if (lp_host_msdfs() && lp_msdfs_root(SNUM(conn)) &&
+			    is_msdfs_link(dirfsp, direntry_fname))
+			{
+
+				DBG_DEBUG("got msdfs link name %s "
+					  "- can't delete directory %s\n",
+					  direntry_fname->base_name,
+					  fsp_str_dbg(dirfsp));
+
+				status = NT_STATUS_DIRECTORY_NOT_EMPTY;
+
+				TALLOC_FREE(direntry_fname);
+				break;
+			}
+
 			/* Not a DFS link - could it be a dangling symlink ? */
-			ret = SMB_VFS_STAT(conn, smb_dname_full);
+			ret = SMB_VFS_FSTATAT(conn,
+					      dirfsp,
+					      direntry_fname,
+					      &direntry_fname->st,
+					      0 /* 0 means follow symlink */);
 			if (ret == -1 && (errno == ENOENT || errno == ELOOP)) {
 				/*
 				 * Dangling symlink.
 				 * Allow if "delete veto files = yes"
 				 */
 				if (lp_delete_veto_files(SNUM(conn))) {
-					TALLOC_FREE(talloced);
-					TALLOC_FREE(fullname);
-					TALLOC_FREE(smb_dname_full);
+					TALLOC_FREE(direntry_fname);
 					continue;
 				}
 			}
-			DBG_DEBUG("got symlink name %s - "
-				"can't delete directory %s\n",
-				dname,
-				fsp_str_dbg(fsp));
-			TALLOC_FREE(talloced);
-			TALLOC_FREE(fullname);
-			TALLOC_FREE(smb_dname_full);
-			status = NT_STATUS_DIRECTORY_NOT_EMPTY;
-			break;
-		}
-
-		/* Not a symlink, get a pathref. */
-		status = synthetic_pathref(talloc_tos(),
-					   fsp,
-					   dname,
-					   NULL,
-					   &smb_dname_full->st,
-					   fsp->fsp_name->twrp,
-					   fsp->fsp_name->flags,
-					   &direntry_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			status = map_nt_error_from_unix(errno);
-			TALLOC_FREE(talloced);
-			TALLOC_FREE(fullname);
-			TALLOC_FREE(smb_dname_full);
-			break;
 		}
 
 		if (!is_visible_fsp(direntry_fname->fsp)) {
@@ -1516,36 +1637,40 @@ NTSTATUS can_delete_directory_fsp(files_struct *fsp)
 			 * Allow if "delete veto files = yes"
 			 */
 			if (lp_delete_veto_files(SNUM(conn))) {
-				TALLOC_FREE(talloced);
-				TALLOC_FREE(fullname);
-				TALLOC_FREE(smb_dname_full);
 				TALLOC_FREE(direntry_fname);
 				continue;
 			}
 		}
 
-		TALLOC_FREE(talloced);
-		TALLOC_FREE(fullname);
-		TALLOC_FREE(smb_dname_full);
+		DBG_DEBUG("got name %s - can't delete\n",
+			  direntry_fname->base_name);
 		TALLOC_FREE(direntry_fname);
 
-		DBG_DEBUG("got name %s - can't delete\n", dname);
 		status = NT_STATUS_DIRECTORY_NOT_EMPTY;
 		break;
 	}
-	TALLOC_FREE(talloced);
-	TALLOC_FREE(dir_hnd);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
-	if (!(fsp->posix_flags & FSP_POSIX_FLAGS_RENAME) &&
-	    lp_strict_rename(SNUM(conn)) &&
-	    have_file_open_below(fsp->conn, fsp->fsp_name))
-	{
+	if (have_file_open_below(dirfsp)) {
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
 	return NT_STATUS_OK;
+}
+
+NTSTATUS can_delete_directory_fsp(files_struct *fsp)
+{
+	struct smb_Dir *dir_hnd = NULL;
+	NTSTATUS status;
+
+	status = OpenDir_from_pathref(talloc_tos(), fsp, NULL, 0, &dir_hnd);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	status = can_delete_directory_hnd(dir_hnd);
+	TALLOC_FREE(dir_hnd);
+	return status;
 }
