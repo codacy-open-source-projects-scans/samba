@@ -235,10 +235,11 @@ static int net_changesecretpw(struct net_context *c, int argc,
 							 &info,
 							 &prev,
 #ifdef HAVE_ADS
-							 sync_pw2keytabs);
+							 sync_pw2keytabs,
 #else
-							 NULL);
+							 NULL,
 #endif
+							 c->opt_host);
 		if (!NT_STATUS_IS_OK(status)) {
 			d_fprintf(stderr,
 			        _("Unable to write the machine account password in the secrets database"));
@@ -261,10 +262,11 @@ static int net_changesecretpw(struct net_context *c, int argc,
 							now,
 							info,
 #ifdef HAVE_ADS
-							sync_pw2keytabs);
+							sync_pw2keytabs,
 #else
-							NULL);
+							NULL,
 #endif
+							c->opt_host);
 		if (!NT_STATUS_IS_OK(status)) {
 			d_fprintf(stderr,
 			        _("Unable to write the machine account password in the secrets database"));
@@ -1394,6 +1396,7 @@ static struct functable net_func[] = {
 			cli_credentials_get_principal_obtained(c->creds);
 		enum credentials_obtained password_obtained =
 			cli_credentials_get_password_obtained(c->creds);
+		char *krb5ccname = NULL;
 
 		if (principal_obtained == CRED_SPECIFIED) {
 			c->explicit_credentials = true;
@@ -1410,6 +1413,20 @@ static struct functable net_func[] = {
 				GENSEC_FEATURE_NTLM_CCACHE,
 				CRED_SPECIFIED);
 		}
+
+		/* cli_credentials_get_ccache_name_obtained() would not work
+		 * here, we also cannot get the content of --use-krb5-ccache= so
+		 * for now at least honour the KRB5CCNAME environment variable
+		 * to get 'net ads kerberos' functions to work at all - gd */
+
+		krb5ccname = getenv("KRB5CCNAME");
+		if (krb5ccname == NULL) {
+			krb5ccname = talloc_strdup(c, "MEMORY:net");
+		}
+		if (krb5ccname == NULL) {
+			exit(1);
+		}
+		c->opt_krb5_ccache = krb5ccname;
 	}
 
 	c->msg_ctx = cmdline_messaging_context(get_dyn_CONFIGFILE());

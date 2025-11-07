@@ -120,7 +120,7 @@ class AclTests(samba.tests.TestCase):
     def get_user_dn(self, name):
         return "CN=%s,CN=Users,%s" % (name, self.base_dn)
 
-    def get_ldb_connection(self, target_username, target_password):
+    def get_creds(self, target_username, target_password):
         creds_tmp = Credentials()
         creds_tmp.set_username(target_username)
         creds_tmp.set_password(target_password)
@@ -130,6 +130,10 @@ class AclTests(samba.tests.TestCase):
         creds_tmp.set_gensec_features(creds_tmp.get_gensec_features()
                                       | gensec.FEATURE_SEAL)
         creds_tmp.set_kerberos_state(DONT_USE_KERBEROS)  # kinit is too expensive to use in a tight loop
+        return creds_tmp
+
+    def get_ldb_connection(self, target_username, target_password):
+        creds_tmp = self.get_creds(target_username, target_password)
         ldb_target = SamDB(url=ldaphost, credentials=creds_tmp, lp=lp)
         return ldb_target
 
@@ -3071,8 +3075,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3135,8 +3138,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3171,8 +3173,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Write Property.
-        mod = (f'(OA;CI;WP;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;WP;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3204,8 +3205,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3240,8 +3240,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3275,8 +3274,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3309,8 +3307,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3345,8 +3342,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3378,8 +3374,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3414,8 +3409,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3450,8 +3444,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3486,8 +3479,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3559,8 +3551,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3592,11 +3583,9 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3621,7 +3610,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         except LdbError:
             self.fail()
 
-    def test_modify_spn_matching_dns_host_name_invalid(self):
+    def test_modify_spn_matching_dns_host_name_valid(self):
         '''Test modifying SPN with validated write, matching a valid dNSHostName '''
 
         ou_dn = f'OU=test_modify_ou1,{self.base_dn}'
@@ -3632,12 +3621,10 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Write Property.
-        mod = (f'(OA;CI;WP;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;WP;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3678,15 +3665,13 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.ldb_admin.create_ou(ou_dn)
 
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         original_host_name = 'invalid_host_name'
-        original_spn = 'host/{original_host_name}'
+        original_spn = f'host/{original_host_name}'
 
         # Create the account.
         self.ldb_admin.add({
@@ -3707,10 +3692,7 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
                                 'dNSHostName')
         try:
             self.ldb_user.modify(m)
-        except LdbError as err:
-            num, estr = err.args
-            self.assertEqual(ERR_CONSTRAINT_VIOLATION, num)
-        else:
+        except LdbError:
             self.fail()
 
     def test_modify_dns_host_name_spn_matching_account_name_original(self):
@@ -3723,18 +3705,15 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
 
         self.ldb_admin.create_ou(ou_dn)
 
-        sam_account_name = '3e0abfd0-126a-11d0-a060-00aa006c33ed'
+        sam_account_name = samba.dsdb.DS_GUID_SCHEMA_ATTR_SAM_ACCOUNT_NAME
 
         # Grant Write Property.
-        mod = (f'(OA;CI;WP;{sam_account_name};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;WP;{sam_account_name};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3776,18 +3755,15 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
 
         self.ldb_admin.create_ou(ou_dn)
 
-        sam_account_name = '3e0abfd0-126a-11d0-a060-00aa006c33ed'
+        sam_account_name = samba.dsdb.DS_GUID_SCHEMA_ATTR_SAM_ACCOUNT_NAME
 
         # Grant Write Property.
-        mod = (f'(OA;CI;WP;{sam_account_name};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;WP;{sam_account_name};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
         # Grant Validated Write.
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_DNS_HOST_NAME};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
-        mod = (f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;'
-               f'{self.user_sid})')
+        mod = f'(OA;CI;SW;{security.GUID_DRS_VALIDATE_SPN};;{self.user_sid})'
         self.sd_utils.dacl_add_ace(ou_dn, mod)
 
         # Create the account.
@@ -3815,8 +3791,6 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
             self.ldb_user.modify(m)
         except LdbError:
             self.fail()
-
-# enable these when we have search implemented
 
 
 class AclSearchTests(AclTests):

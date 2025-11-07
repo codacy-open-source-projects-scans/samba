@@ -493,6 +493,7 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	fstring dev;
 	int ret;
 	bool on_err_call_dis_hook = false;
+	bool on_err_call_profile_unref = false;
 	uid_t effuid;
 	gid_t effgid;
 	NTSTATUS status;
@@ -534,18 +535,19 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* Case options for the share. */
 	conn_setup_case_options(conn);
 
-	conn->encrypt_level = lp_server_smb_encrypt(snum);
-	if (conn->encrypt_level > SMB_ENCRYPTION_OFF) {
-		if (lp_server_smb_encrypt(-1) == SMB_ENCRYPTION_OFF) {
-			if (conn->encrypt_level == SMB_ENCRYPTION_REQUIRED) {
-				DBG_ERR("Service [%s] requires encryption, but "
-					"it is disabled globally!\n",
-					lp_const_servicename(snum));
-				status = NT_STATUS_ACCESS_DENIED;
-				goto err_root_exit;
-			}
-			conn->encrypt_level = SMB_ENCRYPTION_OFF;
+	conn->encrypt_level = lp_server_smb_encrypt(xconn, snum);
+
+	if ((conn->encrypt_level > SMB_ENCRYPTION_OFF) &&
+	    (lp_server_smb_encrypt(xconn, -1) == SMB_ENCRYPTION_OFF)) {
+
+		if (conn->encrypt_level == SMB_ENCRYPTION_REQUIRED) {
+			DBG_ERR("Service [%s] requires encryption, but "
+				"it is disabled globally!\n",
+				lp_const_servicename(snum));
+			status = NT_STATUS_ACCESS_DENIED;
+			goto err_root_exit;
 		}
+		conn->encrypt_level = SMB_ENCRYPTION_OFF;
 	}
 
 	conn->veto_list = NULL;
@@ -613,6 +615,14 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 			lp_const_servicename(snum));
 		status = NT_STATUS_BAD_NETWORK_NAME;
 		goto err_root_exit;
+	}
+
+	/* Initialize per-share profiling */
+	if (lp_smbd_profiling_share(snum)) {
+		smbprofile_persvc_mkref(snum,
+					lp_const_servicename(snum),
+					sconn->remote_hostname);
+		on_err_call_profile_unref = true;
 	}
 
 /* ROOT Activities: */
@@ -860,6 +870,9 @@ NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 		/* Call VFS disconnect hook */
 		SMB_VFS_DISCONNECT(conn);
 	}
+	if (on_err_call_profile_unref) {
+		smbprofile_persvc_unref(snum);
+	}
 	return status;
 }
 
@@ -925,6 +938,11 @@ void close_cnum(connection_struct *conn,
 
 	/* Call VFS disconnect hook */
 	SMB_VFS_DISCONNECT(conn);
+
+	/* Cleanup per-share profiling */
+	if (lp_smbd_profiling_share(SNUM(conn))) {
+		smbprofile_persvc_unref(SNUM(conn));
+	}
 
 	/* execute any "postexec = " line */
 	if (*lp_postexec(talloc_tos(), lp_sub, SNUM(conn)) &&

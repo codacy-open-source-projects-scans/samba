@@ -18,13 +18,13 @@ else:
 	import imp
 
 # the following 3 constants are updated on each new release (do not touch)
-HEXVERSION=0x2001a00
+HEXVERSION=0x2010600
 """Constant updated on new releases"""
 
-WAFVERSION="2.0.26"
+WAFVERSION="2.1.6"
 """Constant updated on new releases"""
 
-WAFREVISION="0fb985ce1932c6f3e7533f435e4ee209d673776e"
+WAFREVISION="aeec9358394f883f63b3ad78c2857117ca2cdfb4"
 """Git revision when the waf version is updated"""
 
 WAFNAME="waf"
@@ -188,13 +188,14 @@ class Context(ctx):
 			Logs.free_logger(logger)
 			delattr(self, 'logger')
 
-	def load(self, tool_list, *k, **kw):
+	def load(self, tool_list, **kw):
 		"""
-		Loads a Waf tool as a module, and try calling the function named :py:const:`waflib.Context.Context.fun`
-		from it.  A ``tooldir`` argument may be provided as a list of module paths.
+		Loads a Waf tool as a module, and try calling the function named :py:const:`waflib.Context.Context.fun` from it.
 
 		:param tool_list: list of Waf tool names to load
 		:type tool_list: list of string or space-separated string
+		:param tooldir: paths for the imports
+		:type tooldir: list of string
 		"""
 		tools = Utils.to_list(tool_list)
 		path = Utils.to_list(kw.get('tooldir', ''))
@@ -347,8 +348,11 @@ class Context(ctx):
 		if 'stderr' not in kw:
 			kw['stderr'] = subprocess.PIPE
 
-		if Logs.verbose and not kw['shell'] and not Utils.check_exe(cmd[0]):
-			raise Errors.WafError('Program %s not found!' % cmd[0])
+		if Logs.verbose and not kw['shell'] and not Utils.check_exe(cmd[0], env=kw.get('env', os.environ)):
+			# This call isn't a shell command, and if the specified exe doesn't exist, check for a relative path being set
+			# with cwd and if so assume the caller knows what they're doing and don't pre-emptively fail
+			if not (cmd[0][0] == '.' and 'cwd' in kw):
+				raise Errors.WafError('Program %s not found!' % cmd[0])
 
 		cargs = {}
 		if 'timeout' in kw:
@@ -422,8 +426,11 @@ class Context(ctx):
 		quiet = kw.pop('quiet', None)
 		to_ret = kw.pop('output', STDOUT)
 
-		if Logs.verbose and not kw['shell'] and not Utils.check_exe(cmd[0]):
-			raise Errors.WafError('Program %r not found!' % cmd[0])
+		if Logs.verbose and not kw['shell'] and not Utils.check_exe(cmd[0], env=kw.get('env', os.environ)):
+			# This call isn't a shell command, and if the specified exe doesn't exist, check for a relative path being set
+			# with cwd and if so assume the caller knows what they're doing and don't pre-emptively fail
+			if not (cmd[0][0] == '.' and 'cwd' in kw):
+				raise Errors.WafError('Program %s not found!' % cmd[0])
 
 		kw['stdout'] = kw['stderr'] = subprocess.PIPE
 		if quiet is None:

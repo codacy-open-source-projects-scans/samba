@@ -67,7 +67,11 @@
 	/* Required for Group Managed Service Accounts. */ \
 	"msDS-ManagedPasswordId",		\
 	"msDS-ManagedPasswordInterval",		\
-	"whenCreated"
+	"whenCreated",				\
+	/* Required for Key Trust authentication */\
+	"msDS-KeyCredentialLink",                \
+	/* Required for certificate mapping */  \
+	"altSecurityIdentities"
 
 #define AUTHN_POLICY_ATTRS                     \
 	/* Required for authentication policies / silos */ \
@@ -383,6 +387,8 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 	uint32_t num_sids = 0;
 	unsigned int i;
 	struct dom_sid *domain_sid;
+	uint32_t group_rid;
+	struct dom_sid groupsid = {};
 	TALLOC_CTX *tmp_ctx;
 	struct ldb_message_element *el;
 	static const char * const group_type_attrs[] = { "groupType", NULL };
@@ -425,11 +431,19 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	sids[PRIMARY_USER_SID_INDEX].sid = *account_sid;
-	sids[PRIMARY_USER_SID_INDEX].attrs = SE_GROUP_DEFAULT_FLAGS;
-	sids[PRIMARY_GROUP_SID_INDEX].sid = *domain_sid;
-	sid_append_rid(&sids[PRIMARY_GROUP_SID_INDEX].sid, ldb_msg_find_attr_as_uint(msg, "primaryGroupID", ~0));
-	sids[PRIMARY_GROUP_SID_INDEX].attrs = SE_GROUP_DEFAULT_FLAGS;
+	group_rid = ldb_msg_find_attr_as_uint(msg, "primaryGroupID", ~0);
+	groupsid = *domain_sid;
+	sid_append_rid(&groupsid, group_rid);
+
+	sids[PRIMARY_USER_SID_INDEX] = (struct auth_SidAttr) {
+		.sid = *account_sid,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+	};
+
+	sids[PRIMARY_GROUP_SID_INDEX] = (struct auth_SidAttr) {
+		.sid = groupsid,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+	};
 
 	/*
 	 * Filter out builtin groups from this token. We will search
@@ -660,13 +674,18 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 			TALLOC_FREE(user_info_dc);
 			return NT_STATUS_NO_MEMORY;
 		}
-		user_info_dc->sids[user_info_dc->num_sids].sid = global_sid_Enterprise_DCs;
-		user_info_dc->sids[user_info_dc->num_sids].attrs = SE_GROUP_DEFAULT_FLAGS;
+
+		user_info_dc->sids[user_info_dc->num_sids] = (struct auth_SidAttr) {
+			.sid = global_sid_Enterprise_DCs,
+			.attrs = SE_GROUP_DEFAULT_FLAGS,
+		};
 		user_info_dc->num_sids++;
 	}
 
 	if ((info->acct_flags & (ACB_PARTIAL_SECRETS_ACCOUNT | ACB_WSTRUST)) ==
 	    (ACB_PARTIAL_SECRETS_ACCOUNT | ACB_WSTRUST)) {
+		struct dom_sid rodcsid = {};
+
 		/* the DOMAIN_RID_ENTERPRISE_READONLY_DCS PAC */
 		user_info_dc->sids = talloc_realloc(user_info_dc,
 						   user_info_dc->sids,
@@ -676,10 +695,14 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 			TALLOC_FREE(user_info_dc);
 			return NT_STATUS_NO_MEMORY;
 		}
-		user_info_dc->sids[user_info_dc->num_sids].sid = *domain_sid;
-		sid_append_rid(&user_info_dc->sids[user_info_dc->num_sids].sid,
-			    DOMAIN_RID_ENTERPRISE_READONLY_DCS);
-		user_info_dc->sids[user_info_dc->num_sids].attrs = SE_GROUP_DEFAULT_FLAGS;
+
+		rodcsid = *domain_sid;
+		sid_append_rid(&rodcsid, DOMAIN_RID_ENTERPRISE_READONLY_DCS);
+
+		user_info_dc->sids[user_info_dc->num_sids] = (struct auth_SidAttr) {
+			.sid = rodcsid,
+			.attrs = SE_GROUP_DEFAULT_FLAGS,
+		};
 		user_info_dc->num_sids++;
 	}
 

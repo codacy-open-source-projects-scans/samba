@@ -334,6 +334,7 @@ struct wbcChangePasswordParams {
 /* wbcAuthUserParams->flags */
 
 #define WBC_AUTH_PARAM_FLAGS_INTERACTIVE_LOGON		0x00000001
+#define WBC_AUTH_PARAM_FLAGS_FOR_NETLOGON		0x00000002
 
 /**
  * @brief Auth User Information
@@ -1547,6 +1548,10 @@ wbcErr wbcListTrusts(struct wbcDomainInfo **domains,
 #define WBC_LOOKUP_DC_IS_DNS_NAME              0x00020000
 #define WBC_LOOKUP_DC_TRY_NEXTCLOSEST_SITE     0x00040000
 #define WBC_LOOKUP_DC_DS_6_REQUIRED            0x00080000
+#define WBC_LOOKUP_DC_WEB_REQUIRED             0x00100000
+#define WBC_LOOKUP_DC_DS_8_REQUIRED            0x00200000
+#define WBC_LOOKUP_DC_DS_9_REQUIRED            0x00400000
+#define WBC_LOOKUP_DC_DS_10_REQUIRED           0x00800000
 #define WBC_LOOKUP_DC_RETURN_DNS_NAME          0x40000000
 #define WBC_LOOKUP_DC_RETURN_FLAT_NAME         0x80000000
 

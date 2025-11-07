@@ -483,6 +483,12 @@ NTSTATUS receive_smb_raw(int fd,
 			unsigned int timeout,
 			size_t maxlen,
 			size_t *p_len);
+int open_socket_in_protocol(
+	int type,
+	int protocol,
+	const struct sockaddr_storage *paddr,
+	uint16_t port,
+	bool rebind);
 int open_socket_in(
 	int type,
 	const struct sockaddr_storage *paddr,
@@ -492,17 +498,11 @@ NTSTATUS open_socket_out(const struct sockaddr_storage *pss, uint16_t port,
 			 int timeout, int *pfd);
 struct tevent_req *open_socket_out_send(TALLOC_CTX *mem_ctx,
 					struct tevent_context *ev,
+					int protocol,
 					const struct sockaddr_storage *pss,
 					uint16_t port,
 					int timeout);
 NTSTATUS open_socket_out_recv(struct tevent_req *req, int *pfd);
-struct tevent_req *open_socket_out_defer_send(TALLOC_CTX *mem_ctx,
-					      struct tevent_context *ev,
-					      struct timeval wait_time,
-					      const struct sockaddr_storage *pss,
-					      uint16_t port,
-					      int timeout);
-NTSTATUS open_socket_out_defer_recv(struct tevent_req *req, int *pfd);
 const char *get_peer_addr(int fd, char *addr, size_t addr_len);
 
 struct tsocket_address;
@@ -521,7 +521,6 @@ int poll_intr_one_fd(int fd, int events, int timeout, int *revents);
 
 /* The following definitions come from lib/util_str.c  */
 
-bool next_token(const char **ptr, char *buff, const char *sep, size_t bufsize);
 bool strnequal(const char *s1,const char *s2,size_t n);
 bool strcsequal(const char *s1,const char *s2);
 char *skip_string(const char *base, size_t len, char *buf);
@@ -650,44 +649,6 @@ NTSTATUS sessionid_traverse_read(int (*fn)(const char *key,
 struct AvahiPoll *tevent_avahi_poll(TALLOC_CTX *mem_ctx,
 				    struct tevent_context *ev);
 
-/* The following definitions come from libsmb/smbsock_connect.c */
-
-struct tevent_req *smbsock_connect_send(TALLOC_CTX *mem_ctx,
-					struct tevent_context *ev,
-					const struct sockaddr_storage *addr,
-					uint16_t port,
-					const char *called_name,
-					int called_type,
-					const char *calling_name,
-					int calling_type);
-NTSTATUS smbsock_connect_recv(struct tevent_req *req, int *sock,
-			      uint16_t *ret_port);
-NTSTATUS smbsock_connect(const struct sockaddr_storage *addr, uint16_t port,
-			 const char *called_name, int called_type,
-			 const char *calling_name, int calling_type,
-			 int *pfd, uint16_t *ret_port, int sec_timeout);
-
-struct tevent_req *smbsock_any_connect_send(TALLOC_CTX *mem_ctx,
-					    struct tevent_context *ev,
-					    const struct sockaddr_storage *addrs,
-					    const char **called_names,
-					    int *called_types,
-					    const char **calling_names,
-					    int *calling_types,
-					    size_t num_addrs, uint16_t port);
-NTSTATUS smbsock_any_connect_recv(struct tevent_req *req, int *pfd,
-				  size_t *chosen_index, uint16_t *chosen_port);
-NTSTATUS smbsock_any_connect(const struct sockaddr_storage *addrs,
-			     const char **called_names,
-			     int *called_types,
-			     const char **calling_names,
-			     int *calling_types,
-			     size_t num_addrs,
-			     uint16_t port,
-			     int sec_timeout,
-			     int *pfd, size_t *chosen_index,
-			     uint16_t *chosen_port);
-
 /* The following definitions come from lib/util_wellknown.c  */
 
 bool sid_check_is_wellknown_domain(const struct dom_sid *sid, const char **name);
@@ -707,12 +668,6 @@ struct smb_filename *synthetic_smb_fname(TALLOC_CTX *mem_ctx,
 					 const SMB_STRUCT_STAT *psbuf,
 					 NTTIME twrp,
 					 uint32_t flags);
-NTSTATUS safe_symlink_target_path(TALLOC_CTX *mem_ctx,
-				  const char *connectpath,
-				  const char *dir,
-				  const char *target,
-				  size_t unparsed,
-				  char **_relative);
 struct reparse_data_buffer;
 NTSTATUS
 filename_convert_dirfsp_nosymlink(TALLOC_CTX *mem_ctx,
@@ -750,8 +705,7 @@ struct smb_filename *full_path_from_dirfsp_atname(
 	const struct files_struct *dirfsp,
 	const struct smb_filename *atname);
 struct smb_filename *synthetic_smb_fname_split(TALLOC_CTX *ctx,
-						const char *fname,
-						bool posix_path);
+					       const char *fname);
 const char *smb_fname_str_dbg(const struct smb_filename *smb_fname);
 const char *fsp_str_dbg(const struct files_struct *fsp);
 const char *fsp_fnum_dbg(const struct files_struct *fsp);

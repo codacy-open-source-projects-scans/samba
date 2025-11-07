@@ -155,7 +155,7 @@ bld.SAMBA3_LIBRARY('samba-passdb',
                                   ''',
                    abi_match=private_pdb_match,
                    abi_directory='passdb/ABI',
-                   vnum='0.29.0')
+                   vnum='0.30.0')
 
 bld.SAMBA3_SUBSYSTEM('pdb',
                    source='''
@@ -192,7 +192,7 @@ bld.SAMBA3_LIBRARY('smbldaphelper',
                           passdb/pdb_ldap_schema.c
                           passdb/pdb_ldap_util.c
                           ''',
-                   deps='smbldap secrets3',
+                   deps='smbldap secrets3 samba-security samba3-util',
                    allow_undefined_symbols=True,
                    enabled=bld.CONFIG_SET('HAVE_LDAP'),
                    private_library=True)
@@ -311,6 +311,7 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                         LIBTSOCKET
                         util_tsock
                         samba-security
+                        samba-security-trusts
                         NDR_SECURITY
                         samba-util
                         util_tdb
@@ -500,7 +501,7 @@ bld.SAMBA3_LIBRARY('secrets3',
 
 bld.SAMBA3_LIBRARY('smbldap',
                     source='lib/smbldap.c',
-                    deps='ldap lber samba-util smbconf',
+                    deps='ldap lber samba-util smbconf samba-security genrand smbd_shim',
                     enabled=bld.CONFIG_SET("HAVE_LDAP"),
                     private_library=False,
                     abi_directory='lib/ABI',
@@ -763,6 +764,7 @@ bld.SAMBA3_LIBRARY('smbd_base',
                         fd_handle
                         cli_spoolss
                         samba3-namearray
+                        LIBTLS
                    ''' +
                    bld.env['dmapi_lib'] +
                    bld.env['legacy_quota_libs'] +
@@ -1045,7 +1047,7 @@ bld.SAMBA3_SUBSYSTEM('LIBCLI_SAMR',
 
 bld.SAMBA3_LIBRARY('libcli_lsa3',
                    source='rpc_client/cli_lsarpc.c',
-                   deps='RPC_NDR_LSA INIT_LSA',
+                   deps='RPC_NDR_LSA INIT_LSA msrpc3',
                    private_library=True)
 
 bld.SAMBA3_LIBRARY('libcli_netlogon3',
@@ -1331,6 +1333,7 @@ bld.RECURSE('utils')
 bld.RECURSE('nmbd')
 bld.RECURSE('lib/util')
 bld.RECURSE('torture')
+bld.RECURSE('locale')
 
 bld.ENFORCE_GROUP_ORDERING()
 bld.CHECK_PROJECT_RULES()

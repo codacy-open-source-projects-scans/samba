@@ -359,6 +359,7 @@ static int do_global_checks(void)
 	const char **lp_ptr = NULL;
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
+	int ival;
 
 	fprintf(stderr, "\n");
 
@@ -420,9 +421,8 @@ static int do_global_checks(void)
 	}
 
 	if (!directory_exist_stat(lp_lock_directory(), &st)) {
-		fprintf(stderr, "ERROR: lock directory %s does not exist\n\n",
+		fprintf(stderr, "WARNING: lock directory %s does not exist\n\n",
 		       lp_lock_directory());
-		ret = 1;
 	} else if ((st.st_ex_mode & 0777) != 0755) {
 		fprintf(stderr, "WARNING: lock directory %s should have "
 				"permissions 0755 for browsing to work\n\n",
@@ -450,9 +450,8 @@ static int do_global_checks(void)
 	}
 
 	if (!directory_exist_stat(lp_pid_directory(), &st)) {
-		fprintf(stderr, "ERROR: pid directory %s does not exist\n\n",
+		fprintf(stderr, "WARNING: pid directory %s does not exist\n\n",
 		       lp_pid_directory());
-		ret = 1;
 	}
 
 	if (lp_passdb_expand_explicit()) {
@@ -786,6 +785,18 @@ static int do_global_checks(void)
 			"options\n\n");
 	}
 
+	ival = lp__client_use_krb5_netlogon();
+	if (ival > 0) {
+		fprintf(stderr,
+			"ERROR: You have configured "
+			"'client use krb5 netlogon = %s'.\n"
+			"This is experimental in Samba %s "
+			"and should not be used in production!\n\n",
+			ival == Auto ? "auto" : "yes",
+			samba_version_string());
+		ret = 1;
+	}
+
 	if (lp_kerberos_encryption_types() == KERBEROS_ETYPES_LEGACY) {
 		fprintf(stderr,
 			"WARNING: You have configured "
@@ -808,6 +819,16 @@ static int do_global_checks(void)
 		while (*lp_ptr) {
 			ret |= pw2kt_check_line(*lp_ptr++);
 		}
+	}
+
+	if (lp_winbind_varlink_service()) {
+#ifndef WITH_SYSTEMD_USERDB
+		fprintf(stderr,
+			"WARNING: \"winbind varlink service\" is enabled but "
+			"samba was built without system'd userdb support "
+			"(--with-systemd-userdb). This option will not "
+			"have any effect.\n\n");
+#endif
 	}
 
 	return ret;

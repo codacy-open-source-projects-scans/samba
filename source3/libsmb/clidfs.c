@@ -20,7 +20,8 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmb/clirap.h"
 #include "msdfs.h"
 #include "trans2.h"
@@ -134,7 +135,7 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 					const char *share,
 					struct cli_credentials *creds,
 					const struct sockaddr_storage *dest_ss,
-					int port,
+					const struct smb_transports *transports,
 					int name_type,
 					struct cli_state **pcli)
 {
@@ -150,7 +151,6 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 	enum smb_encryption_setting encryption_state =
 		cli_credentials_get_smb_encryption(creds);
 	struct smb2_negotiate_contexts *in_contexts = NULL;
-	struct smb2_negotiate_contexts *out_contexts = NULL;
 
 	if (encryption_state >= SMB_ENCRYPTION_DESIRED) {
 		signing_state = SMB_SIGNING_REQUIRED;
@@ -181,12 +181,13 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 	/*
 	 * The functions cli_resolve_path() and cli_cm_open() might not create a
 	 * new cli context, but might return an already existing one. This
-	 * forces us to have a long lived cli allocated on the NULL context.
+	 * requires that a long living context is used. It should be freed after
+	 * the client is done with its connection.
 	 */
-	status = cli_connect_nb(NULL,
+	status = cli_connect_nb(ctx,
 				server,
 				dest_ss,
-				port,
+				transports,
 				name_type,
 				NULL,
 				signing_state,
@@ -226,8 +227,8 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 				 lp_client_min_protocol(),
 				 lp_client_max_protocol(),
 				 in_contexts,
-				 ctx,
-				 &out_contexts);
+				 NULL,
+				 NULL);
 	TALLOC_FREE(in_contexts);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_IO_TIMEOUT)) {
@@ -236,7 +237,9 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 			 smbXcli_conn_remote_name(c->conn));
 		cli_shutdown(c);
 		return status;
-	} else if (!NT_STATUS_IS_OK(status)) {
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Protocol negotiation to server %s (for a protocol between %s and %s) failed: %s\n",
 			 smbXcli_conn_remote_name(c->conn),
 			 lpcfg_get_smb_protocol(lp_client_min_protocol()),
@@ -312,7 +315,7 @@ static NTSTATUS do_connect(TALLOC_CTX *ctx,
 		cli_shutdown(c);
 		return do_connect(ctx, newserver,
 				newshare, creds,
-				NULL, port, name_type, pcli);
+				NULL, transports, name_type, pcli);
 	}
 
 	/* must be a normal share */
@@ -340,7 +343,7 @@ static NTSTATUS cli_cm_connect(TALLOC_CTX *ctx,
 			       const char *share,
 			       struct cli_credentials *creds,
 			       const struct sockaddr_storage *dest_ss,
-			       int port,
+			       const struct smb_transports *transports,
 			       int name_type,
 			       struct cli_state **pcli)
 {
@@ -349,7 +352,7 @@ static NTSTATUS cli_cm_connect(TALLOC_CTX *ctx,
 
 	status = do_connect(ctx, server, share,
 				creds,
-				dest_ss, port, name_type, &cli);
+				dest_ss, transports, name_type, &cli);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -423,17 +426,62 @@ static struct cli_state *cli_cm_find(struct cli_state *cli,
 	return NULL;
 }
 
-/****************************************************************************
- Open a client connection to a \\server\share.
-****************************************************************************/
-
+/**
+ * @brief Open a client connection to a \\server\share.
+ *
+ * This function attempts to establish a connection to a specified SMB server
+ * and share. It first checks for an existing connection in the referring_cli
+ * connection list to avoid creating duplicate connections. If no existing
+ * connection is found, it creates a new one.
+ *
+ * @param[in] ctx           The memory context. This context needs to be a
+ *                          long-living context, as cli_resolve_path() and
+ *                          cli_cm_open() might not create a new cli context,
+ *                          but might return an existing one.
+ *                          The context should be freed after the client is
+ *                          fully done with its connections.
+ *
+ * @param[in] referring_cli An existing cli_state to search for cached
+ *                          connections. This is used to find previously
+ *                          established connections to avoid creating duplicates.
+ *                          Can be NULL if no existing connections exist.
+ *
+ * @param[in] server        The server name to connect to. This is the NetBIOS
+ *                          name or hostname of the target server.
+ *
+ * @param[in] share         The share name to connect to (can also be "IPC$").
+ *
+ * @param[in] creds         Credentials for authentication. Must not be NULL.
+ *                          The function will return NT_STATUS_INVALID_PARAMETER
+ *                          if credentials are not provided.
+ *
+ * @param[in] dest_ss       Destination socket address. Can be NULL, in which
+ *                          case the address will be resolved from the server
+ *                          name using name resolution.
+ *
+ * @param[in] transports    SMB transport configuration specifying which SMB
+ *                          protocol versions to use (e.g., SMB1, SMB2, SMB3).
+ *
+ * @param[in] name_type     NetBIOS name type for name resolution. Common values
+ *                          include 0x00 (workstation), 0x20 (file server).
+ *                          This is used when resolving the server name via
+ *                          NetBIOS.
+ *
+ * @param[out] pcli         Pointer to receive the cli_state structure. On
+ *                          success, this will point to either a newly created
+ *                          connection or an existing cached connection.
+ *
+ * @return                  NT_STATUS_OK on success. NT_STATUS_INVALID_PARAMETER
+ *                          if credentials are NULL. Other NTSTATUS error codes
+ *                          on connection or authentication failures.
+ */
 NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 		     struct cli_state *referring_cli,
 		     const char *server,
 		     const char *share,
 		     struct cli_credentials *creds,
 		     const struct sockaddr_storage *dest_ss,
-		     int port,
+		     const struct smb_transports *transports,
 		     int name_type,
 		     struct cli_state **pcli)
 {
@@ -461,7 +509,7 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				share,
 				creds,
 				dest_ss,
-				port,
+				transports,
 				name_type,
 				&c);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -949,6 +997,9 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 	struct cli_dfs_path_split *dfs_refs = NULL;
 	bool ok;
 	bool is_already_dfs = false;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	if ( !rootcli || !path || !targetcli ) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -1039,7 +1090,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 			     "IPC$",
 			     creds,
 			     NULL, /* dest_ss not needed, we reuse the transport */
-			     0,
+			     &ts,
 			     0x20,
 			     &cli_ipc);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1095,7 +1146,7 @@ NTSTATUS cli_resolve_path(TALLOC_CTX *ctx,
 				dfs_refs[count].share,
 				creds,
 				NULL, /* dest_ss */
-				0, /* port */
+				&ts,
 				0x20,
 				targetcli);
 		if (!NT_STATUS_IS_OK(status)) {

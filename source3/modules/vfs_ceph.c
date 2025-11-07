@@ -472,7 +472,7 @@ static int cephwrap_openat(struct vfs_handle_struct *handle,
 	int result = -ENOENT;
 	int dirfd = -1;
 
-	if (how->resolve != 0) {
+	if ((how->resolve & ~VFS_OPEN_HOW_WITH_BACKUP_INTENT) != 0) {
 		errno = ENOSYS;
 		return -1;
 	}
@@ -710,11 +710,11 @@ static ssize_t cephwrap_recvfile(struct vfs_handle_struct *handle,
 }
 
 static int cephwrap_renameat(struct vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *smb_fname_src,
-			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst,
-			const struct vfs_rename_how *how)
+			     files_struct *src_dirfsp,
+			     const struct smb_filename *smb_fname_src,
+			     files_struct *dst_dirfsp,
+			     const struct smb_filename *smb_fname_dst,
+			     const struct vfs_rename_how *how)
 {
 	struct smb_filename *full_fname_src = NULL;
 	struct smb_filename *full_fname_dst = NULL;
@@ -732,15 +732,15 @@ static int cephwrap_renameat(struct vfs_handle_struct *handle,
 	}
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),
-						  srcfsp,
-						  smb_fname_src);
+						      src_dirfsp,
+						      smb_fname_src);
 	if (full_fname_src == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
 	full_fname_dst = full_path_from_dirfsp_atname(talloc_tos(),
-						  dstfsp,
-						  smb_fname_dst);
+						      dst_dirfsp,
+						      smb_fname_dst);
 	if (full_fname_dst == NULL) {
 		TALLOC_FREE(full_fname_src);
 		errno = ENOMEM;
@@ -954,16 +954,33 @@ static int cephwrap_fntimes(struct vfs_handle_struct *handle,
 	struct ceph_statx stx = { 0 };
 	int result;
 	int mask = 0;
+	struct timespec time_now = timespec_current();
 
 	if (!is_omit_timespec(&ft->atime)) {
+		if (ft->atime.tv_nsec == UTIME_NOW) {
+			ft->atime = time_now;
+		}
 		stx.stx_atime = ft->atime;
 		mask |= CEPH_SETATTR_ATIME;
 	}
 	if (!is_omit_timespec(&ft->mtime)) {
+		if (ft->mtime.tv_nsec == UTIME_NOW) {
+			ft->mtime = time_now;
+		}
 		stx.stx_mtime = ft->mtime;
 		mask |= CEPH_SETATTR_MTIME;
 	}
+	if (!is_omit_timespec(&ft->ctime)) {
+		if (ft->ctime.tv_nsec == UTIME_NOW) {
+			ft->ctime = time_now;
+		}
+		stx.stx_ctime = ft->ctime;
+		mask |= CEPH_SETATTR_CTIME;
+	}
 	if (!is_omit_timespec(&ft->create_time)) {
+		if (ft->create_time.tv_nsec == UTIME_NOW) {
+			ft->create_time = time_now;
+		}
 		stx.stx_btime = ft->create_time;
 		mask |= CEPH_SETATTR_BTIME;
 	}
@@ -1298,25 +1315,25 @@ static int cephwrap_readlinkat(struct vfs_handle_struct *handle,
 }
 
 static int cephwrap_linkat(struct vfs_handle_struct *handle,
-		files_struct *srcfsp,
-		const struct smb_filename *old_smb_fname,
-		files_struct *dstfsp,
-		const struct smb_filename *new_smb_fname,
-		int flags)
+			   files_struct *src_dirfsp,
+			   const struct smb_filename *old_smb_fname,
+			   files_struct *dst_dirfsp,
+			   const struct smb_filename *new_smb_fname,
+			   int flags)
 {
 	struct smb_filename *full_fname_old = NULL;
 	struct smb_filename *full_fname_new = NULL;
 	int result = -1;
 
 	full_fname_old = full_path_from_dirfsp_atname(talloc_tos(),
-					srcfsp,
-					old_smb_fname);
+						      src_dirfsp,
+						      old_smb_fname);
 	if (full_fname_old == NULL) {
 		return -1;
 	}
 	full_fname_new = full_path_from_dirfsp_atname(talloc_tos(),
-					dstfsp,
-					new_smb_fname);
+						      dst_dirfsp,
+						      new_smb_fname);
 	if (full_fname_new == NULL) {
 		TALLOC_FREE(full_fname_old);
 		return -1;

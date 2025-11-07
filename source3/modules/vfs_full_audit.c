@@ -132,6 +132,7 @@ typedef enum _vfs_op_type {
 	SMB_VFS_OP_SENDFILE,
 	SMB_VFS_OP_RECVFILE,
 	SMB_VFS_OP_RENAMEAT,
+	SMB_VFS_OP_RENAME_STREAM,
 	SMB_VFS_OP_FSYNC_SEND,
 	SMB_VFS_OP_FSYNC_RECV,
 	SMB_VFS_OP_STAT,
@@ -211,7 +212,7 @@ typedef enum _vfs_op_type {
 	SMB_VFS_OP_FSETXATTR,
 
 	/* aio operations */
-        SMB_VFS_OP_AIO_FORCE,
+	SMB_VFS_OP_AIO_FORCE,
 
 	/* offline operations */
 	SMB_VFS_OP_IS_OFFLINE,
@@ -267,6 +268,7 @@ static struct {
 	{ SMB_VFS_OP_SENDFILE,	"sendfile" },
 	{ SMB_VFS_OP_RECVFILE,  "recvfile" },
 	{ SMB_VFS_OP_RENAMEAT,	"renameat" },
+	{ SMB_VFS_OP_RENAME_STREAM,	"rename_stream" },
 	{ SMB_VFS_OP_FSYNC_SEND,	"fsync_send" },
 	{ SMB_VFS_OP_FSYNC_RECV,	"fsync_recv" },
 	{ SMB_VFS_OP_STAT,	"stat" },
@@ -1399,11 +1401,11 @@ static ssize_t smb_full_audit_recvfile(vfs_handle_struct *handle, int fromfd,
 }
 
 static int smb_full_audit_renameat(vfs_handle_struct *handle,
-				files_struct *srcfsp,
-				const struct smb_filename *smb_fname_src,
-				files_struct *dstfsp,
-				const struct smb_filename *smb_fname_dst,
-				const struct vfs_rename_how *how)
+				   files_struct *src_dirfsp,
+				   const struct smb_filename *smb_fname_src,
+				   files_struct *dst_dirfsp,
+				   const struct smb_filename *smb_fname_dst,
+				   const struct vfs_rename_how *how)
 {
 	int result;
 	int saved_errno;
@@ -1411,14 +1413,14 @@ static int smb_full_audit_renameat(vfs_handle_struct *handle,
 	struct smb_filename *full_fname_dst = NULL;
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),
-						      srcfsp,
+						      src_dirfsp,
 						      smb_fname_src);
 	if (full_fname_src == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
 	full_fname_dst = full_path_from_dirfsp_atname(talloc_tos(),
-						      dstfsp,
+						      dst_dirfsp,
 						      smb_fname_dst);
 	if (full_fname_dst == NULL) {
 		TALLOC_FREE(full_fname_src);
@@ -1427,11 +1429,11 @@ static int smb_full_audit_renameat(vfs_handle_struct *handle,
 	}
 
 	result = SMB_VFS_NEXT_RENAMEAT(handle,
-				srcfsp,
-				smb_fname_src,
-				dstfsp,
-				smb_fname_dst,
-				how);
+				       src_dirfsp,
+				       smb_fname_src,
+				       dst_dirfsp,
+				       smb_fname_dst,
+				       how);
 
 	if (result == -1) {
 		saved_errno = errno;
@@ -1442,6 +1444,33 @@ static int smb_full_audit_renameat(vfs_handle_struct *handle,
 
 	TALLOC_FREE(full_fname_src);
 	TALLOC_FREE(full_fname_dst);
+
+	if (result == -1) {
+		errno = saved_errno;
+	}
+	return result;
+}
+
+static int smb_full_audit_rename_stream(struct vfs_handle_struct *handle,
+					struct files_struct *src_fsp,
+					const char *dst_name,
+					bool replace_if_exists)
+{
+	int result;
+	int saved_errno;
+
+	result = SMB_VFS_NEXT_RENAME_STREAM(handle,
+					    src_fsp,
+					    dst_name,
+					    replace_if_exists);
+	saved_errno = errno;
+
+	do_log(SMB_VFS_OP_RENAME_STREAM,
+	       (result >= 0),
+	       handle,
+	       "%s|%s",
+	       fsp_str_do_log(src_fsp),
+	       dst_name);
 
 	if (result == -1) {
 		errno = saved_errno;
@@ -1905,35 +1934,35 @@ static int smb_full_audit_readlinkat(vfs_handle_struct *handle,
 }
 
 static int smb_full_audit_linkat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *old_smb_fname,
-			files_struct *dstfsp,
-			const struct smb_filename *new_smb_fname,
-			int flags)
+				 files_struct *src_dirfsp,
+				 const struct smb_filename *old_smb_fname,
+				 files_struct *dst_dirfsp,
+				 const struct smb_filename *new_smb_fname,
+				 int flags)
 {
 	struct smb_filename *old_full_fname = NULL;
 	struct smb_filename *new_full_fname = NULL;
 	int result;
 
 	old_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						srcfsp,
-						old_smb_fname);
+						      src_dirfsp,
+						      old_smb_fname);
 	if (old_full_fname == NULL) {
 		return -1;
 	}
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						dstfsp,
-						new_smb_fname);
+						      dst_dirfsp,
+						      new_smb_fname);
 	if (new_full_fname == NULL) {
 		TALLOC_FREE(old_full_fname);
 		return -1;
 	}
 	result = SMB_VFS_NEXT_LINKAT(handle,
-			srcfsp,
-			old_smb_fname,
-			dstfsp,
-			new_smb_fname,
-			flags);
+				     src_dirfsp,
+				     old_smb_fname,
+				     dst_dirfsp,
+				     new_smb_fname,
+				     flags);
 
 	do_log(SMB_VFS_OP_LINKAT,
 	       (result >= 0),
@@ -2939,6 +2968,7 @@ static struct vfs_fn_pointers vfs_full_audit_fns = {
 	.sendfile_fn = smb_full_audit_sendfile,
 	.recvfile_fn = smb_full_audit_recvfile,
 	.renameat_fn = smb_full_audit_renameat,
+	.rename_stream_fn = smb_full_audit_rename_stream,
 	.fsync_send_fn = smb_full_audit_fsync_send,
 	.fsync_recv_fn = smb_full_audit_fsync_recv,
 	.stat_fn = smb_full_audit_stat,

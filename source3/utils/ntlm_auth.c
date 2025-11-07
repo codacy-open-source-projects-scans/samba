@@ -254,6 +254,7 @@ static const char *get_password(struct cli_credentials *credentials)
 
 	manage_squid_request(NUM_HELPER_MODES /* bogus */, NULL, state, manage_gensec_get_pw_request, (void **)&password);
 	talloc_steal(credentials, password);
+	talloc_keep_secret(password);
 	TALLOC_FREE(frame);
 	return password;
 }
@@ -366,13 +367,13 @@ const char *get_winbind_netbios_name(void)
 
 }
 
-DATA_BLOB get_challenge(void)
+DATA_BLOB get_challenge(TALLOC_CTX *mem_ctx)
 {
 	static DATA_BLOB chal;
 	if (opt_challenge.length)
 		return opt_challenge;
 
-	chal = data_blob(NULL, 8);
+	chal = data_blob_talloc(mem_ctx, NULL, 8);
 
 	generate_random_buffer(chal.data, chal.length);
 	return chal;
@@ -1355,7 +1356,11 @@ static NTSTATUS ntlm_auth_prepare_gensec_server(TALLOC_CTX *mem_ctx,
 
 	cli_credentials_set_conf(server_credentials, lp_ctx);
 
-	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC || lp_security() == SEC_ADS || USE_KERBEROS_KEYTAB) {
+	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC ||
+	    lp_server_role() == ROLE_IPA_DC ||
+	    lp_security() == SEC_ADS ||
+	    USE_KERBEROS_KEYTAB)
+	{
 		cli_credentials_set_kerberos_state(server_credentials,
 						   CRED_USE_KERBEROS_DESIRED,
 						   CRED_SPECIFIED);
@@ -2001,8 +2006,11 @@ static void manage_ntlm_server_1_request(enum stdio_helper_mode stdio_helper_mod
 			SAFE_FREE(error_string);
 		}
 		/* clear out the state */
+		data_blob_free(&challenge);
 		challenge = data_blob_null;
+		data_blob_free(&nt_response);
 		nt_response = data_blob_null;
+		data_blob_free(&lm_response);
 		lm_response = data_blob_null;
 		SAFE_FREE(full_username);
 		SAFE_FREE(username);
@@ -2731,7 +2739,8 @@ enum {
 	while((opt = poptGetNextOpt(pc)) != -1) {
 		switch (opt) {
 		case OPT_CHALLENGE:
-			opt_challenge = strhex_to_data_blob(NULL, hex_challenge);
+			opt_challenge = strhex_to_data_blob(frame,
+							    hex_challenge);
 			if (opt_challenge.length != 8) {
 				fprintf(stderr, "hex decode of %s failed! "
 					"(got %d bytes, expected 8)\n",
@@ -2741,7 +2750,8 @@ enum {
 			}
 			break;
 		case OPT_LM:
-			opt_lm_response = strhex_to_data_blob(NULL, hex_lm_response);
+			opt_lm_response = strhex_to_data_blob(frame,
+							      hex_lm_response);
 			if (opt_lm_response.length != 24) {
 				fprintf(stderr, "hex decode of %s failed! "
 					"(got %d bytes, expected 24)\n",
@@ -2752,7 +2762,8 @@ enum {
 			break;
 
 		case OPT_NT:
-			opt_nt_response = strhex_to_data_blob(NULL, hex_nt_response);
+			opt_nt_response = strhex_to_data_blob(frame,
+							      hex_nt_response);
 			if (opt_nt_response.length < 24) {
 				fprintf(stderr, "hex decode of %s failed! "
 					"(only got %d bytes, needed at least 24)\n",

@@ -52,6 +52,9 @@ const struct dom_sid global_sid_Local_Authority =            /* Local Authority 
 /* S-1-3 */
 const struct dom_sid global_sid_Creator_Owner_Domain =       /* Creator Owner domain */
 { 1, 0, {0,0,0,0,0,3}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-4 */
+const struct dom_sid global_sid_NonUnique_Authority =        /* NonUnique Authority */
+{ 1, 0, {0,0,0,0,0,4}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 /* S-1-5 */
 const struct dom_sid global_sid_NT_Authority =    		/* NT Authority */
 { 1, 0, {0,0,0,0,0,5}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
@@ -72,6 +75,10 @@ const struct dom_sid global_sid_Authenticated_Users =	/* All authenticated rids 
 const struct dom_sid global_sid_Restricted =			/* Restricted Code */
 { 1, 1, {0,0,0,0,0,5}, {12,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 #endif
+
+/* S-1-5-64-10 NTLM Authentication */
+const struct dom_sid global_sid_NTLM_Authentication =
+{ 1, 2, {0,0,0,0,0,5}, {64,10,0,0,0,0,0,0,0,0,0,0,0,0,0}};
 
 /* S-1-18 */
 const struct dom_sid global_sid_Asserted_Identity =       /* Asserted Identity */
@@ -112,6 +119,29 @@ const struct dom_sid global_sid_Compounded_Authentication = 	/* Compounded Authe
 /* S-1-5-21-0-0-0-497 */
 const struct dom_sid global_sid_Claims_Valid = 		/* Claims Valid */
 {1, 5, {0,0,0,0,0,5}, {21,0,0,0,497,0,0,0,0,0,0,0,0,0,0}};
+
+/* S-1-5-15 This Organization */
+const struct dom_sid global_sid_This_Organization =
+{ 1, 1, {0,0,0,0,0,5}, {15,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-5-65-1 This Organization Certificate */
+const struct dom_sid global_sid_This_Organization_Certificate =
+{ 1, 2, {0,0,0,0,0,5}, {65,1,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+/* S-1-5-1000 Other Organization */
+const struct dom_sid global_sid_Other_Organization =
+{ 1, 1, {0,0,0,0,0,5}, {1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
+/* S-1-10 Passport Authority */
+const struct dom_sid global_sid_Passport_Authority =
+{ 1, 0, {0,0,0,0,0,10}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
+/* S-1-16 Mandatory Label Authority */
+const struct dom_sid global_sid_Mandatory_Label_Authority =
+{ 1, 0, {0,0,0,0,0,16}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
+/* S-1-15-2-1 BUILTIN_PACKAGE_ANY_PACKAGE */
+const struct dom_sid global_sid_Builtin_Package_Any_Package =
+{ 1, 2, {0,0,0,0,0,15}, {2,1,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
 /* S-1-5-32 */
 const struct dom_sid global_sid_Builtin = 			/* Local well-known domain */
 { 1, 1, {0,0,0,0,0,5}, {32,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
@@ -414,6 +444,10 @@ NTSTATUS add_sid_to_array_attrs(TALLOC_CTX *mem_ctx,
 {
 	struct auth_SidAttr *tmp = NULL;
 
+	if (sid == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
 	if ((*num) == UINT32_MAX) {
 		return NT_STATUS_INTEGER_OVERFLOW;
 	}
@@ -425,8 +459,10 @@ NTSTATUS add_sid_to_array_attrs(TALLOC_CTX *mem_ctx,
 	}
 	*sids = tmp;
 
-	sid_copy(&((*sids)[*num].sid), sid);
-	(*sids)[*num].attrs = attrs;
+	(*sids)[*num] = (struct auth_SidAttr) {
+		.sid = *sid,
+		.attrs = attrs,
+	};
 	*num += 1;
 
 	return NT_STATUS_OK;
@@ -1073,7 +1109,6 @@ NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,
 				       const char **authority_name)
 {
 	size_t di;
-	bool match_domain = false;
 
 	*name = NULL;
 	*type = SID_NAME_UNKNOWN;
@@ -1095,8 +1130,6 @@ NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,
 			continue;
 		}
 
-		match_domain = true;
-
 		for (ni = 0; ni < d->num_names; ni++) {
 			const struct predefined_name_mapping *n =
 				&d->names[ni];
@@ -1114,7 +1147,7 @@ NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,
 		}
 	}
 
-	if (!match_domain) {
+	if (sid->num_auths == 0) {
 		return NT_STATUS_INVALID_SID;
 	}
 

@@ -66,9 +66,6 @@ struct smbcli_transport *smbcli_transport_init(struct smbcli_socket *sock,
 		transport->options.max_protocol = PROTOCOL_NT1;
 	}
 
-	TALLOC_FREE(sock->event.fde);
-	TALLOC_FREE(sock->event.te);
-
 	smb1_capabilities = 0;
 	smb1_capabilities |= CAP_LARGE_FILES;
 	smb1_capabilities |= CAP_NT_SMBS | CAP_RPC_REMOTE_APIS;
@@ -94,20 +91,18 @@ struct smbcli_transport *smbcli_transport_init(struct smbcli_socket *sock,
 	}
 
 	transport->conn = smbXcli_conn_create(transport,
-					      sock->sock->fd,
+					      &sock->transport,
 					      sock->hostname,
 					      options->signing,
 					      smb1_capabilities,
 					      NULL, /* client_guid */
 					      0, /* smb2_capabilities */
 					      NULL); /* smb3_ciphers */
+	TALLOC_FREE(sock);
 	if (transport->conn == NULL) {
-		TALLOC_FREE(sock);
 		TALLOC_FREE(transport);
 		return NULL;
 	}
-	sock->sock->fd = -1;
-	TALLOC_FREE(sock);
 
 	talloc_set_destructor(transport, transport_destructor);
 

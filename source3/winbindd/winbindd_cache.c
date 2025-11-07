@@ -492,15 +492,15 @@ static NTSTATUS fetch_cache_seqnum( struct winbindd_domain *domain, time_t now )
 
 	time_diff = now - domain->last_seq_check;
 	if ((int)time_diff > lp_winbind_cache_time()) {
-		DBG_DEBUG("fetch_cache_seqnum: timeout [%s][%u @ %u]\n",
+		DBG_DEBUG("fetch_cache_seqnum: timeout [%s][%u @ %jd]\n",
 			domain->name, domain->sequence_number,
-			(uint32_t)domain->last_seq_check);
+			(intmax_t)domain->last_seq_check);
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	DBG_DEBUG("fetch_cache_seqnum: success [%s][%u @ %u]\n",
+	DBG_DEBUG("fetch_cache_seqnum: success [%s][%u @ %jd]\n",
 		domain->name, domain->sequence_number,
-		(uint32_t)domain->last_seq_check);
+		(intmax_t)domain->last_seq_check);
 
 	return NT_STATUS_OK;
 }
@@ -532,8 +532,8 @@ bool wcache_store_seqnum(const char *domain_name, uint32_t seqnum,
 		return false;
 	}
 
-	DBG_DEBUG("wcache_store_seqnum: success [%s][%u @ %u]\n",
-		   domain_name, seqnum, (unsigned)last_seq_check);
+	DBG_DEBUG("wcache_store_seqnum: success [%s][%u @ %ju]\n",
+		   domain_name, seqnum, (uintmax_t)last_seq_check);
 
 	return true;
 }
@@ -3467,13 +3467,11 @@ static int traverse_fn_get_credlist(TDB_CONTEXT *the_tdb, TDB_DATA kbuf, TDB_DAT
 
 	if (strncmp((const char *)kbuf.dptr, "CRED/", 5) == 0) {
 
-		cred = SMB_MALLOC_P(struct cred_list);
+		cred = SMB_CALLOC_ARRAY(struct cred_list, 1);
 		if (cred == NULL) {
 			DBG_ERR("traverse_fn_remove_first_creds: failed to malloc new entry for list\n");
 			return -1;
 		}
-
-		ZERO_STRUCTP(cred);
 
 		/* save a copy of the key */
 

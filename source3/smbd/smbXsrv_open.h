@@ -35,7 +35,8 @@ struct smbXsrv_client;
 
 NTSTATUS smbXsrv_open_global_init(void);
 NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
-			     struct auth_session_info *session_info,
+			     struct smbXsrv_session *session,
+			     struct smbXsrv_tcon *tcon,
 			     NTTIME now,
 			     struct smbXsrv_open **_open);
 NTSTATUS smbXsrv_open_update(struct smbXsrv_open *_open);
@@ -53,23 +54,32 @@ NTSTATUS smb2srv_open_lookup(struct smbXsrv_connection *conn,
 NTSTATUS smbXsrv_open_purge_replay_cache(struct smbXsrv_client *client,
 					 const struct GUID *create_guid);
 NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
-					  struct GUID caller_req_guid,
+					  struct smbXsrv_session *session,
 					  struct GUID create_guid,
 					  const char *name,
 					  NTTIME now,
+					  uint64_t *persistent_id,
 					  struct smbXsrv_open **_open);
+struct smb2_lease_key;
 NTSTATUS smb2srv_open_recreate(struct smbXsrv_connection *conn,
-			       struct auth_session_info *session_info,
+			       struct smbXsrv_session *session,
+			       struct smbXsrv_tcon *tcon,
 			       uint64_t persistent_id,
 			       const struct GUID *create_guid,
+			       const struct smb2_lease_key *lease_key,
 			       NTTIME now,
 			       struct smbXsrv_open **_open);
 
 struct db_record;
 NTSTATUS smbXsrv_open_global_traverse(
-	int (*fn)(struct db_record *rec, struct smbXsrv_open_global0 *, void *),
+	int (*fn)(struct db_record *rec,
+		  struct smbXsrv_open_global0 *global,
+		  TDB_DATA *rc_open_global_key,
+		  void *private_data),
 	void *private_data);
 
 NTSTATUS smbXsrv_open_cleanup(uint64_t persistent_id);
+NTSTATUS smbXsrv_replay_cleanup(const struct GUID *client_guid,
+				const struct GUID *create_guid);
 
 #endif

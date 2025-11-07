@@ -48,6 +48,11 @@
  */
 #define NDR_TOKEN_MAX_LIST_SIZE 65535
 
+/*
+ * An arbitrary limit used by the fixed-size pull/push functions
+ */
+#define NDR_FIXED_SIZE_MARSHALL_MAX_TOKENS 10
+
 size_t ndr_token_max_list_size(void) {
 	return NDR_TOKEN_MAX_LIST_SIZE;
 };
@@ -305,7 +310,6 @@ _PUBLIC_ void ndr_print_debugc_helper(struct ndr_print *ndr, const char *format,
 {
 	va_list ap;
 	char *s = NULL;
-	uint32_t i;
 	int ret;
 	int dbgc_class;
 
@@ -325,11 +329,7 @@ _PUBLIC_ void ndr_print_debugc_helper(struct ndr_print *ndr, const char *format,
 		return;
 	}
 
-	for (i=0;i<ndr->depth;i++) {
-		DEBUGADDC(dbgc_class, 1,("    "));
-	}
-
-	DEBUGADDC(dbgc_class, 1,("%s\n", s));
+	DEBUGADDC(dbgc_class, 1, ("%*.s\n", 4 * ndr->depth, s));
 	free(s);
 }
 
@@ -337,7 +337,6 @@ _PUBLIC_ void ndr_print_debug_helper(struct ndr_print *ndr, const char *format, 
 {
 	va_list ap;
 	char *s = NULL;
-	uint32_t i;
 	int ret;
 
 	va_start(ap, format);
@@ -354,23 +353,16 @@ _PUBLIC_ void ndr_print_debug_helper(struct ndr_print *ndr, const char *format, 
 		return;
 	}
 
-	for (i=0;i<ndr->depth;i++) {
-		DEBUGADD(1,("    "));
-	}
-
-	DEBUGADD(1,("%s\n", s));
+	DEBUGADD(1, ("%*.s%s\n", 4 * ndr->depth, "", s));
 	free(s);
 }
 
 _PUBLIC_ void ndr_print_printf_helper(struct ndr_print *ndr, const char *format, ...)
 {
 	va_list ap;
-	uint32_t i;
 
 	if (!ndr->no_newline) {
-		for (i=0;i<ndr->depth;i++) {
-			printf("    ");
-		}
+		printf("%*.s", 4 * ndr->depth, "");
 	}
 
 	va_start(ap, format);
@@ -384,13 +376,12 @@ _PUBLIC_ void ndr_print_printf_helper(struct ndr_print *ndr, const char *format,
 _PUBLIC_ void ndr_print_string_helper(struct ndr_print *ndr, const char *format, ...)
 {
 	va_list ap;
-	uint32_t i;
 
 	if (!ndr->no_newline) {
-		for (i=0;i<ndr->depth;i++) {
-			ndr->private_data = talloc_asprintf_append_buffer(
-				(char *)ndr->private_data, "    ");
-		}
+		talloc_asprintf_addbuf((char **)&ndr->private_data,
+				       "%*.s",
+				       ndr->depth * 4,
+				       "");
 	}
 
 	va_start(ap, format);
@@ -398,8 +389,7 @@ _PUBLIC_ void ndr_print_string_helper(struct ndr_print *ndr, const char *format,
 						    format, ap);
 	va_end(ap);
 	if (!ndr->no_newline) {
-		ndr->private_data = talloc_asprintf_append_buffer((char *)ndr->private_data,
-								  "\n");
+		talloc_asprintf_addbuf((char **)&ndr->private_data, "\n");
 	}
 }
 
@@ -1096,6 +1086,12 @@ _PUBLIC_ enum ndr_err_code ndr_token_store(TALLOC_CTX *mem_ctx,
 			 const void *key,
 			 uint32_t value)
 {
+	if (list->fixed_alloc_count != 0) {
+		if (list->count >= list->fixed_alloc_count) {
+			return NDR_ERR_RANGE;
+		}
+		goto store;
+	}
 	if (list->tokens == NULL) {
 		list->tokens = talloc_array(mem_ctx, struct ndr_token, 10);
 		if (list->tokens == NULL) {
@@ -1130,6 +1126,7 @@ _PUBLIC_ enum ndr_err_code ndr_token_store(TALLOC_CTX *mem_ctx,
 			list->tokens = new_tokens;
 		}
 	}
+store:
 	list->tokens[list->count].key = key;
 	list->tokens[list->count].value = value;
 	list->count++;
@@ -1526,10 +1523,16 @@ _PUBLIC_ enum ndr_err_code ndr_pull_struct_blob_noalloc(const uint8_t *buf,
 	 * This allows us to keep the safety of the PIDL-generated
 	 * code without the talloc() overhead.
 	 */
+	struct ndr_token tokens[NDR_FIXED_SIZE_MARSHALL_MAX_TOKENS];
+	struct ndr_token_list switch_list = {
+		.tokens = tokens,
+		.fixed_alloc_count = ARRAY_SIZE(tokens),
+	};
 	struct ndr_pull ndr = {
 		.data = discard_const_p(uint8_t, buf),
 		.data_size = buflen,
 		.current_mem_ctx = (void *)-1,
+		.switch_list = switch_list,
 	};
 
 	NDR_CHECK(fn(&ndr, NDR_SCALARS|NDR_BUFFERS, p));
@@ -1647,10 +1650,16 @@ _PUBLIC_ enum ndr_err_code ndr_push_struct_blob(DATA_BLOB *blob, TALLOC_CTX *mem
 _PUBLIC_ enum ndr_err_code ndr_push_struct_into_fixed_blob(
 	DATA_BLOB *blob, const void *p, ndr_push_flags_fn_t fn)
 {
+	struct ndr_token tokens[NDR_FIXED_SIZE_MARSHALL_MAX_TOKENS];
+	struct ndr_token_list switch_list = {
+		.tokens = tokens,
+		.fixed_alloc_count = ARRAY_SIZE(tokens),
+	};
 	struct ndr_push ndr = {
 		.data = blob->data,
 		.alloc_size = blob->length,
-		.fixed_buf_size = true
+		.fixed_buf_size = true,
+		.switch_list = switch_list,
 	};
 
 	NDR_CHECK(fn(&ndr, NDR_SCALARS|NDR_BUFFERS, p));
@@ -1668,7 +1677,7 @@ _PUBLIC_ enum ndr_err_code ndr_push_struct_into_fixed_blob(
 /*
   push a union to a blob using NDR
 */
-_PUBLIC_ enum ndr_err_code ndr_push_union_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p,
+_PUBLIC_ enum ndr_err_code ndr_push_union_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, const void *p,
 			     uint32_t level, ndr_push_flags_fn_t fn)
 {
 	struct ndr_push *ndr;

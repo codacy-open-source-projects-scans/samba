@@ -769,15 +769,13 @@ static void call_trans2open(connection_struct *conn,
 }
 
 static NTSTATUS get_lanman2_dir_entry(TALLOC_CTX *ctx,
-				connection_struct *conn,
-				struct dptr_struct *dirptr,
+				struct files_struct *dirfsp,
 				uint16_t flags2,
 				const char *path_mask,
 				uint32_t dirtype,
 				int info_level,
 				bool requires_resume_key,
 				bool dont_descend,
-				bool ask_sharemode,
 				char **ppdata,
 				char *base_data,
 				char *end_data,
@@ -793,9 +791,9 @@ static NTSTATUS get_lanman2_dir_entry(TALLOC_CTX *ctx,
 		align = 1;
 	}
 
-	return smbd_dirptr_lanman2_entry(ctx, conn, dirptr, flags2,
+	return smbd_dirptr_lanman2_entry(ctx, dirfsp, flags2,
 					 path_mask, dirtype, info_level,
-					 requires_resume_key, dont_descend, ask_sharemode,
+					 requires_resume_key, dont_descend,
 					 true, align, do_pad,
 					 ppdata, base_data, end_data,
 					 space_remaining,
@@ -842,7 +840,6 @@ static void call_trans2findfirst(connection_struct *conn,
 	int space_remaining;
 	struct ea_list *ea_list = NULL;
 	NTSTATUS ntstatus = NT_STATUS_OK;
-	bool ask_sharemode;
 	struct smbXsrv_connection *xconn = req->xconn;
 	struct smbd_server_connection *sconn = req->sconn;
 	uint32_t ucf_flags = ucf_flags_from_smb_request(req);
@@ -1107,20 +1104,16 @@ static void call_trans2findfirst(connection_struct *conn,
 	space_remaining = max_data_bytes;
 	out_of_space = False;
 
-	ask_sharemode = fsp_search_ask_sharemode(fsp);
-
 	for (i=0;(i<maxentries) && !finished && !out_of_space;i++) {
 
 		ntstatus = get_lanman2_dir_entry(talloc_tos(),
-						 conn,
-						 fsp->dptr,
+						 fsp,
 						 req->flags2,
 						 mask,
 						 dirtype,
 						 info_level,
 						 requires_resume_key,
 						 dont_descend,
-						 ask_sharemode,
 						 &p,
 						 pdata,
 						 data_end,
@@ -1286,7 +1279,6 @@ static void call_trans2findnext(connection_struct *conn,
 	int space_remaining;
 	struct ea_list *ea_list = NULL;
 	NTSTATUS ntstatus = NT_STATUS_OK;
-	bool ask_sharemode;
 	TALLOC_CTX *ctx = talloc_tos();
 	struct smbd_server_connection *sconn = req->sconn;
 	bool backup_priv = false;
@@ -1571,20 +1563,16 @@ static void call_trans2findnext(connection_struct *conn,
 		}
 	} /* end if resume_name && !continue_bit */
 
-	ask_sharemode = fsp_search_ask_sharemode(fsp);
-
 	for (i=0;(i<(int)maxentries) && !finished && !out_of_space ;i++) {
 
 		ntstatus = get_lanman2_dir_entry(ctx,
-						 conn,
-						 fsp->dptr,
+						 fsp,
 						 req->flags2,
 						 mask,
 						 dirtype,
 						 info_level,
 						 requires_resume_key,
 						 dont_descend,
-						 ask_sharemode,
 						 &p,
 						 pdata,
 						 data_end,
@@ -1786,7 +1774,6 @@ static void call_trans2setfsinfo(connection_struct *conn,
 			if (xconn->smb1.unix_info.client_cap_low &
 			    CIFS_UNIX_POSIX_PATHNAMES_CAP)
 			{
-				lp_set_posix_pathnames();
 				mangle_change_to_posix();
 			}
 
@@ -1818,7 +1805,7 @@ static void call_trans2setfsinfo(connection_struct *conn,
 					return;
 				}
 
-				if (lp_server_smb_encrypt(SNUM(conn)) ==
+				if (lp_server_smb_encrypt(xconn, SNUM(conn)) ==
 				    SMB_ENCRYPTION_OFF) {
 					reply_nterror(
 						req,
@@ -2045,7 +2032,6 @@ static void call_trans2qfilepathinfo(connection_struct *conn,
 				     struct smb_filename *smb_fname,
 				     struct files_struct *fsp,
 				     bool delete_pending,
-				     struct timespec write_time_ts,
 				     char **pparams, int total_params,
 				     char **ppdata, int total_data,
 				     unsigned int max_data_bytes)
@@ -2122,7 +2108,7 @@ total_data=%u (should be %u)\n", (unsigned int)total_data, (unsigned int)IVAL(pd
 
 	status = smbd_do_qfilepathinfo(conn, req, req, info_level,
 				       fsp, smb_fname,
-				       delete_pending, write_time_ts,
+				       delete_pending,
 				       ea_list,
 				       req->flags2, max_data_bytes,
 				       &fixed_portion,
@@ -2570,7 +2556,6 @@ static void call_trans2qpathinfo(
 	struct smb_filename *smb_fname = NULL;
 	struct smb_filename *smb_fname_rel = NULL;
 	bool delete_pending = False;
-	struct timespec write_time_ts = { .tv_sec = 0, };
 	struct files_struct *dirfsp = NULL;
 	files_struct *fsp = NULL;
 	char *fname = NULL;
@@ -2678,8 +2663,7 @@ static void call_trans2qpathinfo(
 
 		get_file_infos(base_fsp->file_id,
 			       base_fsp->name_hash,
-			       &delete_pending,
-			       NULL);
+			       &delete_pending);
 		if (delete_pending) {
 			reply_nterror(req, NT_STATUS_DELETE_PENDING);
 			return;
@@ -2689,8 +2673,7 @@ static void call_trans2qpathinfo(
 	if (fsp_getinfo_ask_sharemode(fsp)) {
 		get_file_infos(fsp->file_id,
 			       fsp->name_hash,
-			       &delete_pending,
-			       &write_time_ts);
+			       &delete_pending);
 	}
 
 	if (delete_pending) {
@@ -2778,7 +2761,6 @@ static void call_trans2qpathinfo(
 		smb_fname,
 		fsp,
 		false,
-		write_time_ts,
 		pparams,
 		total_params,
 		ppdata,
@@ -2874,7 +2856,6 @@ static void call_trans2qfileinfo(
 	uint16_t info_level;
 	struct smb_filename *smb_fname = NULL;
 	bool delete_pending = False;
-	struct timespec write_time_ts = { .tv_sec = 0, };
 	files_struct *fsp = NULL;
 	struct file_id fileid;
 	bool info_level_handled;
@@ -2956,8 +2937,7 @@ static void call_trans2qfileinfo(
 			fileid = vfs_file_id_from_sbuf(
 				conn, &smb_fname->st);
 			get_file_infos(fileid, fsp->name_hash,
-				       &delete_pending,
-				       &write_time_ts);
+				       &delete_pending);
 		}
 	} else {
 		/*
@@ -2974,8 +2954,7 @@ static void call_trans2qfileinfo(
 			fileid = vfs_file_id_from_sbuf(
 				conn, &smb_fname->st);
 			get_file_infos(fileid, fsp->name_hash,
-				       &delete_pending,
-				       &write_time_ts);
+				       &delete_pending);
 		}
 	}
 
@@ -3028,7 +3007,6 @@ static void call_trans2qfileinfo(
 		smb_fname,
 		fsp,
 		delete_pending,
-		write_time_ts,
 		pparams,
 		total_params,
 		ppdata,
@@ -3722,12 +3700,16 @@ static NTSTATUS smb_set_file_unix_link(connection_struct *conn,
 
 static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 					struct smb_request *req,
-					const char *pdata, int total_data,
-					struct smb_filename *smb_fname_new)
+					const char *pdata,
+					int total_data,
+					struct files_struct *dirfsp_new,
+					struct smb_filename *smb_fname_new,
+					struct smb_filename *smb_fname_new_rel)
 {
 	char *oldname = NULL;
 	struct files_struct *src_dirfsp = NULL;
 	struct smb_filename *smb_fname_old = NULL;
+	struct smb_filename *smb_fname_old_rel = NULL;
 	uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 	NTTIME old_twrp = 0;
 	TALLOC_CTX *ctx = talloc_tos();
@@ -3765,8 +3747,9 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 		return status;
 	}
 
-	DEBUG(10,("smb_set_file_unix_hlink: SMB_SET_FILE_UNIX_LINK doing hard link %s -> %s\n",
-		smb_fname_str_dbg(smb_fname_new), oldname));
+	DBG_DEBUG("SMB_SET_FILE_UNIX_LINK doing hard link %s -> %s\n",
+		  smb_fname_str_dbg(smb_fname_new),
+		  oldname);
 
 	if (ucf_flags & UCF_GMT_PATHNAME) {
 		extract_snapshot_token(oldname, &old_twrp);
@@ -3775,13 +3758,15 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
-	status = filename_convert_dirfsp(ctx,
-					 conn,
-					 oldname,
-					 ucf_flags,
-					 old_twrp,
-					 &src_dirfsp,
-					 &smb_fname_old);
+	status = filename_convert_dirfsp_rel(ctx,
+					     conn,
+					     conn->cwd_fsp,
+					     oldname,
+					     ucf_flags,
+					     old_twrp,
+					     &src_dirfsp,
+					     &smb_fname_old,
+					     &smb_fname_old_rel);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -3790,8 +3775,12 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 				  conn,
 				  req,
 				  false,
+				  src_dirfsp,
 				  smb_fname_old,
-				  smb_fname_new);
+				  smb_fname_old_rel,
+				  dirfsp_new,
+				  smb_fname_new,
+				  smb_fname_new_rel);
 }
 
 /****************************************************************************
@@ -3932,9 +3921,7 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 	uid_t set_owner = (uid_t)SMB_UID_NO_CHANGE;
 	gid_t set_grp = (uid_t)SMB_GID_NO_CHANGE;
 	NTSTATUS status = NT_STATUS_OK;
-	files_struct *all_fsps = NULL;
 	bool modify_mtime = true;
-	struct file_id id;
 	SMB_STRUCT_STAT sbuf;
 
 	if (!CAN_WRITE(conn)) {
@@ -4113,17 +4100,6 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 	if (is_omit_timespec(&ft.mtime) && is_omit_timespec(&ft.atime)) {
 		/* No change, don't cancel anything. */
 		return status;
-	}
-
-	id = vfs_file_id_from_sbuf(conn, &sbuf);
-	for(all_fsps = file_find_di_first(conn->sconn, id, true); all_fsps;
-			all_fsps = file_find_di_next(all_fsps, true)) {
-		/*
-		 * We're setting the time explicitly for UNIX.
-		 * Cancel any pending changes over all handles.
-		 */
-		all_fsps->fsp_flags.update_write_time_on_close = false;
-		TALLOC_FREE(all_fsps->update_write_time_event);
 	}
 
 	/*
@@ -4369,6 +4345,7 @@ static void call_trans2setpathinfo(
 {
 	uint16_t info_level;
 	struct smb_filename *smb_fname = NULL;
+	struct smb_filename *smb_fname_rel = NULL;
 	struct files_struct *dirfsp = NULL;
 	struct files_struct *fsp = NULL;
 	char *params = *pparams;
@@ -4440,13 +4417,15 @@ static void call_trans2setpathinfo(
 		reply_nterror(req, status);
 		return;
 	}
-	status = filename_convert_dirfsp(req,
-					 conn,
-					 fname,
-					 ucf_flags,
-					 twrp,
-					 &dirfsp,
-					 &smb_fname);
+	status = filename_convert_dirfsp_rel(req,
+					     conn,
+					     conn->cwd_fsp,
+					     fname,
+					     ucf_flags,
+					     twrp,
+					     &dirfsp,
+					     &smb_fname,
+					     &smb_fname_rel);
 	if (!NT_STATUS_IS_OK(status)) {
 		if (NT_STATUS_EQUAL(status,NT_STATUS_PATH_NOT_COVERED)) {
 			reply_botherror(req,
@@ -4491,8 +4470,13 @@ static void call_trans2setpathinfo(
 		break;
 
 	case SMB_SET_FILE_UNIX_HLINK:
-		status = smb_set_file_unix_hlink(
-			conn, req, *ppdata, total_data, smb_fname);
+		status = smb_set_file_unix_hlink(conn,
+						 req,
+						 *ppdata,
+						 total_data,
+						 dirfsp,
+						 smb_fname,
+						 smb_fname_rel);
 		break;
 
 	case SMB_SET_FILE_UNIX_BASIC:
@@ -5550,10 +5534,10 @@ void reply_transs2(struct smb_request *req)
 	/* Revise state->total_param and state->total_data in case they have
 	   changed downwards */
 
-	if (SVAL(req->vwv+0, 0) < state->total_param)
-		state->total_param = SVAL(req->vwv+0, 0);
-	if (SVAL(req->vwv+1, 0) < state->total_data)
-		state->total_data = SVAL(req->vwv+1, 0);
+	state->total_param = MIN(PULL_LE_U16(req->vwv + 0, 0),
+				 state->total_param);
+	state->total_data = MIN(PULL_LE_U16(req->vwv + 1, 0),
+				state->total_data);
 
 	pcnt = SVAL(req->vwv+2, 0);
 	poff = SVAL(req->vwv+3, 0);

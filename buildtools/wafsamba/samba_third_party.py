@@ -18,13 +18,13 @@ Build.BuildContext.CHECK_POPT = CHECK_POPT
 
 @conf
 def CHECK_CMOCKA(conf):
-    return conf.CHECK_BUNDLED_SYSTEM_PKG('cmocka', minversion='1.1.3')
+    return conf.CHECK_BUNDLED_SYSTEM_PKG('cmocka', minversion='1.1.8')
 
 Build.BuildContext.CHECK_CMOCKA = CHECK_CMOCKA
 
 @conf
 def CHECK_SOCKET_WRAPPER(conf):
-    return conf.CHECK_BUNDLED_SYSTEM_PKG('socket_wrapper', minversion='1.4.3')
+    return conf.CHECK_BUNDLED_SYSTEM_PKG('socket_wrapper', minversion='1.5.1')
 Build.BuildContext.CHECK_SOCKET_WRAPPER = CHECK_SOCKET_WRAPPER
 
 @conf
@@ -44,5 +44,22 @@ Build.BuildContext.CHECK_UID_WRAPPER = CHECK_UID_WRAPPER
 
 @conf
 def CHECK_PAM_WRAPPER(conf):
-    return conf.CHECK_BUNDLED_SYSTEM_PKG('pam_wrapper', minversion='1.1.7')
+    return conf.CHECK_BUNDLED_SYSTEM_PKG('pam_wrapper', minversion='1.1.8')
 Build.BuildContext.CHECK_PAM_WRAPPER = CHECK_PAM_WRAPPER
+
+@conf
+def CHECK_LIBQUIC(conf):
+    return conf.CHECK_BUNDLED_SYSTEM_PKG('libquic', minversion='1.1')
+Build.BuildContext.CHECK_LIBQUIC = CHECK_LIBQUIC
+
+@conf
+def CHECK_LIBNGTCP2(conf):
+    minversion = '1.12.0'
+    if not conf.CHECK_BUNDLED_SYSTEM_PKG('libngtcp2_crypto_gnutls',
+                                         minversion=minversion):
+        return False
+    if not conf.CHECK_BUNDLED_SYSTEM_PKG('libngtcp2',
+                                         minversion=minversion):
+        return False
+    return True
+Build.BuildContext.CHECK_LIBNGTCP2 = CHECK_LIBNGTCP2

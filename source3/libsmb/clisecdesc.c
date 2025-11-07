@@ -18,7 +18,9 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "source3/libsmb/cli_smb2_fnum.h"
 #include "../libcli/security/secdesc.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "lib/util/tevent_ntstatus.h"
@@ -67,7 +69,8 @@ struct tevent_req *cli_query_security_descriptor_send(
 		return req;
 	}
 
-	PUSH_LE_U32(state->param, 0, fnum);
+	PUSH_LE_U16(state->param, 0, fnum);
+	/* 2 bytes reserved, set to 0 by tevent_req_create */
 	PUSH_LE_U32(state->param, 4, sec_info);
 
 	subreq = cli_trans_send(
@@ -266,8 +269,9 @@ struct tevent_req *cli_set_security_descriptor_send(
 		return req;
 	}
 
-	SIVAL(state->param, 0, fnum);
-	SIVAL(state->param, 4, sec_info);
+	PUSH_LE_U16(state->param, 0, fnum);
+	/* 2 bytes reserved, set to 0 by tevent_req_create */
+	PUSH_LE_U32(state->param, 4, sec_info);
 
 	subreq = cli_trans_send(
 		state, 		/* mem_ctx */

@@ -360,43 +360,6 @@ def RUN_PYTHON_TESTS(testfiles, pythonpath=None, extra_env=None):
     return result
 
 
-# make sure we have md5. some systems don't have it
-try:
-    from hashlib import md5
-    # Even if hashlib.md5 exists, it may be unusable.
-    # Try to use MD5 function. In FIPS mode this will cause an exception
-    # and we'll get to the replacement code
-    foo = md5(b'abcd')
-except:
-    try:
-        import md5
-        # repeat the same check here, mere success of import is not enough.
-        # Try to use MD5 function. In FIPS mode this will cause an exception
-        foo = md5.md5(b'abcd')
-    except:
-        Context.SIG_NIL = hash('abcd')
-        class replace_md5(object):
-            def __init__(self):
-                self.val = None
-            def update(self, val):
-                self.val = hash((self.val, val))
-            def digest(self):
-                return str(self.val)
-            def hexdigest(self):
-                return self.digest().encode('hex')
-        def replace_h_file(filename):
-            f = open(filename, 'rb')
-            m = replace_md5()
-            while (filename):
-                filename = f.read(100000)
-                m.update(filename)
-            f.close()
-            return m.digest()
-        Utils.md5 = replace_md5
-        Task.md5 = replace_md5
-        Utils.h_file = replace_h_file
-
-
 def LOAD_ENVIRONMENT():
     '''load the configuration environment, allowing access to env vars
        from new commands'''
@@ -502,7 +465,7 @@ def CHECK_MAKEFLAGS(options):
 
 waflib_options_parse_cmd_args = Options.OptionsContext.parse_cmd_args
 def wafsamba_options_parse_cmd_args(self, _args=None, cwd=None, allow_unknown=False):
-    (options, commands, envvars) = \
+    (options, leftover_args) = \
         waflib_options_parse_cmd_args(self,
                                       _args=_args,
                                       cwd=cwd,
@@ -526,7 +489,7 @@ def wafsamba_options_parse_cmd_args(self, _args=None, cwd=None, allow_unknown=Fa
                 return
         from waflib import Runner
         Runner.Spawner = NoOpSpawner
-    return options, commands, envvars
+    return options, leftover_args
 Options.OptionsContext.parse_cmd_args = wafsamba_options_parse_cmd_args
 
 option_groups = {}

@@ -44,6 +44,7 @@ struct ndr_token;
 struct ndr_token_list {
 	struct ndr_token *tokens;
 	uint32_t count;
+	uint32_t fixed_alloc_count;
 };
 
 struct ndr_compression_state;
@@ -632,7 +633,7 @@ enum ndr_err_code ndr_push_struct_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, con
 enum ndr_err_code ndr_push_struct_into_fixed_blob(DATA_BLOB *blob,
 						  const void *p,
 						  ndr_push_flags_fn_t fn);
-enum ndr_err_code ndr_push_union_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, void *p, uint32_t level, ndr_push_flags_fn_t fn);
+enum ndr_err_code ndr_push_union_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, const void *p, uint32_t level, ndr_push_flags_fn_t fn);
 size_t ndr_size_struct(const void *p, libndr_flags flags, ndr_push_flags_fn_t push);
 size_t ndr_size_union(const void *p, libndr_flags flags, uint32_t level, ndr_push_flags_fn_t push);
 uint32_t ndr_push_get_relative_base_offset(struct ndr_push *ndr);

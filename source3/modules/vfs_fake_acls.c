@@ -1,4 +1,4 @@
-/* 
+/*
  * Fake ACLs VFS module.  Implements passthrough operation of all VFS
  * calls to disk functions, except for file ownership and ACLs, which
  * are stored in xattrs.
@@ -11,12 +11,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 3 of the License, or
  * (at your option) any later version.
- *  
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *  
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
@@ -75,179 +75,191 @@ static int fake_acls_fgid(vfs_handle_struct *handle,
 	return 0;
 }
 
-static int fake_acls_stat(vfs_handle_struct *handle,
-			   struct smb_filename *smb_fname)
+static int fake_acls_fuidgid(vfs_handle_struct *handle,
+			     files_struct *fsp,
+			     uid_t *uid,
+			     gid_t *gid)
 {
+	int ret;
+
+	ret = fake_acls_fuid(handle, fsp, uid);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = fake_acls_fgid(handle, fsp, gid);
+	return ret;
+}
+
+static int fake_acls_fstatat(struct vfs_handle_struct *handle,
+			     const struct files_struct *dirfsp,
+			     const struct smb_filename *smb_relname,
+			     SMB_STRUCT_STAT *sbuf,
+			     int flags)
+{
+	connection_struct *conn = handle->conn;
 	int ret = -1;
 	struct in_pathref_data *prd = NULL;
-	struct smb_filename *smb_fname_cp = NULL;
-	struct files_struct *fsp = NULL;
+	struct files_struct *root_fsp = NULL;
+	struct files_struct *new_dirfsp = NULL;
+	struct smb_filename *smb_fname = NULL;
+	struct smb_filename *new_relname = NULL;
+	char *base_name = smb_relname->base_name;
+	uint32_t ucf_flags;
+	NTSTATUS status;
 
 	SMB_VFS_HANDLE_GET_DATA(handle,
 				prd,
 				struct in_pathref_data,
 				return -1);
 
-	ret = SMB_VFS_NEXT_STAT(handle, smb_fname);
+	ret = SMB_VFS_NEXT_FSTATAT(handle, dirfsp, smb_relname, sbuf, flags);
 	if (ret != 0) {
 		return ret;
 	}
 
-	if (smb_fname->fsp != NULL) {
-		fsp = metadata_fsp(smb_fname->fsp);
-	} else {
-		NTSTATUS status;
+	if (smb_relname->fsp != NULL) {
+		ret = fake_acls_fuidgid(handle,
+					metadata_fsp(smb_relname->fsp),
+					&sbuf->st_ex_uid,
+					&sbuf->st_ex_gid);
+		return ret;
+	}
 
-		/*
-		 * Ensure openat_pathref_fsp()
-		 * can't recurse into fake_acls_stat().
-		 * openat_pathref_fsp() doesn't care
-		 * about the uid/gid values, it only
-		 * wants a valid/invalid stat answer
-		 * and we know smb_fname exists as
-		 * the SMB_VFS_NEXT_STAT() returned
-		 * zero above.
-		 */
-		if (prd->calling_pathref_fsp) {
-			return 0;
-		}
+	/*
+	 * Ensure openat_pathref_fsp() can't recurse into
+	 * fake_acls_stat().  openat_pathref_fsp() doesn't care about
+	 * the uid/gid values, it only wants a valid/invalid stat
+	 * answer and we know smb_fname exists as the
+	 * SMB_VFS_NEXT_STAT() returned zero above.
+	 */
+	if (prd->calling_pathref_fsp) {
+		return 0;
+	}
 
+	/* Recursion guard. */
+	prd->calling_pathref_fsp = true;
+
+	/*
+	 * Get a pathref fsp on the basename where we have the EAs,
+	 * ignore smb_relname->stream_name
+	 */
+	if (base_name[0] == '/') {
 		/*
-		 * openat_pathref_fsp() expects a talloc'ed
-		 * smb_filename. stat can be passed a struct
-		 * from the stack. Make a talloc'ed copy
-		 * so openat_pathref_fsp() can add its
-		 * destructor.
+		 * filename_convert_dirfsp can't deal with absolute
+		 * paths, make this relative to "/"
 		 */
-		smb_fname_cp = cp_smb_filename(talloc_tos(),
-					       smb_fname);
-		if (smb_fname_cp == NULL) {
-			errno = ENOMEM;
+		base_name += 1;
+		status = open_rootdir_pathref_fsp(conn, &root_fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			prd->calling_pathref_fsp = false;
+			errno = ENOENT;
 			return -1;
 		}
-
-		if (fsp_get_pathref_fd(handle->conn->cwd_fsp) == -1) {
-			/*
-			 * No tcon around, fail as if we don't have
-			 * the EAs
-			 */
-			status = NT_STATUS_INVALID_HANDLE;
-		} else {
-			/* Recursion guard. */
-			prd->calling_pathref_fsp = true;
-			status = openat_pathref_fsp(handle->conn->cwd_fsp,
-						    smb_fname_cp);
-			/* End recursion guard. */
-			prd->calling_pathref_fsp = false;
-		}
-
-		if (!NT_STATUS_IS_OK(status)) {
-			/*
-			 * Ignore errors here. We know
-			 * the path exists (the SMB_VFS_NEXT_STAT()
-			 * above succeeded. So being unable to
-			 * open a pathref fsp can be due to a
-			 * range of errors (startup path beginning
-			 * with '/' for example, path = ".." when
-			 * enumerating a directory. Just treat this
-			 * the same way as the path not having the
-			 * FAKE_UID or FAKE_GID EA's present. For the
-			 * test purposes of this module (fake NT ACLs
-			 * from windows clients) this is close enough.
-			 * Just report for debugging purposes.
-			 */
-			DBG_DEBUG("Unable to get pathref fsp on %s. "
-				  "Error %s\n",
-				  smb_fname_str_dbg(smb_fname_cp),
-				  nt_errstr(status));
-			TALLOC_FREE(smb_fname_cp);
-			return 0;
-		}
-		fsp = smb_fname_cp->fsp;
+		dirfsp = root_fsp;
 	}
 
-	ret = fake_acls_fuid(handle,
-			     fsp,
-			     &smb_fname->st.st_ex_uid);
-	if (ret != 0) {
-		TALLOC_FREE(smb_fname_cp);
-		return ret;
+	if (ISDOT(base_name)) {
+		/*
+		 * filename_convert_dirfsp does not like ".", use ""
+		 */
+		base_name += 1;
 	}
-	ret = fake_acls_fgid(handle,
-			     fsp,
-			     &smb_fname->st.st_ex_gid);
-	if (ret != 0) {
-		TALLOC_FREE(smb_fname_cp);
-		return ret;
+
+	ucf_flags = UCF_POSIX_PATHNAMES;
+
+	if (flags & AT_SYMLINK_NOFOLLOW) {
+		ucf_flags |= UCF_LCOMP_LNK_OK;
 	}
-	TALLOC_FREE(smb_fname_cp);
+
+	status = filename_convert_dirfsp_rel(
+		talloc_tos(),
+		conn,
+		discard_const_p(struct files_struct, dirfsp),
+		base_name,
+		ucf_flags,
+		smb_relname->twrp,
+		&new_dirfsp,
+		&smb_fname,
+		&new_relname);
+
+	/* End recursion guard. */
+	prd->calling_pathref_fsp = false;
+
+	if (!NT_STATUS_IS_OK(status)) {
+		/*
+		 * Ignore errors here. We know the path exists (the
+		 * SMB_VFS_NEXT_STAT() above succeeded. So being
+		 * unable to open a pathref fsp can be due to a range
+		 * of errors (startup path beginning with '/' for
+		 * example, path = ".." when enumerating a
+		 * directory. Just treat this the same way as the path
+		 * not having the FAKE_UID or FAKE_GID EA's
+		 * present. For the test purposes of this module (fake
+		 * NT ACLs from windows clients) this is close enough.
+		 * Just report for debugging purposes.
+		 */
+		DBG_DEBUG("Unable to get pathref fsp on %s/%s. "
+			  "Error %s\n",
+			  fsp_str_dbg(dirfsp),
+			  smb_fname_str_dbg(smb_relname),
+			  nt_errstr(status));
+		return 0;
+	}
+
+	ret = fake_acls_fuidgid(handle,
+				smb_fname->fsp,
+				&sbuf->st_ex_uid,
+				&sbuf->st_ex_gid);
+
+	if (root_fsp != NULL) {
+		fd_close(root_fsp);
+		file_free(NULL, root_fsp);
+		root_fsp = NULL;
+	}
+	fd_close(new_dirfsp);
+	file_free(NULL, new_dirfsp);
+	new_dirfsp = NULL;
+
+	TALLOC_FREE(smb_fname);
+	TALLOC_FREE(new_relname);
+
 	return ret;
+}
+
+static int fake_acls_stat(vfs_handle_struct *handle,
+			   struct smb_filename *smb_fname)
+{
+	struct stat_ex st = {};
+	int ret;
+
+	ret = fake_acls_fstatat(
+		handle, handle->conn->cwd_fsp, smb_fname, &st, 0);
+	if (ret == -1) {
+		return -1;
+	}
+
+	smb_fname->st = st;
+	return 0;
 }
 
 static int fake_acls_lstat(vfs_handle_struct *handle,
 			   struct smb_filename *smb_fname)
 {
-	int ret = -1;
-	struct in_pathref_data *prd = NULL;
+	struct stat_ex st = {};
+	int ret;
 
-	SMB_VFS_HANDLE_GET_DATA(handle,
-				prd,
-				struct in_pathref_data,
-				return -1);
-
-	ret = SMB_VFS_NEXT_LSTAT(handle, smb_fname);
-	if (ret == 0) {
-		struct smb_filename *smb_fname_base = NULL;
-		SMB_STRUCT_STAT sbuf = { 0 };
-		NTSTATUS status;
-
-		/*
-		 * Ensure synthetic_pathref()
-		 * can't recurse into fake_acls_lstat().
-		 * synthetic_pathref() doesn't care
-		 * about the uid/gid values, it only
-		 * wants a valid/invalid stat answer
-		 * and we know smb_fname exists as
-		 * the SMB_VFS_NEXT_LSTAT() returned
-		 * zero above.
-		 */
-		if (prd->calling_pathref_fsp) {
-			return 0;
-		}
-
-		/* Recursion guard. */
-		prd->calling_pathref_fsp = true;
-		status = synthetic_pathref(talloc_tos(),
-					   handle->conn->cwd_fsp,
-					   smb_fname->base_name,
-					   NULL,
-					   &sbuf,
-					   smb_fname->twrp,
-					   0, /* we want stat, not lstat. */
-					   &smb_fname_base);
-		/* End recursion guard. */
-		prd->calling_pathref_fsp = false;
-		if (NT_STATUS_IS_OK(status)) {
-			/*
-			 * This isn't quite right (calling fgetxattr not
-			 * lgetxattr), but for the test purposes of this
-			 * module (fake NT ACLs from windows clients), it is
-			 * close enough.  We removed the l*xattr functions
-			 * because linux doesn't support using them, but we
-			 * could fake them in xattr_tdb if we really wanted
-			 * to. We ignore errors because the link might not
-			 * point anywhere */
-			fake_acls_fuid(handle,
-				       smb_fname_base->fsp,
-				       &smb_fname->st.st_ex_uid);
-			fake_acls_fgid(handle,
-				       smb_fname_base->fsp,
-				       &smb_fname->st.st_ex_gid);
-		}
-		TALLOC_FREE(smb_fname_base);
+	ret = fake_acls_fstatat(handle,
+				handle->conn->cwd_fsp,
+				smb_fname,
+				&st,
+				AT_SYMLINK_NOFOLLOW);
+	if (ret == -1) {
+		return -1;
 	}
 
-	return ret;
+	smb_fname->st = st;
+	return 0;
 }
 
 static int fake_acls_fstat(vfs_handle_struct *handle, files_struct *fsp, SMB_STRUCT_STAT *sbuf)
@@ -255,16 +267,13 @@ static int fake_acls_fstat(vfs_handle_struct *handle, files_struct *fsp, SMB_STR
 	int ret = -1;
 
 	ret = SMB_VFS_NEXT_FSTAT(handle, fsp, sbuf);
-	if (ret == 0) {
-		ret = fake_acls_fuid(handle, fsp, &sbuf->st_ex_uid);
-		if (ret != 0) {
-			return ret;
-		}
-		ret = fake_acls_fgid(handle, fsp, &sbuf->st_ex_gid);
-		if (ret != 0) {
-			return ret;
-		}
+	if (ret != 0) {
+		return ret;
 	}
+	ret = fake_acls_fuidgid(handle,
+				fsp,
+				&sbuf->st_ex_uid,
+				&sbuf->st_ex_gid);
 	return ret;
 }
 
@@ -277,7 +286,7 @@ static SMB_ACL_T fake_acls_blob2acl(DATA_BLOB *blob, TALLOC_CTX *mem_ctx)
 		return NULL;
 	}
 
-	ndr_err = ndr_pull_struct_blob(blob, acl, acl, 
+	ndr_err = ndr_pull_struct_blob(blob, acl, acl,
 		(ndr_pull_flags_fn_t)ndr_pull_smb_acl_t);
 
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
@@ -293,7 +302,7 @@ static DATA_BLOB fake_acls_acl2blob(TALLOC_CTX *mem_ctx, SMB_ACL_T acl)
 {
 	enum ndr_err_code ndr_err;
 	DATA_BLOB blob;
-	ndr_err = ndr_push_struct_blob(&blob, mem_ctx, acl, 
+	ndr_err = ndr_push_struct_blob(&blob, mem_ctx, acl,
 		(ndr_push_flags_fn_t)ndr_push_smb_acl_t);
 
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
@@ -314,7 +323,7 @@ static SMB_ACL_T fake_acls_sys_acl_get_fd(struct vfs_handle_struct *handle,
 	const char *name = NULL;
 	struct smb_acl_t *acl = NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
-		
+
 	switch (type) {
 	case SMB_ACL_TYPE_ACCESS:
 		name = FAKE_ACL_ACCESS_XATTR;
@@ -691,6 +700,7 @@ static int fake_acls_connect(struct vfs_handle_struct *handle,
 
 static struct vfs_fn_pointers vfs_fake_acls_fns = {
 	.connect_fn = fake_acls_connect,
+	.fstatat_fn = fake_acls_fstatat,
 	.stat_fn = fake_acls_stat,
 	.lstat_fn = fake_acls_lstat,
 	.fstat_fn = fake_acls_fstat,
@@ -701,7 +711,7 @@ static struct vfs_fn_pointers vfs_fake_acls_fns = {
 	.sys_acl_delete_def_fd_fn = fake_acls_sys_acl_delete_def_fd,
 	.lchown_fn = fake_acls_lchown,
 	.fchown_fn = fake_acls_fchown,
-	
+
 };
 
 static_decl_vfs;

@@ -242,7 +242,7 @@ Currently the only tested value is 'smbtorture,smbd/smbd' for Samba'''),
 
     gr.add_option('--why-needed',
                   help=("TARGET:DEPENDENCY check why TARGET needs DEPENDENCY"),
-                  action='store', type='str', dest='WHYNEEDED', default=None)
+                  action='store', type=str, dest='WHYNEEDED', default=None)
 
     gr.add_option('--show-duplicates',
                   help=("Show objects which are included in multiple binaries or libraries"),
@@ -290,7 +290,7 @@ Currently the only tested value is 'smbtorture,smbd/smbd' for Samba'''),
                    action='store_true', dest='SIGN_RELEASE')
     gr.add_option('--tag',
                    help='tag release in git at the same time',
-                   type='string', action='store', dest='TAG_RELEASE')
+                   type=str, action='store', dest='TAG_RELEASE')
 
     opt.add_option('--disable-python',
                     help='do not generate python modules',
@@ -331,9 +331,9 @@ def configure(conf):
         conf.load('gccdeps')
 
     # make the install paths available in environment
-    conf.env.LIBDIR = Options.options.LIBDIR or '${PREFIX}/lib'
-    conf.env.BINDIR = Options.options.BINDIR or '${PREFIX}/bin'
-    conf.env.SBINDIR = Options.options.SBINDIR or '${PREFIX}/sbin'
+    conf.env.LIBDIR = Options.options.libdir or '${PREFIX}/lib'
+    conf.env.BINDIR = Options.options.bindir or '${PREFIX}/bin'
+    conf.env.SBINDIR = Options.options.sbindir or '${PREFIX}/sbin'
     conf.env.MODULESDIR = Options.options.MODULESDIR
     conf.env.PRIVATELIBDIR = Options.options.PRIVATELIBDIR
     conf.env.BUNDLED_LIBS = Options.options.BUNDLED_LIBS.split(',')

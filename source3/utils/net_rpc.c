@@ -42,7 +42,8 @@
 #include "libnet/libnet_join.h"
 #include "rpc_client/init_lsa.h"
 #include "../libcli/security/security.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "clirap2.h"
 #include "nsswitch/libwbclient/wbclient.h"
 #include "passdb.h"
@@ -6653,7 +6654,7 @@ static int rpc_trustdom_establish(struct net_context *c, int argc,
 
 	b = pipe_hnd->binding_handle;
 
-	nt_status = dcerpc_lsa_open_policy_fallback(b,
+	nt_status = dcerpc_lsa_open_policy_fallback(pipe_hnd,
 						    frame,
 						    pipe_hnd->srv_name_slash,
 						    true,
@@ -6938,7 +6939,7 @@ static int rpc_trustdom_vampire(struct net_context *c, int argc,
 
 	b = pipe_hnd->binding_handle;
 
-	nt_status = dcerpc_lsa_open_policy_fallback(b,
+	nt_status = dcerpc_lsa_open_policy_fallback(pipe_hnd,
 						    mem_ctx,
 						    pipe_hnd->srv_name_slash,
 						    false,
@@ -7131,7 +7132,7 @@ static int rpc_trustdom_list(struct net_context *c, int argc, const char **argv)
 
 	b = pipe_hnd->binding_handle;
 
-	nt_status = dcerpc_lsa_open_policy_fallback(b,
+	nt_status = dcerpc_lsa_open_policy_fallback(pipe_hnd,
 						    mem_ctx,
 						    pipe_hnd->srv_name_slash,
 						    true,
@@ -7485,6 +7486,9 @@ bool net_rpc_check(struct net_context *c, unsigned flags)
 	bool ret = false;
 	struct sockaddr_storage server_ss;
 	char *server_name = NULL;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 	NTSTATUS status;
 
 	/* flags (i.e. server type) may depend on command */
@@ -7494,7 +7498,7 @@ bool net_rpc_check(struct net_context *c, unsigned flags)
 	status = cli_connect_nb(c,
 				server_name,
 				&server_ss,
-				0,
+				&ts,
 				0x20,
 				lp_netbios_name(),
 				SMB_SIGNING_IPC_DEFAULT,

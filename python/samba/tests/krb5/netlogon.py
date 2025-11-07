@@ -26,16 +26,17 @@ from samba import (
     credentials,
     ntstatus,
     NTSTATUSError,
+    hresult,
     generate_random_password,
     generate_random_bytes,
 )
-from samba.dcerpc import netlogon, samr, misc, ntlmssp, krb5pac
+from samba.dcerpc import netlogon, samr, misc, ntlmssp, krb5pac, security, lsa
 from samba.ndr import ndr_deepcopy, ndr_print, ndr_pack
 from samba.crypto import md4_hash_blob
 from samba.tests import DynamicTestCase, env_get_var_value
 from samba.tests.krb5.kdc_base_test import KDCBaseTest
 import samba.tests.krb5.rfc4120_pyasn1 as krb5_asn1
-from samba.tests.krb5.rfc4120_constants import KU_NON_KERB_CKSUM_SALT
+from samba.tests.krb5.rfc4120_constants import KU_NON_KERB_CKSUM_SALT, NT_SRV_INST
 
 global_asn1_print = False
 global_ndr_print = False
@@ -62,8 +63,16 @@ class NetlogonSchannel(KDCBaseTest):
             "ticket_samlogon",
         ]
 
+        trusts = [
+            "wks",
+            "bdc",
+            "rodc",
+            "uptrust",
+            "downtrust",
+        ]
+
         for test in tests:
-            for trust in ["wks", "bdc"]:
+            for trust in trusts:
                 for auth3_flags in [0x603fffff, 0x613fffff, 0xe13fffff]:
                     setup_test(test, trust, "auth3", auth3_flags)
                 for auth3_flags in [0x00004004, 0x00004000, 0x01000000]:
@@ -74,6 +83,10 @@ class NetlogonSchannel(KDCBaseTest):
                     setup_test(test, trust, "authK", authK_flags)
                 for authK_flags in [0x613fffff, 0x413fffff, 0x400001ff]:
                     setup_test(test, trust, "authK", authK_flags)
+
+        for trust in trusts:
+            setup_test("simple", trust, "auth3", 0x613fffff)
+            setup_test("simple", trust, "authK", 0xe13fffff)
 
     def setUp(self):
         super().setUp()
@@ -105,7 +118,12 @@ class NetlogonSchannel(KDCBaseTest):
         samdb = self.get_samdb()
         self.dc_server = samdb.host_dns_name()
 
+    def download_keys_from_dc(self):
+        self.get_krbtgt_creds()
+        self.get_dc_creds()
+
     def get_wks1_creds(self):
+        self.download_keys_from_dc()
         return self.get_cached_creds(
                 account_type=self.AccountType.COMPUTER,
                 use_cache=False,
@@ -114,12 +132,84 @@ class NetlogonSchannel(KDCBaseTest):
                       'secure_channel_type': misc.SEC_CHAN_WKSTA})
 
     def get_bdc1_creds(self):
+        self.download_keys_from_dc()
         return self.get_cached_creds(
                 account_type=self.AccountType.SERVER,
                 use_cache=False,
                 opts={'name_prefix': 'b1_',
                       'supported_enctypes': 0x18,
                       'secure_channel_type': misc.SEC_CHAN_BDC})
+
+    def get_rodc1_creds(self):
+        self.download_keys_from_dc()
+        krbtgt_creds = self.get_mock_rodc_krbtgt_creds(preserve=False)
+        computer_creds = krbtgt_creds.get_rodc_computer_creds()
+        return computer_creds
+
+    def get_uptrust1_creds(self):
+        self.download_keys_from_dc()
+
+        # This creates a forest trust
+
+        trust_dns_name = "netlogon-fdom.netlogon.example.com"
+        trust_nbt_name = "NETLOGON-FDOM"
+        trust_sid = security.dom_sid("S-1-5-21-1-2-3")
+
+        trust_enc_types = lsa.TrustDomainInfoSupportedEncTypes()
+        trust_enc_types.enc_types = security.KERB_ENCTYPE_AES256_CTS_HMAC_SHA1_96
+
+        trust_info = lsa.TrustDomainInfoInfoEx()
+        trust_info.trust_type = lsa.LSA_TRUST_TYPE_UPLEVEL
+        trust_info.trust_direction = 0
+        trust_info.trust_direction |= lsa.LSA_TRUST_DIRECTION_INBOUND
+        trust_info.trust_direction |= lsa.LSA_TRUST_DIRECTION_OUTBOUND
+        trust_info.trust_attributes = 0
+        trust_info.trust_attributes |= lsa.LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE
+
+        trust_info.domain_name.string = trust_dns_name
+        trust_info.netbios_name.string = trust_nbt_name
+        trust_info.sid = trust_sid
+
+        trust_incoming_password = "%sIncomingPassword!" % trust_dns_name
+        trust_outgoing_password = "%sOutgoingPassword!" % trust_dns_name
+
+        _, _, _, trust_account_creds = \
+            self.create_trust(trust_info,
+                              trust_enc_types=trust_enc_types,
+                              trust_incoming_password=trust_incoming_password,
+                              trust_outgoing_password=trust_outgoing_password,
+                              preserve=False)
+
+        return trust_account_creds
+
+    def get_downtrust1_creds(self):
+
+        # This creates a downlevel external trust
+
+        trust_nbt_name = "NETLOGON-EDOM"
+        trust_sid = security.dom_sid("S-1-5-21-3-2-1")
+
+        trust_info = lsa.TrustDomainInfoInfoEx()
+        trust_info.trust_type = lsa.LSA_TRUST_TYPE_DOWNLEVEL
+        trust_info.trust_direction = 0
+        trust_info.trust_direction |= lsa.LSA_TRUST_DIRECTION_INBOUND
+        trust_info.trust_direction |= lsa.LSA_TRUST_DIRECTION_OUTBOUND
+        trust_info.trust_attributes = 0
+
+        trust_info.domain_name.string = trust_nbt_name
+        trust_info.netbios_name.string = trust_nbt_name
+        trust_info.sid = trust_sid
+
+        trust_incoming_password = "%sIncomingPassword!" % trust_nbt_name
+        trust_outgoing_password = "%sOutgoingPassword!" % trust_nbt_name
+
+        _, _, _, trust_account_creds = \
+            self.create_trust(trust_info,
+                              trust_incoming_password=trust_incoming_password,
+                              trust_outgoing_password=trust_outgoing_password,
+                              preserve=False)
+
+        return trust_account_creds
 
     def get_anon_conn(self):
         dc_server = self.dc_server
@@ -177,7 +267,12 @@ class NetlogonSchannel(KDCBaseTest):
             expect_error=None):
         (auth_type, auth_level) = conn.auth_info()
 
-        trust_account_name = trust_creds.get_username()
+        secure_channel_type = trust_creds.get_secure_channel_type()
+        if secure_channel_type == misc.SEC_CHAN_DNS_DOMAIN:
+            outgoing_creds = trust_creds.get_trust_outgoing_creds()
+            trust_account_name = outgoing_creds.get_realm().lower() + "."
+        else:
+            trust_account_name = trust_creds.get_username()
         trust_computer_name = trust_creds.get_workstation()
 
         client_challenge = credentials.netlogon_creds_random_challenge()
@@ -194,7 +289,7 @@ class NetlogonSchannel(KDCBaseTest):
             credentials.netlogon_creds_client_init(
                 client_account=trust_account_name,
                 client_computer_name=trust_computer_name,
-                secure_channel_type=trust_creds.get_secure_channel_type(),
+                secure_channel_type=secure_channel_type,
                 client_challenge=client_challenge,
                 server_challenge=server_challenge,
                 machine_password=machine_password,
@@ -236,14 +331,19 @@ class NetlogonSchannel(KDCBaseTest):
             expect_error=None):
         (auth_type, auth_level) = conn.auth_info()
 
-        trust_account_name = trust_creds.get_username()
+        secure_channel_type = trust_creds.get_secure_channel_type()
+        if secure_channel_type == misc.SEC_CHAN_DNS_DOMAIN:
+            outgoing_creds = trust_creds.get_trust_outgoing_creds()
+            trust_account_name = outgoing_creds.get_realm().lower() + "."
+        else:
+            trust_account_name = trust_creds.get_username()
         trust_computer_name = trust_creds.get_workstation()
 
         ncreds = \
             credentials.netlogon_creds_kerberos_init(
                 client_account=trust_account_name,
                 client_computer_name=trust_computer_name,
-                secure_channel_type=trust_creds.get_secure_channel_type(),
+                secure_channel_type=secure_channel_type,
                 client_requested_flags=negotiate_flags,
                 negotiate_flags=negotiate_flags)
 
@@ -774,9 +874,43 @@ class NetlogonSchannel(KDCBaseTest):
         elif logon_type == netlogon.NetlogonTicketLogonInformation:
             user_tgt = self.get_tgt(user_creds)
 
-            service_ticket = self.get_service_ticket(user_tgt, trust_creds)
-            service_ticket_data = self.der_encode(service_ticket.ticket,
-                                                  asn1Spec=krb5_asn1.Ticket())
+            if ncreds.secure_channel_type == misc.SEC_CHAN_DNS_DOMAIN:
+                #
+                # With an uplevel trust we are able to get
+                # a referral ticket, but even if we pass
+                # that, it will get
+                # NETLOGON_TICKET_LOGON_FAILED_LOGON
+                # with HRES_SEC_E_WRONG_PRINCIPAL
+                #
+                incoming_creds = trust_creds.get_trust_incoming_creds()
+                outgoing_creds = trust_creds.get_trust_outgoing_creds()
+                trealm = outgoing_creds.get_realm()
+                sname = self.PrincipalName_create(name_type=NT_SRV_INST,
+                                                  names=["krbtgt", trealm])
+                referral_ticket = self.get_service_ticket(user_tgt,
+                                                          incoming_creds,
+                                                          sname=sname,
+                                                          expect_krbtgt_referral=True)
+                service_ticket_data = self.der_encode(referral_ticket.ticket,
+                                                      asn1Spec=krb5_asn1.Ticket())
+            elif ncreds.secure_channel_type == misc.SEC_CHAN_DOMAIN:
+                #
+                # We keep it simple for now and
+                # just pass the user_tgt
+                #
+                # It will generate
+                # NETLOGON_TICKET_LOGON_FAILED_LOGON
+                # with HRES_SEC_E_WRONG_PRINCIPAL
+                #
+                # But here we're only testing
+                # the netlogon as transport
+                #
+                service_ticket_data = self.der_encode(user_tgt.ticket,
+                                                      asn1Spec=krb5_asn1.Ticket())
+            else:
+                service_ticket = self.get_service_ticket(user_tgt, trust_creds)
+                service_ticket_data = self.der_encode(service_ticket.ticket,
+                                                      asn1Spec=krb5_asn1.Ticket())
 
             logon = netlogon.netr_TicketLogonInfo()
             logon.request_options = 0
@@ -964,6 +1098,12 @@ class NetlogonSchannel(KDCBaseTest):
             creds = self.get_wks1_creds()
         elif trust == "bdc":
             creds = self.get_bdc1_creds()
+        elif trust == "rodc":
+            creds = self.get_rodc1_creds()
+        elif trust == "uptrust":
+            creds = self.get_uptrust1_creds()
+        elif trust == "downtrust":
+            creds = self.get_downtrust1_creds()
         self.assertIsNotNone(creds)
 
         proposed_flags = flags
@@ -1020,7 +1160,9 @@ class NetlogonSchannel(KDCBaseTest):
         expect_new_password = self.get_samr_Password(nt_hash)
         old_nt_hash = None
         if self.is_domain_trust(ncreds):
-            old_nt_hash = trust_creds.get_old_hash()
+            old_nt_hash = trust_creds.get_old_nt_hash()
+            if old_nt_hash is None:
+                old_nt_hash = nt_hash
         if old_nt_hash:
             expect_old_password = self.get_samr_Password(old_nt_hash)
         else:
@@ -1066,6 +1208,10 @@ class NetlogonSchannel(KDCBaseTest):
             expect_set2_encrypted = False
 
         if ncreds.secure_channel_type == misc.SEC_CHAN_WKSTA:
+            expect_get_error = ntstatus.NT_STATUS_ACCESS_DENIED
+        elif ncreds.secure_channel_type == misc.SEC_CHAN_RODC:
+            expect_get_error = ntstatus.NT_STATUS_ACCESS_DENIED
+        elif self.is_domain_trust(ncreds):
             expect_get_error = ntstatus.NT_STATUS_ACCESS_DENIED
         else:
             expect_get_error = None
@@ -1172,7 +1318,10 @@ class NetlogonSchannel(KDCBaseTest):
         if old_utf8:
             trust_creds.set_old_password(old_utf8)
         if new_utf8:
+            trust_creds.clear_forced_keys()
             trust_creds.set_password(new_utf8)
+            trust_creds.set_kvno(trust_creds.get_kvno()+1)
+            self.remember_creds_for_keytab_export(trust_creds)
             tmp_nt_hash = trust_creds.get_nt_hash()
             expect_new_password = self.get_samr_Password(tmp_nt_hash)
 
@@ -1211,7 +1360,10 @@ class NetlogonSchannel(KDCBaseTest):
         if old_utf8:
             trust_creds.set_old_password(old_utf8)
         if new_utf8:
+            trust_creds.clear_forced_keys()
             trust_creds.set_password(new_utf8)
+            trust_creds.set_kvno(trust_creds.get_kvno()+1)
+            self.remember_creds_for_keytab_export(trust_creds)
             tmp_nt_hash = trust_creds.get_nt_hash()
             expect_new_password = self.get_samr_Password(tmp_nt_hash)
 
@@ -1298,6 +1450,8 @@ class NetlogonSchannel(KDCBaseTest):
         opaque_buffer = b'invalid_opaque_buffer'
         if ncreds.secure_channel_type == misc.SEC_CHAN_WKSTA:
             expect_invalid_error = ntstatus.NT_STATUS_ACCESS_DENIED
+        elif self.is_domain_trust(ncreds):
+            expect_invalid_error = ntstatus.NT_STATUS_ACCESS_DENIED
         else:
             expect_invalid_error = ntstatus.NT_STATUS_INVALID_PARAMETER
         self.do_SendToSam(ncreds, conn, opaque_buffer,
@@ -1313,8 +1467,12 @@ class NetlogonSchannel(KDCBaseTest):
         opaque_buffer = ndr_pack(bmsg)
         if ncreds.secure_channel_type == misc.SEC_CHAN_WKSTA:
             expect_not_found_error = ntstatus.NT_STATUS_ACCESS_DENIED
+        elif self.is_domain_trust(ncreds):
+            expect_not_found_error = ntstatus.NT_STATUS_ACCESS_DENIED
         elif expect_broken_crypto:
             expect_not_found_error = ntstatus.NT_STATUS_INVALID_PARAMETER
+        elif ncreds.secure_channel_type == misc.SEC_CHAN_RODC:
+            expect_not_found_error = ntstatus.NT_STATUS_INTERNAL_ERROR
         else:
             expect_not_found_error = ntstatus.NT_STATUS_OBJECT_NAME_NOT_FOUND
         self.do_SendToSam(ncreds, conn, opaque_buffer,
@@ -1330,8 +1488,12 @@ class NetlogonSchannel(KDCBaseTest):
         opaque_buffer = ndr_pack(bmsg)
         if ncreds.secure_channel_type == misc.SEC_CHAN_WKSTA:
             expect_no_error = ntstatus.NT_STATUS_ACCESS_DENIED
+        elif self.is_domain_trust(ncreds):
+            expect_no_error = ntstatus.NT_STATUS_ACCESS_DENIED
         elif expect_broken_crypto:
             expect_no_error = ntstatus.NT_STATUS_INVALID_PARAMETER
+        elif ncreds.secure_channel_type == misc.SEC_CHAN_RODC:
+            expect_no_error = ntstatus.NT_STATUS_ACCESS_DENIED
         else:
             expect_no_error = None
         self.do_SendToSam(ncreds, conn, opaque_buffer,
@@ -1394,6 +1556,9 @@ class NetlogonSchannel(KDCBaseTest):
                                            expect_send_encrypted,
                                            expect_recv_encrypted)
         self.assertNotEqual(validationRef_n6.base.rid, 0)
+        self.assertEqual(validationRef_n6.base.user_flags &
+                         netlogon.NETLOGON_NTLMV2_ENABLED,
+                         netlogon.NETLOGON_NTLMV2_ENABLED)
         self.assertNotEqual(validationRef_n6.base.key.key, list(b'\x00' *16))
         self.assertEqual(validationRef_n6.base.LMSessKey.key, list(b'\x00' *8))
 
@@ -1405,6 +1570,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_n2.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationWF_n2.base.user_flags, validationRef_n6.base.user_flags)
         if expect_broken_nt_crypto:
             self.assertNotEqual(validationWF_n2.base.key.key, list(b'\x00' *16))
             self.assertNotEqual(validationWF_n2.base.key.key, validationRef_n6.base.key.key)
@@ -1421,6 +1587,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_n2.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationEx_n2.base.user_flags, validationRef_n6.base.user_flags)
         if expect_broken_nt_crypto:
             self.assertNotEqual(validationEx_n2.base.key.key, list(b'\x00' *16))
             self.assertNotEqual(validationEx_n2.base.key.key, validationRef_n6.base.key.key)
@@ -1440,6 +1607,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_n3.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationWF_n3.base.user_flags, validationRef_n6.base.user_flags)
         if expect_broken_nt_crypto:
             self.assertNotEqual(validationWF_n3.base.key.key, list(b'\x00' *16))
             self.assertNotEqual(validationWF_n3.base.key.key, validationRef_n6.base.key.key)
@@ -1456,6 +1624,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_n3.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationEx_n3.base.user_flags, validationRef_n6.base.user_flags)
         if expect_broken_nt_crypto:
             self.assertNotEqual(validationEx_n3.base.key.key, list(b'\x00' *16))
             self.assertNotEqual(validationEx_n3.base.key.key, validationRef_n6.base.key.key)
@@ -1475,6 +1644,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_n6.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationWF_n6.base.user_flags, validationRef_n6.base.user_flags)
         self.assertEqual(validationWF_n6.base.key.key, validationRef_n6.base.key.key)
         validationEx_n6 = self.do_LogonEx(ncreds, conn,
                                           logon_type_n, logon_info_n,
@@ -1482,6 +1652,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_n6.base.rid, validationRef_n6.base.rid)
+        self.assertEqual(validationEx_n6.base.user_flags, validationRef_n6.base.user_flags)
         self.assertEqual(validationEx_n6.base.key.key, validationRef_n6.base.key.key)
 
         self.do_CheckCapabilities(ncreds, conn)
@@ -1541,6 +1712,9 @@ class NetlogonSchannel(KDCBaseTest):
             self.do_CheckCapabilities(ncreds, conn)
             return
         self.assertNotEqual(validationRef_i6.base.rid, 0)
+        self.assertEqual(validationRef_i6.base.user_flags &
+                         netlogon.NETLOGON_NTLMV2_ENABLED,
+                         netlogon.NETLOGON_NTLMV2_ENABLED)
         self.assertEqual(validationRef_i6.base.key.key, list(b'\x00' *16))
         self.assertEqual(validationRef_i6.base.LMSessKey.key, list(b'\x00' *8))
 
@@ -1552,6 +1726,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_i2.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationWF_i2.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationWF_i2.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationWF_i2.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
         validationEx_i2 = self.do_LogonEx(ncreds, conn,
@@ -1560,6 +1735,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_i2.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationEx_i2.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationEx_i2.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationEx_i2.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
 
@@ -1571,6 +1747,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_i3.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationWF_i3.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationWF_i3.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationWF_i3.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
         validationEx_i3 = self.do_LogonEx(ncreds, conn,
@@ -1579,6 +1756,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_i3.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationEx_i3.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationEx_i3.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationEx_i3.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
 
@@ -1590,6 +1768,7 @@ class NetlogonSchannel(KDCBaseTest):
                                                  expect_send_encrypted,
                                                  expect_recv_encrypted)
         self.assertEqual(validationWF_i6.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationWF_i6.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationWF_i6.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationWF_i6.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
         validationEx_i6 = self.do_LogonEx(ncreds, conn,
@@ -1598,6 +1777,7 @@ class NetlogonSchannel(KDCBaseTest):
                                           expect_send_encrypted,
                                           expect_recv_encrypted)
         self.assertEqual(validationEx_i6.base.rid, validationRef_i6.base.rid)
+        self.assertEqual(validationEx_i6.base.user_flags, validationRef_i6.base.user_flags)
         self.assertEqual(validationEx_i6.base.key.key, validationRef_i6.base.key.key)
         self.assertEqual(validationEx_i6.base.LMSessKey.key, validationRef_i6.base.LMSessKey.key)
 
@@ -1722,15 +1902,36 @@ class NetlogonSchannel(KDCBaseTest):
                                        validation_level,
                                        expect_send_encrypted,
                                        expect_recv_encrypted)
-        self.assertEqual(validationEx.results,
-                         netlogon.NETLOGON_TICKET_LOGON_FULL_SIGNATURE_PRESENT)
-        self.assertEqual(validationEx.kerberos_status[0], ntstatus.NT_STATUS_OK)
-        self.assertEqual(validationEx.netlogon_status[0], ntstatus.NT_STATUS_OK)
-        self.assertIsNone(validationEx.source_of_status.string)
-        self.assertIsNotNone(validationEx.user_information)
-        self.assertNotEqual(validationEx.user_information.base.rid, 0)
-        self.assertEqual(validationEx.user_information.base.key.key, list(b'\x00' *16))
-        self.assertIsNone(validationEx.device_information)
+        if self.is_domain_trust(ncreds):
+            self.assertEqual(validationEx.results,
+                netlogon.NETLOGON_TICKET_LOGON_FAILED_LOGON)
+        elif validationEx.results & netlogon.NETLOGON_TICKET_LOGON_SOURCE_USER_CLAIMS:
+            self.assertEqual(validationEx.results,
+                netlogon.NETLOGON_TICKET_LOGON_SOURCE_USER_CLAIMS |
+                netlogon.NETLOGON_TICKET_LOGON_FULL_SIGNATURE_PRESENT)
+        else:
+            self.assertEqual(validationEx.results,
+                netlogon.NETLOGON_TICKET_LOGON_FULL_SIGNATURE_PRESENT)
+        if self.is_domain_trust(ncreds):
+            self.assertEqual(validationEx.kerberos_status[0], hresult.HRES_SEC_E_WRONG_PRINCIPAL)
+            self.assertEqual(validationEx.netlogon_status[0], hresult.HRES_SEC_E_WRONG_PRINCIPAL)
+            self.assertEqual(validationEx.source_of_status.string, self.dc_server.lower())
+            self.assertIsNone(validationEx.user_information)
+            self.assertIsNone(validationEx.device_information)
+            self.assertEqual(validationEx.user_claims_length, 0)
+            self.assertIsNone(validationEx.user_claims)
+            self.assertEqual(validationEx.device_claims_length, 0)
+            self.assertIsNone(validationEx.device_claims)
+        else:
+            self.assertEqual(validationEx.kerberos_status[0], ntstatus.NT_STATUS_OK)
+            self.assertEqual(validationEx.netlogon_status[0], ntstatus.NT_STATUS_OK)
+            self.assertIsNone(validationEx.source_of_status.string)
+            self.assertIsNotNone(validationEx.user_information)
+            self.assertNotEqual(validationEx.user_information.base.rid, 0)
+            self.assertEqual(validationEx.user_information.base.key.key, list(b'\x00' *16))
+            self.assertEqual(validationEx.user_information.base.user_flags &
+                             netlogon.NETLOGON_NTLMV2_ENABLED, 0)
+            self.assertIsNone(validationEx.device_information)
 
         expect_send_encrypted = False
         expect_recv_encrypted = False
@@ -1739,16 +1940,28 @@ class NetlogonSchannel(KDCBaseTest):
                                               validation_level,
                                               expect_send_encrypted,
                                               expect_recv_encrypted)
-        self.assertEqual(validationWF.results,
-                         netlogon.NETLOGON_TICKET_LOGON_FULL_SIGNATURE_PRESENT)
-        self.assertEqual(validationWF.kerberos_status[0], ntstatus.NT_STATUS_OK)
-        self.assertEqual(validationWF.netlogon_status[0], ntstatus.NT_STATUS_OK)
-        self.assertIsNone(validationWF.source_of_status.string)
-        self.assertIsNotNone(validationWF.user_information)
-        self.assertEqual(validationWF.user_information.base.rid,
-                         validationEx.user_information.base.rid)
-        self.assertEqual(validationWF.user_information.base.key.key, list(b'\x00' *16))
-        self.assertIsNone(validationWF.device_information)
+        self.assertEqual(validationWF.results, validationEx.results)
+        if self.is_domain_trust(ncreds):
+            self.assertEqual(validationWF.kerberos_status[0], hresult.HRES_SEC_E_WRONG_PRINCIPAL)
+            self.assertEqual(validationWF.netlogon_status[0], hresult.HRES_SEC_E_WRONG_PRINCIPAL)
+            self.assertEqual(validationWF.source_of_status.string, self.dc_server.lower())
+            self.assertIsNone(validationWF.user_information)
+            self.assertIsNone(validationWF.device_information)
+            self.assertEqual(validationWF.user_claims_length, 0)
+            self.assertIsNone(validationWF.user_claims)
+            self.assertEqual(validationWF.device_claims_length, 0)
+            self.assertIsNone(validationWF.device_claims)
+        else:
+            self.assertEqual(validationWF.kerberos_status[0], ntstatus.NT_STATUS_OK)
+            self.assertEqual(validationWF.netlogon_status[0], ntstatus.NT_STATUS_OK)
+            self.assertIsNone(validationWF.source_of_status.string)
+            self.assertIsNotNone(validationWF.user_information)
+            self.assertEqual(validationWF.user_information.base.rid,
+                             validationEx.user_information.base.rid)
+            self.assertEqual(validationWF.user_information.base.key.key, list(b'\x00' *16))
+            self.assertEqual(validationWF.user_information.base.user_flags,
+                             validationEx.user_information.base.user_flags)
+            self.assertIsNone(validationWF.device_information)
 
         self.do_CheckCapabilities(ncreds, conn)
         return
@@ -1950,6 +2163,15 @@ class NetlogonSchannel(KDCBaseTest):
         self.do_CheckCapabilities(bdc1_ncreds, bdc1_conn)
         return
 
+    def _test_simple_with_args(self, trust, authX, flags):
+        (creds, ncreds, conn, expect_encrypted) = \
+            self._prepare_ncreds_conn_with_args(trust, authX, flags)
+
+        if conn is None:
+            return
+
+        self.do_CheckCapabilities(ncreds, conn)
+        return
 
 if __name__ == "__main__":
     global_asn1_print = True

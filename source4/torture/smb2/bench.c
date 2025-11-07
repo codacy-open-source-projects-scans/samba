@@ -442,12 +442,16 @@ static bool test_smb2_bench_echo(struct torture_context *tctx,
 			loop->conn = &state->conns[i];
 			loop->im = tevent_create_immediate(state->loops);
 			torture_assert(tctx, loop->im != NULL, __location__);
-
-			tevent_schedule_immediate(loop->im,
-						  tctx->ev,
-						  test_smb2_bench_echo_loop_start,
-						  loop);
 		}
+	}
+
+	for (li = 0; li <state->num_loops; li++) {
+		struct test_smb2_bench_echo_loop *loop = &state->loops[li];
+
+		tevent_schedule_immediate(loop->im,
+					  tctx->ev,
+					  test_smb2_bench_echo_loop_start,
+					  loop);
 	}
 
 	torture_comment(tctx, "Opened %zu connections with qdepth=%d => %zu loops\n",
@@ -916,12 +920,16 @@ bool test_smb2_bench_path_contention_shared(struct torture_context *tctx,
 			torture_assert(tctx, loop->im != NULL, __location__);
 			loop->opens.io = open_io;
 			loop->closes.io = close_io;
-
-			tevent_schedule_immediate(loop->im,
-						  tctx->ev,
-						  test_smb2_bench_path_contention_loop_start,
-						  loop);
 		}
+	}
+
+	for (li = 0; li <state->num_loops; li++) {
+		struct test_smb2_bench_path_contention_shared_loop *loop = &state->loops[li];
+
+		tevent_schedule_immediate(loop->im,
+					  tctx->ev,
+					  test_smb2_bench_path_contention_loop_start,
+					  loop);
 	}
 
 	torture_comment(tctx, "Opened %zu connections with qdepth=%d => %zu loops\n",
@@ -1328,12 +1336,16 @@ static bool test_smb2_bench_read(struct torture_context *tctx,
 			sfinfo.end_of_file_info.in.size = state->io_size;
 			status = smb2_setinfo_file(state->conns[i].tree, &sfinfo);
 			CHECK_STATUS(status, NT_STATUS_OK);
-
-			tevent_schedule_immediate(loop->im,
-						  tctx->ev,
-						  test_smb2_bench_read_loop_start,
-						  loop);
 		}
+	}
+
+	for (li = 0; li <state->num_loops; li++) {
+		struct test_smb2_bench_read_loop *loop = &state->loops[li];
+
+		tevent_schedule_immediate(loop->im,
+					  tctx->ev,
+					  test_smb2_bench_read_loop_start,
+					  loop);
 	}
 
 	torture_comment(tctx, "Opened %zu connections with qdepth=%d => %zu loops\n",
@@ -1451,6 +1463,7 @@ static void test_smb2_bench_session_setup_loop_do_setup(
 	struct test_smb2_bench_session_setup_shared_state *state = loop->state;
 
 	loop->session = smb2_session_init(loop->conn->transport,
+					  state->tctx->lp_ctx,
 					  state->gensec_settings,
 					  loop->conn->transport);
 	torture_assert_goto(state->tctx, loop->session != NULL,
@@ -1805,12 +1818,16 @@ static bool test_smb2_bench_session_setup(struct torture_context *tctx,
 			loop->conn = &state->conns[i];
 			loop->im = tevent_create_immediate(state->loops);
 			torture_assert(tctx, loop->im != NULL, __location__);
-
-			tevent_schedule_immediate(loop->im,
-						  tctx->ev,
-						  test_smb2_bench_session_setup_loop_start,
-						  loop);
 		}
+	}
+
+	for (li = 0; li <state->num_loops; li++) {
+		struct test_smb2_bench_session_setup_shared_loop *loop = &state->loops[li];
+
+		tevent_schedule_immediate(loop->im,
+					  tctx->ev,
+					  test_smb2_bench_session_setup_loop_start,
+					  loop);
 	}
 
 	torture_comment(tctx, "Opened %zu connections with qdepth=%d => %zu loops\n",

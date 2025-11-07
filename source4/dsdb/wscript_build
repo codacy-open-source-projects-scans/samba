@@ -16,7 +16,7 @@ bld.SAMBA_LIBRARY('samdb-common',
 	source='common/util.c common/util_trusts.c common/util_groups.c common/util_samr.c common/dsdb_dn.c common/dsdb_access.c common/util_links.c common/rodc_helper.c gmsa/gkdi.c gmsa/util.c',
 	autoproto='common/proto.h',
 	private_library=True,
-	deps='ldb NDR_DRSBLOBS util_ldb LIBCLI_AUTH samba-hostconfig samba_socket cli-ldap-common flag_mapping UTIL_RUNCMD SAMBA_VERSION samba-security gkdi gmsa'
+	deps='ldb NDR_DRSBLOBS util_ldb LIBCLI_AUTH samba-hostconfig samba_socket cli-ldap-common flag_mapping UTIL_RUNCMD SAMBA_VERSION samba-security samba-security-trusts gkdi gmsa'
 	)
 
 
@@ -68,6 +68,20 @@ bld.SAMBA_MODULE('service_dns_update',
 	internal_module=False,
 	enabled=bld.AD_DC_BUILD_IS_ENABLED()
 	)
+
+bld.SAMBA_MODULE('service_ft_scanner',
+    source='''
+        ft_scanner/ft_scanner_service.c
+        ft_scanner/ft_scanner_periodic.c
+        ft_scanner/ft_scanner_tdos.c
+    ''',
+    autoproto='ft_scanner/ft_scanner_service_proto.h',
+    subsystem='service',
+    init_function='server_service_ft_scanner_init',
+    deps='samdb process_model',
+    internal_module=False,
+    enabled=bld.AD_DC_BUILD_IS_ENABLED()
+)
 
 pyldb_util = bld.pyembed_libname('pyldb-util')
 pyrpc_util = bld.pyembed_libname('pyrpc_util')

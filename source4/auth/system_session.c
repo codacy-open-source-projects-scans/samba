@@ -138,8 +138,10 @@ NTSTATUS auth_system_user_info_dc(TALLOC_CTX *mem_ctx, const char *netbios_name,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	user_info_dc->sids->sid = global_sid_System;
-	user_info_dc->sids->attrs = SE_GROUP_DEFAULT_FLAGS;
+	user_info_dc->sids[0] = (struct auth_SidAttr) {
+		.sid = global_sid_System,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+	};
 
 	/* annoying, but the Anonymous really does have a session key, 
 	   and it is all zeros! */
@@ -245,7 +247,13 @@ static NTSTATUS auth_domain_admin_user_info_dc(TALLOC_CTX *mem_ctx,
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc);
 
 	user_info_dc->num_sids = 8;
-	user_info_dc->sids = talloc_array(user_info_dc, struct auth_SidAttr, user_info_dc->num_sids);
+	user_info_dc->sids = talloc_zero_array(user_info_dc,
+					       struct auth_SidAttr,
+					       user_info_dc->num_sids);
+	if (user_info_dc->sids == NULL) {
+		TALLOC_FREE(user_info_dc);
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	user_info_dc->sids[PRIMARY_USER_SID_INDEX].sid = *domain_sid;
 	sid_append_rid(&user_info_dc->sids[PRIMARY_USER_SID_INDEX].sid, DOMAIN_RID_ADMINISTRATOR);
@@ -481,8 +489,10 @@ _PUBLIC_ NTSTATUS auth_anonymous_user_info_dc(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	};
 
-	user_info_dc->sids->sid = global_sid_Anonymous;
-	user_info_dc->sids->attrs = SE_GROUP_DEFAULT_FLAGS;
+	user_info_dc->sids[0] = (struct auth_SidAttr) {
+		.sid = global_sid_Anonymous,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+	};
 
 	/* annoying, but the Anonymous really does have a session key... */
 	user_info_dc->user_session_key = data_blob_talloc(user_info_dc, NULL, 16);

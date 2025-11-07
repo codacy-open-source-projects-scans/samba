@@ -18,7 +18,9 @@
 */
 
 #include "replace.h"
+#include "system/dir.h"
 #include "system/filesys.h"
+#include "system/glob.h"
 #include "system/locale.h"
 #include "system/network.h"
 
@@ -289,7 +291,7 @@ char *ctdb_tunable_names_to_string(TALLOC_CTX *mem_ctx)
 struct tunable_load_state {
 	struct ctdb_tunable_list *tun_list;
 	bool status;
-	const char *func;
+	const char *file;
 };
 
 static bool tunable_section(const char *section, void *private_data)
@@ -297,8 +299,9 @@ static bool tunable_section(const char *section, void *private_data)
 	struct tunable_load_state *state =
 		(struct tunable_load_state *)private_data;
 
-	D_ERR("%s: Invalid line for section [%s] - sections not supported \n",
-	      state->func,
+	D_ERR("%s: Invalid line for section [%s] - "
+	      "tunables sections not supported \n",
+	      state->file,
 	      section);
 	state->status = false;
 
@@ -317,7 +320,9 @@ static bool tunable_option(const char *name,
 	int ret;
 
 	if (value[0] == '\0') {
-		D_ERR("%s: Invalid line containing \"%s\"\n", state->func, name);
+		D_ERR("%s: Invalid tunables line containing \"%s\"\n",
+		      state->file,
+		      name);
 		state->status = false;
 		return true;
 	}
@@ -325,7 +330,7 @@ static bool tunable_option(const char *name,
 	num = smb_strtoul(value, NULL, 0, &ret, SMB_STR_FULL_STR_CONV);
 	if (ret != 0) {
 		D_ERR("%s: Invalid value \"%s\" for tunable \"%s\"\n",
-		      state->func,
+		      state->file,
 		      value,
 		      name);
 		state->status = false;
@@ -337,12 +342,12 @@ static bool tunable_option(const char *name,
 				    (uint32_t)num,
 				    &obsolete);
 	if (!ok) {
-		D_ERR("%s: Unknown tunable \"%s\"\n", state->func, name);
+		D_ERR("%s: Unknown tunable \"%s\"\n", state->file, name);
 		state->status = false;
 		return true;
 	}
 	if (obsolete) {
-		D_ERR("%s: Obsolete tunable \"%s\"\n", state->func, name);
+		D_ERR("%s: Obsolete tunable \"%s\"\n", state->file, name);
 		state->status = false;
 		return true;
 	}
@@ -356,18 +361,16 @@ bool ctdb_tunable_load_file(TALLOC_CTX *mem_ctx,
 {
 	struct tunable_load_state state = {
 		.tun_list = tun_list,
+		.file = file,
 		.status = true,
-		.func = __FUNCTION__,
 	};
 	FILE *fp;
 	bool status;
 
-	ctdb_tunable_set_defaults(tun_list);
-
 	fp = fopen(file, "r");
 	if (fp == NULL) {
 		if (errno == ENOENT) {
-			/* Doesn't need to exist */
+			D_INFO("Optional tunables file %s not found\n", file);
 			return true;
 		}
 
@@ -394,8 +397,81 @@ bool ctdb_tunable_load_file(TALLOC_CTX *mem_ctx,
 	fclose(fp);
 
 	if (!status) {
-		DBG_ERR("Syntax error\n");
+		D_ERR("%s: Syntax error\n", file);
 	}
 
 	return status && state.status;
+}
+
+static int tunables_filter(const struct dirent *de)
+{
+	int ret;
+
+	/* Match a script pattern */
+	ret = fnmatch("*.tunables", de->d_name, 0);
+	if (ret == 0) {
+		return 1;
+	}
+
+	return 0;
+}
+
+bool ctdb_tunable_load_directory(TALLOC_CTX *mem_ctx,
+				 struct ctdb_tunable_list *tun_list,
+				 const char *dir)
+{
+	struct dirent **namelist = NULL;
+	int count = 0;
+	bool status = true;
+	int i = 0;
+
+	count = scandir(dir, &namelist, tunables_filter, alphasort);
+	if (count == -1) {
+		switch (errno) {
+		case ENOENT:
+			D_INFO("Optional tunables directory %s not found\n",
+			       dir);
+			break;
+		default:
+			DBG_ERR("Failed to open directory %s (err=%d)\n",
+				dir,
+				errno);
+			status = false;
+		}
+		goto done;
+	}
+
+	if (count == 0) {
+		goto done;
+	}
+
+	for (i = 0; i < count; i++) {
+		char *file = NULL;
+		bool file_status = false;
+
+		file = talloc_asprintf(mem_ctx,
+				       "%s/%s",
+				       dir,
+				       namelist[i]->d_name);
+		if (file == NULL) {
+			DBG_ERR("Memory allocation error\n");
+			goto done;
+		}
+
+		file_status = ctdb_tunable_load_file(mem_ctx, tun_list, file);
+		if (!file_status) {
+			status = false;
+		}
+		TALLOC_FREE(file);
+	}
+
+done:
+	if (namelist != NULL && count != -1) {
+		for (i = 0; i < count; i++) {
+			free(namelist[i]);
+		}
+		free(namelist);
+	}
+
+	return status;
 }

@@ -21,7 +21,9 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "libads/ads_status.h"
 #include "libsmb/namequery.h"
 #include "../libcli/auth/libcli_auth.h"
 #include "auth/credentials/credentials.h"
@@ -31,6 +33,7 @@
 #include "../lib/util/tevent_ntstatus.h"
 #include "async_smb.h"
 #include "libsmb/nmblib.h"
+#include "libsmb/smbsock_connect.h"
 #include "librpc/ndr/libndr.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "../libcli/smb/smb_seal.h"
@@ -990,58 +993,6 @@ static void cli_session_setup_gensec_remote_done(struct tevent_req *subreq)
 	cli_session_setup_gensec_local_next(req);
 }
 
-static void cli_session_dump_keys(TALLOC_CTX *mem_ctx,
-				  struct smbXcli_session *session,
-				  DATA_BLOB session_key)
-{
-	NTSTATUS status;
-	DATA_BLOB sig = data_blob_null;
-	DATA_BLOB app = data_blob_null;
-	DATA_BLOB enc = data_blob_null;
-	DATA_BLOB dec = data_blob_null;
-	uint64_t sid = smb2cli_session_current_id(session);
-
-	status = smb2cli_session_signing_key(session, mem_ctx, &sig);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-	status = smbXcli_session_application_key(session, mem_ctx, &app);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-	status = smb2cli_session_encryption_key(session, mem_ctx, &enc);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-	status = smb2cli_session_decryption_key(session, mem_ctx, &dec);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-
-	DEBUG(0, ("debug encryption: dumping generated session keys\n"));
-	DEBUGADD(0, ("Session Id    "));
-	dump_data(0, (uint8_t*)&sid, sizeof(sid));
-	DEBUGADD(0, ("Session Key   "));
-	dump_data(0, session_key.data, session_key.length);
-	DEBUGADD(0, ("Signing Key   "));
-	dump_data(0, sig.data, sig.length);
-	DEBUGADD(0, ("App Key       "));
-	dump_data(0, app.data, app.length);
-
-	/* In client code, ServerIn is the encryption key */
-
-	DEBUGADD(0, ("ServerIn Key  "));
-	dump_data(0, enc.data, enc.length);
-	DEBUGADD(0, ("ServerOut Key "));
-	dump_data(0, dec.data, dec.length);
-
-out:
-	data_blob_clear_free(&sig);
-	data_blob_clear_free(&app);
-	data_blob_clear_free(&enc);
-	data_blob_clear_free(&dec);
-}
-
 static void cli_session_setup_gensec_ready(struct tevent_req *req)
 {
 	struct cli_session_setup_gensec_state *state =
@@ -1112,7 +1063,38 @@ static void cli_session_setup_gensec_ready(struct tevent_req *req)
 		if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB3_00
 		    && lp_debug_encryption())
 		{
-			cli_session_dump_keys(state, session, state->session_key);
+			DATA_BLOB sig, app, enc, dec;
+			const char *wireshark_keyfile = lp_parm_const_string(
+				GLOBAL_SECTION_SNUM,
+				"debug encryption",
+				"wireshark keyfile",
+				NULL);
+
+			status = smb2cli_session_signing_key(session, state, &sig);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smbXcli_session_application_key(session, state, &app);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smb2cli_session_encryption_key(session, state, &enc);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smb2cli_session_decryption_key(session, state, &dec);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+
+			smbXcli_session_dump_keys(smb2cli_session_current_id(session),
+						  &state->session_key,
+						  smb2cli_conn_server_signing_algo(state->cli->conn),
+						  &sig,
+						  &app,
+						  &enc,
+						  &dec,
+						  wireshark_keyfile);
 		}
 	} else {
 		struct smbXcli_session *session = state->cli->smb1.session;
@@ -2046,8 +2028,7 @@ static void cli_tcon_andx_done(struct tevent_req *subreq)
 		}
 	} else {
 		cli->dev = talloc_strdup(cli, "");
-		if (cli->dev == NULL) {
-			tevent_req_nterror(req, NT_STATUS_NO_MEMORY);
+		if (tevent_req_nomem(cli->dev, req)) {
 			return;
 		}
 	}
@@ -2070,7 +2051,7 @@ static void cli_tcon_andx_done(struct tevent_req *subreq)
 		smb1cli_session_protect_session_key(cli->smb1.session);
 	}
 
-	smb1cli_tcon_set_values(state->cli->smb1.tcon,
+	smb1cli_tcon_set_values(cli->smb1.tcon,
 				SVAL(inhdr, HDR_TID),
 				optional_support,
 				0, /* maximal_access */
@@ -2399,11 +2380,11 @@ fail:
 }
 
 struct cli_connect_sock_state {
+	struct smb_transports transports;
 	const char **called_names;
 	const char **calling_names;
 	int *called_types;
-	int fd;
-	uint16_t port;
+	struct smbXcli_transport *transport;
 };
 
 static void cli_connect_sock_done(struct tevent_req *subreq);
@@ -2416,10 +2397,12 @@ static void cli_connect_sock_done(struct tevent_req *subreq);
 static struct tevent_req *cli_connect_sock_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	const char *host, int name_type, const struct sockaddr_storage *pss,
-	const char *myname, uint16_t port)
+	const char *myname,
+	const struct smb_transports *transports)
 {
 	struct tevent_req *req, *subreq;
 	struct cli_connect_sock_state *state;
+	struct loadparm_context *lp_ctx = NULL;
 	struct sockaddr_storage *addrs = NULL;
 	unsigned i;
 	unsigned num_addrs = 0;
@@ -2429,6 +2412,12 @@ static struct tevent_req *cli_connect_sock_send(
 				struct cli_connect_sock_state);
 	if (req == NULL) {
 		return NULL;
+	}
+	state->transports = *transports;
+
+	lp_ctx = loadparm_init_s3(talloc_tos(), loadparm_s3_helpers());
+	if (tevent_req_nomem(lp_ctx, req)) {
+		return tevent_req_post(req, ev);
 	}
 
 	if ((pss == NULL) || is_zero_addr(pss)) {
@@ -2472,8 +2461,9 @@ static struct tevent_req *cli_connect_sock_send(
 	}
 
 	subreq = smbsock_any_connect_send(
-		state, ev, addrs, state->called_names, state->called_types,
-		state->calling_names, NULL, num_addrs, port);
+		state, ev, lp_ctx, addrs,
+		state->called_names, state->called_types,
+		state->calling_names, NULL, num_addrs, &state->transports);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -2489,18 +2479,18 @@ static void cli_connect_sock_done(struct tevent_req *subreq)
 		req, struct cli_connect_sock_state);
 	NTSTATUS status;
 
-	status = smbsock_any_connect_recv(subreq, &state->fd, NULL,
-					  &state->port);
+	status = smbsock_any_connect_recv(subreq, state, &state->transport, NULL);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
-	set_socket_options(state->fd, lp_socket_options());
+
 	tevent_req_done(req);
 }
 
 static NTSTATUS cli_connect_sock_recv(struct tevent_req *req,
-				      int *pfd, uint16_t *pport)
+				      TALLOC_CTX *mem_ctx,
+				      struct smbXcli_transport **ptransport)
 {
 	struct cli_connect_sock_state *state = tevent_req_data(
 		req, struct cli_connect_sock_state);
@@ -2509,13 +2499,13 @@ static NTSTATUS cli_connect_sock_recv(struct tevent_req *req,
 	if (tevent_req_is_nterror(req, &status)) {
 		return status;
 	}
-	*pfd = state->fd;
-	*pport = state->port;
+	*ptransport = talloc_move(mem_ctx, &state->transport);
 	return NT_STATUS_OK;
 }
 
 struct cli_connect_nb_state {
 	const char *desthost;
+	struct smb_transports transports;
 	enum smb_signing_setting signing_state;
 	int flags;
 	struct cli_state *cli;
@@ -2526,7 +2516,8 @@ static void cli_connect_nb_done(struct tevent_req *subreq);
 static struct tevent_req *cli_connect_nb_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	const char *host, const struct sockaddr_storage *dest_ss,
-	uint16_t port, int name_type, const char *myname,
+	const struct smb_transports *transports,
+	int name_type, const char *myname,
 	enum smb_signing_setting signing_state, int flags)
 {
 	struct tevent_req *req, *subreq;
@@ -2538,6 +2529,7 @@ static struct tevent_req *cli_connect_nb_send(
 	}
 	state->signing_state = signing_state;
 	state->flags = flags;
+	state->transports = *transports;
 
 	if (host != NULL) {
 		char *p = strchr(host, '#');
@@ -2563,7 +2555,7 @@ static struct tevent_req *cli_connect_nb_send(
 	}
 
 	subreq = cli_connect_sock_send(state, ev, host, name_type, dest_ss,
-				       myname, port);
+				       myname, &state->transports);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -2577,20 +2569,18 @@ static void cli_connect_nb_done(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct cli_connect_nb_state *state = tevent_req_data(
 		req, struct cli_connect_nb_state);
+	struct smbXcli_transport *xtp = NULL;
 	NTSTATUS status;
-	int fd = 0;
-	uint16_t port;
 
-	status = cli_connect_sock_recv(subreq, &fd, &port);
+	status = cli_connect_sock_recv(subreq, state, &xtp);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
 
-	state->cli = cli_state_create(state, fd, state->desthost,
+	state->cli = cli_state_create(state, &xtp, state->desthost,
 				      state->signing_state, state->flags);
 	if (tevent_req_nomem(state->cli, req)) {
-		close(fd);
 		return;
 	}
 	tevent_req_done(req);
@@ -2614,7 +2604,7 @@ static NTSTATUS cli_connect_nb_recv(struct tevent_req *req,
 NTSTATUS cli_connect_nb(TALLOC_CTX *mem_ctx,
 			const char *host,
 			const struct sockaddr_storage *dest_ss,
-			uint16_t port,
+			const struct smb_transports *transports,
 			int name_type,
 			const char *myname,
 			enum smb_signing_setting signing_state,
@@ -2629,7 +2619,7 @@ NTSTATUS cli_connect_nb(TALLOC_CTX *mem_ctx,
 	if (ev == NULL) {
 		goto fail;
 	}
-	req = cli_connect_nb_send(ev, ev, host, dest_ss, port, name_type,
+	req = cli_connect_nb_send(ev, ev, host, dest_ss, transports, name_type,
 				  myname, signing_state, flags);
 	if (req == NULL) {
 		goto fail;
@@ -2648,6 +2638,7 @@ fail:
 
 struct cli_start_connection_state {
 	struct tevent_context *ev;
+	struct smb_transports transports;
 	struct cli_state *cli;
 	int min_protocol;
 	int max_protocol;
@@ -2668,7 +2659,8 @@ static void cli_start_connection_done(struct tevent_req *subreq);
 static struct tevent_req *cli_start_connection_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	const char *my_name, const char *dest_host,
-	const struct sockaddr_storage *dest_ss, int port,
+	const struct sockaddr_storage *dest_ss,
+	const struct smb_transports *transports,
 	enum smb_signing_setting signing_state, int flags,
 	struct smb2_negotiate_contexts *negotiate_contexts)
 {
@@ -2681,6 +2673,7 @@ static struct tevent_req *cli_start_connection_send(
 		return NULL;
 	}
 	state->ev = ev;
+	state->transports = *transports;
 
 	if (flags & CLI_FULL_CONNECTION_IPC) {
 		state->min_protocol = lp_client_ipc_min_protocol();
@@ -2744,7 +2737,8 @@ static struct tevent_req *cli_start_connection_send(
 		}
 	}
 
-	subreq = cli_connect_nb_send(state, ev, dest_host, dest_ss, port,
+	subreq = cli_connect_nb_send(state, ev, dest_host, dest_ss,
+				     &state->transports,
 				     0x20, my_name, signing_state, flags);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
@@ -2825,7 +2819,8 @@ NTSTATUS cli_start_connection(TALLOC_CTX *mem_ctx,
 			      struct cli_state **output_cli,
 			      const char *my_name,
 			      const char *dest_host,
-			      const struct sockaddr_storage *dest_ss, int port,
+			      const struct sockaddr_storage *dest_ss,
+			      const struct smb_transports *transports,
 			      enum smb_signing_setting signing_state, int flags)
 {
 	struct tevent_context *ev;
@@ -2837,7 +2832,7 @@ NTSTATUS cli_start_connection(TALLOC_CTX *mem_ctx,
 		goto fail;
 	}
 	req = cli_start_connection_send(ev, ev, my_name, dest_host, dest_ss,
-					port, signing_state, flags, NULL);
+					transports, signing_state, flags, NULL);
 	if (req == NULL) {
 		goto fail;
 	}
@@ -3275,6 +3270,7 @@ struct cli_full_connection_creds_state {
 	const char *service;
 	const char *service_type;
 	struct cli_credentials *creds;
+	struct smb_transports transports;
 	int flags;
 	struct cli_state *cli;
 };
@@ -3303,7 +3299,8 @@ static void cli_full_connection_creds_tcon_done(struct tevent_req *subreq);
 struct tevent_req *cli_full_connection_creds_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	const char *my_name, const char *dest_host,
-	const struct sockaddr_storage *dest_ss, int port,
+	const struct sockaddr_storage *dest_ss,
+	const struct smb_transports *transports,
 	const char *service, const char *service_type,
 	struct cli_credentials *creds,
 	int flags,
@@ -3327,6 +3324,7 @@ struct tevent_req *cli_full_connection_creds_send(
 	state->service_type = service_type;
 	state->creds = creds;
 	state->flags = flags;
+	state->transports = *transports;
 
 	if (flags & CLI_FULL_CONNECTION_IPC) {
 		signing_state = cli_credentials_get_smb_ipc_signing(creds);
@@ -3345,7 +3343,8 @@ struct tevent_req *cli_full_connection_creds_send(
 	}
 
 	subreq = cli_start_connection_send(
-		state, ev, my_name, dest_host, dest_ss, port,
+		state, ev, my_name, dest_host, dest_ss,
+		&state->transports,
 		signing_state, flags,
 		negotiate_contexts);
 	if (tevent_req_nomem(subreq, req)) {
@@ -3446,7 +3445,9 @@ static void cli_full_connection_creds_enc_start(struct tevent_req *req)
 				"SMB3 encryption - failing connect\n");
 			tevent_req_nterror(req, status);
 			return;
-		} else if (!NT_STATUS_IS_OK(status)) {
+		}
+
+		if (!NT_STATUS_IS_OK(status)) {
 			d_printf("Encryption required and "
 				"setup failed with error %s.\n",
 				nt_errstr(status));
@@ -3665,7 +3666,8 @@ NTSTATUS cli_full_connection_creds(TALLOC_CTX *mem_ctx,
 				   struct cli_state **output_cli,
 				   const char *my_name,
 				   const char *dest_host,
-				   const struct sockaddr_storage *dest_ss, int port,
+				   const struct sockaddr_storage *dest_ss,
+				   const struct smb_transports *transports,
 				   const char *service, const char *service_type,
 				   struct cli_credentials *creds,
 				   int flags)
@@ -3679,7 +3681,7 @@ NTSTATUS cli_full_connection_creds(TALLOC_CTX *mem_ctx,
 		goto fail;
 	}
 	req = cli_full_connection_creds_send(
-		ev, ev, my_name, dest_host, dest_ss, port, service,
+		ev, ev, my_name, dest_host, dest_ss, transports, service,
 		service_type, creds, flags,
 		NULL);
 	if (req == NULL) {
@@ -3821,6 +3823,9 @@ static struct cli_state *get_ipc_connect(TALLOC_CTX *mem_ctx,
         struct cli_state *cli;
 	NTSTATUS nt_status;
 	uint32_t flags = CLI_FULL_CONNECTION_ANONYMOUS_FALLBACK;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	flags |= CLI_FULL_CONNECTION_FORCE_SMB1;
 	flags |= CLI_FULL_CONNECTION_IPC;
@@ -3830,7 +3835,7 @@ static struct cli_state *get_ipc_connect(TALLOC_CTX *mem_ctx,
 					      NULL,
 					      server,
 					      server_ss,
-					      0,
+					      &ts,
 					      "IPC$",
 					      "IPC",
 					      creds,

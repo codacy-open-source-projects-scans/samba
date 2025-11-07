@@ -52,7 +52,7 @@ import samba.dcerpc.dcerpc
 import samba.dcerpc.epmapper
 
 from unittest import SkipTest
-
+from pathlib import Path
 
 BINDIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                       "../../../../bin"))
@@ -63,6 +63,20 @@ HEXDUMP_FILTER = bytearray(x if (x > 31 and x < 127) else 46 for x in range(256)
 LDB_ERR_LUT = {v: k for k, v in vars(ldb).items() if k.startswith('ERR_')}
 
 RE_CAMELCASE = re.compile(r"([_\-])+")
+
+
+def source_tree_topdir():
+    """Return the top level source directory if this seems to be a
+    full source tree. Otherwise raise FileNotFoundError."""
+    topdir = Path(__file__) / "../../../.."
+    topdir = topdir.resolve()
+
+    for dirpath in ('source4', 'docs-xml', 'python/samba/tests'):
+        d = topdir / dirpath
+        if not d.is_dir():
+            raise FileNotFoundError(f"missing or not a directory: {d}")
+
+    return topdir
 
 
 def ldb_err(v):
@@ -480,9 +494,17 @@ class BlackboxProcessError(Exception):
         self.msg = msg
 
     def __str__(self):
+        stdout = self.stdout
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode()
+
+        stderr = self.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode()
+
         s = ("Command '%s'; shell %s; exit status %d; "
              "stdout: '%s'; stderr: '%s'" %
-             (self.cmd, self.shell, self.returncode, self.stdout, self.stderr))
+             (self.cmd, self.shell, self.returncode, stdout, stderr))
         if self.msg is not None:
             s = "%s; message: %s" % (s, self.msg)
 
@@ -544,11 +566,11 @@ class BlackboxTestCase(TestCaseInTempDir):
         return stdoutdata
 
     @classmethod
-    def check_output(cls, line):
+    def check_output(cls, line, env=None):
         use_shell = not isinstance(line, list)
         line = cls._make_cmdline(line)
         p = subprocess.Popen(line, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             shell=use_shell, close_fds=True)
+                             shell=use_shell, close_fds=True, env=env)
         stdoutdata, stderrdata = p.communicate()
         retcode = p.returncode
         if retcode:

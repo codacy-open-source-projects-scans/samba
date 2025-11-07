@@ -24,7 +24,10 @@
 #include "replace.h"
 #include <tdb.h>
 #include "lib/util/time.h"
+#include "libcli/smb/smb2_constants.h"
+#include "libcli/util/ntstatus.h"
 
+struct smbd_server_connection;
 struct tevent_context;
 
 #ifdef WITH_PROFILE
@@ -43,6 +46,14 @@ struct tevent_context;
 	SMBPROFILE_STATS_BASIC(set_sec_ctx) \
 	SMBPROFILE_STATS_BASIC(set_root_sec_ctx) \
 	SMBPROFILE_STATS_BASIC(pop_sec_ctx) \
+	SMBPROFILE_STATS_COUNT(num_sessions) \
+	SMBPROFILE_STATS_COUNT(num_tcons) \
+	SMBPROFILE_STATS_COUNT(num_files) \
+	SMBPROFILE_STATS_SECTION_END \
+	\
+	SMBPROFILE_STATS_SECTION_START(global, "Authentication") \
+	SMBPROFILE_STATS_COUNT(authentication) \
+	SMBPROFILE_STATS_COUNT(authentication_failed) \
 	SMBPROFILE_STATS_SECTION_END \
 	\
 	SMBPROFILE_STATS_SECTION_START(syscall, "System Calls") \
@@ -64,6 +75,7 @@ struct tevent_context;
 	SMBPROFILE_STATS_BYTES(syscall_sendfile) \
 	SMBPROFILE_STATS_BYTES(syscall_recvfile) \
 	SMBPROFILE_STATS_BASIC(syscall_renameat) \
+	SMBPROFILE_STATS_BASIC(syscall_rename_stream) \
 	SMBPROFILE_STATS_BYTES(syscall_asys_fsync) \
 	SMBPROFILE_STATS_BASIC(syscall_stat) \
 	SMBPROFILE_STATS_BASIC(syscall_fstat) \
@@ -245,6 +257,94 @@ struct tevent_context;
 	\
 	SMBPROFILE_STATS_END
 
+#define SMBPROFILE_STATS_PERSVC_SECTIONS \
+	SMBPROFILE_STATS_START \
+	\
+	SMBPROFILE_STATS_SECTION_START(syscall, "System Calls") \
+	SMBPROFILE_STATS_BASIC(syscall_opendir) \
+	SMBPROFILE_STATS_BASIC(syscall_fdopendir) \
+	SMBPROFILE_STATS_BASIC(syscall_readdir) \
+	SMBPROFILE_STATS_BASIC(syscall_rewinddir) \
+	SMBPROFILE_STATS_BASIC(syscall_mkdirat) \
+	SMBPROFILE_STATS_BASIC(syscall_closedir) \
+	SMBPROFILE_STATS_BASIC(syscall_open) \
+	SMBPROFILE_STATS_BASIC(syscall_openat) \
+	SMBPROFILE_STATS_BASIC(syscall_createfile) \
+	SMBPROFILE_STATS_BASIC(syscall_close) \
+	SMBPROFILE_STATS_BYTES(syscall_pread) \
+	SMBPROFILE_STATS_BYTES(syscall_asys_pread) \
+	SMBPROFILE_STATS_BYTES(syscall_pwrite) \
+	SMBPROFILE_STATS_BYTES(syscall_asys_pwrite) \
+	SMBPROFILE_STATS_BASIC(syscall_lseek) \
+	SMBPROFILE_STATS_BYTES(syscall_sendfile) \
+	SMBPROFILE_STATS_BYTES(syscall_recvfile) \
+	SMBPROFILE_STATS_BASIC(syscall_renameat) \
+	SMBPROFILE_STATS_BYTES(syscall_asys_fsync) \
+	SMBPROFILE_STATS_BASIC(syscall_stat) \
+	SMBPROFILE_STATS_BASIC(syscall_fstat) \
+	SMBPROFILE_STATS_BASIC(syscall_lstat) \
+	SMBPROFILE_STATS_BASIC(syscall_fstatat) \
+	SMBPROFILE_STATS_BASIC(syscall_get_alloc_size) \
+	SMBPROFILE_STATS_BASIC(syscall_unlinkat) \
+	SMBPROFILE_STATS_BASIC(syscall_chmod) \
+	SMBPROFILE_STATS_BASIC(syscall_fchmod) \
+	SMBPROFILE_STATS_BASIC(syscall_fchown) \
+	SMBPROFILE_STATS_BASIC(syscall_lchown) \
+	SMBPROFILE_STATS_BASIC(syscall_chdir) \
+	SMBPROFILE_STATS_BASIC(syscall_getwd) \
+	SMBPROFILE_STATS_BASIC(syscall_fntimes) \
+	SMBPROFILE_STATS_BASIC(syscall_ftruncate) \
+	SMBPROFILE_STATS_BASIC(syscall_fallocate) \
+	SMBPROFILE_STATS_BASIC(syscall_fcntl_lock) \
+	SMBPROFILE_STATS_BASIC(syscall_fcntl) \
+	SMBPROFILE_STATS_BASIC(syscall_linux_setlease) \
+	SMBPROFILE_STATS_BASIC(syscall_fcntl_getlock) \
+	SMBPROFILE_STATS_BASIC(syscall_readlinkat) \
+	SMBPROFILE_STATS_BASIC(syscall_symlinkat) \
+	SMBPROFILE_STATS_BASIC(syscall_linkat) \
+	SMBPROFILE_STATS_BASIC(syscall_mknodat) \
+	SMBPROFILE_STATS_BASIC(syscall_realpath) \
+	SMBPROFILE_STATS_BASIC(syscall_get_quota) \
+	SMBPROFILE_STATS_BASIC(syscall_set_quota) \
+	SMBPROFILE_STATS_BASIC(syscall_get_sd) \
+	SMBPROFILE_STATS_BASIC(syscall_set_sd) \
+	SMBPROFILE_STATS_BASIC(syscall_brl_lock) \
+	SMBPROFILE_STATS_BASIC(syscall_brl_unlock) \
+	SMBPROFILE_STATS_BASIC(syscall_brl_cancel) \
+	SMBPROFILE_STATS_BYTES(syscall_asys_getxattrat) \
+	SMBPROFILE_STATS_SECTION_END \
+	\
+	SMBPROFILE_STATS_SECTION_START(acl, "ACL Calls") \
+	SMBPROFILE_STATS_BASIC(get_nt_acl) \
+	SMBPROFILE_STATS_BASIC(get_nt_acl_at) \
+	SMBPROFILE_STATS_BASIC(fget_nt_acl) \
+	SMBPROFILE_STATS_BASIC(fset_nt_acl) \
+	SMBPROFILE_STATS_SECTION_END \
+	\
+	SMBPROFILE_STATS_SECTION_START(smb2, "SMB2 Calls") \
+	SMBPROFILE_STATS_IOBYTES(smb2_negprot) \
+	SMBPROFILE_STATS_IOBYTES(smb2_sesssetup) \
+	SMBPROFILE_STATS_IOBYTES(smb2_logoff) \
+	SMBPROFILE_STATS_IOBYTES(smb2_tcon) \
+	SMBPROFILE_STATS_IOBYTES(smb2_tdis) \
+	SMBPROFILE_STATS_IOBYTES(smb2_create) \
+	SMBPROFILE_STATS_IOBYTES(smb2_close) \
+	SMBPROFILE_STATS_IOBYTES(smb2_flush) \
+	SMBPROFILE_STATS_IOBYTES(smb2_read) \
+	SMBPROFILE_STATS_IOBYTES(smb2_write) \
+	SMBPROFILE_STATS_IOBYTES(smb2_lock) \
+	SMBPROFILE_STATS_IOBYTES(smb2_ioctl) \
+	SMBPROFILE_STATS_IOBYTES(smb2_cancel) \
+	SMBPROFILE_STATS_IOBYTES(smb2_keepalive) \
+	SMBPROFILE_STATS_IOBYTES(smb2_find) \
+	SMBPROFILE_STATS_IOBYTES(smb2_notify) \
+	SMBPROFILE_STATS_IOBYTES(smb2_getinfo) \
+	SMBPROFILE_STATS_IOBYTES(smb2_setinfo) \
+	SMBPROFILE_STATS_IOBYTES(smb2_break) \
+	SMBPROFILE_STATS_SECTION_END \
+	\
+	SMBPROFILE_STATS_END
+
 /* this file defines the profile structure in the profile shared
    memory area */
 
@@ -289,7 +389,9 @@ struct smbprofile_stats_bytes_async {
 
 struct smbprofile_stats_iobytes {
 	uint64_t count;		/* number of events */
+	uint64_t failed_count;	/* number of unsuccessful events */
 	uint64_t time;		/* microseconds */
+	uint64_t buckets[10];	/* 1,2,4,...256,Inf msecs */
 	uint64_t idle;		/* idle time compared to 'time' microseconds */
 	uint64_t inbytes;	/* bytes read */
 	uint64_t outbytes;	/* bytes written */
@@ -304,6 +406,7 @@ struct smbprofile_stats_iobytes_async {
 
 struct profile_stats {
 	uint64_t magic;
+	bool summary_record;
 	struct {
 #define SMBPROFILE_STATS_START
 #define SMBPROFILE_STATS_SECTION_START(name, display)
@@ -422,19 +525,21 @@ struct profile_stats {
 		smbprofile_dump_schedule(); \
 	} \
 } while(0)
-#define SMBPROFILE_BYTES_ASYNC_START(_name, _area, _async, _bytes) \
-	_SMBPROFILE_BYTES_ASYNC_START(_name##_stats, _area, _async, _bytes)
-#define SMBPROFILE_BYTES_ASYNC_SET_IDLE(_async) \
-	_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async)
-#define SMBPROFILE_BYTES_ASYNC_SET_BUSY(_async) \
-	_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async)
-#define SMBPROFILE_BYTES_ASYNC_END(_async) do { \
+#define _SMBPROFILE_BYTES_ASYNC_END(_async) do { \
 	if ((_async).stats != NULL) { \
 		_SMBPROFILE_TIMER_ASYNC_END(_async); \
 		(_async) = (struct smbprofile_stats_bytes_async) {}; \
 		smbprofile_dump_schedule(); \
 	} \
 } while(0)
+#define SMBPROFILE_BYTES_ASYNC_START(_name, _area, _async, _bytes) \
+	_SMBPROFILE_BYTES_ASYNC_START(_name##_stats, _area, _async, _bytes)
+#define SMBPROFILE_BYTES_ASYNC_SET_IDLE(_async) \
+	_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async)
+#define SMBPROFILE_BYTES_ASYNC_SET_BUSY(_async) \
+	_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async)
+#define SMBPROFILE_BYTES_ASYNC_END(_async) \
+	_SMBPROFILE_BYTES_ASYNC_END(_async)
 
 #define SMBPROFILE_IOBYTES_ASYNC_STATE(_async_name) \
 	struct smbprofile_stats_iobytes_async _async_name;
@@ -447,20 +552,40 @@ struct profile_stats {
 		smbprofile_dump_schedule(); \
 	} \
 } while(0)
+#define _SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes, _opcode, _status) do { \
+	if ((_async).stats != NULL) { \
+		(_async).stats->outbytes += (_outbytes); \
+		_SMBPROFILE_TIMER_ASYNC_END(_async); \
+		smbprofile_update_failed_count((_async.stats), (_opcode), (_status)); \
+		smbprofile_update_hist((_async).stats, profile_timestamp() - (_async).start); \
+		(_async) = (struct smbprofile_stats_iobytes_async) {}; \
+		smbprofile_dump_schedule(); \
+	} \
+} while(0)
+
 #define SMBPROFILE_IOBYTES_ASYNC_START(_name, _area, _async, _inbytes) \
 	_SMBPROFILE_IOBYTES_ASYNC_START(_name##_stats, _area, _async, _inbytes)
 #define SMBPROFILE_IOBYTES_ASYNC_SET_IDLE(_async) \
 	_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async)
 #define SMBPROFILE_IOBYTES_ASYNC_SET_BUSY(_async) \
 	_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async)
-#define SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes) do { \
-	if ((_async).stats != NULL) { \
-		(_async).stats->outbytes += (_outbytes); \
-		_SMBPROFILE_TIMER_ASYNC_END(_async); \
-		(_async) = (struct smbprofile_stats_iobytes_async) {}; \
-		smbprofile_dump_schedule(); \
-	} \
-} while(0)
+#define SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes, _opcode, _status) \
+	_SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes, _opcode, _status) \
+
+#define DO_PROFILE_INC_AUTH_SUCCESS() \
+	DO_PROFILE_INC(authentication); \
+
+#define DO_PROFILE_INC_AUTH_FAILED() \
+	DO_PROFILE_INC(authentication); \
+	DO_PROFILE_INC(authentication_failed); \
+
+struct profile_stats_persvc {
+	struct profile_stats stats;
+	int snum;
+	int refcnt;
+	bool active;
+	char dbkey[];
+};
 
 extern struct profile_stats *profile_p;
 
@@ -469,6 +594,7 @@ struct smbprofile_global_state {
 		struct tdb_wrap *db;
 		struct tevent_context *ev;
 		struct tevent_timer *te;
+		struct smbd_server_connection *sconn;
 	} internal;
 
 	struct {
@@ -479,12 +605,17 @@ struct smbprofile_global_state {
 	struct {
 		struct profile_stats global;
 	} stats;
+
+	struct {
+		struct profile_stats_persvc **tbl;
+	} persvc;
 };
 
 extern struct smbprofile_global_state smbprofile_state;
 
 void smbprofile_dump_schedule_timer(void);
-void smbprofile_dump_setup(struct tevent_context *ev);
+void smbprofile_dump_setup(struct tevent_context *ev,
+			   struct smbd_server_connection *sconn);
 
 static inline void smbprofile_dump_schedule(void)
 {
@@ -504,6 +635,84 @@ static inline bool smbprofile_active(void)
 	return smbprofile_state.config.do_count;
 }
 
+static inline void smbprofile_update_failed_count(
+	struct smbprofile_stats_iobytes *s,
+	uint16_t opcode,
+	NTSTATUS status)
+{
+	bool ok = NT_STATUS_IS_OK(status);
+
+	switch (opcode) {
+	case SMB2_OP_SESSSETUP:
+		if (NT_STATUS_EQUAL(status,
+				    NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+			ok = true;
+		}
+		break;
+	case SMB2_OP_QUERY_DIRECTORY:
+		if (NT_STATUS_EQUAL(status, NT_STATUS_NO_MORE_FILES)) {
+			ok = true;
+		}
+		break;
+	case SMB2_OP_NOTIFY:
+		if (NT_STATUS_EQUAL(status, NT_STATUS_CANCELLED)) {
+			ok = true;
+		}
+		break;
+	case SMB2_OP_READ:
+		if (NT_STATUS_EQUAL(status, NT_STATUS_END_OF_FILE)) {
+			ok = true;
+		}
+		break;
+	}
+
+	if (!ok) {
+		s->failed_count += 1;
+	}
+}
+
+static inline void smbprofile_update_hist(struct smbprofile_stats_iobytes *s,
+					  uint64_t microsecs)
+{
+	s->buckets[9]++;
+	if (microsecs >= 256000) {
+		return;
+	}
+	s->buckets[8]++;
+	if (microsecs >= 128000) {
+		return;
+	}
+	s->buckets[7]++;
+	if (microsecs >= 64000) {
+		return;
+	}
+	s->buckets[6]++;
+	if (microsecs >= 32000) {
+		return;
+	}
+	s->buckets[5]++;
+	if (microsecs >= 16000) {
+		return;
+	}
+	s->buckets[4]++;
+	if (microsecs >= 8000) {
+		return;
+	}
+	s->buckets[3]++;
+	if (microsecs >= 4000) {
+		return;
+	}
+	s->buckets[2]++;
+	if (microsecs >= 2000) {
+		return;
+	}
+	s->buckets[1]++;
+	if (microsecs >= 1000) {
+		return;
+	}
+	s->buckets[0]++;
+}
+
 static inline bool smbprofile_dump_pending(void)
 {
 	if (smbprofile_state.internal.te == NULL) {
@@ -513,15 +722,15 @@ static inline bool smbprofile_dump_pending(void)
 	return true;
 }
 
-void smbprofile_dump(void);
+void smbprofile_dump(struct smbd_server_connection *sconn);
 
 void smbprofile_cleanup(pid_t pid, pid_t dst);
 void smbprofile_stats_accumulate(struct profile_stats *acc,
 				 const struct profile_stats *add);
 int smbprofile_magic(const struct profile_stats *stats, uint64_t *_magic);
-void smbprofile_collect_tdb(struct tdb_context *tdb,
-			    uint64_t magic,
-			    struct profile_stats *stats);
+size_t smbprofile_collect_tdb(struct tdb_context *tdb,
+			      uint64_t magic,
+			      struct profile_stats *stats);
 void smbprofile_collect(struct profile_stats *stats);
 
 static inline uint64_t profile_timestamp(void)
@@ -575,7 +784,7 @@ static inline uint64_t profile_timestamp(void)
 #define SMBPROFILE_IOBYTES_ASYNC_START(_name, _area, _async, _inbytes)
 #define SMBPROFILE_IOBYTES_ASYNC_SET_IDLE(_async)
 #define SMBPROFILE_IOBYTES_ASYNC_SET_BUSY(_async)
-#define SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes)
+#define SMBPROFILE_IOBYTES_ASYNC_END(_async, _outbytes, _opcode, _status)
 
 #define DO_PROFILE_INC(x)
 #define START_PROFILE(x)
@@ -584,6 +793,9 @@ static inline uint64_t profile_timestamp(void)
 #define END_PROFILE_BYTES(x)
 
 #define PROFILE_TIMESTAMP(x) (*(x)=(struct timespec){0})
+
+#define DO_PROFILE_INC_AUTH_SUCCESS()
+#define DO_PROFILE_INC_AUTH_FAILED()
 
 static inline bool smbprofile_active(void)
 {
@@ -595,12 +807,13 @@ static inline bool smbprofile_dump_pending(void)
 	return false;
 }
 
-static inline void smbprofile_dump_setup(struct tevent_context *ev)
+static inline void smbprofile_dump_setup(struct tevent_context *ev,
+					 struct smbd_server_connection *sconn)
 {
 	return;
 }
 
-static inline void smbprofile_dump(void)
+static inline void smbprofile_dump(struct smbd_server_connection *sconn)
 {
 	return;
 }
@@ -619,5 +832,184 @@ void set_profile_level(int level, const struct server_id *src);
 
 struct messaging_context;
 bool profile_setup(struct messaging_context *msg_ctx, bool rdonly);
+
+/* Per-share profiling */
+#ifdef WITH_PROFILE
+
+void smbprofile_persvc_mkref(int snum, const char *svc, const char *remote);
+void smbprofile_persvc_unref(int snum);
+struct profile_stats *smbprofile_persvc_get(int snum);
+void smbprofile_persvc_reset(void);
+
+int smbprofile_persvc_collect(int (*fn)(const char *key,
+					const struct profile_stats *stats,
+					void *private_data),
+			      void *private_data);
+
+int smbprofile_persvc_collect_tdb(struct tdb_context *tdb,
+				  int (*fn)(const char *,
+					    const struct profile_stats *,
+					    void *),
+				  void *userp);
+
+#define START_PROFILE_X(_snum, x)                                              \
+	struct smbprofile_stats_basic_async __profasync_##x = {};              \
+	struct smbprofile_stats_basic_async __profasync_persvc_##x = {};       \
+	_SMBPROFILE_BASIC_ASYNC_START(x##_stats, profile_p, __profasync_##x);  \
+	do {                                                                   \
+		struct profile_stats *persvc_##x = smbprofile_persvc_get(      \
+			_snum);                                                \
+		if (persvc_##x != NULL) {                                      \
+			_SMBPROFILE_BASIC_ASYNC_START(x##_stats,               \
+						      persvc_##x,              \
+						      __profasync_persvc_##x); \
+		}                                                              \
+	} while (0)
+
+#define START_PROFILE_BYTES_X(_snum, x, n)                                    \
+	struct smbprofile_stats_bytes_async __profasync_##x = {};             \
+	struct smbprofile_stats_bytes_async __profasync_persvc_##x = {};      \
+	_SMBPROFILE_BYTES_ASYNC_START(x##_stats,                              \
+				      profile_p,                              \
+				      __profasync_##x,                        \
+				      n);                                     \
+	do {                                                                  \
+		struct profile_stats *persvc_##x = smbprofile_persvc_get(     \
+			_snum);                                               \
+		if (persvc_##x != NULL) {                                     \
+			_SMBPROFILE_BYTES_ASYNC_START(x##_stats,              \
+						      persvc_##x,             \
+						      __profasync_persvc_##x, \
+						      n);                     \
+		}                                                             \
+	} while (0)
+
+#define END_PROFILE_X(x)                                            \
+	do {                                                        \
+		SMBPROFILE_BASIC_ASYNC_END(__profasync_##x);        \
+		SMBPROFILE_BASIC_ASYNC_END(__profasync_persvc_##x); \
+	} while (0)
+
+#define END_PROFILE_BYTES_X(x)                                      \
+	do {                                                        \
+		SMBPROFILE_BYTES_ASYNC_END(__profasync_##x);        \
+		SMBPROFILE_BYTES_ASYNC_END(__profasync_persvc_##x); \
+	} while (0)
+
+#define SMBPROFILE_BYTES_ASYNC_STATE_X(_async_name, _async_persvc_name) \
+	struct smbprofile_stats_bytes_async _async_name;                \
+	struct smbprofile_stats_bytes_async _async_persvc_name;
+
+#define SMBPROFILE_BYTES_ASYNC_START_X(_snum, _name, _async, _async_persvc, _bytes) \
+	_SMBPROFILE_BYTES_ASYNC_START(_name##_stats, profile_p, _async, _bytes);    \
+	do {                                                                        \
+		struct profile_stats *_px = smbprofile_persvc_get(_snum);           \
+		if (_px != NULL) {                                                  \
+			_SMBPROFILE_BYTES_ASYNC_START(_name##_stats,                \
+						      _px,                          \
+						      _async_persvc,                \
+						      _bytes);                      \
+		}                                                                   \
+	} while (0)
+
+#define SMBPROFILE_BYTES_ASYNC_SET_IDLE_X(_async, _async_persvc) \
+	do {                                                     \
+		_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async);        \
+		_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async_persvc); \
+	} while (0)
+
+#define SMBPROFILE_BYTES_ASYNC_SET_BUSY_X(_async, _async_persvc) \
+	do {                                                     \
+		_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async);        \
+		_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async_persvc); \
+	} while (0)
+
+#define SMBPROFILE_BYTES_ASYNC_END_X(_async, _async_persvc) \
+	do {                                                \
+		_SMBPROFILE_BYTES_ASYNC_END(_async);        \
+		_SMBPROFILE_BYTES_ASYNC_END(_async_persvc); \
+	} while (0)
+
+#define SMBPROFILE_IOBYTES_ASYNC_STATE_X(_async_name, _async_persvc_name) \
+	struct smbprofile_stats_iobytes_async _async_name;                \
+	struct smbprofile_stats_iobytes_async _async_persvc_name;
+
+#define SMBPROFILE_IOBYTES_ASYNC_START_X(_snum, _name, _async, _async_persvc, _bytes) \
+	_SMBPROFILE_IOBYTES_ASYNC_START(_name##_stats, profile_p, _async, _bytes);    \
+	do {                                                                          \
+		struct profile_stats *_px = smbprofile_persvc_get(_snum);             \
+		if (_px != NULL) {                                                    \
+			_SMBPROFILE_IOBYTES_ASYNC_START(_name##_stats,                \
+						      _px,                            \
+						      _async_persvc,                  \
+						      _bytes);                        \
+		}                                                                     \
+	} while (0)
+
+#define SMBPROFILE_IOBYTES_ASYNC_SET_IDLE_X(_async, _async_persvc) \
+	do {                                                       \
+		_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async);          \
+		_SMBPROFILE_TIMER_ASYNC_SET_IDLE(_async_persvc);   \
+	} while (0)
+
+#define SMBPROFILE_IOBYTES_ASYNC_SET_BUSY_X(_async, _async_persvc) \
+	do {                                                       \
+		_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async);          \
+		_SMBPROFILE_TIMER_ASYNC_SET_BUSY(_async_persvc);   \
+	} while (0)
+
+#define SMBPROFILE_IOBYTES_ASYNC_END_X(                      \
+	_async, _async_persvc, _outbytes, _opcode, _status)  \
+	do {                                                 \
+		_SMBPROFILE_IOBYTES_ASYNC_END(_async,        \
+					      _outbytes,     \
+					      _opcode,       \
+					      _status);      \
+		_SMBPROFILE_IOBYTES_ASYNC_END(_async_persvc, \
+					      _outbytes,     \
+					      _opcode,       \
+					      _status);      \
+	} while (0)
+
+#else /* WITH_PROFILE */
+
+#define START_PROFILE_X(_snum, x)
+#define START_PROFILE_BYTES_X(_snum, x, n)
+#define END_PROFILE_X(x)
+#define END_PROFILE_BYTES_X(x)
+#define SMBPROFILE_BYTES_ASYNC_STATE_X(_async_name, _async_persvc_name)
+#define SMBPROFILE_BYTES_ASYNC_START_X(_name, _snum, _async, _async_persvc, _bytes)
+#define SMBPROFILE_BYTES_ASYNC_SET_IDLE_X(_async, _async_persvc)
+#define SMBPROFILE_BYTES_ASYNC_SET_BUSY_X(_async, _async_persvc)
+#define SMBPROFILE_BYTES_ASYNC_END_X(_async, _async_persvc)
+#define SMBPROFILE_IOBYTES_ASYNC_STATE_X(_async_name, _async_persvc_name)
+#define SMBPROFILE_IOBYTES_ASYNC_START_X(_name, _snum, _async, _async_persvc, _bytes)
+#define SMBPROFILE_IOBYTES_ASYNC_SET_IDLE_X(_async, _async_persvc)
+#define SMBPROFILE_IOBYTES_ASYNC_SET_BUSY_X(_async, _async_persvc)
+#define SMBPROFILE_IOBYTES_ASYNC_END_X(_async, _async_persvc, _outbytes, _opcode, _status)
+
+static inline void smbprofile_persvc_mkref(int snum,
+					   const char *svc,
+					   const char *remote)
+{
+	return;
+}
+
+static inline void smbprofile_persvc_unref(int snum)
+{
+	return;
+}
+
+static inline struct profile_stats *smbprofile_persvc_get(int snum)
+{
+	return NULL;
+}
+
+static inline void smbprofile_persvc_reset(void)
+{
+	return;
+}
+
+#endif /* WITH_PROFILE */
 
 #endif

@@ -280,6 +280,11 @@ static int cli_credentials_set_from_ccache(struct cli_credentials *cred,
 	return 0;
 }
 
+_PUBLIC_ const char *cli_credentials_get_out_ccache_name(struct cli_credentials *cred)
+{
+	return cred->ccache_name;
+}
+
 _PUBLIC_ int cli_credentials_set_ccache(struct cli_credentials *cred,
 					struct loadparm_context *lp_ctx,
 					const char *name,
@@ -291,6 +296,14 @@ _PUBLIC_ int cli_credentials_set_ccache(struct cli_credentials *cred,
 	struct ccache_container *ccc;
 	if (cred->ccache_obtained > obtained) {
 		return 0;
+	}
+
+	if (name != NULL) {
+		cred->ccache_name = talloc_strdup(cred, name);
+		if (cred->ccache_name == NULL) {
+			(*error_string) = error_message(ENOMEM);
+			return ENOMEM;
+		}
 	}
 
 	ccc = talloc(cred, struct ccache_container);
@@ -669,36 +682,37 @@ _PUBLIC_ int cli_credentials_get_named_ccache(struct cli_credentials *cred,
 	if (cred->ccache_obtained >= cred->ccache_threshold &&
 	    cred->ccache_obtained > CRED_UNINITIALISED) {
 		time_t lifetime;
-		bool expired = false;
+		enum credentials_obtained pass_obtained =
+			cli_credentials_get_password_obtained(cred);
+		bool kinit_required = false;
 		ret = smb_krb5_cc_get_lifetime(cred->ccache->smb_krb5_context->krb5_context,
 					       cred->ccache->ccache, &lifetime);
-		if (ret == KRB5_CC_END || ret == ENOENT) {
-			/* If we have a particular ccache set, without
-			 * an initial ticket, then assume there is a
-			 * good reason */
+		if (ret == KRB5_PLUGIN_NO_HANDLE) {
+			/*
+			 * KRB5_PLUGIN_NO_HANDLE is a special case of the encrypted
+			 * GSSProxy credential. We don't know its lifetime but assume it
+			 * is a valid one. Acquiring it will show the lifetime.
+			 */
+			kinit_required = false;
+		} else if (ret == KRB5_CC_END || ret == ENOENT) {
+			kinit_required = true;
 		} else if (ret == 0) {
 			if (lifetime == 0) {
-				DEBUG(3, ("Ticket in credentials cache for %s expired, will refresh\n",
-					  cli_credentials_get_principal(cred, cred)));
-				expired = true;
+				kinit_required = true;
 			} else if (lifetime < 300) {
-				DEBUG(3, ("Ticket in credentials cache for %s will shortly expire (%u secs), will refresh\n",
-					  cli_credentials_get_principal(cred, cred), (unsigned int)lifetime));
-				expired = true;
+				kinit_required = true;
 			}
 		} else {
-			(*error_string) = talloc_asprintf(cred, "failed to get ccache lifetime: %s\n",
-							  smb_get_krb5_error_message(cred->ccache->smb_krb5_context->krb5_context,
-										     ret, cred));
-			return ret;
+			kinit_required = true;
 		}
 
-		DEBUG(5, ("Ticket in credentials cache for %s will expire in %u secs\n",
-			  cli_credentials_get_principal(cred, cred), (unsigned int)lifetime));
-
-		if (!expired) {
+		if (!kinit_required) {
 			*ccc = cred->ccache;
 			return 0;
+		}
+		if (pass_obtained < cred->ccache_obtained) {
+			(*error_string) = "The credential cache is invalid";
+			return EINVAL;
 		}
 	}
 	if (cli_credentials_is_anonymous(cred)) {
@@ -793,18 +807,27 @@ _PUBLIC_ bool cli_credentials_get_ccache_name_obtained(
 		if (ret == KRB5_CC_END || ret == ENOENT) {
 			return false;
 		}
-		if (ret != 0) {
+
+		/*
+		 * KRB5_PLUGIN_NO_HANDLE is a special case of the encrypted
+		 * GSSProxy credential. We don't know its lifetime but assume it
+		 * is a valid one. Acquiring it will show the lifetime.
+		 * */
+		if (ret != 0 && ret != KRB5_PLUGIN_NO_HANDLE) {
 			return false;
 		}
-		if (lifetime == 0) {
-			return false;
-		} else if (lifetime < 300) {
-			if (cred->password_obtained >= cred->ccache_obtained) {
-				/*
-				 * we have a password to re-kinit
-				 * so let the caller try that.
-				 */
+
+		if (ret == 0) {
+			if (lifetime == 0) {
 				return false;
+			} else if (lifetime < 300) {
+				if (cred->password_obtained >= cred->ccache_obtained) {
+					/*
+					* we have a password to re-kinit
+					* so let the caller try that.
+					*/
+					return false;
+				}
 			}
 		}
 

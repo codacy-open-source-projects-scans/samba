@@ -200,7 +200,7 @@ static int account_show(struct net_context *c,
 	d_printf(_("Minimum password age: "));
 	if (!nt_time_is_zero((NTTIME *)&i1->min_password_age)) {
 		time_t t = nt_time_to_unix_abs((NTTIME *)&i1->min_password_age);
-		d_printf(_("%d seconds\n"), (int)t);
+		d_printf(_("%jd seconds\n"), (intmax_t)t);
 	} else {
 		d_printf(_("not set\n"));
 	}
@@ -208,7 +208,7 @@ static int account_show(struct net_context *c,
 	d_printf(_("Maximum password age: "));
 	if (nt_time_is_set((NTTIME *)&i1->max_password_age)) {
 		time_t t = nt_time_to_unix_abs((NTTIME *)&i1->max_password_age);
-		d_printf(_("%d seconds\n"), (int)t);
+		d_printf(_("%jd seconds\n"), (intmax_t)t);
 	} else {
 		d_printf(_("not set\n"));
 	}
@@ -220,7 +220,7 @@ static int account_show(struct net_context *c,
 		d_printf(_("Account lockout duration: "));
 		if (nt_time_is_set(&i12->lockout_duration)) {
 			time_t t = nt_time_to_unix_abs(&i12->lockout_duration);
-			d_printf(_("%d seconds\n"), (int)t);
+			d_printf(_("%jd seconds\n"), (intmax_t)t);
 		} else {
 			d_printf(_("not set\n"));
 		}
@@ -228,7 +228,7 @@ static int account_show(struct net_context *c,
 		d_printf(_("Bad password count reset after: "));
 		if (nt_time_is_set(&i12->lockout_window)) {
 			time_t t = nt_time_to_unix_abs(&i12->lockout_window);
-			d_printf(_("%d seconds\n"), (int)t);
+			d_printf(_("%jd seconds\n"), (intmax_t)t);
 		} else {
 			d_printf(_("not set\n"));
 		}
@@ -325,8 +325,8 @@ static int account_set_resetduration(struct net_context *c,
 	}
 
 	unix_to_nt_time_abs(&i12->lockout_window, atoi(argv[0]));
-	d_printf(_("Setting bad password reset duration to %d seconds\n"),
-		 (int)nt_time_to_unix_abs(&i12->lockout_window));
+	d_printf(_("Setting bad password reset duration to %jd seconds\n"),
+		 (intmax_t)nt_time_to_unix_abs(&i12->lockout_window));
 
 	return 12;
 }
@@ -386,8 +386,8 @@ static int account_set_maxpwage(struct net_context *c,
 	}
 
 	unix_to_nt_time_abs((NTTIME *)&i1->max_password_age, atoi(argv[0]));
-	d_printf(_("Setting maximum password age to %d seconds\n"),
-		 (int)nt_time_to_unix_abs((NTTIME *)&i1->max_password_age));
+	d_printf(_("Setting maximum password age to %jd seconds\n"),
+		 (intmax_t)nt_time_to_unix_abs((NTTIME *)&i1->max_password_age));
 
 	return 1;
 }

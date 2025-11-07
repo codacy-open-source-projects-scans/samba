@@ -20,6 +20,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include <sys/stat.h>
 #include <cmocka.h>
@@ -363,6 +364,11 @@ static ssize_t attempt_round_trip(TALLOC_CTX *mem_ctx,
 					     comp_written,
 					     decompressed.data,
 					     decompressed.length);
+	if (decomp_written <= 0) {
+		talloc_free(tmp_ctx);
+		return -1;
+	}
+
 	debug_end_timer("decompress", original.length);
 	if (save_name != NULL && LZX_DEBUG_FILES) {
 		char s[300];

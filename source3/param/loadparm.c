@@ -82,6 +82,7 @@
 #include "source3/librpc/gen_ndr/ads.h"
 #include "lib/util/time_basic.h"
 #include "libds/common/flags.h"
+#include "source3/smbd/globals.h"
 
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -249,7 +250,7 @@ static const struct loadparm_service _sDefault =
 	.aio_read_size = 1,
 	.aio_write_size = 1,
 	.map_readonly = MAP_READONLY_NO,
-	.server_smb_encrypt = SMB_ENCRYPTION_DEFAULT,
+	._server_smb_encrypt = SMB_ENCRYPTION_DEFAULT,
 	.kernel_share_modes = false,
 	.durable_handles = true,
 	.check_parent_directory_delete_on_close = false,
@@ -259,6 +260,7 @@ static const struct loadparm_service _sDefault =
 	.spotlight_backend = SPOTLIGHT_BACKEND_NOINDEX,
 	.honor_change_notify_privilege = false,
 	.volume_serial_number = -1,
+	.smb3_unix_extensions = true,
 	.dummy = ""
 };
 
@@ -670,6 +672,7 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.winbind_sealed_pipes = true;
 	Globals.require_strong_key = true;
 	Globals.reject_md5_servers = true;
+	Globals._client_use_krb5_netlogon = LP_ENUM_Default;
 	Globals.server_schannel = true;
 	Globals.server_schannel_require_seal = true;
 	Globals.reject_md5_clients = true;
@@ -845,7 +848,8 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.server_signing = SMB_SIGNING_DEFAULT;
 
 	Globals.defer_sharing_violations = true;
-	Globals.smb_ports = str_list_make_v3_const(NULL, SMB_PORTS, NULL);
+	Globals.server_smb_transports = str_list_make_v3_const(NULL, "tcp, nbt", NULL);
+	Globals.client_smb_transports = str_list_make_v3_const(NULL, "tcp, nbt", NULL);
 
 	Globals.enable_privileges = true;
 	Globals.host_msdfs        = true;
@@ -885,9 +889,13 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	lpcfg_string_set(Globals.ctx, &Globals.ncalrpc_dir,
 			 get_dyn_NCALRPCDIR());
 
-	Globals.server_services = str_list_make_v3_const(NULL, "s3fs rpc nbt wrepl ldap cldap kdc drepl winbindd ntp_signd kcc dnsupdate dns", NULL);
+	Globals.server_services = str_list_make_v3_const(NULL, "s3fs rpc nbt wrepl ldap cldap kdc drepl ft_scanner winbindd ntp_signd kcc dnsupdate dns", NULL);
 
-	Globals.dcerpc_endpoint_servers = str_list_make_v3_const(NULL, "epmapper wkssvc samr netlogon lsarpc drsuapi dssetup unixinfo browser eventlog6 backupkey dnsserver", NULL);
+	Globals.dcerpc_endpoint_servers = str_list_make_v3_const(
+		NULL,
+		"epmapper samr netlogon lsarpc drsuapi dssetup unixinfo "
+		"browser eventlog6 backupkey dnsserver",
+		NULL);
 
 	Globals.tls_enabled = true;
 	Globals.tls_verify_peer = TLS_VERIFY_PEER_AS_STRICT_AS_POSSIBLE;
@@ -952,6 +960,9 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.kpasswd_port = 464;
 
 	Globals.kdc_enable_fast = true;
+	Globals.strong_certificate_binding_enforcement
+		= KDC_CERT_BINDING_FULL;
+	Globals.certificate_backdating_compensation = 0;
 
 	Globals.winbind_debug_traceid = true;
 
@@ -1003,12 +1014,8 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 
 	Globals.acl_claims_evaluation = ACL_CLAIMS_EVALUATION_AD_DC_ONLY;
 
-	/* Set the default Himmelblaud globals */
-	lpcfg_string_set(Globals.ctx,
-			&Globals.himmelblaud_hsm_pin_path,
-			get_dyn_HIMMELBLAUD_HSM_PIN_PATH());
-	Globals.himmelblaud_hello_enabled = false;
-	Globals.himmelblaud_sfa_fallback = false;
+	Globals.server_smb_encryption_over_quic = true;
+	Globals.client_smb_encryption_over_quic = true;
 
 	/* Now put back the settings that were set with lp_set_cmdline() */
 	apply_lp_set_cmdline();
@@ -2946,7 +2953,7 @@ bool lp_do_section(const char *pszSectionName, void *userdata)
 	if (bRetval) {
 		/* We put this here to avoid an odd message order if messages are */
 		/* issued by the post-processing of a previous section. */
-		DEBUG(2, ("Processing section \"[%s]\"\n", pszSectionName));
+		DBG_INFO("Processing section \"[%s]\"\n", pszSectionName);
 
 		iServiceIndex = add_a_service(&sDefault, pszSectionName);
 		if (iServiceIndex < 0) {
@@ -4298,6 +4305,17 @@ bool lp_load_with_registry_shares(const char *pszFname)
 			  true); /* load_all_shares*/
 }
 
+bool lp_load_with_registry_without_shares(const char *pszFname)
+{
+	return lp_load_ex(pszFname,
+			  false, /* global_only */
+			  true,  /* save_defaults */
+			  false, /* add_ipc */
+			  true, /* reinit_globals */
+			  true,  /* allow_include_registry */
+			  false); /* load_all_shares*/
+}
+
 /***************************************************************************
  Return the max number of services.
 ***************************************************************************/
@@ -4653,27 +4671,6 @@ void lp_set_mangling_method(const char *new_method)
 }
 
 /*******************************************************************
- Global state for POSIX pathname processing.
-********************************************************************/
-
-static bool posix_pathnames;
-
-bool lp_posix_pathnames(void)
-{
-	return posix_pathnames;
-}
-
-/*******************************************************************
- Change everything needed to ensure POSIX pathname processing (currently
- not much).
-********************************************************************/
-
-void lp_set_posix_pathnames(void)
-{
-	posix_pathnames = true;
-}
-
-/*******************************************************************
  Global state for POSIX lock processing - CIFS unix extensions.
 ********************************************************************/
 
@@ -4728,12 +4725,6 @@ void widelinks_warning(int snum)
 			"These parameters are incompatible. "
 			"Wide links will be disabled for this share.\n",
 			 lp_const_servicename(snum));
-		} else if (lp_smb3_unix_extensions(snum)) {
-			DBG_ERR("Share '%s' has wide links and SMB3 Unix "
-				"extensions enabled. "
-				"These parameters are incompatible. "
-				"Wide links will be disabled for this share.\n",
-				lp_const_servicename(snum));
 		}
 	}
 }
@@ -4741,7 +4732,7 @@ void widelinks_warning(int snum)
 bool lp_widelinks(int snum)
 {
 	/* wide links is always incompatible with unix extensions */
-	if (lp_smb1_unix_extensions() || lp_smb3_unix_extensions(snum)) {
+	if (lp_smb1_unix_extensions()) {
 		/*
 		 * Unless we have "allow insecure widelinks"
 		 * turned on.
@@ -4941,4 +4932,19 @@ int lp_smb3_directory_leases(void)
 	dirleases &= lp_oplocks(GLOBAL_SECTION_SNUM);
 	dirleases &= !lp_kernel_oplocks(GLOBAL_SECTION_SNUM);
 	return dirleases;
+}
+
+int lp_server_smb_encrypt(struct smbXsrv_connection *xconn, int snum)
+{
+	enum smb_encryption_setting enc = lp__server_smb_encrypt(snum);
+
+	if (xconn->transport.trusted_quic) {
+		/*
+		 * Our transport is already encrypted in a trustworthy
+		 * way, don't request SMB level double-encryption
+		 */
+		enc = MIN(enc, SMB_ENCRYPTION_IF_REQUIRED);
+	}
+
+	return enc;
 }

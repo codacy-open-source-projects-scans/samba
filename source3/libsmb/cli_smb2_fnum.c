@@ -98,7 +98,7 @@ static NTSTATUS map_smb2_handle_to_fnum(struct cli_state *cli,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	*pfnum = (uint16_t)ret;
+	*pfnum = ret;
 	return NT_STATUS_OK;
 }
 
@@ -111,14 +111,16 @@ static NTSTATUS map_fnum_to_smb2_handle(struct cli_state *cli,
 				struct smb2_hnd **pph)	/* Out */
 {
 	struct idr_context *idp = cli->smb2.open_handles;
+	void *ph = NULL;
 
 	if (idp == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
-	*pph = (struct smb2_hnd *)idr_find(idp, fnum);
-	if (*pph == NULL) {
+	ph = idr_find(idp, fnum);
+	if (ph == NULL) {
 		return NT_STATUS_INVALID_HANDLE;
 	}
+	*pph = talloc_get_type_abort(ph, struct smb2_hnd);
 	return NT_STATUS_OK;
 }
 
@@ -1334,6 +1336,7 @@ static NTSTATUS parse_finfo_posix_info(const uint8_t *dir_data,
 	finfo->st_ex_mode = wire_mode_to_unix(info.cc.posix_mode);
 	sid_copy(&finfo->owner_sid, &info.cc.owner);
 	sid_copy(&finfo->group_sid, &info.cc.group);
+	finfo->flags.posix = true;
 
 	if (dir_data_length < 4) {
 		return NT_STATUS_INFO_LENGTH_MISMATCH;
@@ -1544,19 +1547,8 @@ struct tevent_req *cli_smb2_list_send(
 		/* The mode MUST be 0 when opening an existing file/dir, and
 		 * will be ignored by the server.
 		 */
-		uint8_t linear_mode[4] = { 0 };
-		DATA_BLOB blob = { .data=linear_mode,
-				   .length=sizeof(linear_mode) };
-
-		in_cblobs = talloc_zero(mem_ctx, struct smb2_create_blobs);
-		if (in_cblobs == NULL) {
-			return NULL;
-		}
-
-		status = smb2_create_blob_add(in_cblobs, in_cblobs,
-					      SMB2_CREATE_TAG_POSIX, blob);
+		status = make_smb2_posix_create_ctx(mem_ctx, &in_cblobs, 0);
 		if (tevent_req_nterror(req, status)) {
-			tevent_req_nterror(req, status);
 			return tevent_req_post(req, ev);
 		}
 	}

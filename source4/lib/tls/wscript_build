@@ -13,4 +13,7 @@ bld.SAMBA_SUBSYSTEM('LIBTLS',
                                 LIBTSOCKET
                                 tevent
                                 tevent-util
+                                quic
+                                libngtcp2
+                                libngtcp2_crypto_gnutls
                                 ''')

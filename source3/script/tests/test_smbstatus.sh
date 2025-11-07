@@ -43,7 +43,7 @@ test_smbstatus()
 What a Wurst!
 EOF
 	cat >$cmdfile <<EOF
-lcd $PREFIX_ABS
+lcd $PREFIX
 put $file
 open $file
 !UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $SMBSTATUS
@@ -100,7 +100,7 @@ test_smbstatus_resolve_uids()
 What a Wurst!
 EOF
 	cat >$cmdfile <<EOF
-lcd $PREFIX_ABS
+lcd $PREFIX
 put $file
 open $file
 !UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $SMBSTATUS --resolve-uids
@@ -157,7 +157,7 @@ test_smbstatus_output()
 Hello World!
 EOF
 	cat >$cmdfile <<EOF
-lcd $PREFIX_ABS
+lcd $PREFIX
 put $file
 open $file
 !UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $SMBSTATUS --shares > $status_shares
@@ -249,7 +249,7 @@ test_smbstatus_json()
 Hello World!
 EOF
 	cat > $cmdfile <<EOF
-lcd $PREFIX_ABS
+lcd $PREFIX
 put $file
 open $file
 posix
@@ -422,7 +422,7 @@ EOF
 	fi
 
 	# keys in --json --profile
-	expected='["ACL Calls","NT Transact Calls","SMB Calls","SMB2 Calls","SMBD loop","Stat Cache","System Calls","Trans2 Calls","smb_conf","timestamp","version"]'
+	expected='["ACL Calls","Authentication","NT Transact Calls","SMB Calls","SMB2 Calls","SMBD loop","Stat Cache","System Calls","Trans2 Calls","smb_conf","timestamp","version"]'
 	out=$(cat $PREFIX/$status_json | jq keys -c)
 	if [ "$expected" != "$out" ]; then
 		echo "Failed: Unexpected keys in smbstatus -jP"

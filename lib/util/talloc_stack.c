@@ -38,12 +38,11 @@
  */
 
 #include "replace.h"
+#include <pthread.h>
 #include <talloc.h>
 #include "lib/util/talloc_stack.h"
-#include "lib/util/smb_threads.h"
-#include "lib/util/smb_threads_internal.h"
-#include "lib/util/fault.h"
 #include "lib/util/debug.h"
+#include "lib/util/fault.h"
 
 struct talloc_stackframe {
 	int talloc_stacksize;
@@ -51,55 +50,115 @@ struct talloc_stackframe {
 	TALLOC_CTX **talloc_stack;
 };
 
-/*
- * In the single threaded case this is a pointer
- * to the global talloc_stackframe. In the MT-case
- * this is the pointer to the thread-specific key
- * used to look up the per-thread talloc_stackframe
- * pointer.
- */
-
-static void *global_ts;
-
 /* Variable to ensure TLS value is only initialized once. */
-static smb_thread_once_t ts_initialized = SMB_THREAD_ONCE_INIT;
+#ifdef HAVE_PTHREAD
+static pthread_once_t ts_initialized = PTHREAD_ONCE_INIT;
+static pthread_key_t ts_key;
+#else /* ! HAVE_PTHREAD */
+static struct talloc_stackframe *global_ts;
+#endif
 
-static void talloc_stackframe_init(void * unused)
+static void talloc_stackframe_destructor(void *ptr)
 {
-	if (SMB_THREAD_CREATE_TLS("talloc_stackframe", global_ts)) {
-		smb_panic("talloc_stackframe_init create_tls failed");
+	struct talloc_stackframe *ts =
+		(struct talloc_stackframe *)ptr;
+	int i;
+
+	for (i = 0; i < ts->talloc_stacksize; i++) {
+		int idx = ts->talloc_stacksize - (i + 1);
+		DEBUG(0, ("Dangling frame[%d] %s\n",
+			  idx, talloc_get_name(ts->talloc_stack[idx])));
 	}
+	if (ts->talloc_stacksize > 0) {
+#ifdef DEVELOPER
+		smb_panic("Dangling frames.");
+#endif
+	}
+
+	free(ts);
 }
 
-static struct talloc_stackframe *talloc_stackframe_create(void)
+#ifdef HAVE_PTHREAD
+static void talloc_stackframe_init_once(void)
 {
+	int ret = pthread_key_create(&ts_key, talloc_stackframe_destructor);
+	SMB_ASSERT(ret == 0);
+}
+
+static void talloc_stackframe_init(void)
+{
+	pthread_once(&ts_initialized, talloc_stackframe_init_once);
+}
+#else /* ! HAVE_PTHREAD */
+static void talloc_stackframe_atexit(void)
+{
+	talloc_stackframe_destructor(global_ts);
+}
+
+static void talloc_stackframe_init(void)
+{
+	static bool done;
+
+	if (!done) {
+		atexit(talloc_stackframe_atexit);
+		done = true;
+	}
+}
+#endif
+
+static struct talloc_stackframe *talloc_stackframe_get_existing(void)
+{
+	struct talloc_stackframe *ts = NULL;
+
+	talloc_stackframe_init();
+
+#ifdef HAVE_PTHREAD
+	ts = (struct talloc_stackframe *)pthread_getspecific(ts_key);
+#else /* ! HAVE_PTHREAD */
+	ts = global_ts;
+#endif
+
+	return ts;
+}
+
+static struct talloc_stackframe *talloc_stackframe_get(void)
+{
+	struct talloc_stackframe *ts = talloc_stackframe_get_existing();
+#ifdef HAVE_PTHREAD
+	int ret;
+#endif /* ! HAVE_PTHREAD */
+
+	if (ts != NULL) {
+		return ts;
+	}
+
 #if defined(PARANOID_MALLOC_CHECKER)
 #ifdef calloc
 #undef calloc
 #endif
 #endif
-	struct talloc_stackframe *ts = (struct talloc_stackframe *)calloc(
+	ts = (struct talloc_stackframe *)calloc(
 		1, sizeof(struct talloc_stackframe));
 #if defined(PARANOID_MALLOC_CHECKER)
 #define calloc(n, s) __ERROR_DONT_USE_MALLOC_DIRECTLY
 #endif
-
 	if (!ts) {
 		smb_panic("talloc_stackframe_init malloc failed");
 	}
 
-	SMB_THREAD_ONCE(&ts_initialized, talloc_stackframe_init, NULL);
+#ifdef HAVE_PTHREAD
+	ret = pthread_setspecific(ts_key, ts);
+	SMB_ASSERT(ret == 0);
+#else /* ! HAVE_PTHREAD */
+	global_ts = ts;
+#endif
 
-	if (SMB_THREAD_SET_TLS(global_ts, ts)) {
-		smb_panic("talloc_stackframe_init set_tls failed");
-	}
 	return ts;
 }
 
 static int talloc_pop(TALLOC_CTX *frame)
 {
-	struct talloc_stackframe *ts =
-		(struct talloc_stackframe *)SMB_THREAD_GET_TLS(global_ts);
+	struct talloc_stackframe *ts = talloc_stackframe_get_existing();
 	size_t blocks;
 	int i;
 
@@ -165,12 +224,7 @@ static TALLOC_CTX *talloc_stackframe_internal(const char *location,
 					      size_t poolsize)
 {
 	TALLOC_CTX **tmp, *top;
-	struct talloc_stackframe *ts =
-		(struct talloc_stackframe *)SMB_THREAD_GET_TLS(global_ts);
-
-	if (ts == NULL) {
-		ts = talloc_stackframe_create();
-	}
+	struct talloc_stackframe *ts = talloc_stackframe_get();
 
 	if (ts->talloc_stack_arraysize < ts->talloc_stacksize + 1) {
 		tmp = talloc_realloc(NULL, ts->talloc_stack, TALLOC_CTX *,
@@ -225,17 +279,16 @@ TALLOC_CTX *_talloc_stackframe_pool(const char *location, size_t poolsize)
 
 TALLOC_CTX *_talloc_tos(const char *location)
 {
-	struct talloc_stackframe *ts =
-		(struct talloc_stackframe *)SMB_THREAD_GET_TLS(global_ts);
+	struct talloc_stackframe *ts = talloc_stackframe_get_existing();
 
 	if (ts == NULL || ts->talloc_stacksize == 0) {
-		_talloc_stackframe(location);
-		ts = (struct talloc_stackframe *)SMB_THREAD_GET_TLS(global_ts);
+		TALLOC_CTX *ret = _talloc_stackframe(location);
 		DEBUG(0, ("no talloc stackframe at %s, leaking memory\n",
 			  location));
 #ifdef DEVELOPER
 		smb_panic("No talloc stackframe");
 #endif
+		return ret;
 	}
 
 	return ts->talloc_stack[ts->talloc_stacksize-1];
@@ -249,8 +302,7 @@ TALLOC_CTX *_talloc_tos(const char *location)
 
 bool talloc_stackframe_exists(void)
 {
-	struct talloc_stackframe *ts =
-		(struct talloc_stackframe *)SMB_THREAD_GET_TLS(global_ts);
+	struct talloc_stackframe *ts = talloc_stackframe_get_existing();
 
 	if (ts == NULL || ts->talloc_stacksize == 0) {
 		return false;

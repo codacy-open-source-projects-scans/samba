@@ -23,25 +23,25 @@
 import samba.getopt as options
 import ldb
 import socket
-import samba
 import re
 import os
 import tempfile
 from samba import sd_utils
 from samba.dcerpc import dnsserver, dnsp, security
 from samba.dnsserver import ARecord, AAAARecord
-from samba.ndr import ndr_unpack, ndr_pack, ndr_print
+from samba.ndr import ndr_unpack
 from samba.remove_dc import remove_dns_references
 from samba.auth import system_session
 from samba.samdb import SamDB
 from samba.common import get_bytes
 from subprocess import check_call, CalledProcessError
 from . import common
+from .computer_generate_csr import cmd_computer_generate_csr
+from .computer_keytrust import cmd_computer_keytrust
+
 
 from samba import (
-    credentials,
     dsdb,
-    Ldb,
     werror,
     WERRORError
 )
@@ -724,6 +724,8 @@ class cmd_computer(SuperCommand):
     subcommands["create"] = cmd_computer_add()
     subcommands["delete"] = cmd_computer_delete()
     subcommands["edit"] = cmd_computer_edit()
+    subcommands["generate-csr"] = cmd_computer_generate_csr()
     subcommands["list"] = cmd_computer_list()
     subcommands["show"] = cmd_computer_show()
     subcommands["move"] = cmd_computer_move()
+    subcommands["keytrust"] = cmd_computer_keytrust()

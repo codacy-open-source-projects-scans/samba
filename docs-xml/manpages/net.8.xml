@@ -1464,13 +1464,13 @@ against an NT4 Domain Controller.
 <title>ADS DNS</title>
 
 <refsect3>
-<title>ADS DNS REGISTER [HOSTNAME [IP [IP.....]]]</title>
-<para>Add host dns entry to Active Directory.</para>
+<title>ADS DNS REGISTER [FQDN [IP [IP.....]]]</title>
+<para>Add dns record to Active Directory. If FQDN is missing, <smbconfoption name="dns hostname"/> is used. If IP is missing, IPs from all network interfaces are added.</para>
 </refsect3>
 
 <refsect3>
-<title>ADS DNS UNREGISTER &lt;HOSTNAME&gt;</title>
-<para>Remove host dns entry from Active Directory.</para>
+<title>ADS DNS UNREGISTER &lt;FQDN&gt;</title>
+<para>Remove FQDN dns entry from Active Directory.</para>
 </refsect3>
 
 </refsect2>
@@ -1549,29 +1549,25 @@ to show in the result.
 
 <para>
 Since Samba 4.21.0, keytab file is created as specified in <smbconfoption
-name="sync machine password to keytab"/>. The keytab is created only for
+name="sync machine password to keytab"/> . The keytab can be created only when
+machine password is available in secrets.tdb, i.e. only for
 <smbconfoption name="kerberos method">secrets only</smbconfoption> and
 <smbconfoption name="kerberos method">secrets and keytab</smbconfoption>. With
 the smb.conf default values for <smbconfoption name="kerberos method"> secrets
 only</smbconfoption> and <smbconfoption name="sync machine password to keytab"/>
 (default is empty) the keytab is not generated at all.  Keytab with a default
-name and SPNs synced from AD is created for <smbconfoption name="kerberos
-method">secrets and keytab</smbconfoption> if <smbconfoption name="sync machine
-password to keytab"/> is missing.
+name containing: SPNs synced from AD, account name COMPUTER$ and principal
+host/dns_hostname is created for <smbconfoption name="kerberos method">secrets
+and keytab</smbconfoption> if <smbconfoption name="sync machine password to
+keytab"/> is missing.
 </para>
 <para>
-Till Samba 4.20.0, two more entries were created by default: the machinename of
-the client (ending with '$') and the UPN (host/domain@REALM).  If these two
-entries are still needed, each must be specified in an own keytab file.
-Example below will generate three keytab files that contain SPNs synced from
-AD, host UPN and machine$ SPN:
+Till Samba 4.20, these entries were created by default: the account name
+COMPUTER$, 'host' principal and SPNs synced from AD. Example below generates
+such keytab:
 </para>
 <programlisting>
-<smbconfoption name="sync machine password to keytab">
-/etc/krb5.keytab0:sync_spns:machine_password,
-/etc/krb5.keytab1:spns=host/smb.com@SMB.COM:machine_password,
-/etc/krb5.keytab2:account_name:machine_password
-</smbconfoption>
+<smbconfoption name="sync machine password to keytab">/etc/krb5.keytab:spn_prefixes=host:account_name:sync_spns:sync_kvno:machine_password</smbconfoption>
 </programlisting>
 <para>
 No changes are made to the computer AD account.
@@ -1579,7 +1575,7 @@ No changes are made to the computer AD account.
 </refsect2>
 
 <refsect2>
-<title>(Removed!) ADS KEYTAB <replaceable>ADD</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN</replaceable></title>
+<title>(Removed!) ADS KEYTAB <replaceable>ADD</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
 
 <para>
 This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
@@ -1641,7 +1637,16 @@ available.
 </refsect2>
 
 <refsect2>
-<title>(Removed!) ADS KEYTAB <replaceable>DELETE</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN</replaceable></title>
+    <title>ADS KEYTAB <replaceable>LIST</replaceable> <replaceable>[keytab]</replaceable></title>
+
+    <para>
+        The command will list the contents of a keytab. If no keytab is
+        specified it will display the default keytab configured by KRB5.
+    </para>
+</refsect2>
+
+<refsect2>
+<title>(Removed!) ADS KEYTAB <replaceable>DELETE</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
 
 <para>
 This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
@@ -1661,7 +1666,7 @@ net ads keytab create
 </refsect2>
 
 <refsect2>
-<title>(Removed!) ADS KEYTAB <replaceable>ADD_UPDATE_ADS</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN</replaceable></title>
+<title>(Removed!) ADS KEYTAB <replaceable>ADD_UPDATE_ADS</replaceable> <replaceable>(principal | machine | serviceclass | windows SPN)</replaceable></title>
 <para>
 This command is no longer available in Samba 4.21.0 and newer. See <smbconfoption name="sync machine password to keytab"/> for replacement.
 </para>
@@ -1710,35 +1715,37 @@ the following entry types;
 </refsect2>
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN LIST [machine]</replaceable></title>
+<title>ADS SETSPN LIST <replaceable>[machine]</replaceable></title>
 
 <para>
    Lists the Windows SPNs stored in the 'machine' Windows AD Computer object.
    If 'machine' is not specified then computer account for this client is used
    instead.
 </para>
+<para>Example: <userinput>net ads setspn list --machine-pass</userinput></para>
 </refsect2>
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN ADD SPN [machine]</replaceable></title>
+<title>ADS SETSPN ADD <replaceable>[machine] SPN</replaceable></title>
 
 <para>
    Adds the specified Windows SPN to the 'machine' Windows AD Computer object.
    If 'machine' is not specified then computer account for this client is used
    instead.
 </para>
+<para>Example: <userinput>net ads setspn add computername host/computername.example.com -U Administrator%Passw0rd</userinput></para>
 </refsect2>
 
 
 <refsect2>
-<title>ADS setspn <replaceable>SETSPN DELETE SPN [machine]</replaceable></title>
+<title>ADS SETSPN DELETE <replaceable>[machine] SPN</replaceable></title>
 
 <para>
    DELETE the specified Window SPN from the 'machine' Windows AD Computer
    object. If 'machine' is not specified then computer account for this
-   client is used
-   instead.
+   client is used instead.
 </para>
+<para>Example: <userinput>net ads setspn delete computername host/computername.example.com -U Administrator%Passw0rd</userinput></para>
 
 </refsect2>
 
@@ -1765,6 +1772,8 @@ the following entry types;
 <para>0x00000004 RC4-HMAC</para>
 <para>0x00000008 AES128-CTS-HMAC-SHA1-96</para>
 <para>0x00000010 AES256-CTS-HMAC-SHA1-96</para>
+<para>0x00000020 AES256-CTS-HMAC-SHA1-96-SK</para>
+<para>0x00080000 RESOURCE-SID-COMPRESSION-DISABLED</para>
 
 </refsect2>
 
@@ -1772,10 +1781,10 @@ the following entry types;
 	<title>ADS ENCTYPES LIST <replaceable>&lt;ACCOUNTNAME&gt;</replaceable></title>
 
 <para>
-	List the value of the "msDS-SupportedEncryptionTypes" attribute of a given account.
+	List the value of the "msDS-SupportedEncryptionTypes" attribute of a given account. Computer account needs '$' at the end.
 </para>
 
-<para>Example: <userinput>net ads enctypes list Computername</userinput></para>
+<para>Example: <userinput>net ads enctypes list Computername$ --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -1783,10 +1792,10 @@ the following entry types;
 	<title>ADS ENCTYPES SET <replaceable>&lt;ACCOUNTNAME&gt;</replaceable> <replaceable>[enctypes]</replaceable></title>
 
 <para>
-	Set the value of the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME to a given value. If the value is omitted, the value is set to 31 which enables all the currently supported encryption types.
+	Set the value of the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME to a given value. If the value is omitted, the value is set to 28 which enables RC4-HMAC, AES128-CTS-HMAC-SHA1-96 and AES256-CTS-HMAC-SHA1-96 encryption types.
 </para>
 
-<para>Example: <userinput>net ads enctypes set Computername 24</userinput></para>
+<para>Example: <userinput>net ads enctypes set Computername$ 24 --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -1797,7 +1806,7 @@ the following entry types;
 	Deletes the "msDS-SupportedEncryptionTypes" attribute of the LDAP object of ACCOUNTNAME.
 </para>
 
-<para>Example: <userinput>net ads enctypes set Computername 24</userinput></para>
+<para>Example: <userinput>net ads enctypes delete Computername$ --machine-pass</userinput></para>
 
 </refsect2>
 
@@ -3132,6 +3141,13 @@ Dump the locking table of a certain global lock.
 		</itemizedlist>
 
 	</refsect3>
+
+	<refsect3>
+		<title>tdb smbXsrv wipedbs</title>
+		<para>Clean stale entries from smbXsrv databases.</para>
+		<para>An alias for <command>net serverid wipedbs</command>.
+		</para>
+	</refsect3>
 </refsect2>
 
 <refsect2>
@@ -3746,6 +3762,35 @@ net witness force-response   Force an AsyncNotify response based on json input (
 </refsect2>
 
 <refsect2>
+  <title>serverid</title>
+  <para>Check existence of a serverid and clean stale entries from fileserver
+  state databases.</para>
+  <para>The following commands are implemented:
+  <simplelist>
+    <member>net serverid exists          Check existence of a serverid</member>
+    <member>net serverid wipedbs         Clean stale entries from fileserver state databases</member>
+  </simplelist>
+  </para>
+
+<refsect3>
+  <title>serverid exists &lt;serverid&gt;</title>
+  <para>Checks if a serverid exits.</para>
+</refsect3>
+
+<refsect3>
+  <title>serverid wipedbs</title>
+  <para>Clean stale entries from fileserver state databases</para>
+  <para>Options for wipedbs:</para>
+  <para>        --test</para>
+  <para>            Only check for stale entries and log them</para>
+  <para>        --verbose</para>
+  <para>            Produce verbose logging</para>
+</refsect3>
+
+
+</refsect2>
+
+<refsect2>
 <title>HELP [COMMAND]</title>
 
 <para>Gives usage information for the specified command.</para>
@@ -3757,8 +3802,8 @@ net witness force-response   Force an AsyncNotify response based on json input (
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is complete for version 3 of the Samba
-	suite.</para>
+	<para>This man page is part of version &doc.version;
+	of the Samba suite.</para>
 </refsect1>
 
 <refsect1>

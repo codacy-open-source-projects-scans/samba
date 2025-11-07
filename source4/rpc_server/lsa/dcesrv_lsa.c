@@ -31,7 +31,6 @@
 #include "dsdb/common/util.h"
 #include "libcli/security/session.h"
 #include "libcli/lsarpc/util_lsarpc.h"
-#include "lib/messaging/irpc.h"
 #include "libds/common/roles.h"
 #include "lib/util/smb_strtox.h"
 #include "lib/param/loadparm.h"
@@ -77,6 +76,12 @@ static NTSTATUS dcesrv_interface_lsarpc_init_server(struct dcesrv_context *dce_c
 	}
 	return lsarpc__op_init_server(dce_ctx, ep_server);
 }
+
+static NTSTATUS fill_trust_domain_ex(TALLOC_CTX *mem_ctx,
+				     struct ldb_message *msg,
+				     struct lsa_TrustDomainInfoInfoEx *info_ex);
+
+#define FOREST_TRUST_RECORD_TYPE_LAST_SUPPORTED LSA_FOREST_TRUST_RECORD2_TYPE_LAST
 
 /*
   this type allows us to distinguish handle types
@@ -282,6 +287,8 @@ static NTSTATUS dcesrv_lsa_DeleteObject(struct dcesrv_call_state *dce_call, TALL
 			return NT_STATUS_INVALID_HANDLE;
 		}
 
+		TALLOC_FREE(h);
+
 		ZERO_STRUCTP(r->out.handle);
 
 		return NT_STATUS_OK;
@@ -314,6 +321,8 @@ static NTSTATUS dcesrv_lsa_DeleteObject(struct dcesrv_call_state *dce_call, TALL
 		if (ret != LDB_SUCCESS) {
 			return NT_STATUS_INTERNAL_DB_CORRUPTION;
 		}
+
+		TALLOC_FREE(h);
 
 		ZERO_STRUCTP(r->out.handle);
 
@@ -357,6 +366,8 @@ static NTSTATUS dcesrv_lsa_DeleteObject(struct dcesrv_call_state *dce_call, TALL
 		if (!NT_STATUS_IS_OK(status)) {
 			return status;
 		}
+
+		TALLOC_FREE(h);
 
 		ZERO_STRUCTP(r->out.handle);
 
@@ -1079,7 +1090,7 @@ static NTSTATUS add_trust_user(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	ret = ldb_msg_add_fmt(msg, "samAccountName", "%s$", netbios_name);
+	ret = ldb_msg_add_fmt(msg, "sAMAccountName", "%s$", netbios_name);
 	if (ret != LDB_SUCCESS) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1173,6 +1184,38 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_precheck(
 		return NT_STATUS_INVALID_SID;
 	}
 
+	if ((info->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) &&
+	    (info->trust_attributes & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE))
+	{
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if ((info->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) &&
+	    (info->trust_attributes & LSA_TRUST_ATTRIBUTE_CROSS_ORGANIZATION))
+	{
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if ((info->trust_attributes & LSA_TRUST_ATTRIBUTE_PIM_TRUST) &&
+	    !(info->trust_attributes & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE))
+	{
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (info->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) {
+		/*
+		 * We don't allow additional domains in our forest yet.
+		 */
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	if (info->trust_attributes & LSA_TRUST_ATTRIBUTE_PIM_TRUST) {
+		/*
+		 * We don't support LSA_TRUST_ATTRIBUTE_PIM_TRUST yet.
+		 */
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
 	/*
 	 * We expect S-1-5-21-A-B-C, but we don't
 	 * allow S-1-5-21-0-0-0 as this is used
@@ -1199,6 +1242,44 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_precheck(
 		return NT_STATUS_CURRENT_DOMAIN_NOT_ALLOWED;
 	}
 
+	if (strlen(netbios_name) > 15) {
+		return NT_STATUS_OBJECT_NAME_INVALID;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS dcesrv_lsa_default_forest_trust_info(TALLOC_CTX *mem_ctx,
+						     const struct dom_sid *sid,
+						     const char *dns_name,
+						     const char *nbt_name,
+						     DATA_BLOB *_ft_blob)
+{
+	struct ForestTrustInfo *trust_fti = NULL;
+	DATA_BLOB ft_blob = {};
+	enum ndr_err_code ndr_err;
+	struct timeval tv = timeval_current();
+	NTTIME now = timeval_to_nttime(&tv);
+	NTSTATUS status;
+
+	status = dsdb_trust_default_forest_info(mem_ctx,
+						sid,
+						dns_name,
+						nbt_name,
+						now,
+						&trust_fti);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	ndr_err = ndr_push_struct_blob(&ft_blob, mem_ctx, trust_fti,
+				       (ndr_push_flags_fn_t)ndr_push_ForestTrustInfo);
+	TALLOC_FREE(trust_fti);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		return ndr_map_error2ntstatus(ndr_err);
+	}
+
+	*_ft_blob = ft_blob;
 	return NT_STATUS_OK;
 }
 
@@ -1222,13 +1303,9 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_common(struct dcesrv_call_state *
 	DATA_BLOB trustAuthIncoming = data_blob_null;
 	DATA_BLOB trustAuthOutgoing = data_blob_null;
 	struct dcesrv_handle *handle = NULL;
-	struct server_id *server_ids = NULL;
-	uint32_t num_server_ids = 0;
 	char *dns_encoded = NULL;
 	char *netbios_encoded = NULL;
 	char *sid_encoded = NULL;
-	struct imessaging_context *imsg_ctx =
-		dcesrv_imessaging_context(dce_call->conn);
 	NTSTATUS status;
 	bool ok;
 	int ret;
@@ -1392,6 +1469,29 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_common(struct dcesrv_call_state *
 		}
 	}
 
+	if (info->trust_attributes & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE) {
+		DATA_BLOB ft_blob = {};
+
+		status = dcesrv_lsa_default_forest_trust_info(mem_ctx,
+							      info->sid,
+							      dns_name,
+							      netbios_name,
+							      &ft_blob);
+		if (!NT_STATUS_IS_OK(status)) {
+			ldb_transaction_cancel(sam_ldb);
+			return status;
+		}
+
+		ret = ldb_msg_add_value(msg,
+					"msDS-TrustForestTrustInfo",
+					&ft_blob,
+					NULL);
+		if (ret != LDB_SUCCESS) {
+			ldb_transaction_cancel(sam_ldb);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
 	trusted_domain_state->trusted_domain_dn = ldb_dn_copy(
 		trusted_domain_state, msg->dn);
 
@@ -1442,22 +1542,6 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_common(struct dcesrv_call_state *
 	if (ret != LDB_SUCCESS) {
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
 	}
-
-	/*
-	 * Notify winbindd that we have a new trust
-	 */
-	status = irpc_servers_byname(imsg_ctx,
-				     mem_ctx,
-				     "winbind_server",
-				     &num_server_ids,
-				     &server_ids);
-	if (NT_STATUS_IS_OK(status) && num_server_ids >= 1) {
-		imessaging_send(imsg_ctx,
-				server_ids[0],
-				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
-				NULL);
-	}
-	TALLOC_FREE(server_ids);
 
 	handle = dcesrv_handle_create(dce_call, LSA_HANDLE_TRUSTED_DOMAIN);
 	if (handle == NULL) {
@@ -1932,7 +2016,7 @@ static NTSTATUS update_trust_user(TALLOC_CTX *mem_ctx,
 
 	ret = gendb_search(sam_ldb, mem_ctx,
 			   base_dn, &msgs, attrs,
-			   "samAccountName=%s$", netbios_name);
+			   "sAMAccountName=%s$", netbios_name);
 	if (ret > 1) {
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
 	}
@@ -2045,6 +2129,7 @@ static NTSTATUS setInfoTrustedDomain_base(struct dcesrv_call_state *dce_call,
 	bool del_outgoing = false;
 	bool del_incoming = false;
 	bool del_forest_info = false;
+	bool add_forest_info = false;
 	bool in_transaction = false;
 	int ret;
 	bool am_rodc;
@@ -2267,6 +2352,14 @@ static NTSTATUS setInfoTrustedDomain_base(struct dcesrv_call_state *dce_call,
 			if (orig_forest_el != NULL) {
 				del_forest_info = true;
 			}
+		} else if (changed_attrs & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE) {
+			struct ldb_message_element *orig_forest_el = NULL;
+
+			orig_forest_el = ldb_msg_find_element(dom_msg,
+						"msDS-TrustForestTrustInfo");
+			if (orig_forest_el == NULL) {
+				add_forest_info = true;
+			}
 		}
 	}
 
@@ -2313,6 +2406,34 @@ static NTSTATUS setInfoTrustedDomain_base(struct dcesrv_call_state *dce_call,
 	if (del_forest_info) {
 		ret = ldb_msg_add_empty(msg, "msDS-TrustForestTrustInfo",
 					LDB_FLAG_MOD_REPLACE, NULL);
+		if (ret != LDB_SUCCESS) {
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+	if (add_forest_info) {
+		struct lsa_TrustDomainInfoInfoEx tmp = {};
+		DATA_BLOB ft_blob = {};
+
+		nt_status = fill_trust_domain_ex(mem_ctx,
+						 dom_msg,
+						 &tmp);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			return nt_status;
+		}
+
+		nt_status = dcesrv_lsa_default_forest_trust_info(mem_ctx,
+							tmp.sid,
+							tmp.domain_name.string,
+							tmp.netbios_name.string,
+							&ft_blob);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			return nt_status;
+		}
+
+		ret = ldb_msg_add_value(msg,
+					"msDS-TrustForestTrustInfo",
+					&ft_blob,
+					NULL);
 		if (ret != LDB_SUCCESS) {
 			return NT_STATUS_NO_MEMORY;
 		}
@@ -2450,10 +2571,19 @@ static NTSTATUS fill_trust_domain_ex(TALLOC_CTX *mem_ctx,
 {
 	info_ex->domain_name.string
 		= ldb_msg_find_attr_as_string(msg, "trustPartner", NULL);
+	if (info_ex->domain_name.string == NULL) {
+		return NT_STATUS_TRUSTED_DOMAIN_FAILURE;
+	}
 	info_ex->netbios_name.string
 		= ldb_msg_find_attr_as_string(msg, "flatname", NULL);
+	if (info_ex->netbios_name.string == NULL) {
+		return NT_STATUS_TRUSTED_DOMAIN_FAILURE;
+	}
 	info_ex->sid
 		= samdb_result_dom_sid(mem_ctx, msg, "securityIdentifier");
+	if (info_ex->sid == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 	info_ex->trust_direction
 		= ldb_msg_find_attr_as_int(msg, "trustDirection", 0);
 	info_ex->trust_type
@@ -2715,7 +2845,7 @@ static NTSTATUS dcesrv_lsa_EnumTrustDom(struct dcesrv_call_state *dce_call, TALL
 
 	policy_state = policy_handle->data;
 
-	/* search for all users in this domain. This could possibly be cached and
+	/* search for all trusted domains. This could possibly be cached and
 	   resumed based on resume_key */
 	count = gendb_search(policy_state->sam_ldb, mem_ctx, policy_state->system_dn, &domains, attrs,
 			     "objectclass=trustedDomain");
@@ -2807,7 +2937,7 @@ static NTSTATUS dcesrv_lsa_EnumTrustedDomainsEx(struct dcesrv_call_state *dce_ca
 
 	policy_state = policy_handle->data;
 
-	/* search for all users in this domain. This could possibly be cached and
+	/* search for all trusted domains. This could possibly be cached and
 	   resumed based on resume_key */
 	count = gendb_search(policy_state->sam_ldb, mem_ctx, policy_state->system_dn, &domains, attrs,
 			     "objectclass=trustedDomain");
@@ -4421,14 +4551,14 @@ static NTSTATUS dcesrv_lsa_LSARUNREGISTERAUDITEVENT(struct dcesrv_call_state *dc
 }
 
 
-/*
-  lsa_lsaRQueryForestTrustInformation
-*/
-static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
-		       struct lsa_lsaRQueryForestTrustInformation *r)
+static NTSTATUS dcesrv_lsa_QueryFTI(
+		struct dcesrv_call_state *dce_call,
+		TALLOC_CTX *mem_ctx,
+		struct lsa_policy_state *p_state,
+		const char *trusted_domain_name,
+		enum lsa_ForestTrustRecordType highest_record_type,
+		struct ForestTrustInfo **_fti)
 {
-	struct dcesrv_handle *h = NULL;
-	struct lsa_policy_state *p_state = NULL;
 	int forest_level = DS_DOMAIN_FUNCTION_2000;
 	const char * const trust_attrs[] = {
 		"securityIdentifier",
@@ -4443,12 +4573,7 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_st
 	struct ldb_message *trust_tdo_msg = NULL;
 	struct lsa_TrustDomainInfoInfoEx *trust_tdo = NULL;
 	struct ForestTrustInfo *trust_fti = NULL;
-	struct lsa_ForestTrustInformation *trust_lfti = NULL;
 	NTSTATUS status;
-
-	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
-
-	p_state = h->data;
 
 	if (strcmp(p_state->domain_dns, p_state->forest_dns)) {
 		return NT_STATUS_INVALID_DOMAIN_STATE;
@@ -4459,13 +4584,13 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_st
 		return NT_STATUS_INVALID_DOMAIN_STATE;
 	}
 
-	if (r->in.trusted_domain_name->string == NULL) {
+	if (trusted_domain_name == NULL) {
 		return NT_STATUS_NO_SUCH_DOMAIN;
 	}
 
 	status = dsdb_trust_search_tdo(p_state->sam_ldb,
-				       r->in.trusted_domain_name->string,
-				       r->in.trusted_domain_name->string,
+				       trusted_domain_name,
+				       trusted_domain_name,
 				       trust_attrs, mem_ctx, &trust_tdo_msg);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
 		return NT_STATUS_NO_SUCH_DOMAIN;
@@ -4483,7 +4608,7 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_st
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	if (r->in.highest_record_type >= LSA_FOREST_TRUST_RECORD_TYPE_LAST) {
+	if (highest_record_type > FOREST_TRUST_RECORD_TYPE_LAST_SUPPORTED) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
@@ -4494,8 +4619,37 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_st
 		return status;
 	}
 
-	status = dsdb_trust_forest_info_to_lsa(mem_ctx, trust_fti,
-					       &trust_lfti);
+	*_fti = trust_fti;
+	return NT_STATUS_OK;
+}
+
+/*
+  lsa_lsaRQueryForestTrustInformation
+*/
+static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
+		       struct lsa_lsaRQueryForestTrustInformation *r)
+{
+	struct dcesrv_handle *h = NULL;
+	struct lsa_policy_state *p_state = NULL;
+	struct ForestTrustInfo *trust_fti = NULL;
+	struct lsa_ForestTrustInformation *trust_lfti = NULL;
+	NTSTATUS status;
+
+	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
+
+	p_state = talloc_get_type_abort(h->data, struct lsa_policy_state);
+
+	status = dcesrv_lsa_QueryFTI(dce_call,
+				     mem_ctx,
+				     p_state,
+				     r->in.trusted_domain_name->string,
+				     r->in.highest_record_type,
+				     &trust_fti);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = trust_forest_info_to_lsa(mem_ctx, trust_fti, &trust_lfti);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -4504,15 +4658,16 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation(struct dcesrv_call_st
 	return NT_STATUS_OK;
 }
 
-/*
-  lsa_lsaRSetForestTrustInformation
-*/
-static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_state *dce_call,
-							 TALLOC_CTX *mem_ctx,
-							 struct lsa_lsaRSetForestTrustInformation *r)
+static NTSTATUS dcesrv_lsa_SetFTI(
+		struct dcesrv_call_state *dce_call,
+		TALLOC_CTX *mem_ctx,
+		struct lsa_policy_state *p_state,
+		const char *trusted_domain_name,
+		enum lsa_ForestTrustRecordType highest_record_type,
+		const struct lsa_ForestTrustInformation2 *forest_trust_info,
+		uint8_t check_only,
+		struct lsa_ForestTrustCollisionInfo **_c_info)
 {
-	struct dcesrv_handle *h;
-	struct lsa_policy_state *p_state;
 	const char * const trust_attrs[] = {
 		"securityIdentifier",
 		"flatName",
@@ -4525,34 +4680,26 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	};
 	struct ldb_message *trust_tdo_msg = NULL;
 	struct lsa_TrustDomainInfoInfoEx *trust_tdo = NULL;
-	struct lsa_ForestTrustInformation *step1_lfti = NULL;
-	struct lsa_ForestTrustInformation *step2_lfti = NULL;
+	struct lsa_ForestTrustInformation2 *step1_lfti = NULL;
+	struct lsa_ForestTrustInformation2 *step2_lfti = NULL;
 	struct ForestTrustInfo *trust_fti = NULL;
 	struct ldb_result *trusts_res = NULL;
 	unsigned int i;
 	struct lsa_TrustDomainInfoInfoEx *xref_tdo = NULL;
-	struct lsa_ForestTrustInformation *xref_lfti = NULL;
+	struct lsa_ForestTrustInformation2 *xref_lfti = NULL;
 	struct lsa_ForestTrustCollisionInfo *c_info = NULL;
 	DATA_BLOB ft_blob = {};
 	struct ldb_message *msg = NULL;
-	struct server_id *server_ids = NULL;
-	uint32_t num_server_ids = 0;
 	NTSTATUS status;
 	enum ndr_err_code ndr_err;
 	int ret;
 	bool in_transaction = false;
-	struct imessaging_context *imsg_ctx =
-		dcesrv_imessaging_context(dce_call->conn);
-
-	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
-
-	p_state = h->data;
 
 	if (strcmp(p_state->domain_dns, p_state->forest_dns)) {
 		return NT_STATUS_INVALID_DOMAIN_STATE;
 	}
 
-	if (r->in.check_only == 0) {
+	if (check_only == 0) {
 		ret = ldb_transaction_start(p_state->sam_ldb);
 		if (ret != LDB_SUCCESS) {
 			return NT_STATUS_INTERNAL_DB_CORRUPTION;
@@ -4570,14 +4717,14 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		goto done;
 	}
 
-	if (r->in.trusted_domain_name->string == NULL) {
+	if (trusted_domain_name == NULL) {
 		status = NT_STATUS_NO_SUCH_DOMAIN;
 		goto done;
 	}
 
 	status = dsdb_trust_search_tdo(p_state->sam_ldb,
-				       r->in.trusted_domain_name->string,
-				       r->in.trusted_domain_name->string,
+				       trusted_domain_name,
+				       trusted_domain_name,
 				       trust_attrs, mem_ctx, &trust_tdo_msg);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
 		status = NT_STATUS_NO_SUCH_DOMAIN;
@@ -4597,7 +4744,7 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		goto done;
 	}
 
-	if (r->in.highest_record_type >= LSA_FOREST_TRUST_RECORD_TYPE_LAST) {
+	if (highest_record_type > FOREST_TRUST_RECORD_TYPE_LAST_SUPPORTED) {
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto done;
 	}
@@ -4610,13 +4757,13 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	 * can generate collision entries with the callers index.
 	 */
 	status = dsdb_trust_normalize_forest_info_step1(mem_ctx,
-							r->in.forest_trust_info,
+							forest_trust_info,
 							&step1_lfti);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
 
-	c_info = talloc_zero(r->out.collision_info,
+	c_info = talloc_zero(mem_ctx,
 			     struct lsa_ForestTrustCollisionInfo);
 	if (c_info == NULL) {
 		status = NT_STATUS_NO_MEMORY;
@@ -4666,7 +4813,7 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	for (i = 0; i < trusts_res->count; i++) {
 		struct lsa_TrustDomainInfoInfoEx *tdo = NULL;
 		struct ForestTrustInfo *fti = NULL;
-		struct lsa_ForestTrustInformation *lfti = NULL;
+		struct lsa_ForestTrustInformation2 *lfti = NULL;
 
 		status = dsdb_trust_parse_tdo_info(mem_ctx,
 						   trusts_res->msgs[i],
@@ -4685,7 +4832,7 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 			goto done;
 		}
 
-		status = dsdb_trust_forest_info_to_lsa(tdo, fti, &lfti);
+		status = trust_forest_info_to_lsa2(tdo, fti, &lfti);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
 		}
@@ -4700,7 +4847,7 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		TALLOC_FREE(tdo);
 	}
 
-	if (r->in.check_only != 0) {
+	if (check_only != 0) {
 		status = NT_STATUS_OK;
 		goto done;
 	}
@@ -4722,8 +4869,7 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		goto done;
 	}
 
-	status = dsdb_trust_forest_info_from_lsa(mem_ctx, step2_lfti,
-						 &trust_fti);
+	status = trust_forest_info_from_lsa2(mem_ctx, step2_lfti, &trust_fti);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
@@ -4772,29 +4918,12 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		goto done;
 	}
 
-	/*
-	 * Notify winbindd that we have a acquired forest trust info
-	 */
-	status = irpc_servers_byname(imsg_ctx,
-				     mem_ctx,
-				     "winbind_server",
-				     &num_server_ids,
-				     &server_ids);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("irpc_servers_byname failed\n");
-		goto done;
-	}
-
-	imessaging_send(imsg_ctx,
-			server_ids[0],
-			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
-			NULL);
-
 	status = NT_STATUS_OK;
 
 done:
+	*_c_info = NULL;
 	if (NT_STATUS_IS_OK(status) && c_info->count != 0) {
-		*r->out.collision_info = c_info;
+		*_c_info = c_info;
 	}
 
 	if (in_transaction) {
@@ -4802,6 +4931,52 @@ done:
 	}
 
 	return status;
+}
+
+/*
+  lsa_lsaRSetForestTrustInformation
+*/
+static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_state *dce_call,
+							 TALLOC_CTX *mem_ctx,
+							 struct lsa_lsaRSetForestTrustInformation *r)
+{
+	struct dcesrv_handle *h = NULL;
+	struct lsa_policy_state *p_state = NULL;
+	struct lsa_ForestTrustCollisionInfo *c_info = NULL;
+	struct lsa_ForestTrustInformation2 *in_lfti2 = NULL;
+	NTSTATUS status;
+
+	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
+
+	p_state = talloc_get_type_abort(h->data, struct lsa_policy_state);
+
+	/*
+	 * Note his also upgrades binary records
+	 * to scanner records and downgrades unknown records
+	 * to binary records.
+	 */
+	status = trust_forest_info_lsa_1to2(mem_ctx,
+					    r->in.forest_trust_info,
+					    &in_lfti2);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = dcesrv_lsa_SetFTI(dce_call,
+				   mem_ctx,
+				   p_state,
+				   r->in.trusted_domain_name->string,
+				   r->in.highest_record_type,
+				   in_lfti2,
+				   r->in.check_only,
+				   &c_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	*r->out.collision_info = talloc_move(r->out.collision_info, &c_info);
+
+	return NT_STATUS_OK;
 }
 
 /*
@@ -5390,8 +5565,33 @@ static NTSTATUS dcesrv_lsa_lsaRQueryForestTrustInformation2(
 		TALLOC_CTX *mem_ctx,
 		struct lsa_lsaRQueryForestTrustInformation2 *r)
 {
-	/* TODO */
-	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR);
+	struct dcesrv_handle *h = NULL;
+	struct lsa_policy_state *p_state = NULL;
+	struct ForestTrustInfo *trust_fti = NULL;
+	struct lsa_ForestTrustInformation2 *trust_lfti = NULL;
+	NTSTATUS status;
+
+	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
+
+	p_state = talloc_get_type_abort(h->data, struct lsa_policy_state);
+
+	status = dcesrv_lsa_QueryFTI(dce_call,
+				     mem_ctx,
+				     p_state,
+				     r->in.trusted_domain_name->string,
+				     r->in.highest_record_type,
+				     &trust_fti);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = trust_forest_info_to_lsa2(mem_ctx, trust_fti, &trust_lfti);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	*r->out.forest_trust_info = trust_lfti;
+	return NT_STATUS_OK;
 }
 
 /*
@@ -5401,8 +5601,42 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation2(struct dcesrv_call_sta
 							  TALLOC_CTX *mem_ctx,
 							  struct lsa_lsaRSetForestTrustInformation2 *r)
 {
-	/* TODO */
-	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR);
+	struct dcesrv_handle *h = NULL;
+	struct lsa_policy_state *p_state = NULL;
+	struct lsa_ForestTrustCollisionInfo *c_info = NULL;
+	struct lsa_ForestTrustInformation2 *in_lfti2 = NULL;
+	NTSTATUS status;
+
+	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
+
+	p_state = talloc_get_type_abort(h->data, struct lsa_policy_state);
+
+	/*
+	 * We need this in order to upgrade binary records
+	 * to scanner records, depending on the sub_type.
+	 */
+	status = trust_forest_info_lsa_2to2(mem_ctx,
+					    r->in.forest_trust_info,
+					    &in_lfti2);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = dcesrv_lsa_SetFTI(dce_call,
+				   mem_ctx,
+				   p_state,
+				   r->in.trusted_domain_name->string,
+				   r->in.highest_record_type,
+				   in_lfti2,
+				   r->in.check_only,
+				   &c_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	*r->out.collision_info = talloc_move(r->out.collision_info, &c_info);
+
+	return NT_STATUS_OK;
 }
 
 /* include the generated boilerplate */

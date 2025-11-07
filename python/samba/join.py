@@ -66,7 +66,8 @@ class DCJoinContext(object):
                  promote_existing=False, plaintext_secrets=False,
                  backend_store=None,
                  backend_store_size=None,
-                 forced_local_samdb=None):
+                 forced_local_samdb=None,
+                 filter_secrets=False):
 
         ctx.logger = logger
         ctx.creds = creds
@@ -77,6 +78,7 @@ class DCJoinContext(object):
         ctx.plaintext_secrets = plaintext_secrets
         ctx.backend_store = backend_store
         ctx.backend_store_size = backend_store_size
+        ctx.filter_secrets = filter_secrets
 
         ctx.promote_existing = promote_existing
         ctx.promote_from_dn = None
@@ -954,9 +956,16 @@ class DCJoinContext(object):
 
     def create_replicator(ctx, repl_creds, binding_options):
         """Creates a new DRS object for managing replications"""
-        return drs_utils.drs_Replicate(
-                "ncacn_ip_tcp:%s[%s]" % (ctx.server, binding_options),
-                ctx.lp, repl_creds, ctx.local_samdb, ctx.invocation_id)
+        repl = drs_utils.drs_ReplicatorImpl(
+            f"ncacn_ip_tcp:{ctx.server}[{binding_options}]",
+            ctx.lp,
+            repl_creds,
+            ctx.local_samdb,
+            ctx.invocation_id,
+        )
+        if ctx.filter_secrets:
+            repl = drs_utils.drs_SecretFilter(repl)
+        return repl
 
     def join_replicate(ctx):
         """Replicate the SAM."""
@@ -989,6 +998,7 @@ class DCJoinContext(object):
                 binding_options += ",print"
 
             repl = ctx.create_replicator(repl_creds, binding_options)
+            repl = drs_utils.drs_Replicator(repl, ctx.local_samdb)
 
             repl.replicate(ctx.schema_dn, source_dsa_invocation_id,
                            destination_dsa_guid, schema=True, rodc=ctx.RODC,
@@ -1210,6 +1220,9 @@ class DCJoinContext(object):
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 name_found = False
+            else:
+                print(e)
+                raise
 
         if name_found:
             for rec in res.rec:
@@ -1293,7 +1306,7 @@ class DCJoinContext(object):
                                                    | security.SECINFO_GROUP)])
 
         ctx.logger.info("All other DNS records (like _ldap SRV records) " +
-                        "will be created samba_dnsupdate on first startup")
+                        "will be created by samba_dnsupdate on first startup")
 
     def join_replicate_new_dns_records(ctx):
         for nc in (ctx.domaindns_zone, ctx.forestdns_zone):
@@ -1386,7 +1399,7 @@ class DCJoinContext(object):
         objectAttr = lsa.ObjectAttribute()
         objectAttr.sec_qos = lsa.QosInfo()
 
-        pol_handle = lsaconn.OpenPolicy2(''.decode('utf-8'),
+        pol_handle = lsaconn.OpenPolicy2('',
                                          objectAttr, security.SEC_FLAG_MAXIMUM_ALLOWED)
 
         info = lsa.TrustDomainInfoInfoEx()
@@ -1655,7 +1668,8 @@ class DCCloneContext(DCJoinContext):
                          targetdir=targetdir, domain=domain,
                          dns_backend=dns_backend,
                          backend_store=backend_store,
-                         backend_store_size=backend_store_size)
+                         backend_store_size=backend_store_size,
+                         filter_secrets=not include_secrets)
 
         # As we don't want to create or delete these DNs, we set them to None
         ctx.server_dn = None
@@ -1723,11 +1737,8 @@ class DCCloneAndRenameContext(DCCloneContext):
         # We want to rename all the domain objects, and the simplest way to do
         # this is during replication. This is because the base DN of the top-
         # level replicated object will flow through to all the objects below it
-        binding_str = "ncacn_ip_tcp:%s[%s]" % (ctx.server, binding_options)
-        return drs_utils.drs_ReplicateRenamer(binding_str, ctx.lp, repl_creds,
-                                              ctx.local_samdb,
-                                              ctx.invocation_id,
-                                              ctx.base_dn, ctx.new_base_dn)
+        repl = super().create_replicator(repl_creds, binding_options)
+        return drs_utils.drs_ReplicateRenamer(repl, ctx.base_dn, ctx.new_base_dn)
 
     def create_non_global_lp(ctx, global_lp):
         """Creates a non-global LoadParm based on the global LP's settings"""
@@ -1746,8 +1757,7 @@ class DCCloneAndRenameContext(DCCloneContext):
 
     def rename_dn(ctx, dn_str):
         """Uses string substitution to replace the base DN"""
-        old_base_dn = ctx.base_dn
-        return re.sub('%s$' % old_base_dn, ctx.new_base_dn, dn_str)
+        return re.sub('%s$' % ctx.base_dn, ctx.new_base_dn, dn_str)
 
     # we want to override the normal DCCloneContext's join_provision() so that
     # use the new domain DNs during the provision. We do this because:

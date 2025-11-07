@@ -281,12 +281,11 @@ sub setup_dns_hub_internal($$$)
 		warn("Unable to create $prefix");
 		return undef;
 	}
-	my $prefix_abs = abs_path($prefix);
 
-	die ("prefix=''") if $prefix_abs eq "";
-	die ("prefix='/'") if $prefix_abs eq "/";
+	die ("prefix=''") if $prefix eq "";
+	die ("prefix='/'") if $prefix eq "/";
 
-	unless (system("rm -rf $prefix_abs/*") == 0) {
+	unless (system("rm -rf $prefix/*") == 0) {
 		warn("Unable to clean up");
 	}
 
@@ -296,9 +295,9 @@ sub setup_dns_hub_internal($$$)
 	$env->{SERVER_IP} = Samba::get_ipv4_addr($hostname);
 	$env->{SERVER_IPV6} = Samba::get_ipv6_addr($hostname);
 	$env->{SOCKET_WRAPPER_DEFAULT_IFACE} = Samba::get_interface($hostname);
-	$env->{DNS_HUB_LOG} = "$prefix_abs/dns_hub.log";
-	$env->{RESOLV_CONF} = "$prefix_abs/resolv.conf";
-	$env->{TESTENV_DIR} = $prefix_abs;
+	$env->{DNS_HUB_LOG} = "$prefix/dns_hub.log";
+	$env->{RESOLV_CONF} = "$prefix/resolv.conf";
+	$env->{TESTENV_DIR} = $prefix;
 
 	my $ctx = undef;
 	$ctx->{resolv_conf} = $env->{RESOLV_CONF};
@@ -338,7 +337,7 @@ sub setup_dns_hub_internal($$$)
 	my $pid = Samba::fork_and_exec($self, $env, $daemon_ctx, $STDIN_READER);
 
 	$env->{SAMBA_PID} = $pid;
-	$env->{KRB5_CONFIG} = "$prefix_abs/no_krb5.conf";
+	$env->{KRB5_CONFIG} = "$prefix/no_krb5.conf";
 
 	# close the parent's read-end of the pipe
 	close($STDIN_READER);
@@ -550,12 +549,11 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 		warn("Unable to create $prefix");
 		return undef;
 	}
-	my $prefix_abs = abs_path($prefix);
 
-	die ("prefix=''") if $prefix_abs eq "";
-	die ("prefix='/'") if $prefix_abs eq "/";
+	die ("prefix=''") if $prefix eq "";
+	die ("prefix='/'") if $prefix eq "/";
 
-	unless (system("rm -rf $prefix_abs/*") == 0) {
+	unless (system("rm -rf $prefix/*") == 0) {
 		warn("Unable to clean up");
 	}
 
@@ -563,8 +561,6 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	my $swiface = Samba::get_interface($hostname);
 
 	$ctx->{prefix} = $prefix;
-	$ctx->{prefix_abs} = $prefix_abs;
-
 	$ctx->{server_role} = $server_role;
 	$ctx->{hostname} = $hostname;
 	$ctx->{netbiosname} = $netbiosname;
@@ -573,7 +569,7 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{kdc_ipv4} = $kdc_ipv4;
 	$ctx->{kdc_ipv6} = $kdc_ipv6;
 	$ctx->{force_fips_mode} = $force_fips_mode;
-	$ctx->{krb5_ccname} = "$prefix_abs/krb5cc_%{uid}";
+	$ctx->{krb5_ccname} = "$prefix/krb5cc_%{uid}";
 	if ($functional_level eq "2000") {
 		$ctx->{supported_enctypes} = "arcfour-hmac-md5 des-cbc-md5 des-cbc-crc";
 	}
@@ -603,23 +599,23 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{unix_gids_str} = $);
 	@{$ctx->{unix_gids}} = split(" ", $ctx->{unix_gids_str});
 
-	$ctx->{etcdir} = "$prefix_abs/etc";
-	$ctx->{piddir} = "$prefix_abs/pid";
+	$ctx->{etcdir} = "$prefix/etc";
+	$ctx->{piddir} = "$prefix/pid";
 	$ctx->{smb_conf} = "$ctx->{etcdir}/smb.conf";
 	$ctx->{krb5_conf} = "$ctx->{etcdir}/krb5.conf";
-	$ctx->{krb5_ccache} = "$prefix_abs/krb5_ccache";
+	$ctx->{krb5_ccache} = "$prefix/krb5_ccache";
 	$ctx->{mitkdc_conf} = "$ctx->{etcdir}/mitkdc.conf";
-	$ctx->{gnupghome} = "$prefix_abs/gnupg";
-	$ctx->{privatedir} = "$prefix_abs/private";
-	$ctx->{binddnsdir} = "$prefix_abs/bind-dns";
-	$ctx->{ncalrpcdir} = "$prefix_abs/ncalrpc";
-	$ctx->{lockdir} = "$prefix_abs/lockdir";
-	$ctx->{logdir} = "$prefix_abs/logs";
-	$ctx->{statedir} = "$prefix_abs/statedir";
-	$ctx->{cachedir} = "$prefix_abs/cachedir";
-	$ctx->{winbindd_socket_dir} = "$prefix_abs/wbsock";
-	$ctx->{nmbd_socket_dir} = "$prefix_abs/nmbsock";
-	$ctx->{ntp_signd_socket_dir} = "$prefix_abs/ntp_signd_socket";
+	$ctx->{gnupghome} = "$prefix/gnupg";
+	$ctx->{privatedir} = "$prefix/private";
+	$ctx->{binddnsdir} = "$prefix/bind-dns";
+	$ctx->{ncalrpcdir} = "$prefix/ncalrpc";
+	$ctx->{lockdir} = "$prefix/lockdir";
+	$ctx->{logdir} = "$prefix/logs";
+	$ctx->{statedir} = "$prefix/statedir";
+	$ctx->{cachedir} = "$prefix/cachedir";
+	$ctx->{winbindd_socket_dir} = "$prefix/wbsock";
+	$ctx->{nmbd_socket_dir} = "$prefix/nmbsock";
+	$ctx->{ntp_signd_socket_dir} = "$prefix/ntp_signd_socket";
 	$ctx->{nsswrap_passwd} = "$ctx->{etcdir}/passwd";
 	$ctx->{nsswrap_group} = "$ctx->{etcdir}/group";
 	$ctx->{nsswrap_hosts} = "$ENV{SELFTEST_PREFIX}/hosts";
@@ -672,18 +668,27 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 		push (@provision_options, "OPENSSL_FORCE_FIPS_MODE=1");
 	}
 
-	if (defined($ENV{GDB_PROVISION})) {
-		push (@provision_options, "gdb --args");
-		if (!defined($ENV{PYTHON})) {
-		    push (@provision_options, "env");
-		    push (@provision_options, "python");
+	if (defined($ENV{GDB_PROVISION}) ||
+	    defined($ENV{RR_PROVISION}) ||
+	    defined($ENV{PY_DEV_PROVISION}) ||
+	    defined($ENV{VALGRIND_PROVISION})) {
+		if (defined($ENV{GDB_PROVISION})) {
+			push (@provision_options, "gdb --args");
 		}
-	}
-	if (defined($ENV{VALGRIND_PROVISION})) {
-		push (@provision_options, "valgrind");
+		if (defined($ENV{RR_PROVISION})) {
+			push (@provision_options, "rr");
+		}
+		if (defined($ENV{VALGRIND_PROVISION})) {
+			push (@provision_options, "valgrind");
+		}
 		if (!defined($ENV{PYTHON})) {
-		    push (@provision_options, "env");
-		    push (@provision_options, "python");
+			push (@provision_options, "env");
+			push (@provision_options, "python");
+		}
+		if (defined($ENV{PY_DEV_PROVISION})) {
+			# makes Python more likely to emit warnings
+			# and debug info.
+			push (@provision_options, "-X dev");
 		}
 	}
 
@@ -812,6 +817,10 @@ sub provision_raw_step1($$)
         idmap_ldb:use rfc2307=yes
 	winbind enum users = yes
 	winbind enum groups = yes
+	winbind expand groups = 1
+
+	winbind varlink : socket directory = $ctx->{winbindd_socket_dir}
+	winbind varlink : service name = org.samba.selftest
 
         rpc server port:netlogon = 1026
 	include system krb5 conf = no
@@ -842,14 +851,14 @@ sub provision_raw_step1($$)
 
 	open(PWD, ">$ctx->{nsswrap_passwd}");
 	if ($ctx->{unix_uid} != 0) {
-		print PWD "root:x:0:0:root gecos:$ctx->{prefix_abs}:/bin/false\n";
+		print PWD "root:x:0:0:root gecos:$ctx->{prefix}:/bin/false\n";
 	}
-	print PWD "$ctx->{unix_name}:x:$ctx->{unix_uid}:65531:$ctx->{unix_name} gecos:$ctx->{prefix_abs}:/bin/false\n";
-	print PWD "nobody:x:65534:65533:nobody gecos:$ctx->{prefix_abs}:/bin/false
-pdbtest:x:65533:65533:pdbtest gecos:$ctx->{prefix_abs}:/bin/false
-pdbtest2:x:65532:65533:pdbtest gecos:$ctx->{prefix_abs}:/bin/false
-pdbtest3:x:65531:65533:pdbtest gecos:$ctx->{prefix_abs}:/bin/false
-pdbtest4:x:65530:65533:pdbtest gecos:$ctx->{prefix_abs}:/bin/false
+	print PWD "$ctx->{unix_name}:x:$ctx->{unix_uid}:65531:$ctx->{unix_name} gecos:$ctx->{prefix}:/bin/false\n";
+	print PWD "nobody:x:65534:65533:nobody gecos:$ctx->{prefix}:/bin/false
+pdbtest:x:65533:65533:pdbtest gecos:$ctx->{prefix}:/bin/false
+pdbtest2:x:65532:65533:pdbtest gecos:$ctx->{prefix}:/bin/false
+pdbtest3:x:65531:65533:pdbtest gecos:$ctx->{prefix}:/bin/false
+pdbtest4:x:65530:65533:pdbtest gecos:$ctx->{prefix}:/bin/false
 ";
 	close(PWD);
         my $uid_rfc2307test = 65533;
@@ -869,7 +878,7 @@ nogroup:x:65534:nobody
 
 	my $hostname = lc($ctx->{hostname});
 	open(HOSTS, ">>$ctx->{nsswrap_hosts}");
-	if ($hostname eq "localdc") {
+	if ($hostname eq "localdc" || $hostname eq "localvampiredc") {
 		print HOSTS "$ctx->{ipv4} ${hostname}.$ctx->{dnsname} $ctx->{dnsname} ${hostname}\n";
 		print HOSTS "$ctx->{ipv6} ${hostname}.$ctx->{dnsname} $ctx->{dnsname} ${hostname}\n";
 	} else {
@@ -931,7 +940,7 @@ nogroup:x:65534:nobody
 		PRIVATEDIR => $ctx->{privatedir},
 		BINDDNSDIR => $ctx->{binddnsdir},
 		SERVERCONFFILE => $ctx->{smb_conf},
-		TESTENV_DIR => $ctx->{prefix_abs},
+		TESTENV_DIR => $ctx->{prefix},
 		CONFIGURATION => $configuration,
 		SOCKET_WRAPPER_DEFAULT_IFACE => $ctx->{swiface},
 		NSS_WRAPPER_PASSWD => $ctx->{nsswrap_passwd},
@@ -1208,7 +1217,7 @@ sub provision($$$$$$$$$$$)
 					       $force_fips_mode,
 					       $extra_provision_options);
 
-	$ctx->{share} = "$ctx->{prefix_abs}/share";
+	$ctx->{share} = "$ctx->{prefix}/share";
 	push(@{$ctx->{directories}}, "$ctx->{share}");
 	push(@{$ctx->{directories}}, "$ctx->{share}/test1");
 	push(@{$ctx->{directories}}, "$ctx->{share}/test2");
@@ -1628,6 +1637,7 @@ sub provision_ad_dc_ntvfs($$$)
 	ldap server require strong auth = allow_sasl_without_tls_channel_bindings
 	raw NTLMv2 auth = yes
 	lsa over netlogon = yes
+	wins hook = $ENV{SRCDIR_ABS}/testprogs/blackbox/wins_hook_test
         rpc server port = 1027
         auth event notification = true
 	dsdb event notification = true
@@ -1637,6 +1647,7 @@ sub provision_ad_dc_ntvfs($$$)
 	client min protocol = CORE
 	server min protocol = LANMAN1
 
+	server support krb5 netlogon = yes
 	CVE_2020_1472:warn_about_unused_debug_level = 3
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	allow nt4 crypto:torturetest\$ = yes
@@ -1690,6 +1701,9 @@ sub provision_ad_dc_ntvfs($$$)
 	# needed for 'samba.tests.auth_log' tests
 	server require schannel:LOCALDC\$ = no
 	server schannel require seal:LOCALDC\$ = no
+
+	strong certificate binding enforcement = compatibility
+	certificate backdating compensation = 1500
 	";
 	push (@{$extra_provision_options},
 	      "--base-schema=2008_R2",
@@ -1859,6 +1873,7 @@ sub provision_fl2008r2dc($$$)
         # delay by 10 seconds, 10^7 usecs
 	ldap_server:delay_expire_disconnect = 10000
 
+	server support krb5 netlogon = yes
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	server reject md5 schannel:tests4u2proxywk\$ = no
 	server reject md5 schannel:tests4u2selfbdc\$ = no
@@ -1918,7 +1933,7 @@ sub provision_rodc($$$)
 		return undef;
 	}
 
-	$ctx->{share} = "$ctx->{prefix_abs}/share";
+	$ctx->{share} = "$ctx->{prefix}/share";
 	push(@{$ctx->{directories}}, "$ctx->{share}");
 
 	$ctx->{smb_conf_extra_options} = "
@@ -2017,11 +2032,9 @@ sub provision_ad_dc()
 	    $extra_provision_options,
 	    $functional_level) = @_;
 
-	my $prefix_abs = abs_path($prefix);
-
 	my $bindir_abs = abs_path($self->{bindir});
-	my $lockdir="$prefix_abs/lockdir";
-        my $conffile="$prefix_abs/etc/smb.conf";
+	my $lockdir="$prefix/lockdir";
+	my $conffile="$prefix/etc/smb.conf";
 
 	my $require_mutexes = "dbwrap_tdb_require_mutexes:* = yes";
 	if ($ENV{SELFTEST_DONT_REQUIRE_TDB_MUTEX_SUPPORT} // '' eq "1") {
@@ -2052,7 +2065,7 @@ sub provision_ad_dc()
 	$password_hash_gpg_key_ids = "" unless defined($config_h->{HAVE_GPGME});
 
 	my $extra_smbconf_options = "
-        xattr_tdb:file = $prefix_abs/statedir/xattr.tdb
+        xattr_tdb:file = $prefix/statedir/xattr.tdb
 
 	dbwrap_tdb_mutexes:* = yes
 	${require_mutexes}
@@ -2100,6 +2113,7 @@ sub provision_ad_dc()
 	CVE_2020_1472:warn_about_unused_debug_level = 3
 	CVE_2022_38023:warn_about_unused_debug_level = 3
 	CVE_2022_38023:error_debug_level = 2
+	allow nt4 crypto:samlogontest\$ = yes
 	server reject md5 schannel:schannel2\$ = no
 	server reject md5 schannel:schannel3\$ = no
 	server reject md5 schannel:schannel8\$ = no
@@ -2153,6 +2167,9 @@ sub provision_ad_dc()
 	dsdb event notification = true
 	dsdb password event notification = true
 	dsdb group change notification = true
+
+	winbind varlink service = yes
+
         $smbconf_args
 ";
 
@@ -2869,7 +2886,11 @@ sub _setup_ad_dc
 sub setup_ad_dc
 {
 	my ($self, $path) = @_;
-	return _setup_ad_dc($self, $path, undef, undef, undef);
+	# Disable certificate binding enforcement, to avoid
+	# breaking kerberos tests
+	my $conf_opts = "strong certificate binding enforcement = none\n";
+
+	return _setup_ad_dc($self, $path, $conf_opts, undef, undef);
 }
 
 sub setup_ad_dc_smb1
@@ -3361,11 +3382,11 @@ sub prepare_dc_testenv
 					       undef);
 
 	# the restore uses a slightly different state-dir location to other testenvs
-	$ctx->{statedir} = "$ctx->{prefix_abs}/state";
+	$ctx->{statedir} = "$ctx->{prefix}/state";
 	push(@{$ctx->{directories}}, "$ctx->{statedir}");
 
 	# add support for sysvol/netlogon/tmp shares
-	$ctx->{share} = "$ctx->{prefix_abs}/share";
+	$ctx->{share} = "$ctx->{prefix}/share";
 	push(@{$ctx->{directories}}, "$ctx->{share}");
 	push(@{$ctx->{directories}}, "$ctx->{share}/test1");
 

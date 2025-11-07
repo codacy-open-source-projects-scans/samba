@@ -346,7 +346,6 @@ NTSTATUS check_parent_access_fsp(struct files_struct *fsp,
 	NTSTATUS status;
 	struct security_descriptor *parent_sd = NULL;
 	uint32_t access_granted = 0;
-	uint32_t name_hash;
 	bool delete_on_close_set;
 	TALLOC_CTX *frame = talloc_stackframe();
 
@@ -406,15 +405,7 @@ NTSTATUS check_parent_access_fsp(struct files_struct *fsp,
 		goto out;
 	}
 
-	/* Check if the directory has delete-on-close set */
-	status = file_name_hash(fsp->conn,
-				fsp->fsp_name->base_name,
-				&name_hash);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-
-	get_file_infos(fsp->file_id, name_hash, &delete_on_close_set, NULL);
+	get_file_infos(fsp->file_id, fsp->name_hash, &delete_on_close_set);
 	if (delete_on_close_set) {
 		status = NT_STATUS_DELETE_PENDING;
 		goto out;
@@ -955,7 +946,6 @@ static NTSTATUS open_file(
 	const struct vfs_open_how *_how,
 	uint32_t access_mask,	   /* client requested access mask. */
 	uint32_t open_access_mask, /* what we're actually using in the open. */
-	uint32_t private_flags,
 	bool *p_file_created)
 {
 	connection_struct *conn = fsp->conn;
@@ -1889,17 +1879,6 @@ static bool is_same_lease(const files_struct *fsp,
 				&e->lease_key);
 }
 
-static bool file_has_brlocks(files_struct *fsp)
-{
-	struct byte_range_lock *br_lck;
-
-	br_lck = brl_get_locks_readonly(fsp);
-	if (!br_lck)
-		return false;
-
-	return (brl_num_locks(br_lck) > 0);
-}
-
 struct fsp_lease *find_fsp_lease(struct files_struct *new_fsp,
 				 const struct smb2_lease_key *key,
 				 uint32_t current_state,
@@ -2066,7 +2045,10 @@ static NTSTATUS grant_new_fsp_lease(struct files_struct *fsp,
 	fsp->lease->lease.parent_lease_key = lease->parent_lease_key;
 	fsp->lease->lease.lease_flags = lease->lease_flags;
 	fsp->lease->lease.lease_state = granted;
-	fsp->lease->lease.lease_epoch = lease->lease_epoch + 1;
+	fsp->lease->lease.lease_epoch = lease->lease_epoch;
+	if (granted != 0) {
+		fsp->lease->lease.lease_epoch++;
+	}
 
 	status = leases_db_add(client_guid,
 			       &lease->lease_key,
@@ -2151,6 +2133,7 @@ struct delay_for_oplock_state {
 	bool will_overwrite;
 	uint32_t delay_mask;
 	bool first_open_attempt;
+	int info;
 	bool got_handle_lease;
 	bool got_oplock;
 	bool disallow_write_lease;
@@ -2290,7 +2273,7 @@ static bool delay_for_oplock_fn(
 
 	break_to = e_lease_type & ~state->delay_mask;
 
-	if (state->will_overwrite) {
+	if (state->will_overwrite && !(state->delay_mask & SMB2_LEASE_HANDLE)) {
 		break_to &= ~(SMB2_LEASE_HANDLE|SMB2_LEASE_READ);
 	}
 
@@ -2309,7 +2292,7 @@ static bool delay_for_oplock_fn(
 		return false;
 	}
 
-	if (state->will_overwrite) {
+	if (state->will_overwrite && !(state->delay_mask & SMB2_LEASE_HANDLE)) {
 		/*
 		 * If we break anyway break to NONE directly.
 		 * Otherwise vfs_set_filelen() will trigger the
@@ -2394,6 +2377,7 @@ static NTSTATUS delay_for_oplock(files_struct *fsp,
 				 bool have_sharing_violation,
 				 uint32_t create_disposition,
 				 bool first_open_attempt,
+				 int info,
 				 int *poplock_type,
 				 uint32_t *pgranted,
 				 struct blocker_debug_state **blocker_debug_state)
@@ -2402,6 +2386,7 @@ static NTSTATUS delay_for_oplock(files_struct *fsp,
 		.fsp = fsp,
 		.lease = lease,
 		.first_open_attempt = first_open_attempt,
+		.info = info,
 	};
 	uint32_t requested;
 	uint32_t granted;
@@ -2507,10 +2492,10 @@ grant:
 		}
 	}
 
-	if (lp_locking(fsp->conn->params) && file_has_brlocks(fsp)) {
+	if (info != FILE_WAS_OVERWRITTEN && file_has_brlocks(fsp)) {
 		DBG_DEBUG("file %s has byte range locks\n",
 			  fsp_str_dbg(fsp));
-		granted &= ~SMB2_LEASE_READ;
+		granted &= ~(SMB2_LEASE_READ | SMB2_LEASE_HANDLE);
 	}
 
 	if (state.disallow_write_lease) {
@@ -2592,6 +2577,7 @@ static NTSTATUS handle_share_mode_lease(
 	int oplock_request,
 	const struct smb2_lease *lease,
 	bool first_open_attempt,
+	int info,
 	int *poplock_type,
 	uint32_t *pgranted,
 	struct blocker_debug_state **blocker_debug_state)
@@ -2644,6 +2630,7 @@ static NTSTATUS handle_share_mode_lease(
 		sharing_violation,
 		create_disposition,
 		first_open_attempt,
+		info,
 		poplock_type,
 		pgranted,
 		blocker_debug_state);
@@ -3092,7 +3079,8 @@ static NTSTATUS check_and_store_share_mode(
 	uint32_t share_access,
 	int oplock_request,
 	const struct smb2_lease *lease,
-	bool first_open_attempt)
+	bool first_open_attempt,
+	int info)
 {
 	NTSTATUS status;
 	int oplock_type = NO_OPLOCK;
@@ -3120,6 +3108,7 @@ static NTSTATUS check_and_store_share_mode(
 					 oplock_request,
 					 lease,
 					 first_open_attempt,
+					 info,
 					 &oplock_type,
 					 &granted_lease,
 					 &blocker_debug_state);
@@ -3450,9 +3439,9 @@ struct open_ntcreate_lock_state {
 	int oplock_request;
 	const struct smb2_lease *lease;
 	bool first_open_attempt;
+	int info;
 	bool keep_locked;
 	NTSTATUS status;
-	struct timespec write_time;
 	share_mode_entry_prepare_unlock_fn_t cleanup_fn;
 };
 
@@ -3478,12 +3467,11 @@ static void open_ntcreate_lock_add_entry(struct share_mode_lock *lck,
 						   state->share_access,
 						   state->oplock_request,
 						   state->lease,
-						   state->first_open_attempt);
+						   state->first_open_attempt,
+						   state->info);
 	if (!NT_STATUS_IS_OK(state->status)) {
 		return;
 	}
-
-	state->write_time = get_share_mode_write_time(lck);
 
 	/*
 	 * keep the g_lock while existing the tdb chainlock,
@@ -3525,7 +3513,7 @@ static void open_ntcreate_lock_cleanup_entry(struct share_mode_lock *lck,
 static void possibly_set_archive(struct connection_struct *conn,
 				 struct files_struct *fsp,
 				 struct smb_filename *smb_fname,
-				 struct smb_filename *parent_dir_fname,
+				 struct files_struct *dirfsp,
 				 int info,
 				 uint32_t dosattrs,
 				 mode_t *unx_mode)
@@ -3550,7 +3538,7 @@ static void possibly_set_archive(struct connection_struct *conn,
 	ret = file_set_dosmode(conn,
 			       smb_fname,
 			       dosattrs | FILE_ATTRIBUTE_ARCHIVE,
-			       parent_dir_fname,
+			       dirfsp,
 			       true);
 	if (ret != 0) {
 		return;
@@ -3573,7 +3561,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 			    const struct smb2_lease *lease,
 				 			/* Information (FILE_EXISTS etc.) */
 			    uint32_t private_flags,     /* Samba specific flags. */
-			    struct smb_filename *parent_dir_fname, /* parent. */
+			    struct files_struct *dirfsp,
 			    struct smb_filename *smb_fname_atname, /* atname relative to parent. */
 			    int *pinfo,
 			    files_struct *fsp)
@@ -3597,7 +3585,6 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 	uint32_t open_access_mask = access_mask;
 	NTSTATUS status;
 	SMB_STRUCT_STAT saved_stat = smb_fname->st;
-	struct timespec old_write_time;
 	bool setup_poll = false;
 	NTSTATUS ulstatus;
 
@@ -3640,7 +3627,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 			conn,
 			new_dos_attributes | FILE_ATTRIBUTE_ARCHIVE,
 			smb_fname,
-			parent_dir_fname->fsp);
+			dirfsp);
 	}
 
 	DEBUG(10, ("open_file_ntcreate: fname=%s, dos_attrs=0x%x "
@@ -3809,11 +3796,8 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		}
 	}
 
-	status = smbd_calculate_access_mask_fsp(parent_dir_fname->fsp,
-						smb_fname->fsp,
-						false,
-						access_mask,
-						&access_mask);
+	status = smbd_calculate_access_mask_fsp(
+		dirfsp, smb_fname->fsp, false, access_mask, &access_mask);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_DEBUG("smbd_calculate_access_mask_fsp "
 			"on file %s returned %s\n",
@@ -3841,7 +3825,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		 * which adds FILE_WRITE_DATA to open_access_mask.
 		 */
 		if (is_oplock_stat_open(open_access_mask) && lease == NULL) {
-			oplock_request = NO_OPLOCK;
+			oplock_request &= SAMBA_PRIVATE_OPLOCK_MASK;
 		}
 	}
 
@@ -3868,8 +3852,12 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 	}
 #endif /* O_SYNC */
 
-	if (posix_open && (access_mask & FILE_APPEND_DATA)) {
+	if (posix_open &&
+	    ((access_mask & FILE_APPEND_DATA) &&
+	     !(access_mask & FILE_WRITE_DATA)))
+	{
 		flags |= O_APPEND;
+		fsp->fsp_flags.posix_append = true;
 	}
 
 	if (!posix_open && !CAN_WRITE(conn)) {
@@ -3918,7 +3906,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		 */
 		fsp->file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
 	}
-	fh_set_private_options(fsp->fh, private_flags);
+	fsp_apply_private_ntcreatex_flags(fsp, private_flags);
 	fsp->access_mask = open_access_mask; /* We change this to the
 					      * requested access_mask after
 					      * the open is done. */
@@ -3942,7 +3930,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 	 */
 
 	if ((flags & O_CREAT) && lp_inherit_acls(SNUM(conn)) &&
-	    (def_acl = directory_has_default_acl_fsp(parent_dir_fname->fsp))) {
+	    (def_acl = directory_has_default_acl_fsp(dirfsp))) {
 		unx_mode = (0777 & lp_create_mask(SNUM(conn)));
 	}
 
@@ -3965,13 +3953,12 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		}
 
 		fsp_open = open_file(req,
-				     parent_dir_fname->fsp,
+				     dirfsp,
 				     smb_fname_atname,
 				     fsp,
 				     &how,
 				     access_mask,
 				     open_access_mask,
-				     private_flags,
 				     &new_file_created);
 	}
 	if (NT_STATUS_EQUAL(fsp_open, NT_STATUS_NETWORK_BUSY)) {
@@ -4065,8 +4052,6 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	old_write_time = smb_fname->st.st_ex_mtime;
-
 	/*
 	 * Deal with the race condition where two smbd's detect the
 	 * file doesn't exist and do the create at the same time. One
@@ -4115,6 +4100,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 		.oplock_request		= oplock_request,
 		.lease			= lease,
 		.first_open_attempt	= first_open_attempt,
+		.info			= info,
 		.keep_locked		= keep_locked,
 	};
 
@@ -4122,7 +4108,6 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 						   fsp->file_id,
 						   conn->connectpath,
 						   smb_fname,
-						   &old_write_time,
 						   open_ntcreate_lock_add_entry,
 						   &lck_state);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -4181,7 +4166,7 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 	if (!new_file_created &&
 	    clear_ads(create_disposition) &&
 	    !fsp_is_alternate_stream(fsp)) {
-		status = delete_all_streams(conn, smb_fname);
+		status = delete_all_streams(fsp, dirfsp, smb_fname_atname);
 		if (!NT_STATUS_IS_OK(status)) {
 			lck_state.cleanup_fn =
 				open_ntcreate_lock_cleanup_entry;
@@ -4264,10 +4249,10 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 	possibly_set_archive(conn,
 			     fsp,
 			     smb_fname,
-			     parent_dir_fname,
+			     dirfsp,
 			     info,
 			     new_dos_attributes,
-			     &smb_fname->st.st_ex_mode);
+			     &unx_mode);
 
 	/* Determine sparse flag. */
 	if (posix_open) {
@@ -4324,15 +4309,6 @@ static NTSTATUS open_file_ntcreate(connection_struct *conn,
 				  (unsigned int)new_unx_mode);
 			}
 		}
-	}
-
-	/*
-	 * Deal with other opens having a modified write time.
-	 */
-	if (fsp_getinfo_ask_sharemode(fsp) &&
-	    !is_omit_timespec(&lck_state.write_time))
-	{
-		update_stat_ex_mtime(&fsp->fsp_name->st, lck_state.write_time);
 	}
 
 	status = NT_STATUS_OK;
@@ -4487,7 +4463,7 @@ bool smbd_is_tmpname(const char *n, int *_unlink_flags)
 }
 
 static NTSTATUS mkdir_internal(connection_struct *conn,
-			       struct smb_filename *parent_dir_fname, /* parent. */
+			       struct files_struct *dirfsp,
 			       struct smb_filename *smb_fname_atname, /* atname relative to parent. */
 			       struct smb_filename *smb_dname, /* full pathname from root of share. */
 			       struct security_descriptor *sd,
@@ -4529,22 +4505,22 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 		mode = unix_mode(conn,
 				 FILE_ATTRIBUTE_DIRECTORY,
 				 smb_dname,
-				 parent_dir_fname->fsp);
+				 dirfsp);
 	}
 
-	status = check_parent_access_fsp(parent_dir_fname->fsp, access_mask);
+	status = check_parent_access_fsp(dirfsp, access_mask);
 	if(!NT_STATUS_IS_OK(status)) {
 		DBG_INFO("check_parent_access_fsp "
-			"on directory %s for path %s returned %s\n",
-			smb_fname_str_dbg(parent_dir_fname),
-			smb_dname->base_name,
-			nt_errstr(status));
+			 "on directory %s for path %s returned %s\n",
+			 fsp_str_dbg(dirfsp),
+			 smb_dname->base_name,
+			 nt_errstr(status));
 		TALLOC_FREE(frame);
 		return status;
 	}
 
 	if (lp_inherit_acls(SNUM(conn))) {
-		if (directory_has_default_acl_fsp(parent_dir_fname->fsp)) {
+		if (directory_has_default_acl_fsp(dirfsp)) {
 			mode = (0777 & lp_directory_mask(SNUM(conn)));
 		}
 		need_tmpname = true;
@@ -4557,6 +4533,19 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 	} else if (lp_nt_acl_support(SNUM(conn)) && sd != NULL) {
 		need_tmpname = true;
 	}
+
+#ifdef OPENBSD
+	/*
+	 * OpenBSD requires to have write permissions
+	 * on both source and destination of renameat(),
+	 * see https://bugzilla.samba.org/show_bug.cgi?id=15801
+	 *
+	 * For now just disable the new code by default.
+	 */
+	if (vfs_use_tmp == Auto) {
+		vfs_use_tmp = false;
+	}
+#endif
 
 	if (vfs_use_tmp != Auto) {
 		need_tmpname = vfs_use_tmp;
@@ -4593,21 +4582,17 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 		return NT_STATUS_NO_MEMORY;
 	}
 	SMB_ASSERT(smbd_is_tmpname(tmp_atname->base_name, NULL));
-	if (!ISDOT(parent_dir_fname->base_name)) {
+	if (ISDOT(dirfsp->fsp_name->base_name)) {
+		tmp_dname = talloc_strdup(frame, tmp_atname->base_name);
+	} else {
 		tmp_dname = talloc_asprintf(frame,
 					    "%s/%s",
-					    parent_dir_fname->base_name,
+					    dirfsp->fsp_name->base_name,
 					    tmp_atname->base_name);
-		if (tmp_dname == NULL) {
-			TALLOC_FREE(frame);
-			return NT_STATUS_NO_MEMORY;
-		}
-	} else {
-		tmp_dname = talloc_strdup(frame, tmp_atname->base_name);
-		if (tmp_dname == NULL) {
-			TALLOC_FREE(frame);
-			return NT_STATUS_NO_MEMORY;
-		}
+	}
+	if (tmp_dname == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	smb_dname->base_name = tmp_dname;
@@ -4618,12 +4603,16 @@ static NTSTATUS mkdir_internal(connection_struct *conn,
 	first_atname = tmp_atname;
 
 mkdir_first:
-	ret = SMB_VFS_MKDIRAT(conn,
-			      parent_dir_fname->fsp,
-			      first_atname,
-			      mode);
+	ret = SMB_VFS_MKDIRAT(conn, dirfsp, first_atname, mode);
 	if (ret != 0) {
 		status = map_nt_error_from_unix(errno);
+		if (NT_STATUS_EQUAL(status, NT_STATUS_INVALID_PARAMETER)
+		    && need_tmpname)
+		{
+			need_tmpname = false;
+			first_atname = smb_fname_atname;
+			goto mkdir_first;
+		}
 		DBG_NOTICE("MKDIRAT failed for '%s': %s\n",
 			   smb_fname_str_dbg(smb_dname), nt_errstr(status));
 		goto restore_orig;
@@ -4635,7 +4624,7 @@ mkdir_first:
 	 */
 	fsp->fsp_flags.is_pathref = true;
 
-	status = fd_openat(parent_dir_fname->fsp, first_atname, fsp, &how);
+	status = fd_openat(dirfsp, first_atname, fsp, &how);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("fd_openat() failed for '%s': %s\n",
 			smb_fname_str_dbg(smb_dname), nt_errstr(status));
@@ -4663,13 +4652,12 @@ mkdir_first:
 		file_set_dosmode(conn,
 				 smb_dname,
 				 file_attributes | FILE_ATTRIBUTE_DIRECTORY,
-				 parent_dir_fname,
+				 dirfsp,
 				 true);
 	}
 
 	if (lp_inherit_permissions(SNUM(conn))) {
-		inherit_access_posix_acl(conn, parent_dir_fname->fsp,
-					 smb_dname, mode);
+		inherit_access_posix_acl(conn, dirfsp, smb_dname, mode);
 		need_re_stat = true;
 	}
 
@@ -4691,8 +4679,7 @@ mkdir_first:
 
 	/* Change the owner if required. */
 	if (lp_inherit_owner(SNUM(conn)) != INHERIT_OWNER_NO) {
-		change_dir_owner_to_parent_fsp(parent_dir_fname->fsp,
-					       fsp);
+		change_dir_owner_to_parent_fsp(dirfsp, fsp);
 		need_re_stat = true;
 	}
 
@@ -4706,9 +4693,7 @@ mkdir_first:
 	}
 
 	if (lp_nt_acl_support(SNUM(conn))) {
-		status = apply_new_nt_acl(parent_dir_fname->fsp,
-					  fsp,
-					  sd);
+		status = apply_new_nt_acl(dirfsp, fsp, sd);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_WARNING("apply_new_nt_acl() failed for %s with %s\n",
 				    fsp_str_dbg(fsp),
@@ -4741,12 +4726,8 @@ mkdir_first:
 	 * is mapped in the libreplace replacement
 	 * (as well as the glibc replacement).
 	 */
-	ret = SMB_VFS_RENAMEAT(conn,
-			       parent_dir_fname->fsp,
-			       tmp_atname,
-			       parent_dir_fname->fsp,
-			       smb_fname_atname,
-			       &rhow);
+	ret = SMB_VFS_RENAMEAT(
+		conn, dirfsp, tmp_atname, dirfsp, smb_fname_atname, &rhow);
 	if (ret == -1 && errno == EINVAL) {
 		/*
 		 * This is the strategy we use without having
@@ -4772,10 +4753,7 @@ mkdir_first:
 		DBG_DEBUG("MKDIRAT/RENAMEAT '%s' -> '%s'\n",
 			  tmp_dname, orig_dname);
 
-		ret = SMB_VFS_MKDIRAT(conn,
-				      parent_dir_fname->fsp,
-				      smb_fname_atname,
-				      0);
+		ret = SMB_VFS_MKDIRAT(conn, dirfsp, smb_fname_atname, 0);
 		if (ret != 0) {
 			status = map_nt_error_from_unix(errno);
 			DBG_NOTICE("MKDIRAT failed for '%s': %s\n",
@@ -4784,9 +4762,9 @@ mkdir_first:
 		}
 
 		ret = SMB_VFS_RENAMEAT(conn,
-				       parent_dir_fname->fsp,
+				       dirfsp,
 				       tmp_atname,
-				       parent_dir_fname->fsp,
+				       dirfsp,
 				       smb_fname_atname,
 				       &rhow);
 	}
@@ -4811,10 +4789,7 @@ do_unlink:
 	DBG_NOTICE("%s: rollback and unlink '%s'\n",
 		   nt_errstr(status),
 		   tmp_dname);
-	ret = SMB_VFS_UNLINKAT(conn,
-			       parent_dir_fname->fsp,
-			       tmp_atname,
-			       AT_REMOVEDIR);
+	ret = SMB_VFS_UNLINKAT(conn, dirfsp, tmp_atname, AT_REMOVEDIR);
 	if (ret == 0) {
 		DBG_NOTICE("SMB_VFS_UNLINKAT(%s): OK\n",
 			   tmp_dname);
@@ -4851,7 +4826,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 			       uint32_t create_disposition,
 			       uint32_t create_options,
 			       uint32_t file_attributes,
-			       struct smb_filename *parent_dir_fname,
+			       struct files_struct *dirfsp,
 			       struct smb_filename *smb_fname_atname,
 			       uint32_t oplock_request,
 			       const struct smb2_lease *lease,
@@ -4865,7 +4840,6 @@ static NTSTATUS open_directory(connection_struct *conn,
 	struct open_ntcreate_lock_state lck_state = {};
 	bool keep_locked = false;
 	NTSTATUS status;
-	struct timespec mtimespec;
 	int info = 0;
 	uint32_t need_fd_access;
 	NTSTATUS ulstatus;
@@ -4909,11 +4883,8 @@ static NTSTATUS open_directory(connection_struct *conn,
 		}
 	}
 
-	status = smbd_calculate_access_mask_fsp(parent_dir_fname->fsp,
-					smb_dname->fsp,
-					false,
-					access_mask,
-					&access_mask);
+	status = smbd_calculate_access_mask_fsp(
+		dirfsp, smb_dname->fsp, false, access_mask, &access_mask);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_DEBUG("smbd_calculate_access_mask_fsp "
 			"on file %s returned %s\n",
@@ -4960,7 +4931,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 			}
 
 			status = mkdir_internal(conn,
-						parent_dir_fname,
+						dirfsp,
 						smb_fname_atname,
 						smb_dname,
 						sd,
@@ -4992,7 +4963,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 					return NT_STATUS_MEDIA_WRITE_PROTECTED;
 				}
 				status = mkdir_internal(conn,
-							parent_dir_fname,
+							dirfsp,
 							smb_fname_atname,
 							smb_dname,
 							sd,
@@ -5020,7 +4991,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 					 */
 					ret = SMB_VFS_FSTATAT(
 						conn,
-						parent_dir_fname->fsp,
+						dirfsp,
 						smb_fname_atname,
 						&smb_dname->st,
 						AT_SYMLINK_NOFOLLOW);
@@ -5069,7 +5040,7 @@ static NTSTATUS open_directory(connection_struct *conn,
 	fsp->fsp_flags.can_read = false;
 	fsp->fsp_flags.can_write = false;
 
-	fh_set_private_options(fsp->fh, 0);
+	fsp_apply_private_ntcreatex_flags(fsp, 0);
 	/*
 	 * According to Samba4, SEC_FILE_READ_ATTRIBUTE is always granted,
 	 */
@@ -5082,15 +5053,6 @@ static NTSTATUS open_directory(connection_struct *conn,
 	if (file_attributes & FILE_FLAG_POSIX_SEMANTICS) {
 		fsp->fsp_flags.posix_open = true;
 	}
-
-	/* Don't store old timestamps for directory
-	   handles in the internal database. We don't
-	   update them in there if new objects
-	   are created in the directory. Currently
-	   we only update timestamps on file writes.
-	   See bug #9870.
-	*/
-	mtimespec = make_omit_timespec();
 
 	/*
 	 * Obviously for FILE_LIST_DIRECTORY we need to reopen to get an fd
@@ -5109,11 +5071,8 @@ static NTSTATUS open_directory(connection_struct *conn,
 		};
 		bool file_created;
 
-		status = reopen_from_fsp(parent_dir_fname->fsp,
-					 smb_fname_atname,
-					 fsp,
-					 &how,
-					 &file_created);
+		status = reopen_from_fsp(
+			dirfsp, smb_fname_atname, fsp, &how, &file_created);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_INFO("Could not open fd for [%s]: %s\n",
 				 smb_fname_str_dbg(smb_dname),
@@ -5147,10 +5106,10 @@ static NTSTATUS open_directory(connection_struct *conn,
 	}
 
 	if (info == FILE_WAS_OPENED) {
-		status = smbd_check_access_rights_fsp(parent_dir_fname->fsp,
-						fsp,
-						false,
-						access_mask);
+		status = smbd_check_access_rights_fsp(dirfsp,
+						      fsp,
+						      false,
+						      access_mask);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_DEBUG("smbd_check_access_rights_fsp on "
 				  "file %s failed with %s\n",
@@ -5172,6 +5131,13 @@ static NTSTATUS open_directory(connection_struct *conn,
 		keep_locked = true;
 	}
 
+	if ((oplock_request != NO_OPLOCK) && (oplock_request != LEASE_OPLOCK)) {
+		/*
+		 * No oplocks on directories, only leases
+		 */
+		oplock_request &= SAMBA_PRIVATE_OPLOCK_MASK;
+	}
+
 	lck_state = (struct open_ntcreate_lock_state) {
 		.fsp			= fsp,
 		.object_type		= "directory",
@@ -5190,7 +5156,6 @@ static NTSTATUS open_directory(connection_struct *conn,
 						   fsp->file_id,
 						   conn->connectpath,
 						   smb_dname,
-						   &mtimespec,
 						   open_ntcreate_lock_add_entry,
 						   &lck_state);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -5225,13 +5190,6 @@ static NTSTATUS open_directory(connection_struct *conn,
 			   not the regular one. The magic gets handled in close. */
 			fsp->fsp_flags.initial_delete_on_close = true;
 		}
-	}
-
-	/*
-	 * Deal with other opens having a modified write time.
-	 */
-	if (!is_omit_timespec(&lck_state.write_time)) {
-		update_stat_ex_mtime(&fsp->fsp_name->st, lck_state.write_time);
 	}
 
 	if (pinfo) {
@@ -6183,7 +6141,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 	}
 
 	if (req == NULL) {
-		oplock_request |= INTERNAL_OPEN_ONLY;
+		oplock_request = INTERNAL_OPEN_ONLY;
 	}
 
 	if (lease != NULL) {
@@ -6509,7 +6467,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 					create_disposition,
 					create_options,
 					file_attributes,
-					dirfsp->fsp_name,
+					dirfsp,
 					smb_fname_atname,
 					oplock_request,
 					lease,
@@ -6537,7 +6495,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 					    oplock_request,
 					    lease,
 					    private_flags,
-					    dirfsp->fsp_name,
+					    dirfsp,
 					    smb_fname_atname,
 					    &info,
 					    fsp);
@@ -6567,7 +6525,7 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 						create_disposition,
 						create_options,
 						file_attributes,
-						dirfsp->fsp_name,
+						dirfsp,
 						smb_fname_atname,
 						oplock_request,
 						lease,

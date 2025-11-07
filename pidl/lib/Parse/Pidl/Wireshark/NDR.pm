@@ -322,7 +322,7 @@ sub ElementLevel($$$$$$$$)
 		$self->pidl_code("offset = dissect_ndr_$type\_pointer(tvb, offset, pinfo, tree, di, drep, $myname\_, $ptrtype_mappings{$l->{POINTER_TYPE}}, \"Pointer to ".field2name(StripPrefixes($e->{NAME}, $self->{conformance}->{strip_prefixes})) . " ($e->{TYPE})\",$hf);");
 	} elsif ($l->{TYPE} eq "ARRAY") {
 		if ($l->{IS_INLINE}) {
-			error($e->{ORIGINAL}, "Inline arrays not supported");
+			error($e->{ORIGINAL}, "Inline arrays not supported automatically. Use conformance file MANUAL directives for `$myname' and `$l->{SIZE_IS}' to implement them.");
 		} elsif ($l->{IS_FIXED}) {
 			$self->pidl_code("int i;");
 			$self->pidl_code("for (i = 0; i < $l->{SIZE_IS}; i++)");
@@ -389,13 +389,19 @@ sub ElementLevel($$$$$$$$)
 					$t = $l->{DATA_TYPE};
 				}
 
+				if ($param ne 0) {
+					$self->{conformance}->{dissectorparams}->{$myname}->{USED} = 1;
+				}
 				$self->pidl_code("offset = $ifname\_dissect_struct_" . $t . "(tvb,offset,pinfo,tree,di,drep,$hf,$param);");
 
 				return;
 			}
 
 			$call =~ s/\@HF\@/$hf/g;
-			$call =~ s/\@PARAM\@/$param/g;
+			my $replacements = ($call =~ s/\@PARAM\@/$param/g);
+			if ($param ne 0 and $replacements ne 0) {
+				$self->{conformance}->{dissectorparams}->{$myname}->{USED} = 1;
+			}
 			$self->pidl_code($call);
 		}
 	} elsif ($_->{TYPE} eq "SUBCONTEXT") {
@@ -404,7 +410,7 @@ sub ElementLevel($$$$$$$$)
 			$varswitch = $e->{PROPERTIES}->{switch_is};
 		}
 		my $num_bits = ($l->{HEADER_SIZE}*8);
-		my $hf2 = $self->register_hf_field($hf."_", "Subcontext length", "$ifname.$pn.$_->{NAME}subcontext", "FT_UINT$num_bits", "BASE_HEX", "NULL", 0, "");
+		my $hf2 = $self->register_hf_field($hf."_", "Subcontext length", "$ifname.$pn.$e->{NAME}.subcontext", "FT_UINT$num_bits", "BASE_HEX", "NULL", 0, "");
 		$num_bits = 3264 if ($num_bits == 32);
 		$self->{hf_used}->{$hf2} = 1;
 		$self->pidl_code("guint$num_bits size;");
@@ -424,6 +430,7 @@ sub ElementLevel($$$$$$$$)
 
 		$self->pidl_code("subtvb = tvb_new_subset_length_caplen(tvb, offset, (const int)size, -1);");
 		if ($param ne 0) {
+			$self->{conformance}->{dissectorparams}->{$myname}->{USED} = 1;
 			$self->pidl_code("$myname\_(subtvb, 0, pinfo, tree, di, drep, $param);");
 		} else {
 			$self->pidl_code("$myname\_(subtvb, 0, pinfo, tree, di, drep);");
@@ -443,21 +450,23 @@ sub SwitchType($$;$)
 {
 	my ($e, $type, $nodiscriminant) = @_;
 
-	my $switch_dt =  getType($type);
 	my $switch_type = undef;
-	if ($switch_dt->{DATA}->{TYPE} eq "ENUM") {
-		$switch_type = Parse::Pidl::Typelist::enum_type_fn($switch_dt->{DATA});
-	} elsif ($switch_dt->{DATA}->{TYPE} eq "BITMAP") {
-		$switch_type = Parse::Pidl::Typelist::bitmap_type_fn($switch_dt->{DATA});
-	} elsif ($switch_dt->{DATA}->{TYPE} eq "SCALAR") {
-		if (defined $e->{SWITCH_TYPE}) {
-			$switch_type = "$e->{SWITCH_TYPE}";
-		} else {
-			$switch_type = "$switch_dt->{DATA}->{NAME}";
-		}
-	} elsif (not defined $e->{SWITCH_TYPE}) {
+	if (not defined($type)) {
 		$switch_type = $nodiscriminant;
-	}
+	} else {
+                my $switch_dt =  getType($type);
+                if ($switch_dt->{DATA}->{TYPE} eq "ENUM") {
+                        $switch_type = Parse::Pidl::Typelist::enum_type_fn($switch_dt->{DATA});
+                } elsif ($switch_dt->{DATA}->{TYPE} eq "BITMAP") {
+                        $switch_type = Parse::Pidl::Typelist::bitmap_type_fn($switch_dt->{DATA});
+                } elsif ($switch_dt->{DATA}->{TYPE} eq "SCALAR") {
+                        if (defined $e->{SWITCH_TYPE}) {
+                                $switch_type = "$e->{SWITCH_TYPE}";
+                        } else {
+                                $switch_type = "$switch_dt->{DATA}->{NAME}";
+                        }
+                }
+        }
 
 	return $switch_type
 }
@@ -470,7 +479,7 @@ sub Element($$$$$$)
 
 	my ($call_code, $moreparam);
 	my $param = 0;
-	if (defined $isoruseswitch) {
+	if (defined $isoruseswitch and @$isoruseswitch) {
 		my $type = $isoruseswitch->[0];
 		my $name = $isoruseswitch->[1];
 
@@ -486,7 +495,7 @@ sub Element($$$$$$)
 		} else {
 			$moreparam = "";
 		}
-		if (($e->{PROPERTIES}->{switch_is} eq "") && ($switchvars{$name}) &&
+		if ((not has_property($e, "switch_is")) && ($switchvars{$name}) &&
 			#not a "native" type
 			(!($type =~ /^uint(8|16|1632|32|3264|64)/))) {
 			$param = $name;
@@ -555,22 +564,24 @@ sub Element($$$$$$)
 		next if ($_->{TYPE} eq "SWITCH");
 		next if (defined($self->{conformance}->{noemit}->{"$dissectorname$add"}));
 		$self->pidl_def("static int $dissectorname$add(tvbuff_t *tvb _U_, int offset _U_, packet_info *pinfo _U_, proto_tree *tree _U_, dcerpc_info* di _U_, uint8_t *drep _U_$moreparam);");
-		$self->pidl_fn_start("$dissectorname$add");
-		$self->pidl_code("static int");
-		$self->pidl_code("$dissectorname$add(tvbuff_t *tvb _U_, int offset _U_, packet_info *pinfo _U_, proto_tree *tree _U_, dcerpc_info* di _U_, uint8_t *drep _U_$moreparam)");
-		$self->pidl_code("{");
-		$self->indent;
+		if (not defined($self->{conformance}->{manual}->{"$dissectorname$add"})) {
+			$self->pidl_fn_start("$dissectorname$add");
+			$self->pidl_code("static int");
+			$self->pidl_code("$dissectorname$add(tvbuff_t *tvb _U_, int offset _U_, packet_info *pinfo _U_, proto_tree *tree _U_, dcerpc_info* di _U_, uint8_t *drep _U_$moreparam)");
+			$self->pidl_code("{");
+			$self->indent;
 
-		$self->ElementLevel($e,$_,$hf,$dissectorname.$add,$pn,$ifname,$param);
-		if (defined $oldparam) {
-			$param = $oldparam;
+			$self->ElementLevel($e,$_,$hf,$dissectorname.$add,$pn,$ifname,$param);
+			if (defined $oldparam) {
+				$param = $oldparam;
+			}
+
+			$self->pidl_code("");
+			$self->pidl_code("return offset;");
+			$self->deindent;
+			$self->pidl_code("}\n");
+			$self->pidl_fn_end("$dissectorname$add");
 		}
-
-		$self->pidl_code("");
-		$self->pidl_code("return offset;");
-		$self->deindent;
-		$self->pidl_code("}\n");
-		$self->pidl_fn_end("$dissectorname$add");
 		$add.="_";
 		last if ($_->{TYPE} eq "ARRAY" and $_->{IS_ZERO_TERMINATED});
 	}
@@ -723,6 +734,9 @@ sub Struct($$$$)
 		if (has_property($_, "switch_is")) {
 			my $varswitch = $_->{PROPERTIES}->{switch_is};
 			$switch_info = $varswitchs->{$varswitch};
+			if (not @$switch_info) {
+				warning($_->{ORIGINAL}, "`$v' switch_is discriminant `$varswitch' not found. (Only single identifiers are supported, not expressions as in MIDL.)");
+			}
 		}
 
 		$res.="\t".$self->Element($_, $name, $ifname, $switch_info, %switch_hash)."\n\n";
@@ -1357,9 +1371,20 @@ sub DumpFunctionTable($)
 sub CheckUsed($$)
 {
 	my ($self, $conformance) = @_;
+
+	# Check if some word appears inside a CODE block
+	# This has false positives if a word appears within a comment.
+	# We could use Regexp::Common to remove comments before searching.
+	local *CheckCode = sub {
+		my $name = shift;
+		return (exists ($conformance->{override}) and ($conformance->{override} =~ /\b$name\b/));
+	};
+
 	foreach (values %{$conformance->{header_fields}}) {
 		if (not defined($self->{hf_used}->{$_->{INDEX}})) {
-			warning($_->{POS}, "hf field `$_->{INDEX}' not used");
+			if (not CheckCode($_->{INDEX})) {
+				warning($_->{POS}, "hf field `$_->{INDEX}' not used");
+			}
 		}
 	}
 

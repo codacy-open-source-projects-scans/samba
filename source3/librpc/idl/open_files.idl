@@ -12,6 +12,13 @@ import "misc.idl";
 
 interface open_files
 {
+	typedef [public,bitmap16bit] bitmap {
+		SHARE_ENTRY_FLAG_POSIX_OPEN		= 0x0001,
+		SHARE_ENTRY_FLAG_STREAM_BASEOPEN	= 0x0002,
+		SHARE_ENTRY_FLAG_DENY_DOS		= 0x0004,
+		SHARE_ENTRY_FLAG_DENY_FCB		= 0x0008
+	} share_entry_flags;
+
 	typedef [enum16bit] enum {
 		SHARE_MODE_ENTRY_OP_TYPE_NONE = 0,
 		SHARE_MODE_ENTRY_OP_TYPE_EXCLUSIVE = 1,
@@ -29,11 +36,10 @@ interface open_files
 		smb2_lease_key  lease_key;
 		uint32		access_mask;
 		uint32		share_access;
-		uint32		private_options;
 		timeval		time;
 		udlong		share_file_id;
 		uint32		uid;
-		uint16		flags;
+		share_entry_flags flags;
 		uint32		name_hash;
 
 		/*
@@ -70,8 +76,6 @@ interface open_files
 		[string,charset(UTF8)] char *stream_name;
 		uint32 num_delete_tokens;
 		[size_is(num_delete_tokens)] delete_token delete_tokens[];
-		NTTIME old_write_time;
-		NTTIME changed_write_time;
 		[skip] boolean8 not_stored;
 		[skip] boolean8 modified;
 		[ignore] file_id id; /* In memory key used to lookup cache. */
@@ -111,10 +115,7 @@ interface open_files
 		[string,charset(UTF8)] char *base_name;
 		hyper initial_allocation_size;
 		hyper position_information;
-		boolean8 update_write_time_triggered;
-		boolean8 update_write_time_on_close;
 		boolean8 write_time_forced;
-		NTTIME close_write_time;
 		vfs_default_durable_stat stat_info;
 	} vfs_default_durable_cookie;
 

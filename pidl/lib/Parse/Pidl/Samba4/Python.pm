@@ -1017,32 +1017,81 @@ sub PythonFunctionUnpackOut($$$)
 	my $env = GenerateFunctionOutEnv($fn, "r->");
 	my $result_size = 0;
 
-	$self->pidl("static PyObject *$outfnname(struct $fn->{NAME} *r)");
+	$self->pidl("static PyObject *$outfnname(struct $fn->{NAME} *r, bool raise_result_exception)");
 	$self->pidl("{");
 	$self->indent;
-	$self->pidl("PyObject *result;");
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		next unless (grep(/out/,@{$e->{DIRECTION}}));
 		next if (($metadata_args->{in}->{$e->{NAME}} and grep(/in/, @{$e->{DIRECTION}})) or
 		         ($metadata_args->{out}->{$e->{NAME}}) and grep(/out/, @{$e->{DIRECTION}}));
-		$self->pidl("PyObject *py_$e->{NAME};");
+		$self->pidl("PyObject *py_$e->{NAME} = NULL;");
 		$result_size++;
 	}
 
-	if ($fn->{RETURN_TYPE}) {
-		$result_size++ unless ($fn->{RETURN_TYPE} eq "WERROR" or $fn->{RETURN_TYPE} eq "NTSTATUS");
+	my $is_raisable_return = 0;
+	if ($fn->{RETURN_TYPE} and ($fn->{RETURN_TYPE} eq "WERROR" or $fn->{RETURN_TYPE} eq "NTSTATUS")) {
+		$is_raisable_return = 1;
+	}
+
+	if ($fn->{RETURN_TYPE} and not $is_raisable_return) {
+		$result_size++;
+	}
+
+	my $max_result_size = $result_size;
+	my $alloc_size = "$result_size";
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$max_result_size++;
+	}
+	$self->pidl("PyObject *result = NULL;");
+	if ($max_result_size != $result_size) {
+		$self->pidl("size_t result_size = $result_size;");
+		$alloc_size = "result_size";
+	}
+	$self->pidl("");
+
+	if ($result_size > 1) {
+		$signature .= "(";
+	} elsif ($result_size == 0) {
+		$signature .= "None";
+	}
+
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->pidl("if (raise_result_exception) {");
+		$self->indent;
+		if (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "NTSTATUS") {
+			$self->handle_ntstatus("r->out.result", "NULL", undef);
+		} elsif (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "WERROR") {
+			$self->handle_werror("r->out.result", "NULL", undef);
+		}
+		$self->deindent;
+		$self->pidl("} else {");
+		$self->indent;
+		$self->pidl("/* $fn->{RETURN_TYPE} will be part of the results */");
+		$self->pidl("result_size += 1;");
+		$self->deindent;
+		$self->pidl("}");
+		$self->pidl("");
+	}
+
+	if ($max_result_size > 1) {
+		if ($max_result_size != $result_size) {
+			$self->pidl("if (result_size > 1) {");
+			$self->indent;
+		}
+		$self->pidl("result = PyTuple_New($alloc_size);");
+		$self->pidl("if (result == NULL) {");
+		$self->indent;
+		$self->pidl("return NULL;");
+		$self->deindent;
+		$self->pidl("}");
+		if ($max_result_size != $result_size) {
+			$self->deindent;
+			$self->pidl("}");
+		}
+		$self->pidl("");
 	}
 
 	my $i = 0;
-
-	if ($result_size > 1) {
-		$self->pidl("result = PyTuple_New($result_size);");
-		$signature .= "(";
-	} elsif ($result_size == 0) {
-		$self->pidl("result = Py_None;");
-		$self->pidl("Py_INCREF(result);");
-		$signature .= "None";
-	}
 
 	foreach my $e (@{$fn->{ELEMENTS}}) {
 		next if ($metadata_args->{out}->{$e->{NAME}});
@@ -1050,28 +1099,64 @@ sub PythonFunctionUnpackOut($$$)
 		if (grep(/out/,@{$e->{DIRECTION}})) {
 			$self->ConvertObjectToPython("r", $env, $e, "r->out.$e->{NAME}", $py_name, "return NULL;");
 			if ($result_size > 1) {
-				$self->pidl("PyTuple_SetItem(result, $i, $py_name);");
-				$i++;
 				$signature .= "$e->{NAME}, ";
 			} else {
-				$self->pidl("result = $py_name;");
 				$signature .= $e->{NAME};
 			}
+
+			if ($max_result_size > 1) {
+				if ($max_result_size != $result_size and $result_size == 1) {
+					$self->pidl("if (result_size > 1) {");
+					$self->indent;
+				}
+				$self->pidl("PyTuple_SetItem(result, $i, $py_name);");
+				if ($max_result_size != $result_size and $result_size == 1) {
+					$self->deindent;
+					$self->pidl("}");
+				}
+			}
+			if ($result_size == 1) {
+				if ($max_result_size != $result_size) {
+					$self->pidl("if (result_size == 1) {");
+					$self->indent;
+				}
+				$self->pidl("result = $py_name;");
+				if ($max_result_size != $result_size) {
+					$self->deindent;
+					$self->pidl("}");
+				}
+			}
+			$self->pidl("");
+			$i++;
 		}
 	}
 
-	if (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "NTSTATUS") {
-		$self->handle_ntstatus("r->out.result", "NULL", undef);
-	} elsif (defined($fn->{RETURN_TYPE}) and $fn->{RETURN_TYPE} eq "WERROR") {
-		$self->handle_werror("r->out.result", "NULL", undef);
-	} elsif (defined($fn->{RETURN_TYPE})) {
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->pidl("if (!raise_result_exception) {");
+		$self->indent;
+	}
+
+	if ($fn->{RETURN_TYPE}) {
 		my $conv = $self->ConvertObjectToPythonData("r", $fn->{RETURN_TYPE}, "r->out.result", $fn);
-		if ($result_size > 1) {
+		if ($max_result_size > 1) {
 			$self->pidl("PyTuple_SetItem(result, $i, $conv);");
-		} else {
+		} elsif ($max_result_size == 1) {
 			$self->pidl("result = $conv;");
+		} else {
+			fatal($fn->{ORIGINAL}, "Internal error max_result_size=$max_result_size");
 		}
-		$signature .= "result";
+
+		if (not $is_raisable_return) {
+			$signature .= "result";
+		}
+	}
+
+	if ($fn->{RETURN_TYPE} and $is_raisable_return) {
+		$self->deindent;
+		$self->pidl("}");
+		$self->pidl("");
+	} elsif ($fn->{RETURN_TYPE}) {
+		$self->pidl("");
 	}
 
 	if (substr($signature, -2) eq ", ") {
@@ -1079,6 +1164,20 @@ sub PythonFunctionUnpackOut($$$)
 	}
 	if ($result_size > 1) {
 		$signature .= ")";
+	}
+
+	if ($result_size == 0) {
+		if ($max_result_size != $result_size) {
+			$self->pidl("if (result_size == 0) {");
+			$self->indent;
+		}
+		$self->pidl("result = Py_None;");
+		$self->pidl("Py_INCREF(result);");
+		if ($max_result_size != $result_size) {
+			$self->deindent;
+			$self->pidl("}");
+		}
+		$self->pidl("");
 	}
 
 	$self->pidl("return result;");
@@ -1467,9 +1566,23 @@ sub Interface($$$)
 		$self->indent;
 		foreach my $d (@fns) {
 			my ($infn, $outfn, $callfn, $prettyname, $docstring, $opnum) = @$d;
-			$self->pidl("{ \"$prettyname\", $docstring, (py_dcerpc_call_fn)$callfn, (py_data_pack_fn)$infn, (py_data_unpack_fn)$outfn, $opnum, &ndr_table_$interface->{NAME} },");
+			$self->pidl("{");
+			$self->indent;
+			$self->pidl(".name = \"$prettyname\",");
+			$self->pidl(".doc = $docstring,");
+			$self->pidl(".call = (py_dcerpc_call_fn)$callfn,");
+			$self->pidl(".pack_in_data = (py_data_pack_fn)$infn,");
+			$self->pidl(".unpack_out_data = (py_data_unpack_fn)$outfn,");
+			$self->pidl(".opnum = $opnum,");
+			$self->pidl(".table = &ndr_table_$interface->{NAME},");
+			$self->deindent;
+			$self->pidl("},");
 		}
-		$self->pidl("{0}");
+		$self->pidl("{");
+		$self->indent;
+		$self->pidl(".name = NULL,");
+		$self->deindent;
+		$self->pidl("},");
 		$self->deindent;
 		$self->pidl("};");
 		$self->pidl("");
@@ -1484,11 +1597,30 @@ sub Interface($$$)
 		$self->pidl("");
 
 		my $signature =
-"\"$interface->{NAME}(binding, lp_ctx=None, credentials=None) -> connection\\n\"
-\"\\n\"
-\"binding should be a DCE/RPC binding string (for example: ncacn_ip_tcp:127.0.0.1)\\n\"
-\"lp_ctx should be a path to a smb.conf file or a param.LoadParm object\\n\"
-\"credentials should be a credentials.Credentials object.\\n\\n\"";
+"\"$interface->{NAME}(binding, lp_ctx=None, credentials=None, basis_connection=None) -> connection\\n\"
+\"\\n\\n\"
+\"Parameters\\n\"
+\"----------\\n\"
+\"binding : str\\n\"
+\"    A DCE/RPC binding string (for example: ncacn_ip_tcp:127.0.0.1)\\n\"
+\"lp_ctx : param.LoadParm\\n\"
+\"    Should be a path to a smb.conf file or a param.LoadParm object\\n\"
+\"credentials : credentials.Credentials, optional\\n\"
+\"    A credentials.Credentials object (default is None).\\n\"
+\"basis_connection : samba.dcerpc.ClientConnection, optional\\n\"
+\"    A $interface->{NAME} client connection object (default is None).\\n\"
+\"\\n\\n\"
+\"Returns\\n\"
+\"-------\\n\"
+\"samba.dcerpc.ClientConnection\\n\"
+\"    A ClientConnection object\\n\"
+\"\\n\\n\"
+\"Raises\\n\"
+\"------\\n\"
+\"samba.NTSTATUSError\\n\"
+\"    An NTSTATUS error\\n\"
+\"\\n\"";
+
 
 		my $docstring = $self->DocString($interface, $interface->{NAME});
 
@@ -1907,6 +2039,12 @@ sub ConvertObjectFromPythonData($$$$$$;$$)
 	}
 
 	if ($actual_ctype->{TYPE} eq "SCALAR" and $actual_ctype->{NAME} eq "DATA_BLOB") {
+		$self->pidl("if (!PyBytes_Check($cvar)) {");
+		$self->indent;
+		$self->pidl("PyErr_Format(PyExc_TypeError, \"Expected bytes object, got %s\", Py_TYPE($cvar)->tp_name);");
+		$self->pidl("$fail");
+		$self->deindent;
+		$self->pidl("}");
 		$self->pidl("$target = data_blob_talloc($mem_ctx, PyBytes_AS_STRING($cvar), PyBytes_GET_SIZE($cvar));");
 		return;
 	}

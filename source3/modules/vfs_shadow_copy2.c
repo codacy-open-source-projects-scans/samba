@@ -726,31 +726,42 @@ static bool _shadow_copy2_strip_snapshot_converted(TALLOC_CTX *mem_ctx,
 static char *shadow_copy2_find_mount_point(TALLOC_CTX *mem_ctx,
 					   vfs_handle_struct *handle)
 {
-	char *path = talloc_strdup(mem_ctx, handle->conn->connectpath);
+	struct smb_filename *smb_fname_cpath = NULL;
 	dev_t dev;
-	struct stat st;
 	char *p;
 
-	if (stat(path, &st) != 0) {
-		talloc_free(path);
+	smb_fname_cpath = synthetic_smb_fname(mem_ctx,
+					      handle->conn->connectpath,
+					      NULL,
+					      NULL,
+					      0,
+					      0);
+	if (smb_fname_cpath == NULL) {
+		errno = ENOMEM;
 		return NULL;
 	}
 
-	dev = st.st_dev;
+	if (SMB_VFS_NEXT_STAT(handle, smb_fname_cpath) != 0) {
+		TALLOC_FREE(smb_fname_cpath);
+		return NULL;
+	}
 
-	while ((p = strrchr(path, '/')) && p > path) {
+	dev = smb_fname_cpath->st.st_ex_dev;
+
+	while ((p = strrchr(smb_fname_cpath->base_name, '/')) &&
+			p > smb_fname_cpath->base_name) {
 		*p = 0;
-		if (stat(path, &st) != 0) {
-			talloc_free(path);
+		if (SMB_VFS_NEXT_STAT(handle, smb_fname_cpath) != 0) {
+			TALLOC_FREE(smb_fname_cpath);
 			return NULL;
 		}
-		if (st.st_dev != dev) {
+		if (smb_fname_cpath->st.st_ex_dev != dev) {
 			*p = '/';
 			break;
 		}
 	}
 
-	return path;
+	return smb_fname_cpath->base_name;
 }
 
 /**
@@ -1024,11 +1035,11 @@ static void convert_sbuf(vfs_handle_struct *handle, const char *fname,
 }
 
 static int shadow_copy2_renameat(vfs_handle_struct *handle,
-				files_struct *srcfsp,
-				const struct smb_filename *smb_fname_src,
-				files_struct *dstfsp,
-				const struct smb_filename *smb_fname_dst,
-				const struct vfs_rename_how *how)
+				 files_struct *src_dirfsp,
+				 const struct smb_filename *smb_fname_src,
+				 files_struct *dst_dirfsp,
+				 const struct smb_filename *smb_fname_dst,
+				 const struct vfs_rename_how *how)
 {
 	time_t timestamp_src = 0;
 	time_t timestamp_dst = 0;
@@ -1067,11 +1078,11 @@ static int shadow_copy2_renameat(vfs_handle_struct *handle,
 		return -1;
 	}
 	return SMB_VFS_NEXT_RENAMEAT(handle,
-			srcfsp,
-			smb_fname_src,
-			dstfsp,
-			smb_fname_dst,
-			how);
+				     src_dirfsp,
+				     smb_fname_src,
+				     dst_dirfsp,
+				     smb_fname_dst,
+				     how);
 }
 
 static int shadow_copy2_symlinkat(vfs_handle_struct *handle,
@@ -1120,11 +1131,11 @@ static int shadow_copy2_symlinkat(vfs_handle_struct *handle,
 }
 
 static int shadow_copy2_linkat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *old_smb_fname,
-			files_struct *dstfsp,
-			const struct smb_filename *new_smb_fname,
-			int flags)
+			       files_struct *src_dirfsp,
+			       const struct smb_filename *old_smb_fname,
+			       files_struct *dst_dirfsp,
+			       const struct smb_filename *new_smb_fname,
+			       int flags)
 {
 	time_t timestamp_old = 0;
 	time_t timestamp_new = 0;
@@ -1161,11 +1172,11 @@ static int shadow_copy2_linkat(vfs_handle_struct *handle,
 		return -1;
 	}
 	return SMB_VFS_NEXT_LINKAT(handle,
-			srcfsp,
-			old_smb_fname,
-			dstfsp,
-			new_smb_fname,
-			flags);
+				   src_dirfsp,
+				   old_smb_fname,
+				   dst_dirfsp,
+				   new_smb_fname,
+				   flags);
 }
 
 static int shadow_copy2_stat(vfs_handle_struct *handle,
@@ -1521,25 +1532,15 @@ static struct smb_filename *shadow_copy2_openat_name(
 {
 	struct smb_filename *result = NULL;
 
-	if (fsp->base_fsp != NULL) {
+	if (fsp_is_alternate_stream(fsp)) {
 		struct smb_filename *base_fname = fsp->base_fsp->fsp_name;
 
-		if (smb_fname_in->base_name[0] == '/') {
-			/*
-			 * Special-case stream names from streams_depot
-			 */
-			result = cp_smb_filename(mem_ctx, smb_fname_in);
-		} else {
-
-			SMB_ASSERT(is_named_stream(smb_fname_in));
-
-			result = synthetic_smb_fname(mem_ctx,
-						     base_fname->base_name,
-						     smb_fname_in->stream_name,
-						     &smb_fname_in->st,
-						     smb_fname_in->twrp,
-						     smb_fname_in->flags);
-		}
+		result = synthetic_smb_fname(mem_ctx,
+					     base_fname->base_name,
+					     smb_fname_in->stream_name,
+					     &smb_fname_in->st,
+					     smb_fname_in->twrp,
+					     smb_fname_in->flags);
 	} else {
 		result = full_path_from_dirfsp_atname(
 			mem_ctx, dirfsp, smb_fname_in);

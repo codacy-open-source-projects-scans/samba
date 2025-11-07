@@ -320,8 +320,10 @@ hdb_samba4_check_constrained_delegation(krb5_context context, HDB *db,
 static krb5_error_code
 hdb_samba4_check_rbcd(krb5_context context, HDB *db,
 		      const hdb_entry *client_krbtgt,
+		      krb5_const_principal client_principal,
 		      const hdb_entry *client,
 		      const hdb_entry *device_krbtgt,
+		      krb5_const_principal device_principal,
 		      const hdb_entry *device,
 		      krb5_const_principal server_principal,
 		      krb5_const_pac header_pac,
@@ -332,10 +334,8 @@ hdb_samba4_check_rbcd(krb5_context context, HDB *db,
 	struct samba_kdc_entry *client_skdc_entry = NULL;
 	const struct samba_kdc_entry *client_krbtgt_skdc_entry = NULL;
 	struct samba_kdc_entry *proxy_skdc_entry = NULL;
-	const struct auth_user_info_dc *client_info = NULL;
-	const struct auth_user_info_dc *device_info = NULL;
 	struct samba_kdc_entry_pac client_pac_entry = {};
-	struct auth_claims auth_claims = {};
+	struct samba_kdc_entry_pac device_pac_entry = {};
 	TALLOC_CTX *mem_ctx = NULL;
 	krb5_error_code code;
 
@@ -354,74 +354,46 @@ hdb_samba4_check_rbcd(krb5_context context, HDB *db,
 	}
 
 	client_pac_entry = samba_kdc_entry_pac(header_pac,
+					       client_principal,
 					       client_skdc_entry,
-					       samba_kdc_entry_is_trust(client_krbtgt_skdc_entry));
+					       client_krbtgt_skdc_entry);
 
-	code = samba_kdc_get_user_info_dc(mem_ctx,
-					  context,
-					  kdc_db_ctx->samdb,
-					  client_pac_entry,
-					  &client_info,
-					  NULL /* resource_groups_out */);
-	if (code != 0) {
-		goto out;
-	}
-
-	code = samba_kdc_get_claims_data(mem_ctx,
-					 context,
-					 kdc_db_ctx->samdb,
-					 client_pac_entry,
-					 &auth_claims.user_claims);
-	if (code) {
-		goto out;
-	}
-
-	if (device != NULL) {
+	if (device_pac != NULL) {
 		struct samba_kdc_entry *device_skdc_entry = NULL;
 		const struct samba_kdc_entry *device_krbtgt_skdc_entry = NULL;
-		struct samba_kdc_entry_pac device_pac_entry = {};
 
-		device_skdc_entry = talloc_get_type_abort(device->context,
-							  struct samba_kdc_entry);
+		/*
+		 * If we have a armor_pac we also have armor_server,
+		 * otherwise we can't decrypt the ticket and get to
+		 * the pac.
+		 */
+		device_krbtgt_skdc_entry = talloc_get_type_abort(device_krbtgt->context,
+								 struct samba_kdc_entry);
 
-		if (device_krbtgt != NULL) {
-			device_krbtgt_skdc_entry = talloc_get_type_abort(device_krbtgt->context,
-									 struct samba_kdc_entry);
+		/*
+		 * The armor ticket might be from a different
+		 * domain, so we may not have a local db entry
+		 * for the device.
+		 */
+		if (device != NULL) {
+			device_skdc_entry = talloc_get_type_abort(device->context,
+								  struct samba_kdc_entry);
 		}
 
 		device_pac_entry = samba_kdc_entry_pac(device_pac,
+						       device_principal,
 						       device_skdc_entry,
-						       samba_kdc_entry_is_trust(device_krbtgt_skdc_entry));
-
-		code = samba_kdc_get_user_info_dc(mem_ctx,
-						  context,
-						  kdc_db_ctx->samdb,
-						  device_pac_entry,
-						  &device_info,
-						  NULL /* resource_groups_out */);
-		if (code) {
-			goto out;
-		}
-
-		code = samba_kdc_get_claims_data(mem_ctx,
-						 context,
-						 kdc_db_ctx->samdb,
-						 device_pac_entry,
-						 &auth_claims.device_claims);
-		if (code) {
-			goto out;
-		}
+						       device_krbtgt_skdc_entry);
 	}
 
 	code = samba_kdc_check_s4u2proxy_rbcd(context,
 					      kdc_db_ctx,
 					      client->principal,
 					      server_principal,
-					      client_info,
-					      device_info,
-					      auth_claims,
+					      client_pac_entry,
+					      device_pac_entry,
 					      proxy_skdc_entry);
-out:
+
 	talloc_free(mem_ctx);
 	return code;
 }

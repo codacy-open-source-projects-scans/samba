@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    replacement routines for broken systems
    Copyright (C) Andrew Tridgell 1992-1998
@@ -8,7 +8,7 @@
      ** NOTE! The following LGPL license applies to the replace
      ** library. This does NOT imply that all of Samba is released
      ** under the LGPL
-   
+
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Lesser General Public
    License as published by the Free Software Foundation; either
@@ -35,6 +35,10 @@
 
 #ifdef HAVE_SYS_SYSCALL_H
 #include <sys/syscall.h>
+#endif
+
+#ifdef HAVE_SYS_PRCTL_H
+#include <sys/prctl.h>
 #endif
 
 #ifdef _WIN32
@@ -91,7 +95,7 @@ size_t rep_strlcpy(char *d, const char *s, size_t bufsize)
 #endif
 
 #ifndef HAVE_STRLCAT
-/* like strncat but does not 0 fill the buffer and always null 
+/* like strncat but does not 0 fill the buffer and always null
    terminates. bufsize is the length of the buffer, which should
    be one more than the maximum resulting string length */
 size_t rep_strlcat(char *d, const char *s, size_t bufsize)
@@ -116,7 +120,7 @@ size_t rep_strlcat(char *d, const char *s, size_t bufsize)
 
 #ifndef HAVE_MKTIME
 /*******************************************************************
-a mktime() replacement for those who don't have it - contributed by 
+a mktime() replacement for those who don't have it - contributed by
 C.A. Lademann <cal@zls.com>
 Corrections by richard.kettlewell@kewill.com
 ********************************************************************/
@@ -137,7 +141,7 @@ time_t rep_mktime(struct tm *t)
     return((time_t)-1);
 
   n = t->tm_year + 1900 - 1;
-  epoch = (t->tm_year - 70) * YEAR + 
+  epoch = (t->tm_year - 70) * YEAR +
     ((n / 4 - n / 100 + n / 400) - (1969 / 4 - 1969 / 100 + 1969 / 400)) * DAY;
 
   y = t->tm_year + 1900;
@@ -147,7 +151,7 @@ time_t rep_mktime(struct tm *t)
     epoch += mon [m] * DAY;
     if(m == 1 && y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
       epoch += DAY;
-    
+
     if(++m > 11) {
       m = 0;
       y++;
@@ -156,7 +160,7 @@ time_t rep_mktime(struct tm *t)
 
   epoch += (t->tm_mday - 1) * DAY;
   epoch += t->tm_hour * HOUR + t->tm_min * MINUTE + t->tm_sec;
-  
+
   if((u = localtime(&epoch)) != NULL) {
     t->tm_sec = u->tm_sec;
     t->tm_min = u->tm_min;
@@ -176,7 +180,7 @@ time_t rep_mktime(struct tm *t)
 
 #ifndef HAVE_INITGROUPS
 /****************************************************************************
- some systems don't have an initgroups call 
+ some systems don't have an initgroups call
 ****************************************************************************/
 int rep_initgroups(char *name, gid_t id)
 {
@@ -194,7 +198,7 @@ int rep_initgroups(char *name, gid_t id)
 	int    i,j;
 	struct group *g;
 	char   *gr;
-	
+
 	if((grouplst = malloc(sizeof(gid_t) * max_gr)) == NULL) {
 		errno = ENOMEM;
 		return -1;
@@ -250,9 +254,9 @@ void *rep_memmove(void *dest,const void *src,int size)
 
 	if (d < s) {
 		/* we can forward copy */
-		if (s-d >= sizeof(int) && 
-		    !(s%sizeof(int)) && 
-		    !(d%sizeof(int)) && 
+		if (s-d >= sizeof(int) &&
+		    !(s%sizeof(int)) &&
+		    !(d%sizeof(int)) &&
 		    !(size%sizeof(int))) {
 			/* do it all as words */
 			int *idest = (int *)dest;
@@ -267,9 +271,9 @@ void *rep_memmove(void *dest,const void *src,int size)
 		}
 	} else {
 		/* must backward copy */
-		if (d-s >= sizeof(int) && 
-		    !(s%sizeof(int)) && 
-		    !(d%sizeof(int)) && 
+		if (d-s >= sizeof(int) &&
+		    !(s%sizeof(int)) &&
+		    !(d%sizeof(int)) &&
 		    !(size%sizeof(int))) {
 			/* do it all as words */
 			int *idest = (int *)dest;
@@ -281,7 +285,7 @@ void *rep_memmove(void *dest,const void *src,int size)
 			char *cdest = (char *)dest;
 			char *csrc = (char *)src;
 			for (i=size-1;i>=0;i--) cdest[i] = csrc[i];
-		}      
+		}
 	}
 	return(dest);
 }
@@ -334,16 +338,16 @@ void rep_vsyslog (int facility_priority, const char *format, va_list arglist)
  size_t rep_strnlen(const char *s, size_t max)
 {
         size_t len;
-  
+
         for (len = 0; len < max; len++) {
                 if (s[len] == '\0') {
                         break;
                 }
         }
-        return len;  
+        return len;
 }
 #endif
-  
+
 #ifndef HAVE_STRNDUP
 /**
  Some platforms don't have strndup.
@@ -351,7 +355,7 @@ void rep_vsyslog (int facility_priority, const char *format, va_list arglist)
 char *rep_strndup(const char *s, size_t n)
 {
 	char *ret;
-	
+
 	n = strnlen(s, n);
 	ret = malloc(n+1);
 	if (!ret)
@@ -407,7 +411,7 @@ int rep_chroot(const char *dname)
 
 /*****************************************************************
  Possibly replace mkstemp if it is broken.
-*****************************************************************/  
+*****************************************************************/
 
 #ifndef HAVE_SECURE_MKSTEMP
 int rep_mkstemp(char *template)
@@ -425,7 +429,7 @@ int rep_mkstemp(char *template)
 char *rep_mkdtemp(char *template)
 {
 	char *dname;
-	
+
 	if ((dname = mktemp(template))) {
 		if (mkdir(dname, 0700) >= 0) {
 			return dname;
@@ -532,7 +536,7 @@ long long int rep_strtoll(const char *str, char **endptr, int base)
 {
 #ifdef HAVE_STRTOQ
 	return strtoq(str, endptr, base);
-#elif defined(HAVE___STRTOLL) 
+#elif defined(HAVE___STRTOLL)
 	return __strtoll(str, endptr, base);
 #elif SIZEOF_LONG == SIZEOF_LONG_LONG
 	return (long long int) strtol(str, endptr, base);
@@ -568,7 +572,7 @@ unsigned long long int rep_strtoull(const char *str, char **endptr, int base)
 {
 #ifdef HAVE_STRTOUQ
 	return strtouq(str, endptr, base);
-#elif defined(HAVE___STRTOULL) 
+#elif defined(HAVE___STRTOULL)
 	return __strtoull(str, endptr, base);
 #elif SIZEOF_LONG == SIZEOF_LONG_LONG
 	return (unsigned long long int) strtoul(str, endptr, base);
@@ -599,7 +603,7 @@ unsigned long long int rep_strtoull(const char *str, char **endptr, int base)
 #endif /* HAVE_STRTOULL */
 
 #ifndef HAVE_SETENV
-int rep_setenv(const char *name, const char *value, int overwrite) 
+int rep_setenv(const char *name, const char *value, int overwrite)
 {
 	char *p;
 	size_t l1, l2;
@@ -644,10 +648,10 @@ int rep_unsetenv(const char *name)
 	for (i=0;environ[i];i++) /* noop */ ;
 
 	count=i;
-	
+
 	for (i=0;i<count;) {
 		if (strncmp(environ[i], name, len) == 0 && environ[i][len] == '=') {
-			/* note: we do _not_ free the old variable here. It is unsafe to 
+			/* note: we do _not_ free the old variable here. It is unsafe to
 			   do so, as the pointer may not have come from malloc */
 			memmove(&environ[i], &environ[i+1], (count-i)*sizeof(char *));
 			count--;
@@ -688,7 +692,7 @@ int rep_utimes(const char *filename, const struct timeval tv[2])
 #endif
 
 #ifndef HAVE_DUP2
-int rep_dup2(int oldfd, int newfd) 
+int rep_dup2(int oldfd, int newfd)
 {
 	errno = ENOSYS;
 	return -1;
@@ -944,8 +948,183 @@ int rep_usleep(useconds_t sec)
 #ifndef HAVE_SETPROCTITLE
 void rep_setproctitle(const char *fmt, ...)
 {
+#if defined(HAVE_PRCTL) && defined(PR_SET_MM_MAP) && defined(__NR_brk)
+	/*
+	 * Implementation based on setproctitle from lcx under LGPL-2.1+
+	 * https://github.com/lxc/lxc/
+	 *
+	 * Using PR_SET_MM_MAP requires CAP_SYS_RESOURCE.
+	 */
+	static char *proctitle = NULL;
+	char *tmp_proctitle = NULL;
+	char buf[2048] = {0};
+	char title[2048] = {0};
+	va_list ap;
+	char *ptr = NULL;
+	FILE *f = NULL;
+	size_t title_len;
+	int ret = 0;
+	struct prctl_mm_map prctl_map = {
+		.exe_fd = -1,
+	};
+	long brk_val = 0;
+	/* See `man proc_pid_stat.5` */
+	unsigned long start_code = 0;            // 26
+	unsigned long end_code = 0;              // 27
+	unsigned long start_stack = 0;           // 28
+
+	unsigned long start_data = 0;            // 45
+	unsigned long end_data = 0;              // 46
+	unsigned long start_brk = 0;             // 47
+	unsigned long arg_start = 0;             // 48
+	unsigned long arg_end = 0;               // 49
+	unsigned long env_start = 0;             // 50
+	unsigned long env_end = 0;               // 51
+
+	f = fopen("/proc/self/stat", "r");
+	if (f == NULL) {
+		return;
+	}
+
+	ptr = fgets(buf, sizeof(buf), f);
+	fclose(f);
+	if (ptr == NULL) {
+		return;
+	}
+
+	/*
+	 * Find the last ')' to skip the comm field which can contain spaces and
+	 * maybe ')'.
+	 */
+	ptr = strrchr(buf, ')');
+	if (ptr == NULL || ptr[1] == '\0') {
+		return;
+	}
+	ptr += 2; // Skip ') '
+
+	/* See `man proc_pid_stat.5` */
+	ret = sscanf(
+		ptr,
+		"%*c "        // 3 (state)
+		"%*d "        // 4 (ppid)
+		"%*d "        // 5 (pgrp)
+		"%*d "        // 6 (session)
+		"%*d "        // 7 (tty_nr)
+		"%*d "        // 8 (tpgid)
+		"%*u "        // 9 (flags)
+		"%*u "        // 10 (minflt)
+		"%*u "        // 11 (cminflt)
+		"%*u "        // 12 (majflt)
+		"%*u "        // 13 (cmajflt)
+		"%*u "        // 14 (utime)
+		"%*u "        // 15 (stime)
+		"%*d "        // 16 (cutime)
+		"%*d "        // 17 (cstime)
+		"%*d "        // 18 (priority)
+		"%*d "        // 19 (nice)
+		"%*d "        // 20 (num_threads)
+		"%*d "        // 21 (itrealvalue)
+		"%*u "        // 22 (starttime)
+		"%*u "        // 23 (vsize)
+		"%*d "        // 24 (rss)
+		"%*u "        // 25 (rsslim)
+		"%lu "        // 26 (start_code)
+		"%lu "        // 27 (end_code)
+		"%lu "        // 28 (start_stack)
+		"%*u "        // 29 (kstkesp)
+		"%*u "        // 30 (kstkeip)
+		"%*u "        // 31 (signal)
+		"%*u "        // 32 (blocked)
+		"%*u "        // 33 (sigignore)
+		"%*u "        // 34 (sigcatch)
+		"%*u "        // 35 (wchan)
+		"%*u "        // 36 (nswap)
+		"%*u "        // 37 (cnswap)
+		"%*d "        // 38 (exit_signal)
+		"%*d "        // 39 (processor)
+		"%*d "        // 40 (rt_priority)
+		"%*u "        // 41 (policy)
+		"%*u "        // 42 (delayacct_blkio_ticks)
+		"%*u "        // 43 (guest_time)
+		"%*d "        // 44 (cguest_time)
+		"%lu "        // 45 (start_data)
+		"%lu "        // 46 (end_data)
+		"%lu "        // 47 (start_brk)
+		"%lu "        // 48 (arg_start)
+		"%lu "        // 49 (arg_end)
+		"%lu "        // 50 (env_start)
+		"%lu",        // 51 (env_end)
+		&start_code,  // 26
+		&end_code,    // 27
+		&start_stack, // 28
+		&start_data,  // 45
+		&end_data,    // 46
+		&start_brk,   // 47
+		&arg_start,   // 48
+		&arg_end,     // 49
+		&env_start,   // 50
+		&env_end      // 51
+	);
+	if (ret != 10) {
+		return;
+	}
+
+	va_start(ap, fmt);
+	ret = vsnprintf(title, sizeof(title), fmt, ap);
+	va_end(ap);
+	if (ret <= 0) {
+		return;
+	}
+	/*
+	 * Include the null byte here, because in the calculations below
+	 * we want to have room for it.
+	 */
+	title_len = ret + 1;
+
+	/* This will leak memory */
+	tmp_proctitle = realloc(proctitle, title_len);
+	if (tmp_proctitle == NULL) {
+		return;
+	}
+	proctitle = tmp_proctitle;
+
+	arg_start = (uint64_t)proctitle;
+	arg_end = arg_start + title_len;
+
+	brk_val = syscall(__NR_brk, 0);
+	if (brk_val < 0) {
+		return;
+	}
+
+	prctl_map = (struct prctl_mm_map) {
+		.start_code = start_code,
+		.end_code = end_code,
+		.start_stack = start_stack,
+		.start_data = start_data,
+		.end_data = end_data,
+		.start_brk = start_brk,
+		.brk = brk_val,
+		.arg_start = arg_start,
+		.arg_end = arg_end,
+		.env_start = env_start,
+		.env_end = env_end,
+		.auxv = NULL,
+		.auxv_size = 0,
+		.exe_fd = -1,
+	};
+
+	ret = prctl(PR_SET_MM,
+		    PR_SET_MM_MAP,
+		    (long)&prctl_map,
+		    sizeof(prctl_map),
+		    0);
+	if (ret == 0) {
+		strlcpy((char *)arg_start, title, title_len);
+	}
+#endif /* HAVE_PRCTL */
 }
 #endif
+
 #ifndef HAVE_SETPROCTITLE_INIT
 void rep_setproctitle_init(int argc, char *argv[], char *envp[])
 {

@@ -647,7 +647,8 @@ bld.SAMBA_LIBRARY('ndr-samba',
     NDR_DNSSERVER NDR_EPMAPPER NDR_XATTR NDR_UNIXINFO NDR_NAMED_PIPE_AUTH
     NDR_NTPRINTING NDR_FSRVP NDR_WITNESS NDR_MDSSVC NDR_OPEN_FILES NDR_SMBXSRV
     NDR_SMB3POSIX NDR_RPCD_WITNESS
-    NDR_KRB5CCACHE NDR_WSP NDR_GKDI NDR_GMSA''',
+    NDR_KRB5CCACHE NDR_WSP NDR_GKDI NDR_GMSA
+    NDR_KEYCREDLINK NDR_BCRYPT_RSAKEY_BLOB NDR_TPM20_RSAKEY_BLOB''',
     private_library=True,
     grouping_library=True
     )
@@ -672,6 +673,7 @@ bld.SAMBA_LIBRARY('ndr',
     source='ndr/ndr_string.c ndr/ndr_basic.c ndr/uuid.c ndr/ndr.c ndr/ndr_misc.c gen_ndr/ndr_misc.c ndr/util.c',
     pc_files='ndr.pc',
     public_deps='samba-errors talloc samba-util util_str_hex',
+    deps='genrand',
     public_headers='gen_ndr/misc.h gen_ndr/ndr_misc.h ndr/libndr.h:ndr.h',
     header_path= [('*gen_ndr*', 'gen_ndr')],
     vnum='6.0.0',
@@ -752,6 +754,21 @@ bld.SAMBA_SUBSYSTEM('RPC_NDR_WINBIND',
 
 bld.SAMBA_SUBSYSTEM('NDR_FSRVP_STATE',
     source='gen_ndr/ndr_fsrvp_state.c',
+    public_deps='ndr'
+    )
+
+bld.SAMBA_SUBSYSTEM('NDR_KEYCREDLINK',
+    source='ndr/ndr_keycredlink.c gen_ndr/ndr_keycredlink.c',
+    public_deps='ndr'
+    )
+
+bld.SAMBA_SUBSYSTEM('NDR_BCRYPT_RSAKEY_BLOB',
+    source='gen_ndr/ndr_bcrypt_rsakey_blob.c',
+    public_deps='ndr'
+    )
+
+bld.SAMBA_SUBSYSTEM('NDR_TPM20_RSAKEY_BLOB',
+    source='gen_ndr/ndr_tpm20_rsakey_blob.c',
     public_deps='ndr'
     )
 #

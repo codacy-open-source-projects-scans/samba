@@ -363,9 +363,9 @@ static bool matchdirparam(const char **dir_exclude_list, char *path)
 		return False;
 	}
 
-	/* 
+	/*
 	 * Walk the components of path, looking for matches with the
-	 * exclude list on each component. 
+	 * exclude list on each component.
 	 */
 
 	for (startp = path; startp; startp = endp) {
@@ -612,7 +612,7 @@ static int recycle_unlink_internal(vfs_handle_struct *handle,
 		goto done;
 	}
 
-	if (config->keeptree) {
+	if (config->keeptree && !ISDOT(path_name)) {
 		temp_name = talloc_asprintf(frame, "%s/%s",
 					    config->repository,
 					    path_name);

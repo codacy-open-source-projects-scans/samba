@@ -1343,47 +1343,29 @@ static void notify_rename(struct connection_struct *conn,
 	TALLOC_FREE(parent_dir_dst);
 }
 
-/****************************************************************************
- Returns an error if the parent directory for a filename is open in an
- incompatible way.
-****************************************************************************/
+struct rename_check_open_state {
+	struct files_struct *dst_fsp;
+	struct file_id fileid;
+};
 
-static NTSTATUS parent_dirname_compatible_open(connection_struct *conn,
-					const struct smb_filename *smb_fname_dst_in)
+static struct files_struct *rename_check_open_fn(struct files_struct *fsp,
+						 void *private_data)
 {
-	struct smb_filename *smb_fname_parent = NULL;
-	struct file_id id;
-	files_struct *fsp = NULL;
-	int ret;
-	NTSTATUS status;
+	struct rename_check_open_state *state = private_data;
 
-	status = SMB_VFS_PARENT_PATHNAME(conn,
-					 talloc_tos(),
-					 smb_fname_dst_in,
-					 &smb_fname_parent,
-					 NULL);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+	if (fsp == state->dst_fsp) {
+		return NULL;
 	}
 
-	ret = vfs_stat(conn, smb_fname_parent);
-	if (ret == -1) {
-		return map_nt_error_from_unix(errno);
+	if (!fsp->fsp_flags.is_fsa) {
+		return NULL;
 	}
 
-	/*
-	 * We're only checking on this smbd here, mostly good
-	 * enough.. and will pass tests.
-	 */
+	if (!file_id_equal(&fsp->file_id, &state->fileid)) {
+		return NULL;
+	}
 
-	id = vfs_file_id_from_sbuf(conn, &smb_fname_parent->st);
-	for (fsp = file_find_di_first(conn->sconn, id, true); fsp;
-			fsp = file_find_di_next(fsp, true)) {
-		if (fsp->access_mask & DELETE_ACCESS) {
-			return NT_STATUS_SHARING_VIOLATION;
-                }
-        }
-	return NT_STATUS_OK;
+	return fsp;
 }
 
 /****************************************************************************
@@ -1391,220 +1373,172 @@ static NTSTATUS parent_dirname_compatible_open(connection_struct *conn,
 ****************************************************************************/
 
 NTSTATUS rename_internals_fsp(connection_struct *conn,
-			files_struct *fsp,
-			struct share_mode_lock **_lck,
-			struct smb_filename *smb_fname_dst_in,
-			const char *dst_original_lcomp,
-			uint32_t attrs,
-			bool replace_if_exists)
+			      struct files_struct *src_dirfsp,
+			      files_struct *fsp,
+			      struct smb_filename *smb_fname_src_rel,
+			      struct share_mode_lock **_lck,
+			      uint32_t attrs,
+			      const char *newname,
+			      bool replace_if_exists)
 {
-	TALLOC_CTX *ctx = talloc_tos();
-	struct smb_filename *parent_dir_fname_dst = NULL;
-	struct smb_filename *parent_dir_fname_dst_atname = NULL;
-	struct smb_filename *parent_dir_fname_src = NULL;
-	struct smb_filename *parent_dir_fname_src_atname = NULL;
+	TALLOC_CTX *ctx = talloc_stackframe();
+	struct smb_filename *smb_fname_src = fsp->fsp_name;
+	struct files_struct *dst_dirfsp = NULL;
 	struct smb_filename *smb_fname_dst = NULL;
+	struct smb_filename *smb_fname_dst_rel = NULL;
 	NTSTATUS status = NT_STATUS_OK;
 	struct share_mode_lock *lck = NULL;
-	uint32_t access_mask = SEC_DIR_ADD_FILE;
-	bool dst_exists, old_is_stream, new_is_stream;
 	int ret;
-	bool case_sensitive = fsp->fsp_flags.posix_open ?
-				true : conn->case_sensitive;
-	bool case_preserve = fsp->fsp_flags.posix_open ?
-				true : conn->case_preserve;
+	bool case_preserve = fsp->fsp_flags.posix_open || conn->case_preserve;
 	struct vfs_rename_how rhow = { .flags = 0, };
 
-	status = parent_dirname_compatible_open(conn, smb_fname_dst_in);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-
 	if (file_has_open_streams(fsp)) {
-		return NT_STATUS_ACCESS_DENIED;
-	}
-
-	/* Make a copy of the dst smb_fname structs */
-
-	smb_fname_dst = cp_smb_filename(ctx, smb_fname_dst_in);
-	if (smb_fname_dst == NULL) {
-		status = NT_STATUS_NO_MEMORY;
+		status = NT_STATUS_ACCESS_DENIED;
 		goto out;
 	}
 
-	/*
-	 * Check for special case with case preserving and not
-	 * case sensitive. If the new last component differs from the original
-	 * last component only by case, then we should allow
-	 * the rename (user is trying to change the case of the
-	 * filename).
-	 */
-	if (!case_sensitive && case_preserve &&
-	    strequal(fsp->fsp_name->base_name, smb_fname_dst->base_name) &&
-	    strequal(fsp->fsp_name->stream_name, smb_fname_dst->stream_name)) {
-		char *fname_dst_parent = NULL;
-		const char *fname_dst_lcomp = NULL;
-		char *orig_lcomp_path = NULL;
-		char *orig_lcomp_stream = NULL;
-		bool ok = true;
+	if (fsp_is_alternate_stream(fsp)) {
+		if (newname[0] != ':') {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
 
-		/*
-		 * Split off the last component of the processed
-		 * destination name. We will compare this to
-		 * the split components of dst_original_lcomp.
-		 */
-		if (!parent_dirname(ctx,
-				smb_fname_dst->base_name,
-				&fname_dst_parent,
-				&fname_dst_lcomp)) {
+		smb_fname_dst = synthetic_smb_fname(ctx,
+						    smb_fname_src->base_name,
+						    newname,
+						    NULL,
+						    0,
+						    smb_fname_src->flags);
+		if (smb_fname_dst == NULL) {
 			status = NT_STATUS_NO_MEMORY;
 			goto out;
 		}
 
-		/*
-		 * The dst_original_lcomp component contains
-		 * the last_component of the path + stream
-		 * name (if a stream exists).
-		 *
-		 * Split off the stream name so we
-		 * can check them separately.
-		 */
-
-		if (fsp->fsp_flags.posix_open) {
-			/* POSIX - no stream component. */
-			orig_lcomp_path = talloc_strdup(ctx,
-						dst_original_lcomp);
-			if (orig_lcomp_path == NULL) {
-				ok = false;
-			}
-		} else {
-			ok = split_stream_filename(ctx,
-					dst_original_lcomp,
-					&orig_lcomp_path,
-					&orig_lcomp_stream);
-		}
-
-		if (!ok) {
-			TALLOC_FREE(fname_dst_parent);
-			status = NT_STATUS_NO_MEMORY;
+		if (is_ntfs_default_stream_smb_fname(smb_fname_dst)) {
+			status = replace_if_exists
+					 ? NT_STATUS_NOT_SUPPORTED
+					 : NT_STATUS_OBJECT_NAME_COLLISION;
 			goto out;
 		}
 
-		/* If the base names only differ by case, use original. */
-		if(!strcsequal(fname_dst_lcomp, orig_lcomp_path)) {
-			char *tmp;
-			/*
-			 * Replace the modified last component with the
-			 * original.
-			 */
-			if (!ISDOT(fname_dst_parent)) {
-				tmp = talloc_asprintf(smb_fname_dst,
-					"%s/%s",
-					fname_dst_parent,
-					orig_lcomp_path);
-			} else {
-				tmp = talloc_strdup(smb_fname_dst,
-					orig_lcomp_path);
-			}
-			if (tmp == NULL) {
-				status = NT_STATUS_NO_MEMORY;
-				TALLOC_FREE(fname_dst_parent);
-				TALLOC_FREE(orig_lcomp_path);
-				TALLOC_FREE(orig_lcomp_stream);
-				goto out;
-			}
-			TALLOC_FREE(smb_fname_dst->base_name);
-			smb_fname_dst->base_name = tmp;
-		}
-
-		/* If the stream_names only differ by case, use original. */
-		if(!strcsequal(smb_fname_dst->stream_name,
-			       orig_lcomp_stream)) {
-			/* Use the original stream. */
-			char *tmp = talloc_strdup(smb_fname_dst,
-					    orig_lcomp_stream);
-			if (tmp == NULL) {
-				status = NT_STATUS_NO_MEMORY;
-				TALLOC_FREE(fname_dst_parent);
-				TALLOC_FREE(orig_lcomp_path);
-				TALLOC_FREE(orig_lcomp_stream);
-				goto out;
-			}
-			TALLOC_FREE(smb_fname_dst->stream_name);
-			smb_fname_dst->stream_name = tmp;
-		}
-		TALLOC_FREE(fname_dst_parent);
-		TALLOC_FREE(orig_lcomp_path);
-		TALLOC_FREE(orig_lcomp_stream);
+		ret = SMB_VFS_RENAME_STREAM(fsp->conn,
+					    fsp,
+					    newname,
+					    replace_if_exists);
+		goto inform_others;
 	}
 
-	/*
-	 * If the src and dest names are identical - including case,
-	 * don't do the rename, just return success.
-	 */
-
-	if (strcsequal(fsp->fsp_name->base_name, smb_fname_dst->base_name) &&
-	    strcsequal(fsp->fsp_name->stream_name,
-		       smb_fname_dst->stream_name)) {
-		DBG_NOTICE("identical names in rename %s "
-			   "- returning success\n",
-			   smb_fname_str_dbg(smb_fname_dst));
-		status = NT_STATUS_OK;
+	status = filename_convert_dirfsp(ctx,
+					 conn,
+					 newname,
+					 fsp->fsp_flags.posix_open
+						 ? UCF_POSIX_PATHNAMES |
+							   UCF_LCOMP_LNK_OK
+						 : 0,
+					 smb_fname_src->twrp,
+					 &dst_dirfsp,
+					 &smb_fname_dst);
+	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
 	}
 
-	old_is_stream = is_ntfs_stream_smb_fname(fsp->fsp_name);
-	new_is_stream = is_ntfs_stream_smb_fname(smb_fname_dst);
-
-	/* Return the correct error code if both names aren't streams. */
-	if (!old_is_stream && new_is_stream) {
+	if (is_ntfs_stream_smb_fname(smb_fname_dst)) {
+		/*
+		 * We handled streams above
+		 */
 		status = NT_STATUS_OBJECT_NAME_INVALID;
 		goto out;
 	}
 
-	if (old_is_stream && !new_is_stream) {
-		status = NT_STATUS_INVALID_PARAMETER;
-		goto out;
-	}
+	{
+		/*
+		 * Get the lcomp as the client sent it. For a pure
+		 * case change smb_fname_dst exists, but
+		 * filename_convert_dirfsp has removed the client's
+		 * intent by doing the case-insensitive lookup.
+		 */
 
-	dst_exists = vfs_stat(conn, smb_fname_dst) == 0;
+		char *lcomp = get_original_lcomp(ctx, conn, newname, 0);
+		if (lcomp == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto out;
+		}
 
-	if(!replace_if_exists && dst_exists) {
-		DBG_NOTICE("dest exists doing rename "
-			   "%s -> %s\n",
-			   smb_fname_str_dbg(fsp->fsp_name),
-			   smb_fname_str_dbg(smb_fname_dst));
-		status = NT_STATUS_OBJECT_NAME_COLLISION;
-		goto out;
-	}
+		smb_fname_dst_rel = synthetic_smb_fname(
+			ctx, lcomp, NULL, NULL, 0, 0);
+		TALLOC_FREE(lcomp);
 
-	/*
-	 * Drop the pathref fsp on the destination otherwise we trip upon in in
-	 * the below check for open files check.
-	 */
-	if (smb_fname_dst_in->fsp != NULL) {
-		fd_close(smb_fname_dst_in->fsp);
-		file_free(NULL, smb_fname_dst_in->fsp);
-		SMB_ASSERT(smb_fname_dst_in->fsp == NULL);
-	}
-
-	if (dst_exists) {
-		struct file_id fileid = vfs_file_id_from_sbuf(conn,
-		    &smb_fname_dst->st);
-		files_struct *dst_fsp = file_find_di_first(conn->sconn,
-							   fileid, true);
-		/* The file can be open when renaming a stream */
-		if (dst_fsp && !new_is_stream) {
-			DBG_NOTICE("Target file open\n");
-			status = NT_STATUS_ACCESS_DENIED;
+		if (smb_fname_dst_rel == NULL) {
+			status = NT_STATUS_NO_MEMORY;
 			goto out;
 		}
 	}
 
-	/* Ensure we have a valid stat struct for the source. */
-	status = vfs_stat_fsp(fsp);
-	if (!NT_STATUS_IS_OK(status)) {
+	if (!case_preserve &&
+	    strequal(smb_fname_src->base_name, smb_fname_dst->base_name))
+	{
+		/*
+		 * src and dst are the same except for the
+		 * case. Because we don't preserve the case, we can
+		 * just return success. Streams handled above.
+		 */
+		status = NT_STATUS_OK;
 		goto out;
+	}
+
+	if (strcsequal(src_dirfsp->fsp_name->base_name,
+		       dst_dirfsp->fsp_name->base_name))
+	{
+		/*
+		 * Same directory
+		 */
+		if (strcsequal(smb_fname_src_rel->base_name,
+			       smb_fname_dst_rel->base_name))
+		{
+			/*
+			 * No file name change
+			 */
+			status = NT_STATUS_OK;
+			goto out;
+		}
+
+		if (strequal(smb_fname_src_rel->base_name,
+			     smb_fname_dst_rel->base_name))
+		{
+			/*
+			 * Change the case of a file, mark the dst as
+			 * nonexisting.
+			 */
+			SET_STAT_INVALID(smb_fname_dst->st);
+		}
+	}
+
+	if (VALID_STAT(smb_fname_dst->st)) {
+
+		struct rename_check_open_state check_state = {
+			.dst_fsp = smb_fname_dst->fsp,
+		};
+		struct files_struct *found_open = NULL;
+
+		if (!replace_if_exists) {
+			DBG_NOTICE("dest exists doing rename "
+				   "%s -> %s\n",
+				   smb_fname_str_dbg(smb_fname_src),
+				   smb_fname_str_dbg(smb_fname_dst));
+			status = NT_STATUS_OBJECT_NAME_COLLISION;
+			goto out;
+		}
+
+		check_state.fileid = vfs_file_id_from_sbuf(conn,
+							   &smb_fname_dst->st);
+
+		found_open = files_forall(conn->sconn,
+					  rename_check_open_fn,
+					  &check_state);
+		if (found_open != NULL) {
+			DBG_NOTICE("Target file open\n");
+			status = NT_STATUS_ACCESS_DENIED;
+			goto out;
+		}
 	}
 
 	status = can_rename(conn, fsp, attrs);
@@ -1612,7 +1546,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_NOTICE("Error %s rename %s -> %s\n",
 			   nt_errstr(status),
-			   smb_fname_str_dbg(fsp->fsp_name),
+			   fsp_str_dbg(fsp),
 			   smb_fname_str_dbg(smb_fname_dst));
 		if (NT_STATUS_EQUAL(status,NT_STATUS_SHARING_VIOLATION))
 			status = NT_STATUS_ACCESS_DENIED;
@@ -1624,27 +1558,10 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 		goto out;
 	}
 
-	/* Do we have rights to move into the destination ? */
-	if (S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
-		/* We're moving a directory. */
-		access_mask = SEC_DIR_ADD_SUBDIR;
-	}
-
-	/*
-	 * Get a pathref on the destination parent directory, so
-	 * we can call check_parent_access_fsp().
-	 */
-	status = parent_pathref(ctx,
-				conn->cwd_fsp,
-				smb_fname_dst,
-				&parent_dir_fname_dst,
-				&parent_dir_fname_dst_atname);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-
-	status = check_parent_access_fsp(parent_dir_fname_dst->fsp,
-				access_mask);
+	status = check_parent_access_fsp(dst_dirfsp,
+					 S_ISDIR(fsp->fsp_name->st.st_ex_mode)
+						 ? SEC_DIR_ADD_SUBDIR
+						 : SEC_DIR_ADD_FILE);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_INFO("check_parent_access_fsp on "
 			"dst %s returned %s\n",
@@ -1653,93 +1570,14 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 		goto out;
 	}
 
-	/*
-	 * If the target existed, make sure the destination
-	 * atname has the same stat struct.
-	 */
-	parent_dir_fname_dst_atname->st = smb_fname_dst->st;
+	ret = SMB_VFS_RENAMEAT(conn,
+			       src_dirfsp,
+			       smb_fname_src_rel,
+			       dst_dirfsp,
+			       smb_fname_dst_rel,
+			       &rhow);
 
-	/*
-	 * It's very common that source and
-	 * destination directories are the same.
-	 * Optimize by not opening the
-	 * second parent_pathref if we know
-	 * this is the case.
-	 */
-
-	status = SMB_VFS_PARENT_PATHNAME(conn,
-					 ctx,
-					 fsp->fsp_name,
-					 &parent_dir_fname_src,
-					 &parent_dir_fname_src_atname);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-
-	/*
-	 * We do a case-sensitive string comparison. We want to be *sure*
-	 * this is the same path. The worst that can happen if
-	 * the case doesn't match is we lose out on the optimization,
-	 * the code still works.
-	 *
-	 * We can ignore twrp fields here. Rename is not allowed on
-	 * shadow copy handles.
-	 */
-
-	if (strcmp(parent_dir_fname_src->base_name,
-		   parent_dir_fname_dst->base_name) == 0) {
-		/*
-		 * parent directory is the same for source
-		 * and destination.
-		 */
-		/* Reparent the src_atname to the parent_dir_dest fname. */
-		parent_dir_fname_src_atname = talloc_move(
-						parent_dir_fname_dst,
-						&parent_dir_fname_src_atname);
-		/* Free the unneeded duplicate parent name. */
-		TALLOC_FREE(parent_dir_fname_src);
-		/*
-		 * And make the source parent name a copy of the
-		 * destination parent name.
-		 */
-		parent_dir_fname_src = parent_dir_fname_dst;
-
-		/*
-		 * Ensure we have a pathref fsp on the
-		 * parent_dir_fname_src_atname to match the code in the else
-		 * branch where we use parent_pathref().
-		 */
-		status = reference_smb_fname_fsp_link(
-			parent_dir_fname_src_atname,
-			fsp->fsp_name);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto out;
-		}
-	} else {
-		/*
-		 * source and destination parent directories are
-		 * different.
-		 *
-		 * Get a pathref on the source parent directory, so
-		 * we can do a relative rename.
-		 */
-		TALLOC_FREE(parent_dir_fname_src);
-		status = parent_pathref(ctx,
-				conn->cwd_fsp,
-				fsp->fsp_name,
-				&parent_dir_fname_src,
-				&parent_dir_fname_src_atname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto out;
-		}
-	}
-
-	/*
-	 * Some modules depend on the source smb_fname having a valid stat.
-	 * The parent_dir_fname_src_atname is the relative name of the
-	 * currently open file, so just copy the stat from the open fsp.
-	 */
-	parent_dir_fname_src_atname->st = fsp->fsp_name->st;
+inform_others:
 
 	if (_lck != NULL) {
 		lck = talloc_move(talloc_tos(), _lck);
@@ -1754,14 +1592,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 
 	SMB_ASSERT(lck != NULL);
 
-	ret = SMB_VFS_RENAMEAT(conn,
-			parent_dir_fname_src->fsp,
-			parent_dir_fname_src_atname,
-			parent_dir_fname_dst->fsp,
-			parent_dir_fname_dst_atname,
-			&rhow);
 	if (ret == 0) {
-		uint32_t create_options = fh_get_private_options(fsp->fh);
 		struct smb_filename *old_fname = NULL;
 
 		DBG_NOTICE("succeeded doing rename on "
@@ -1803,25 +1634,6 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 			}
 		}
 
-		/*
-		 * A rename acts as a new file create w.r.t. allowing an initial delete
-		 * on close, probably because in Windows there is a new handle to the
-		 * new file. If initial delete on close was requested but not
-		 * originally set, we need to set it here. This is probably not 100% correct,
-		 * but will work for the CIFSFS client which in non-posix mode
-		 * depends on these semantics. JRA.
-		 */
-
-		if (create_options & FILE_DELETE_ON_CLOSE) {
-			status = can_set_delete_on_close(fsp, 0);
-
-			if (NT_STATUS_IS_OK(status)) {
-				/* Note that here we set the *initial* delete on close flag,
-				 * not the regular one. The magic gets handled in close. */
-				fsp->fsp_flags.initial_delete_on_close = true;
-			}
-		}
-
 		TALLOC_FREE(lck);
 
 		notify_rename(conn,
@@ -1848,18 +1660,7 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 		   smb_fname_str_dbg(smb_fname_dst));
 
  out:
-
-	/*
-	 * parent_dir_fname_src may be a copy of parent_dir_fname_dst.
-	 * See the optimization for same source and destination directory
-	 * above. Only free one in that case.
-	 */
-	if (parent_dir_fname_src != parent_dir_fname_dst) {
-		TALLOC_FREE(parent_dir_fname_src);
-	}
-	TALLOC_FREE(parent_dir_fname_dst);
-	TALLOC_FREE(smb_fname_dst);
-
+	TALLOC_FREE(ctx);
 	return status;
 }
 
@@ -1869,25 +1670,24 @@ NTSTATUS rename_internals_fsp(connection_struct *conn,
 ****************************************************************************/
 
 NTSTATUS rename_internals(TALLOC_CTX *ctx,
-			connection_struct *conn,
-			struct smb_request *req,
-			struct files_struct *src_dirfsp,
-			struct smb_filename *smb_fname_src,
-			struct smb_filename *smb_fname_dst,
-			const char *dst_original_lcomp,
-			uint32_t attrs,
-			bool replace_if_exists,
-			uint32_t access_mask)
+			  connection_struct *conn,
+			  struct smb_request *req,
+			  struct files_struct *src_dirfsp,
+			  struct smb_filename *smb_fname_src,
+			  struct smb_filename *smb_fname_src_rel,
+			  uint32_t attrs,
+			  const char *newname,
+			  bool replace_if_exists,
+			  uint32_t access_mask)
 {
 	NTSTATUS status = NT_STATUS_OK;
 	int create_options = FILE_OPEN_REPARSE_POINT;
 	struct smb2_create_blobs *posx = NULL;
 	struct files_struct *fsp = NULL;
 	bool posix_pathname = (smb_fname_src->flags & SMB_FILENAME_POSIX_PATH);
-	bool case_sensitive = posix_pathname ? true : conn->case_sensitive;
-	bool case_preserve = posix_pathname ? true : conn->case_preserve;
-	bool short_case_preserve = posix_pathname ? true :
-					conn->short_case_preserve;
+	bool case_sensitive = posix_pathname || conn->case_sensitive;
+	bool case_preserve = posix_pathname || conn->case_preserve;
+	bool short_case_preserve = posix_pathname || conn->short_case_preserve;
 
 	if (posix_pathname) {
 		status = make_smb2_posix_create_ctx(talloc_tos(), &posx, 0777);
@@ -1899,14 +1699,13 @@ NTSTATUS rename_internals(TALLOC_CTX *ctx,
 	}
 
 	DBG_NOTICE("case_sensitive = %d, "
-		  "case_preserve = %d, short case preserve = %d, "
-		  "directory = %s, newname = %s, "
-		  "last_component_dest = %s\n",
-		  case_sensitive, case_preserve,
-		  short_case_preserve,
-		  smb_fname_str_dbg(smb_fname_src),
-		  smb_fname_str_dbg(smb_fname_dst),
-		  dst_original_lcomp);
+		   "case_preserve = %d, short case preserve = %d, "
+		   "directory = %s, newname = %s\n",
+		   case_sensitive,
+		   case_preserve,
+		   short_case_preserve,
+		   smb_fname_str_dbg(smb_fname_src),
+		   newname);
 
 	ZERO_STRUCT(smb_fname_src->st);
 
@@ -1970,18 +1769,20 @@ NTSTATUS rename_internals(TALLOC_CTX *ctx,
 	}
 
 	status = rename_internals_fsp(conn,
-					fsp,
-					NULL,
-					smb_fname_dst,
-					dst_original_lcomp,
-					attrs,
-					replace_if_exists);
+				      src_dirfsp,
+				      fsp,
+				      smb_fname_src_rel,
+				      NULL,
+				      attrs,
+				      newname,
+				      replace_if_exists);
 
 	close_file_free(req, &fsp, NORMAL_CLOSE);
 
 	DBG_NOTICE("Error %s rename %s -> %s\n",
-		  nt_errstr(status), smb_fname_str_dbg(smb_fname_src),
-		  smb_fname_str_dbg(smb_fname_dst));
+		   nt_errstr(status),
+		   smb_fname_str_dbg(smb_fname_src),
+		   newname);
 
  out:
 	TALLOC_FREE(posx);
@@ -2014,11 +1815,6 @@ NTSTATUS copy_file(TALLOC_CTX *ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = vfs_file_exist(conn, smb_fname_src);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
-
 	status = openat_pathref_fsp(conn->cwd_fsp, smb_fname_src);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
@@ -2033,7 +1829,7 @@ NTSTATUS copy_file(TALLOC_CTX *ctx,
 		FILE_GENERIC_READ,			/* access_mask */
 		FILE_SHARE_READ | FILE_SHARE_WRITE,	/* share_access */
 		FILE_OPEN,				/* create_disposition*/
-		0,					/* create_options */
+		FILE_NON_DIRECTORY_FILE,		/* create_options */
 		FILE_ATTRIBUTE_NORMAL,			/* file_attributes */
 		INTERNAL_OPEN_ONLY,			/* oplock_request */
 		NULL,					/* lease */
@@ -2146,23 +1942,22 @@ uint64_t get_lock_offset(const uint8_t *data, int data_offset,
 	return offset;
 }
 
-struct smbd_do_unlocking_state {
-	struct files_struct *fsp;
-	uint16_t num_ulocks;
-	struct smbd_lock_element *ulocks;
-	NTSTATUS status;
-};
-
-static void smbd_do_unlocking_fn(
-	struct share_mode_lock *lck,
-	void *private_data)
+static void smbd_do_unlocking_fn(struct share_mode_lock *lck,
+				 struct byte_range_lock *br_lck,
+				 void *private_data)
 {
-	struct smbd_do_unlocking_state *state = private_data;
-	struct files_struct *fsp = state->fsp;
+	struct smbd_do_locks_state *state = private_data;
+	struct files_struct *fsp = brl_fsp(br_lck);
 	uint16_t i;
 
-	for (i = 0; i < state->num_ulocks; i++) {
-		struct smbd_lock_element *e = &state->ulocks[i];
+	/*
+	 * The caller has checked fsp->fsp_flags.can_lock and lp_locking so
+	 * br_lck has to be there!
+	 */
+	SMB_ASSERT(br_lck != NULL);
+
+	for (i = 0; i < state->num_locks; i++) {
+		struct smbd_lock_element *e = &state->locks[i];
 
 		DBG_DEBUG("unlock start=%"PRIu64", len=%"PRIu64" for "
 			  "pid %"PRIu64", file %s\n",
@@ -2178,7 +1973,7 @@ static void smbd_do_unlocking_fn(
 		}
 
 		state->status = do_unlock(
-			fsp, e->smblctx, e->count, e->offset, e->lock_flav);
+			br_lck, e->smblctx, e->count, e->offset, e->lock_flav);
 
 		DBG_DEBUG("do_unlock returned %s\n",
 			  nt_errstr(state->status));
@@ -2196,20 +1991,30 @@ NTSTATUS smbd_do_unlocking(struct smb_request *req,
 			   uint16_t num_ulocks,
 			   struct smbd_lock_element *ulocks)
 {
-	struct smbd_do_unlocking_state state = {
-		.fsp = fsp,
-		.num_ulocks = num_ulocks,
-		.ulocks = ulocks,
+	struct smbd_do_locks_state state = {
+		.num_locks = num_ulocks,
+		.locks = ulocks,
 	};
 	NTSTATUS status;
 
 	DBG_NOTICE("%s num_ulocks=%"PRIu16"\n", fsp_fnum_dbg(fsp), num_ulocks);
 
-	status = share_mode_do_locked_vfs_allowed(
-		fsp->file_id, smbd_do_unlocking_fn, &state);
+	if (!fsp->fsp_flags.can_lock) {
+		if (fsp->fsp_flags.is_directory) {
+			return NT_STATUS_INVALID_DEVICE_REQUEST;
+		}
+		return NT_STATUS_INVALID_HANDLE;
+	}
 
+	if (!lp_locking(fsp->conn->params)) {
+		return NT_STATUS_OK;
+	}
+
+	status = share_mode_do_locked_brl(fsp,
+					  smbd_do_unlocking_fn,
+					  &state);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_DEBUG("share_mode_do_locked_vfs_allowed failed: %s\n",
+		DBG_DEBUG("share_mode_do_locked_brl failed: %s\n",
 			  nt_errstr(status));
 		return status;
 	}

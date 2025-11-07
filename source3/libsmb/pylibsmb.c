@@ -49,10 +49,13 @@ c = libsmb.Conn("127.0.0.1",
 #include "includes.h"
 #include "python/py3compat.h"
 #include "python/modules.h"
+#include "param/pyparam.h"
 #include "libcli/smb/smbXcli_base.h"
 #include "libcli/smb/smb2_negotiate_context.h"
 #include "libcli/smb/reparse.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "source3/libsmb/cli_smb2_fnum.h"
 #include "libcli/security/security.h"
 #include "system/select.h"
 #include "source4/libcli/util/pyerrors.h"
@@ -159,9 +162,11 @@ static void *py_cli_state_poll_thread(void *private_data)
 	gstate = PyGILState_Ensure();
 
 	while (!t->do_shutdown) {
+		TALLOC_CTX *frame = talloc_stackframe();
 		int ret;
 		ret = tevent_loop_once(self->ev);
 		assert(ret == 0);
+		TALLOC_FREE(frame);
 	}
 	PyGILState_Release(gstate);
 	return NULL;
@@ -271,7 +276,13 @@ static bool py_cli_state_setup_mt_ev(struct py_cli_state *self)
 		goto fail;
 	}
 
+#if PY_VERSION_HEX < 0x03070000
+	/*
+	 * Should be explicitly called in 3.6 and older, see
+	 * https://docs.python.org/3/c-api/init.html#c.PyEval_InitThreads
+	 */
 	PyEval_InitThreads();
+#endif
 
 	ret = pthread_create(&t->id, NULL, py_cli_state_poll_thread, self);
 	if (ret != 0) {
@@ -537,11 +548,13 @@ static void py_cli_got_oplock_break(struct tevent_req *req);
 static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 			     PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	char *host, *share;
 	PyObject *creds = NULL;
 	struct cli_credentials *cli_creds;
 	PyObject *py_lp = Py_None;
+	struct loadparm_context *lp_ctx = NULL;
 	PyObject *py_multi_threaded = Py_False;
 	bool multi_threaded = false;
 	PyObject *py_force_smb1 = Py_False;
@@ -550,6 +563,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	PyObject *py_posix = Py_False;
 	PyObject *py_negotiate_contexts = NULL;
 	struct smb2_negotiate_contexts *negotiate_contexts = NULL;
+	struct smb_transports ts = { .num_transports = 0, };
 	bool use_ipc = false;
 	bool request_posix = false;
 	struct tevent_req *req;
@@ -568,6 +582,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	PyTypeObject *py_type_Credentials = get_pytype(
 		"samba.credentials", "Credentials");
 	if (py_type_Credentials == NULL) {
+		TALLOC_FREE(frame);
 		return -1;
 	}
 
@@ -584,6 +599,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	Py_DECREF(py_type_Credentials);
 
 	if (!ret) {
+		TALLOC_FREE(frame);
 		return -1;
 	}
 
@@ -612,8 +628,9 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 
 	if (py_negotiate_contexts != NULL) {
 		negotiate_contexts = py_cli_get_negotiate_contexts(
-			talloc_tos(), py_negotiate_contexts);
+			frame, py_negotiate_contexts);
 		if (negotiate_contexts == NULL) {
+			TALLOC_FREE(frame);
 			return -1;
 		}
 	}
@@ -622,31 +639,44 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 #ifdef HAVE_PTHREAD
 		ret = py_cli_state_setup_mt_ev(self);
 		if (!ret) {
+			TALLOC_FREE(frame);
 			return -1;
 		}
 #else
 		PyErr_SetString(PyExc_RuntimeError,
 				"No PTHREAD support available");
+		TALLOC_FREE(frame);
 		return -1;
 #endif
 	} else {
 		ret = py_cli_state_setup_ev(self);
 		if (!ret) {
+			TALLOC_FREE(frame);
 			return -1;
 		}
 	}
 
 	if (creds == NULL) {
-		cli_creds = cli_credentials_init_anon(NULL);
+		cli_creds = cli_credentials_init_anon(frame);
 	} else {
 		cli_creds = PyCredentials_AsCliCredentials(creds);
 	}
 
+	lp_ctx = lpcfg_from_py_object(frame, py_lp);
+	if (lp_ctx == NULL) {
+		TALLOC_FREE(frame);
+		return -1;
+	}
+
+	ts = smb_transports_parse("client smb transports",
+				  lpcfg_client_smb_transports(lp_ctx));
+
 	req = cli_full_connection_creds_send(
-		NULL, self->ev, "myname", host, NULL, 0, share, "?????",
+		frame, self->ev, "myname", host, NULL, &ts, share, "?????",
 		cli_creds, flags,
 		negotiate_contexts);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return -1;
 	}
 	status = cli_full_connection_creds_recv(req, NULL, &self->cli);
@@ -654,6 +684,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return -1;
 	}
 
@@ -661,6 +692,7 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 	 * Oplocks require a multi threaded connection
 	 */
 	if (self->thread_state == NULL) {
+		TALLOC_FREE(frame);
 		return 0;
 	}
 
@@ -668,15 +700,18 @@ static int py_cli_state_init(struct py_cli_state *self, PyObject *args,
 		self->ev, self->ev, self->cli);
 	if (self->oplock_waiter == NULL) {
 		PyErr_NoMemory();
+		TALLOC_FREE(frame);
 		return -1;
 	}
 	tevent_req_set_callback(self->oplock_waiter, py_cli_got_oplock_break,
 				self);
+	TALLOC_FREE(frame);
 	return 0;
 }
 
 static void py_cli_got_oplock_break(struct tevent_req *req)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct py_cli_state *self = (struct py_cli_state *)
 		tevent_req_callback_data_void(req);
 	struct py_cli_oplock_break b;
@@ -689,6 +724,7 @@ static void py_cli_got_oplock_break(struct tevent_req *req)
 	self->oplock_waiter = NULL;
 
 	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
 		return;
 	}
 
@@ -696,6 +732,7 @@ static void py_cli_got_oplock_break(struct tevent_req *req)
 	tmp = talloc_realloc(self->ev, self->oplock_breaks,
 			     struct py_cli_oplock_break, num_breaks+1);
 	if (tmp == NULL) {
+		TALLOC_FREE(frame);
 		return;
 	}
 	self->oplock_breaks = tmp;
@@ -708,6 +745,7 @@ static void py_cli_got_oplock_break(struct tevent_req *req)
 	self->oplock_waiter = cli_smb_oplock_break_waiter_send(
 		self->ev, self->ev, self->cli);
 	if (self->oplock_waiter == NULL) {
+		TALLOC_FREE(frame);
 		return;
 	}
 	tevent_req_set_callback(self->oplock_waiter, py_cli_got_oplock_break,
@@ -717,9 +755,11 @@ static void py_cli_got_oplock_break(struct tevent_req *req)
 static PyObject *py_cli_get_oplock_break(struct py_cli_state *self,
 					 PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	size_t num_oplock_breaks;
 
 	if (!PyArg_ParseTuple(args, "")) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -727,10 +767,12 @@ static PyObject *py_cli_get_oplock_break(struct py_cli_state *self,
 		PyErr_SetString(PyExc_RuntimeError,
 				"get_oplock_break() only possible on "
 				"a multi_threaded connection");
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	if (self->oplock_cond != NULL) {
+		TALLOC_FREE(frame);
 		errno = EBUSY;
 		PyErr_SetFromErrno(PyExc_RuntimeError);
 		return NULL;
@@ -747,6 +789,7 @@ static PyObject *py_cli_get_oplock_break(struct py_cli_state *self,
 		self->oplock_cond = NULL;
 
 		if (ret != 0) {
+			TALLOC_FREE(frame);
 			errno = ret;
 			PyErr_SetFromErrno(PyExc_RuntimeError);
 			return NULL;
@@ -769,13 +812,18 @@ static PyObject *py_cli_get_oplock_break(struct py_cli_state *self,
 			NULL, self->oplock_breaks, struct py_cli_oplock_break,
 			num_oplock_breaks - 1);
 
+		TALLOC_FREE(frame);
 		return result;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static void py_cli_state_dealloc(struct py_cli_state *self)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
+
 	TALLOC_FREE(self->thread_state);
 	TALLOC_FREE(self->oplock_waiter);
 	TALLOC_FREE(self->ev);
@@ -785,43 +833,55 @@ static void py_cli_state_dealloc(struct py_cli_state *self)
 		self->cli = NULL;
 	}
 	Py_TYPE(self)->tp_free((PyObject *)self);
+	TALLOC_FREE(frame);
 }
 
 static PyObject *py_cli_settimeout(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	unsigned int nmsecs = 0;
 	unsigned int omsecs = 0;
 
 	if (!PyArg_ParseTuple(args, "I", &nmsecs)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	omsecs = cli_set_timeout(self->cli, nmsecs);
 
+	TALLOC_FREE(frame);
 	return PyLong_FromLong(omsecs);
 }
 
 static PyObject *py_cli_echo(struct py_cli_state *self,
 			     PyObject *Py_UNUSED(ignored))
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	DATA_BLOB data = data_blob_string_const("keepalive");
 	struct tevent_req *req = NULL;
 	NTSTATUS status;
 
-	req = cli_echo_send(NULL, self->ev, self->cli, 1, data);
+	req = cli_echo_send(frame, self->ev, self->cli, 1, data);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_echo_recv(req);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_cli_create(struct py_cli_state *self, PyObject *args,
 			       PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *fname;
 	unsigned CreateFlags = 0;
 	unsigned DesiredAccess = FILE_GENERIC_READ;
@@ -845,14 +905,16 @@ static PyObject *py_cli_create(struct py_cli_state *self, PyObject *args,
 		    &fname, &CreateFlags, &DesiredAccess, &FileAttributes,
 		    &ShareAccess, &CreateDisposition, &CreateOptions,
 		    &ImpersonationLevel, &SecurityFlags)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_ntcreate_send(NULL, self->ev, self->cli, fname, CreateFlags,
+	req = cli_ntcreate_send(frame, self->ev, self->cli, fname, CreateFlags,
 				DesiredAccess, FileAttributes, ShareAccess,
 				CreateDisposition, CreateOptions,
 				ImpersonationLevel, SecurityFlags);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_ntcreate_recv(req, &fnum, NULL);
@@ -860,8 +922,11 @@ static PyObject *py_cli_create(struct py_cli_state *self, PyObject *args,
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	return Py_BuildValue("I", (unsigned)fnum);
 }
 
@@ -1020,6 +1085,7 @@ static PyObject *py_cli_create_returns(const struct smb_create_returns *r)
 
 static PyObject *py_cli_symlink_error(const struct symlink_reparse_struct *s)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *subst_utf8 = NULL, *print_utf8 = NULL;
 	size_t subst_utf8_len, print_utf8_len;
 	PyObject *v = NULL;
@@ -1031,7 +1097,7 @@ static PyObject *py_cli_symlink_error(const struct symlink_reparse_struct *s)
 	 */
 
 	ok = convert_string_talloc(
-		talloc_tos(),
+		frame,
 		CH_UNIX,
 		CH_UTF8,
 		s->substitute_name,
@@ -1043,7 +1109,7 @@ static PyObject *py_cli_symlink_error(const struct symlink_reparse_struct *s)
 	}
 
 	ok = convert_string_talloc(
-		talloc_tos(),
+		frame,
 		CH_UNIX,
 		CH_UTF8,
 		s->print_name,
@@ -1066,14 +1132,14 @@ static PyObject *py_cli_symlink_error(const struct symlink_reparse_struct *s)
 		(unsigned long long)s->flags);
 
 fail:
-	TALLOC_FREE(subst_utf8);
-	TALLOC_FREE(print_utf8);
+	TALLOC_FREE(frame);
 	return v;
 }
 
 static PyObject *py_cli_get_posix_fs_info(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct tevent_req *req = NULL;
 	uint32_t optimal_transfer_size = 0;
@@ -1085,8 +1151,9 @@ static PyObject *py_cli_get_posix_fs_info(
 	uint64_t free_file_nodes = 0;
 	uint64_t fs_identifier = 0;
 
-	req = cli_get_posix_fs_info_send(NULL, self->ev, self->cli);
+	req = cli_get_posix_fs_info_send(frame, self->ev, self->cli);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1100,8 +1167,13 @@ static PyObject *py_cli_get_posix_fs_info(
 					    &free_file_nodes,
 					    &fs_identifier);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	return Py_BuildValue("{s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
 			     "optimal_transfer_size", optimal_transfer_size,
 			     "block_size", block_size,
@@ -1116,6 +1188,7 @@ static PyObject *py_cli_get_posix_fs_info(
 static PyObject *py_cli_create_ex(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *fname = NULL;
 	unsigned CreateFlags = 0;
 	unsigned DesiredAccess = FILE_GENERIC_READ;
@@ -1168,13 +1241,15 @@ static PyObject *py_cli_create_ex(
 		&SecurityFlags,
 		&py_create_contexts_in);
 	if (!ret) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	if (py_create_contexts_in != NULL) {
 		create_contexts_in = py_cli_get_create_contexts(
-			NULL, py_create_contexts_in);
+			frame, py_create_contexts_in);
 		if (create_contexts_in == NULL) {
+			TALLOC_FREE(frame);
 			errno = EINVAL;
 			PyErr_SetFromErrno(PyExc_RuntimeError);
 			return NULL;
@@ -1188,7 +1263,7 @@ static PyObject *py_cli_create_ex(
 		};
 
 		req = cli_smb2_create_fnum_send(
-			NULL,
+			frame,
 			self->ev,
 			self->cli,
 			fname,
@@ -1202,7 +1277,7 @@ static PyObject *py_cli_create_ex(
 			create_contexts_in);
 	} else {
 		req = cli_ntcreate_send(
-			NULL,
+			frame,
 			self->ev,
 			self->cli,
 			fname,
@@ -1220,6 +1295,7 @@ static PyObject *py_cli_create_ex(
 
 	ok = py_tevent_req_wait_exc(self, req);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1228,7 +1304,7 @@ static PyObject *py_cli_create_ex(
 			req,
 			&fnum,
 			&cr,
-			NULL,
+			frame,
 			&create_contexts_out,
 			&symlink);
 	} else {
@@ -1258,6 +1334,7 @@ static PyObject *py_cli_create_ex(
 			  (unsigned)fnum,
 			  py_cr,
 			  py_create_contexts_out);
+	TALLOC_FREE(frame);
 	return v;
 nomem:
 	status = NT_STATUS_NO_MEMORY;
@@ -1280,22 +1357,27 @@ fail:
 	} else {
 		PyErr_SetNTSTATUS(status);
 	}
+
+	TALLOC_FREE(frame);
 	return NULL;
 }
 
 static PyObject *py_cli_close(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct tevent_req *req;
 	int fnum;
 	int flags = 0;
 	NTSTATUS status;
 
 	if (!PyArg_ParseTuple(args, "i|i", &fnum, &flags)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_close_send(NULL, self->ev, self->cli, fnum, flags);
+	req = cli_close_send(frame, self->ev, self->cli, fnum, flags);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_close_recv(req);
@@ -1303,8 +1385,11 @@ static PyObject *py_cli_close(struct py_cli_state *self, PyObject *args)
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -1346,6 +1431,7 @@ static PyObject *py_unix_mode_to_wire(struct py_cli_state *self,
 
 static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct tevent_req *req = NULL;
 	int fnum, level;
 	uint16_t recv_flags2;
@@ -1355,20 +1441,23 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 	NTSTATUS status;
 
 	if (!PyArg_ParseTuple(args, "ii", &fnum, &level)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_qfileinfo_send(
-		NULL, self->ev, self->cli, fnum, level, 0, UINT32_MAX);
+		frame, self->ev, self->cli, fnum, level, 0, UINT32_MAX);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_qfileinfo_recv(
-		req, NULL, &recv_flags2, &rdata, &num_rdata);
+		req, frame, &recv_flags2, &rdata, &num_rdata);
 	TALLOC_FREE(req);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1379,6 +1468,7 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 
 		if (num_rdata != 8) {
 			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 
@@ -1410,6 +1500,7 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 
 		if (num_rdata < 80) {
 			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 
@@ -1448,12 +1539,14 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 			&sid_size);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 		if (data_off + sid_size < data_off ||
 		    data_off + sid_size > num_rdata)
 		{
 			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 		data_off += sid_size;
@@ -1466,6 +1559,7 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 			&sid_size);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			PyErr_SetNTSTATUS(NT_STATUS_INVALID_NETWORK_RESPONSE);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 
@@ -1517,7 +1611,7 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 		break;
 	}
 
-	TALLOC_FREE(rdata);
+	TALLOC_FREE(frame);
 
 	return result;
 }
@@ -1525,6 +1619,7 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 static PyObject *py_cli_rename(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *fname_src = NULL, *fname_dst = NULL;
 	int replace = false;
 	struct tevent_req *req = NULL;
@@ -1536,12 +1631,14 @@ static PyObject *py_cli_rename(
 	ok = ParseTupleAndKeywords(
 		args, kwds, "ss|p", kwlist, &fname_src, &fname_dst, &replace);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_rename_send(
-		NULL, self->ev, self->cli, fname_src, fname_dst, replace);
+		frame, self->ev, self->cli, fname_src, fname_dst, replace);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_rename_recv(req);
@@ -1549,8 +1646,11 @@ static PyObject *py_cli_rename(
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -1589,6 +1689,7 @@ static size_t push_data(uint8_t *buf, size_t n, void *priv)
  */
 static PyObject *py_smb_savefile(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	uint16_t fnum;
 	const char *filename = NULL;
 	char *data = NULL;
@@ -1599,50 +1700,69 @@ static PyObject *py_smb_savefile(struct py_cli_state *self, PyObject *args)
 
 	if (!PyArg_ParseTuple(args, "s"PYARG_BYTES_LEN":savefile", &filename,
 			      &data, &size)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	/* create a new file handle for writing to */
-	req = cli_ntcreate_send(NULL, self->ev, self->cli, filename, 0,
+	req = cli_ntcreate_send(frame, self->ev, self->cli, filename, 0,
 				FILE_WRITE_DATA, FILE_ATTRIBUTE_NORMAL,
 				FILE_SHARE_READ|FILE_SHARE_WRITE,
 				FILE_OVERWRITE_IF, FILE_NON_DIRECTORY_FILE,
 				SMB2_IMPERSONATION_IMPERSONATION, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_ntcreate_recv(req, &fnum, NULL);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
 	/* write the new file contents */
 	state.data = data;
 	state.nread = 0;
 	state.total_data = size;
 
-	req = cli_push_send(NULL, self->ev, self->cli, fnum, 0, 0, 0,
+	req = cli_push_send(frame, self->ev, self->cli, fnum, 0, 0, 0,
 			    push_data, &state);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_push_recv(req);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
 	/* close the file handle */
-	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
+	req = cli_close_send(frame, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_close_recv(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	TALLOC_FREE(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_cli_write(struct py_cli_state *self, PyObject *args,
 			      PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int fnum;
 	unsigned mode = 0;
 	char *buf;
@@ -1658,12 +1778,14 @@ static PyObject *py_cli_write(struct py_cli_state *self, PyObject *args,
 	if (!ParseTupleAndKeywords(
 		    args, kwds, "i" PYARG_BYTES_LEN "K|I", kwlist,
 		    &fnum, &buf, &buflen, &offset, &mode)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_write_send(NULL, self->ev, self->cli, fnum, mode,
 			     (uint8_t *)buf, offset, buflen);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_write_recv(req, &written);
@@ -1671,8 +1793,10 @@ static PyObject *py_cli_write(struct py_cli_state *self, PyObject *args,
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+	TALLOC_FREE(frame);
 	return Py_BuildValue("K", (unsigned long long)written);
 }
 
@@ -1682,16 +1806,18 @@ static PyObject *py_cli_write(struct py_cli_state *self, PyObject *args,
 static NTSTATUS py_smb_filesize(struct py_cli_state *self, uint16_t fnum,
 				off_t *size)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct tevent_req *req = NULL;
 
-	req = cli_qfileinfo_basic_send(NULL, self->ev, self->cli, fnum);
+	req = cli_qfileinfo_basic_send(frame, self->ev, self->cli, fnum);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 	status = cli_qfileinfo_basic_recv(
 		req, NULL, size, NULL, NULL, NULL, NULL, NULL);
-	TALLOC_FREE(req);
+	TALLOC_FREE(frame);
 	return status;
 }
 
@@ -1700,6 +1826,7 @@ static NTSTATUS py_smb_filesize(struct py_cli_state *self, uint16_t fnum,
  */
 static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *filename = NULL;
 	struct tevent_req *req = NULL;
@@ -1710,6 +1837,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	PyObject *result = NULL;
 
 	if (!PyArg_ParseTuple(args, "s:loadfile", &filename)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1720,18 +1848,28 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 				FILE_SHARE_READ, FILE_OPEN, 0,
 				SMB2_IMPERSONATION_IMPERSONATION, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_ntcreate_recv(req, &fnum, NULL);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
 	/* get a buffer to hold the file contents */
 	status = py_smb_filesize(self, fnum, &size);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
 	result = PyBytes_FromStringAndSize(NULL, size);
 	if (result == NULL) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1741,6 +1879,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 			    size, cli_read_sink, &buf);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		Py_XDECREF(result);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_pull_recv(req, &nread);
@@ -1748,6 +1887,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	if (!NT_STATUS_IS_OK(status)) {
 		Py_XDECREF(result);
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1755,6 +1895,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	req = cli_close_send(NULL, self->ev, self->cli, fnum, 0);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		Py_XDECREF(result);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_close_recv(req);
@@ -1762,6 +1903,7 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 	if (!NT_STATUS_IS_OK(status)) {
 		Py_XDECREF(result);
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1771,21 +1913,25 @@ static PyObject *py_smb_loadfile(struct py_cli_state *self, PyObject *args)
 		PyErr_Format(PyExc_IOError,
 			     "read invalid - got %zu requested %zu",
 			     nread, size);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	if (nread < size) {
 		if (_PyBytes_Resize(&result, nread) < 0) {
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 	}
 
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyObject *py_cli_read(struct py_cli_state *self, PyObject *args,
 			     PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int fnum;
 	unsigned long long offset;
 	unsigned size;
@@ -1801,11 +1947,13 @@ static PyObject *py_cli_read(struct py_cli_state *self, PyObject *args,
 	if (!ParseTupleAndKeywords(
 		    args, kwds, "iKI", kwlist, &fnum, &offset,
 		    &size)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	result = PyBytes_FromStringAndSize(NULL, size);
 	if (result == NULL) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	buf = PyBytes_AS_STRING(result);
@@ -1814,6 +1962,7 @@ static PyObject *py_cli_read(struct py_cli_state *self, PyObject *args,
 			    buf, offset, size);
 	if (!py_tevent_req_wait_exc(self, req)) {
 		Py_XDECREF(result);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_read_recv(req, &received);
@@ -1822,6 +1971,7 @@ static PyObject *py_cli_read(struct py_cli_state *self, PyObject *args,
 	if (!NT_STATUS_IS_OK(status)) {
 		Py_XDECREF(result);
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1830,21 +1980,25 @@ static PyObject *py_cli_read(struct py_cli_state *self, PyObject *args,
 		PyErr_Format(PyExc_IOError,
 			     "read invalid - got %zu requested %u",
 			     received, size);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	if (received < size) {
 		if (_PyBytes_Resize(&result, received) < 0) {
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 	}
 
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyObject *py_cli_ftruncate(struct py_cli_state *self, PyObject *args,
 				  PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int fnum;
 	unsigned long long size;
 	struct tevent_req *req;
@@ -1855,11 +2009,13 @@ static PyObject *py_cli_ftruncate(struct py_cli_state *self, PyObject *args,
 
 	if (!ParseTupleAndKeywords(
 		    args, kwds, "IK", kwlist, &fnum, &size)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_ftruncate_send(NULL, self->ev, self->cli, fnum, size);
+	req = cli_ftruncate_send(frame, self->ev, self->cli, fnum, size);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_ftruncate_recv(req);
@@ -1867,8 +2023,11 @@ static PyObject *py_cli_ftruncate(struct py_cli_state *self, PyObject *args,
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -1876,6 +2035,7 @@ static PyObject *py_cli_delete_on_close(struct py_cli_state *self,
 					PyObject *args,
 					PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	unsigned fnum, flag;
 	struct tevent_req *req;
 	NTSTATUS status;
@@ -1885,12 +2045,14 @@ static PyObject *py_cli_delete_on_close(struct py_cli_state *self,
 
 	if (!ParseTupleAndKeywords(
 		    args, kwds, "II", kwlist, &fnum, &flag)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_nt_delete_on_close_send(NULL, self->ev, self->cli, fnum,
+	req = cli_nt_delete_on_close_send(frame, self->ev, self->cli, fnum,
 					  flag);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_nt_delete_on_close_recv(req);
@@ -1898,8 +2060,11 @@ static PyObject *py_cli_delete_on_close(struct py_cli_state *self,
 
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -1911,9 +2076,13 @@ struct py_cli_notify_state {
 
 static void py_cli_notify_state_dealloc(struct py_cli_notify_state *self)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
+
 	TALLOC_FREE(self->req);
 	Py_CLEAR(self->py_cli_state);
 	Py_TYPE(self)->tp_free(self);
+
+	TALLOC_FREE(frame);
 }
 
 static PyTypeObject py_cli_notify_state_type;
@@ -1922,6 +2091,7 @@ static PyObject *py_cli_notify(struct py_cli_state *self,
 			       PyObject *args,
 			       PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	static const char *kwlist[] = {
 		"fnum",
 		"buffer_size",
@@ -1950,6 +2120,7 @@ static PyObject *py_cli_notify(struct py_cli_state *self,
 				   &completion_filter,
 				   &py_recursive);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -1963,9 +2134,18 @@ static PyObject *py_cli_notify(struct py_cli_state *self,
 			      completion_filter,
 			      recursive);
 	if (req == NULL) {
+		TALLOC_FREE(frame);
 		PyErr_NoMemory();
 		return NULL;
 	}
+	/*
+	 * only reparent to frame,
+	 * if we would pass frame to
+	 * cli_query_security_descriptor_recv()
+	 * we'd leak a potential talloc_stackframe_pool
+	 * via py_return_ndr_struct().
+	 */
+	talloc_reparent(NULL, frame, req);
 
 	/*
 	 * Just wait for the request being submitted to
@@ -1975,18 +2155,23 @@ static PyObject *py_cli_notify(struct py_cli_state *self,
 	flush_req = tevent_queue_wait_send(req,
 					   self->ev,
 					   send_queue);
+	if (flush_req == NULL) {
+		TALLOC_FREE(frame);
+		PyErr_NoMemory();
+		return NULL;
+	}
 	endtime = timeval_current_ofs_msec(self->cli->timeout);
 	ok = tevent_req_set_endtime(flush_req,
 				    self->ev,
 				    endtime);
 	if (!ok) {
-		TALLOC_FREE(req);
+		TALLOC_FREE(frame);
 		PyErr_NoMemory();
 		return NULL;
 	}
 	ok = py_tevent_req_wait_exc(self, flush_req);
 	if (!ok) {
-		TALLOC_FREE(req);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	TALLOC_FREE(flush_req);
@@ -1994,14 +2179,15 @@ static PyObject *py_cli_notify(struct py_cli_state *self,
 	py_notify_state = (struct py_cli_notify_state *)
 		py_cli_notify_state_type.tp_alloc(&py_cli_notify_state_type, 0);
 	if (py_notify_state == NULL) {
-		TALLOC_FREE(req);
+		TALLOC_FREE(frame);
 		PyErr_NoMemory();
 		return NULL;
 	}
 	Py_INCREF(self);
 	py_notify_state->py_cli_state = self;
-	py_notify_state->req = req;
+	py_notify_state->req = talloc_move(NULL, &req);
 
+	TALLOC_FREE(frame);
 	return (PyObject *)py_notify_state;
 }
 
@@ -2009,8 +2195,9 @@ static PyObject *py_cli_notify_get_changes(struct py_cli_notify_state *self,
 					   PyObject *args,
 					   PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct py_cli_state *py_cli_state = self->py_cli_state;
-	struct tevent_req *req = self->req;
+	struct tevent_req *req = NULL;
 	uint32_t i;
 	uint32_t num_changes = 0;
 	struct notify_change *changes = NULL;
@@ -2031,22 +2218,35 @@ static PyObject *py_cli_notify_get_changes(struct py_cli_notify_state *self,
 				   kwlist,
 				   &py_wait);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	wait = PyObject_IsTrue(py_wait);
 
-	if (req == NULL) {
+	if (self->req == NULL) {
 		PyErr_SetString(PyExc_RuntimeError,
 				"TODO req == NULL "
 				"- missing change notify request?");
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	pending = tevent_req_is_in_progress(req);
+	pending = tevent_req_is_in_progress(self->req);
 	if (pending && !wait) {
+		TALLOC_FREE(frame);
 		Py_RETURN_NONE;
 	}
+
+	/*
+	 * Now we really return success or an exception
+	 * so we move self->req to frame and set
+	 * self->req to NULL.
+	 *
+	 * Below we also call Py_CLEAR(self->py_cli_state)
+	 * as soon as possible.
+	 */
+	req = talloc_move(frame, &self->req);
 
 	if (pending) {
 		struct timeval endtime;
@@ -2056,29 +2256,31 @@ static PyObject *py_cli_notify_get_changes(struct py_cli_notify_state *self,
 					    py_cli_state->ev,
 					    endtime);
 		if (!ok) {
-			TALLOC_FREE(req);
+			TALLOC_FREE(frame);
+			Py_CLEAR(self->py_cli_state);
 			PyErr_NoMemory();
 			return NULL;
 		}
 	}
 
 	ok = py_tevent_req_wait_exc(py_cli_state, req);
-	self->req = NULL;
 	Py_CLEAR(self->py_cli_state);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	status = cli_notify_recv(req, req, &num_changes, &changes);
+	status = cli_notify_recv(req, frame, &num_changes, &changes);
+	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(req);
+		TALLOC_FREE(frame);
 		PyErr_SetNTSTATUS(status);
 		return NULL;
 	}
 
 	result = Py_BuildValue("[]");
 	if (result == NULL) {
-		TALLOC_FREE(req);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -2091,7 +2293,7 @@ static PyObject *py_cli_notify_get_changes(struct py_cli_notify_state *self,
 				       "action", changes[i].action);
 		if (change == NULL) {
 			Py_XDECREF(result);
-			TALLOC_FREE(req);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 
@@ -2099,19 +2301,20 @@ static PyObject *py_cli_notify_get_changes(struct py_cli_notify_state *self,
 		Py_DECREF(change);
 		if (ret == -1) {
 			Py_XDECREF(result);
-			TALLOC_FREE(req);
+			TALLOC_FREE(frame);
 			return NULL;
 		}
 	}
 
-	TALLOC_FREE(req);
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyMethodDef py_cli_notify_state_methods[] = {
 	{
 		.ml_name = "get_changes",
-		.ml_meth = (PyCFunction)py_cli_notify_get_changes,
+		.ml_meth = (PY_DISCARD_FUNC_SIG(PyCFunction,
+			    py_cli_notify_get_changes)),
 		.ml_flags = METH_VARARGS|METH_KEYWORDS,
 		.ml_doc  = "Wait for change notifications: \n"
 			   "N.get_changes(wait=BOOLEAN) -> "
@@ -2274,15 +2477,17 @@ struct do_listing_state {
 
 static void do_listing_cb(struct tevent_req *subreq)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct do_listing_state *state = tevent_req_callback_data_void(subreq);
 	struct file_info *finfo = NULL;
 
-	state->status = cli_list_recv(subreq, NULL, &finfo);
+	state->status = cli_list_recv(subreq, frame, &finfo);
 	if (!NT_STATUS_IS_OK(state->status)) {
+		TALLOC_FREE(frame);
 		return;
 	}
 	state->callback_fn(finfo, state->mask, state->private_data);
-	TALLOC_FREE(finfo);
+	TALLOC_FREE(frame);
 }
 
 static NTSTATUS do_listing(struct py_cli_state *self,
@@ -2293,6 +2498,7 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 						   const char *, void *),
 			   void *priv)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *mask = NULL;
 	struct do_listing_state state = {
 		.mask = mask,
@@ -2303,17 +2509,18 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 	NTSTATUS status;
 
 	if (user_mask == NULL) {
-		mask = talloc_asprintf(NULL, "%s\\*", base_dir);
+		mask = talloc_asprintf(frame, "%s\\*", base_dir);
 	} else {
-		mask = talloc_asprintf(NULL, "%s\\%s", base_dir, user_mask);
+		mask = talloc_asprintf(frame, "%s\\%s", base_dir, user_mask);
 	}
 
 	if (mask == NULL) {
+		TALLOC_FREE(frame);
 		return NT_STATUS_NO_MEMORY;
 	}
 	dos_format(mask);
 
-	req = cli_list_send(NULL, self->ev, self->cli, mask, attribute,
+	req = cli_list_send(frame, self->ev, self->cli, mask, attribute,
 			    info_level);
 	if (req == NULL) {
 		status = NT_STATUS_NO_MEMORY;
@@ -2322,7 +2529,8 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 	tevent_req_set_callback(req, do_listing_cb, &state);
 
 	if (!py_tevent_req_wait_exc(self, req)) {
-		return NT_STATUS_INTERNAL_ERROR;
+		status = NT_STATUS_INTERNAL_ERROR;
+		goto done;
 	}
 	TALLOC_FREE(req);
 
@@ -2332,7 +2540,7 @@ static NTSTATUS do_listing(struct py_cli_state *self,
 	}
 
 done:
-	TALLOC_FREE(mask);
+	TALLOC_FREE(frame);
 	return status;
 }
 
@@ -2340,6 +2548,7 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 			     PyObject *args,
 			     PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *base_dir;
 	char *user_mask = NULL;
 	unsigned int attribute = LIST_ATTRIBUTE_MASK;
@@ -2355,11 +2564,13 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 	if (!ParseTupleAndKeywords(args, kwds, "z|sII:list", kwlist,
 				   &base_dir, &user_mask, &attribute,
 				   &info_level)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	result = Py_BuildValue("[]");
 	if (result == NULL) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -2380,52 +2591,70 @@ static PyObject *py_cli_list(struct py_cli_state *self,
 	if (!NT_STATUS_IS_OK(status)) {
 		Py_XDECREF(result);
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyObject *py_smb_unlink(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *filename = NULL;
 	struct tevent_req *req = NULL;
 	const uint32_t attrs = (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
 
 	if (!PyArg_ParseTuple(args, "s:unlink", &filename)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_unlink_send(NULL, self->ev, self->cli, filename, attrs);
+	req = cli_unlink_send(frame, self->ev, self->cli, filename, attrs);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_unlink_recv(req);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_smb_rmdir(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct tevent_req *req = NULL;
 	const char *dirname = NULL;
 
 	if (!PyArg_ParseTuple(args, "s:rmdir", &dirname)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_rmdir_send(NULL, self->ev, self->cli, dirname);
+	req = cli_rmdir_send(frame, self->ev, self->cli, dirname);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_rmdir_recv(req);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -2434,22 +2663,30 @@ static PyObject *py_smb_rmdir(struct py_cli_state *self, PyObject *args)
  */
 static PyObject *py_smb_mkdir(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *dirname = NULL;
 	struct tevent_req *req = NULL;
 
 	if (!PyArg_ParseTuple(args, "s:mkdir", &dirname)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_mkdir_send(NULL, self->ev, self->cli, dirname);
+	req = cli_mkdir_send(frame, self->ev, self->cli, dirname);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_mkdir_recv(req);
 	TALLOC_FREE(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
@@ -2490,14 +2727,6 @@ static PyObject *py_smb_posix_whoami(struct py_cli_state *self,
 				&guest);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
-		goto fail;
-	}
-	if (num_gids > PY_SSIZE_T_MAX) {
-		PyErr_SetString(PyExc_OverflowError, "posix_whoami: Too many GIDs");
-		goto fail;
-	}
-	if (num_sids > PY_SSIZE_T_MAX) {
-		PyErr_SetString(PyExc_OverflowError, "posix_whoami: Too many SIDs");
 		goto fail;
 	}
 
@@ -2575,29 +2804,35 @@ fail:
  */
 static bool check_dir_path(struct py_cli_state *self, const char *path)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct tevent_req *req = NULL;
 
-	req = cli_chkpath_send(NULL, self->ev, self->cli, path);
+	req = cli_chkpath_send(frame, self->ev, self->cli, path);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return false;
 	}
 	status = cli_chkpath_recv(req);
 	TALLOC_FREE(req);
 
+	TALLOC_FREE(frame);
 	return NT_STATUS_IS_OK(status);
 }
 
 static PyObject *py_smb_chkpath(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	const char *path = NULL;
 	bool dir_exists;
 
 	if (!PyArg_ParseTuple(args, "s:chkpath", &path)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	dir_exists = check_dir_path(self, path);
+	TALLOC_FREE(frame);
 	return PyBool_FromLong(dir_exists);
 }
 
@@ -2622,30 +2857,50 @@ static PyObject *py_smb_protocol(struct py_cli_state *self,
 
 static PyObject *py_smb_get_sd(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int fnum;
 	unsigned sinfo;
 	struct tevent_req *req = NULL;
 	struct security_descriptor *sd = NULL;
+	PyObject *py_sd = NULL;
 	NTSTATUS status;
 
 	if (!PyArg_ParseTuple(args, "iI:get_acl", &fnum, &sinfo)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_query_security_descriptor_send(
-		NULL, self->ev, self->cli, fnum, sinfo);
+		frame, self->ev, self->cli, fnum, sinfo);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_query_security_descriptor_recv(req, NULL, &sd);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	TALLOC_FREE(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+	/*
+	 * only reparent to frame,
+	 * if we would pass frame to
+	 * cli_query_security_descriptor_recv()
+	 * we'd leak a potential talloc_stackframe_pool
+	 * via py_return_ndr_struct().
+	 */
+	talloc_reparent(NULL, frame, sd);
 
-	return py_return_ndr_struct(
-		"samba.dcerpc.security", "descriptor", sd, sd);
+	py_sd = py_return_ndr_struct("samba.dcerpc.security", "descriptor",
+				     sd, sd);
+	TALLOC_FREE(frame);
+	return py_sd;
 }
 
 static PyObject *py_smb_set_sd(struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	PyObject *py_sd = NULL;
 	struct tevent_req *req = NULL;
 	struct security_descriptor *sd = NULL;
@@ -2654,6 +2909,7 @@ static PyObject *py_smb_set_sd(struct py_cli_state *self, PyObject *args)
 	NTSTATUS status;
 
 	if (!PyArg_ParseTuple(args, "iOI:set_sd", &fnum, &py_sd, &sinfo)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -2662,32 +2918,42 @@ static PyObject *py_smb_set_sd(struct py_cli_state *self, PyObject *args)
 		PyErr_Format(PyExc_TypeError,
 			"Expected dcerpc.security.descriptor as argument, got %s",
 			pytalloc_get_name(py_sd));
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_set_security_descriptor_send(
-		NULL, self->ev, self->cli, fnum, sinfo, sd);
+		frame, self->ev, self->cli, fnum, sinfo, sd);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	status = cli_set_security_descriptor_recv(req);
-	PyErr_NTSTATUS_NOT_OK_RAISE(status);
+	TALLOC_FREE(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_smb_smb1_posix(
 	struct py_cli_state *self, PyObject *Py_UNUSED(ignored))
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	struct tevent_req *req = NULL;
 	uint16_t major, minor;
 	uint32_t caplow, caphigh;
 	PyObject *result = NULL;
 
-	req = cli_unix_extensions_version_send(NULL, self->ev, self->cli);
+	req = cli_unix_extensions_version_send(frame, self->ev, self->cli);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_unix_extensions_version_recv(
@@ -2695,18 +2961,21 @@ static PyObject *py_smb_smb1_posix(
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_set_unix_extensions_capabilities_send(
-		NULL, self->ev, self->cli, major, minor, caplow, caphigh);
+		frame, self->ev, self->cli, major, minor, caplow, caphigh);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_set_unix_extensions_capabilities_recv(req);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -2716,12 +2985,14 @@ static PyObject *py_smb_smb1_posix(
 		(unsigned)major,
 		(unsigned)caplow,
 		(unsigned)caphigh);
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyObject *py_smb_smb1_readlink(
 	struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *filename = NULL;
 	struct tevent_req *req = NULL;
@@ -2729,74 +3000,87 @@ static PyObject *py_smb_smb1_readlink(
 	PyObject *result = NULL;
 
 	if (!PyArg_ParseTuple(args, "s:smb1_readlink", &filename)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_posix_readlink_send(NULL, self->ev, self->cli, filename);
+	req = cli_posix_readlink_send(frame, self->ev, self->cli, filename);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
-	status = cli_posix_readlink_recv(req, NULL, &target);
+	status = cli_posix_readlink_recv(req, frame, &target);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	result = PyBytes_FromString(target);
-	TALLOC_FREE(target);
+	TALLOC_FREE(frame);
 	return result;
 }
 
 static PyObject *py_smb_smb1_symlink(
 	struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *target = NULL, *newname = NULL;
 	struct tevent_req *req = NULL;
 
 	if (!PyArg_ParseTuple(args, "ss:smb1_symlink", &target, &newname)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	req = cli_posix_symlink_send(
-		NULL, self->ev, self->cli, target, newname);
+		frame, self->ev, self->cli, target, newname);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_posix_symlink_recv(req);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_smb_smb1_stat(
 	struct py_cli_state *self, PyObject *args)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	const char *fname = NULL;
 	struct tevent_req *req = NULL;
 	struct stat_ex sbuf = { .st_ex_nlink = 0, };
 
 	if (!PyArg_ParseTuple(args, "s:smb1_stat", &fname)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	req = cli_posix_stat_send(NULL, self->ev, self->cli, fname);
+	req = cli_posix_stat_send(frame, self->ev, self->cli, fname);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_posix_stat_recv(req, &sbuf);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
+	TALLOC_FREE(frame);
 	return Py_BuildValue(
 		"{sLsLsLsLsLsLsLsLsLsLsLsLsLsLsLsLsLsLsLsL}",
 		"dev",
@@ -2844,6 +3128,7 @@ static PyObject *py_smb_smb1_stat(
 static PyObject *py_cli_mknod(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	char *fname = NULL;
 	int mode = 0, major = 0, minor = 0, dev = 0;
 	struct tevent_req *req = NULL;
@@ -2863,6 +3148,7 @@ static PyObject *py_cli_mknod(
 		&major,
 		&minor);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -2871,22 +3157,27 @@ static PyObject *py_cli_mknod(
 #endif
 
 	req = cli_mknod_send(
-		NULL, self->ev, self->cli, fname, mode, dev);
+		frame, self->ev, self->cli, fname, mode, dev);
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 	status = cli_mknod_recv(req);
 	TALLOC_FREE(req);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
+
+	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_cli_fsctl(
 	struct py_cli_state *self, PyObject *args, PyObject *kwds)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int fnum, ctl_code;
 	int max_out = 0;
 	char *buf = NULL;
@@ -2912,26 +3203,105 @@ static PyObject *py_cli_fsctl(
 		    &buflen,
 		    &max_out);
 	if (!ok) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	in = (DATA_BLOB) { .data = (uint8_t *)buf, .length = buflen, };
 
 	req = cli_fsctl_send(
-		NULL, self->ev, self->cli, fnum, ctl_code, &in, max_out);
+		frame, self->ev, self->cli, fnum, ctl_code, &in, max_out);
 
 	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	status = cli_fsctl_recv(req, NULL, &out);
+	status = cli_fsctl_recv(req, frame, &out);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	result = PyBytes_FromStringAndSize((char *)out.data, out.length);
-	data_blob_free(&out);
+	TALLOC_FREE(frame);
+	return result;
+}
+
+static int copy_chunk_cb(off_t n, void *priv)
+{
+	return 1;
+}
+
+static PyObject *py_cli_copy_chunk(struct py_cli_state *self,
+				   PyObject *args,
+				   PyObject *kwds)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_req *req = NULL;
+	PyObject *result = NULL;
+	int fnum_src;
+	int fnum_dst;
+	unsigned long long size;
+	unsigned long long src_offset;
+	unsigned long long dst_offset;
+	off_t written;
+	static const char *kwlist[] = {
+		"fnum_src",
+		"fnum_dst",
+		"size",
+		"src_offset",
+		"dst_offset",
+		NULL,
+	};
+	NTSTATUS status;
+	bool ok;
+
+	if (smbXcli_conn_protocol(self->cli->conn) < PROTOCOL_SMB2_02) {
+		errno = EINVAL;
+		PyErr_SetFromErrno(PyExc_RuntimeError);
+		goto err;
+	}
+
+	ok = ParseTupleAndKeywords(
+		    args,
+		    kwds,
+		    "iiKKK",
+		    kwlist,
+		    &fnum_src,
+		    &fnum_dst,
+		    &size,
+		    &src_offset,
+		    &dst_offset);
+	if (!ok) {
+		goto err;
+	}
+
+	req = cli_smb2_splice_send(frame,
+				   self->ev,
+				   self->cli,
+				   fnum_src,
+				   fnum_dst,
+				   size,
+				   src_offset,
+				   dst_offset,
+				   copy_chunk_cb,
+				   NULL);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		goto err;
+	}
+
+	status = cli_smb2_splice_recv(req, &written);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		goto err;
+	}
+
+	result = Py_BuildValue("K", written);
+
+err:
+	TALLOC_FREE(frame);
 	return result;
 }
 
@@ -3046,7 +3416,7 @@ static PyMethodDef py_cli_state_methods[] = {
 	  "smb1_stat(path) -> stat info",
 	},
 	{ "fsctl",
-	  (PyCFunction)py_cli_fsctl,
+	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_fsctl),
 	  METH_VARARGS|METH_KEYWORDS,
 	  "fsctl(fnum, ctl_code, in_bytes, max_out) -> out_bytes",
 	},
@@ -3060,6 +3430,11 @@ static PyMethodDef py_cli_state_methods[] = {
 	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_mknod),
 	  METH_VARARGS|METH_KEYWORDS,
 	  "mknod(path, mode | major, minor)",
+	},
+	{ "copy_chunk",
+	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_copy_chunk),
+	  METH_VARARGS|METH_KEYWORDS,
+	  "copy_chunk(fnum_src, fnum_dst, size, src_offset, dst_offset) -> written",
 	},
 	{ NULL, NULL, 0, NULL }
 };
@@ -3106,8 +3481,6 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 {
 	PyObject *m = NULL;
 	PyObject *mod = NULL;
-
-	talloc_stackframe();
 
 	if (PyType_Ready(&py_cli_state_type) < 0) {
 		return NULL;
@@ -3191,6 +3564,8 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(FILE_SHARE_READ);
 	ADD_FLAGS(FILE_SHARE_WRITE);
 	ADD_FLAGS(FILE_SHARE_DELETE);
+
+	ADD_FLAGS(VFS_PWRITE_APPEND_OFFSET);
 
 	/* change notify completion filter flags */
 	ADD_FLAGS(FILE_NOTIFY_CHANGE_FILE_NAME);
@@ -3365,6 +3740,7 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_STRING(SMB2_CREATE_TAG_APP_INSTANCE_ID);
 	ADD_STRING(SVHDX_OPEN_DEVICE_CONTEXT);
 	ADD_STRING(SMB2_CREATE_TAG_POSIX);
+	ADD_FLAGS(SMB2_FIND_ID_BOTH_DIRECTORY_INFO);
 	ADD_FLAGS(SMB2_FIND_POSIX_INFORMATION);
 	ADD_FLAGS(FILE_SUPERSEDE);
 	ADD_FLAGS(FILE_OPEN);

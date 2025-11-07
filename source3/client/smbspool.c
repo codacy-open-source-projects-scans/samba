@@ -26,7 +26,9 @@
 #include "system/filesys.h"
 #include "system/passwd.h"
 #include "system/kerberos.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "libsmb/smbsock_connect.h"
 #include "lib/param/param.h"
 #include "lib/krb5_wrap/krb5_samba.h"
 
@@ -67,7 +69,7 @@ static NTSTATUS
 smb_connect(struct cli_state **output_cli,
 	    const char *workgroup,
 	    const char *server,
-	    const int port,
+	    const struct smb_transports *transports,
 	    const char *share,
 	    const char *username,
 	    const char *password,
@@ -112,6 +114,7 @@ main(int argc,			/* I - Number of command-line arguments */
 	const char *print_title = NULL;
 	const char *print_file = NULL;
 	const char *print_copies = NULL;
+	struct smb_transports ts = { .num_transports = 0, };
 	int cmp;
 	int len;
 
@@ -373,13 +376,15 @@ main(int argc,			/* I - Number of command-line arguments */
 		workgroup = lp_workgroup();
 	}
 
+	ts = smbsock_transports_from_port(port);
+
 	load_interfaces();
 
 	do {
 		nt_status = smb_connect(&cli,
 					workgroup,
 					server,
-					port,
+					&ts,
 					printer,
 					username,
 					password,
@@ -531,7 +536,7 @@ static NTSTATUS
 smb_complete_connection(struct cli_state **output_cli,
 			const char *myname,
 			const char *server,
-			int port,
+			const struct smb_transports *transports,
 			const char *username,
 			const char *password,
 			const char *workgroup,
@@ -549,7 +554,7 @@ smb_complete_connection(struct cli_state **output_cli,
 					 myname,
 					 server,
 					 NULL,
-					 port,
+					 transports,
 					 SMB_SIGNING_DEFAULT,
 					 0);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -662,7 +667,7 @@ static NTSTATUS
 smb_connect(struct cli_state **output_cli,
 	    const char *workgroup,	/* I - Workgroup */
 	    const char *server,	/* I - Server */
-	    const int port,	/* I - Port */
+	    const struct smb_transports *transports,	/* I - transports */
 	    const char *share,	/* I - Printer */
 	    const char *username,	/* I - Username */
 	    const char *password,	/* I - Password */
@@ -729,7 +734,7 @@ smb_connect(struct cli_state **output_cli,
 	nt_status = smb_complete_connection(&cli,
 					    myname,
 					    server,
-					    port,
+					    transports,
 					    user,
 					    password,
 					    workgroup,
@@ -757,7 +762,7 @@ smb_connect(struct cli_state **output_cli,
 	nt_status = smb_complete_connection(&cli,
 					    myname,
 					    server,
-					    port,
+					    transports,
 					    pwd->pw_name,
 					    "",
 					    workgroup,
@@ -778,7 +783,7 @@ anonymous:
 	nt_status = smb_complete_connection(&cli,
 					    myname,
 					    server,
-					    port,
+					    transports,
 					    "",
 					    "",
 					    workgroup,
@@ -878,16 +883,14 @@ smb_print(struct cli_state * cli,	/* I - SMB connection */
 static char *
 uri_unescape_alloc(const char *uritok)
 {
-	char *ret;
-	char *end;
-	ret = (char *) SMB_STRDUP(uritok);
+	char *end = NULL;
+	char *ret = talloc_strdup(talloc_tos(), uritok);
 	if (!ret) {
 		return NULL;
 	}
 
 	end = rfc1738_unescape(ret);
 	if (end == NULL) {
-		free(ret);
 		return NULL;
 	}
 	return ret;

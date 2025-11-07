@@ -166,7 +166,7 @@ static int prepare_share_mode(struct traverse_state *state)
 }
 
 static uint32_t map_share_mode_to_deny_mode(
-	uint32_t share_access, uint32_t private_options)
+	uint32_t share_access, uint16_t flags)
 {
 	switch (share_access & ~FILE_SHARE_DELETE) {
 	case FILE_SHARE_NONE:
@@ -178,9 +178,9 @@ static uint32_t map_share_mode_to_deny_mode(
 	case FILE_SHARE_READ|FILE_SHARE_WRITE:
 		return DENY_NONE;
 	}
-	if (private_options & NTCREATEX_FLAG_DENY_DOS) {
+	if (flags & SHARE_ENTRY_FLAG_DENY_DOS) {
 		return DENY_DOS;
-	} else if (private_options & NTCREATEX_FLAG_DENY_FCB) {
+	} else if (flags & SHARE_ENTRY_FLAG_DENY_FCB) {
 		return DENY_FCB;
 	}
 
@@ -233,7 +233,7 @@ static int print_share_mode(struct file_id fid,
 		}
 
 		denymode_int = map_share_mode_to_deny_mode(e->share_access,
-							   e->private_options);
+							   e->flags);
 		switch (denymode_int) {
 			case DENY_NONE:
 				denymode = "DENY_NONE";
@@ -264,9 +264,9 @@ static int print_share_mode(struct file_id fid,
 				fprintf(stderr,
 					"unknown-please report ! "
 					"e->share_access = 0x%x, "
-					"e->private_options = 0x%x\n",
+					"e->flags = 0x%x\n",
 					(unsigned int)e->share_access,
-					(unsigned int)e->private_options);
+					(unsigned int)e->flags);
 				break;
 			}
 		}
@@ -526,6 +526,38 @@ static int prepare_connections(struct traverse_state *state)
 		add_section_to_json(state, "tcons");
 	}
 	return 0;
+}
+
+static bool smbXsrv_is_encrypted(uint8_t encryption_flags)
+{
+	return (!(encryption_flags & SMBXSRV_PROCESSED_UNENCRYPTED_PACKET)
+		&&
+		(encryption_flags & (SMBXSRV_PROCESSED_ENCRYPTED_PACKET |
+				     SMBXSRV_ENCRYPTION_DESIRED |
+				     SMBXSRV_ENCRYPTION_REQUIRED)));
+}
+
+static bool smbXsrv_is_partially_encrypted(uint8_t encryption_flags)
+{
+	return ((encryption_flags & SMBXSRV_PROCESSED_ENCRYPTED_PACKET) &&
+		(encryption_flags & SMBXSRV_PROCESSED_UNENCRYPTED_PACKET));
+}
+
+static bool smbXsrv_is_signed(uint8_t signing_flags)
+{
+	/*
+	 * Signing is always enabled, so unless we got an unsigned
+	 * packet and at least one signed packet that was not
+	 * encrypted, the session or tcon is "signed".
+	 */
+	return (!(signing_flags & SMBXSRV_PROCESSED_UNSIGNED_PACKET) &&
+		(signing_flags & SMBXSRV_PROCESSED_SIGNED_PACKET));
+}
+
+static bool smbXsrv_is_partially_signed(uint8_t signing_flags)
+{
+	return ((signing_flags & SMBXSRV_PROCESSED_UNSIGNED_PACKET) &&
+		(signing_flags & SMBXSRV_PROCESSED_SIGNED_PACKET));
 }
 
 static int traverse_connections(const struct connections_data *crec,

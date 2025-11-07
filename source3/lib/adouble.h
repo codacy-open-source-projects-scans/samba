@@ -159,11 +159,11 @@ int ad_convert(struct vfs_handle_struct *handle,
 		const struct smb_filename *smb_fname,
 		const char *catia_mappings,
 		uint32_t flags);
-bool ad_unconvert(TALLOC_CTX *mem_ctx,
-		  struct vfs_handle_struct *handle,
-		  const char *catia_mappings,
-		  struct smb_filename *smb_fname,
-		  bool *converted);
+NTSTATUS ad_unconvert(TALLOC_CTX *mem_ctx,
+		      struct vfs_handle_struct *handle,
+		      const char *catia_mappings,
+		      struct smb_filename *smb_fname,
+		      bool *converted);
 struct adouble *ad_init(TALLOC_CTX *ctx, adouble_type_t type);
 NTSTATUS adouble_open_from_base_fsp(const struct files_struct *dirfsp,
 				    struct files_struct *base_fsp,
@@ -184,9 +184,21 @@ bool is_adouble_file(const char *path);
 int adouble_path(TALLOC_CTX *ctx,
 		 const struct smb_filename *smb_fname_in,
 		 struct smb_filename **pp_smb_fname_out);
+struct smb_filename *adouble_name(TALLOC_CTX *mem_ctx,
+				  const struct smb_filename *base);
 
 AfpInfo *afpinfo_new(TALLOC_CTX *ctx);
 ssize_t afpinfo_pack(const AfpInfo *ai, char *buf);
 AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data, bool validate);
+
+struct adouble_buf {
+	uint32_t magic;
+	uint32_t version;
+	DATA_BLOB entries[ADEID_MAX];
+};
+
+bool adouble_buf_parse(const uint8_t *buf,
+		       size_t buflen,
+		       struct adouble_buf *dst);
 
 #endif

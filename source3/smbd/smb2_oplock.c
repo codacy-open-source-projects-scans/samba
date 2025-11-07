@@ -1336,9 +1336,17 @@ void contend_dirleases(struct connection_struct *conn,
 
 	ret = SMB_VFS_STAT(conn, parent_fname);
 	if (ret != 0) {
-		DBG_ERR("Failed to stat [%s]: %s\n",
-			smb_fname_str_dbg(parent_fname), strerror(errno));
+		struct smb_filename *cwd = SMB_VFS_GETWD(conn, talloc_tos());
+
+		DBG_ERR("Trigger [conn: %s] [smb_fname: %s] cwd [%s], "
+			"failed to stat parent [%s]: %s\n",
+			conn->connectpath,
+			smb_fname_str_dbg(smb_fname),
+			(cwd != NULL) ? cwd->base_name : "",
+			smb_fname_str_dbg(parent_fname),
+			strerror(errno));
 		TALLOC_FREE(parent_fname);
+		TALLOC_FREE(cwd);
 		return;
 	}
 
@@ -1511,6 +1519,7 @@ struct delay_for_handle_lease_break_state {
 	TALLOC_CTX *mem_ctx;
 	struct tevent_context *ev;
 	struct timeval timeout;
+	uint32_t access_mask;
 	bool recursive;
 	bool recursive_h_leases_break;
 	struct files_struct *fsp;
@@ -1541,6 +1550,7 @@ struct tevent_req *delay_for_handle_lease_break_send(
 	struct tevent_context *ev,
 	struct timeval timeout,
 	struct files_struct *fsp,
+	uint32_t access_mask,
 	bool recursive,
 	struct share_mode_lock **lck)
 {
@@ -1559,6 +1569,7 @@ struct tevent_req *delay_for_handle_lease_break_send(
 		.mem_ctx = mem_ctx,
 		.ev = ev,
 		.timeout = timeout,
+		.access_mask = access_mask,
 		.recursive = recursive,
 		.recursive_h_leases_break = recursive,
 		.fsp = fsp,
@@ -1599,6 +1610,10 @@ static bool delay_for_handle_lease_break_fn(struct share_mode_entry *e,
 		}
 	}
 
+	if ((state->access_mask & e->access_mask) == 0) {
+		return false;
+	}
+
 	lease_type = get_lease_type(e, fsp->file_id);
 	if ((lease_type & SMB2_LEASE_HANDLE) == 0) {
 		return false;
@@ -1633,6 +1648,12 @@ static void delay_for_handle_lease_break_fsp_check(struct tevent_req *req)
 	bool ok;
 
 	DBG_DEBUG("fsp [%s]\n", fsp_str_dbg(state->fsp));
+
+	if (state->lck == NULL) {
+		DBG_DEBUG("fsp [%s] all opens are gone\n",
+			  fsp_str_dbg(state->fsp));
+		return;
+	}
 
 	ok = share_mode_forall_leases(state->lck,
 				      delay_for_handle_lease_break_fn,
@@ -1691,11 +1712,6 @@ static void delay_for_handle_lease_break_fsp_done(struct tevent_req *subreq)
 	}
 
 	state->lck = get_existing_share_mode_lock(state, state->fsp->file_id);
-	if (state->lck == NULL) {
-		tevent_req_nterror(req, NT_STATUS_UNSUCCESSFUL);
-		return;
-	}
-
 	/*
 	 * This could potentially end up looping for some if a client
 	 * aggressively reaquires H-leases on the file, but we have a
@@ -1737,7 +1753,7 @@ static int delay_for_handle_lease_break_below_fn(struct share_mode_data *d,
 	}
 
 	if ((lease & SMB2_LEASE_HANDLE) == 0) {
-		if (e->flags & SHARE_MODE_FLAG_POSIX_OPEN) {
+		if (e->flags & SHARE_ENTRY_FLAG_POSIX_OPEN) {
 			DBG_DEBUG("POSIX open file-id [%s]\n", fid_bufp);
 			/* Ignore POSIX opens. */
 			return 0;
@@ -1959,11 +1975,6 @@ static void delay_for_handle_lease_break_below_done(struct tevent_req *subreq)
 	state->recursive_h_leases_break = false;
 
 	state->lck = get_existing_share_mode_lock(state, state->fsp->file_id);
-	if (state->lck == NULL) {
-		tevent_req_nterror(req, NT_STATUS_UNSUCCESSFUL);
-		return;
-	}
-
 	delay_for_handle_lease_break_check(req);
 }
 

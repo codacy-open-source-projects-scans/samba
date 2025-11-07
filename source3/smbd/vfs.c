@@ -403,27 +403,12 @@ bool smbd_vfs_init(connection_struct *conn)
 	return True;
 }
 
-/*******************************************************************
- Check if a file exists in the vfs.
-********************************************************************/
-
-NTSTATUS vfs_file_exist(connection_struct *conn, struct smb_filename *smb_fname)
-{
-	/* Only return OK if stat was successful and S_ISREG */
-	if ((SMB_VFS_STAT(conn, smb_fname) != -1) &&
-	    S_ISREG(smb_fname->st.st_ex_mode)) {
-		return NT_STATUS_OK;
-	}
-
-	return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-}
-
 bool vfs_valid_pread_range(off_t offset, size_t length)
 {
 	return sys_valid_io_range(offset, length);
 }
 
-bool vfs_valid_pwrite_range(off_t offset, size_t length)
+bool vfs_valid_allocation_range(off_t offset, size_t length)
 {
 	/*
 	 * See MAXFILESIZE in [MS-FSA] 2.1.5.3 Server Requests a Write
@@ -449,6 +434,22 @@ bool vfs_valid_pwrite_range(off_t offset, size_t length)
 	return true;
 }
 
+bool vfs_valid_pwrite_range(const struct files_struct *fsp,
+			    off_t offset,
+			    size_t length)
+{
+	if (fsp->fsp_flags.posix_append) {
+		if (offset != VFS_PWRITE_APPEND_OFFSET) {
+			return false;
+		}
+		return true;
+	} else if (offset == VFS_PWRITE_APPEND_OFFSET) {
+		return false;
+	}
+
+	return vfs_valid_allocation_range(offset, length);
+}
+
 ssize_t vfs_pwrite_data(struct smb_request *req,
 			files_struct *fsp,
 			const char *buffer,
@@ -459,7 +460,7 @@ ssize_t vfs_pwrite_data(struct smb_request *req,
 	ssize_t ret;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(offset, N);
+	ok = vfs_valid_pwrite_range(fsp, offset, N);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -515,9 +516,14 @@ ssize_t vfs_pwrite_data(struct smb_request *req,
 	}
 
 	while (total < N) {
-		ret = SMB_VFS_PWRITE(fsp, buffer + total, N - total,
-				     offset + total);
-
+		off_t pwrite_offset = offset;
+		if (offset != VFS_PWRITE_APPEND_OFFSET) {
+			pwrite_offset += total;
+		}
+		ret = SMB_VFS_PWRITE(fsp,
+				     buffer + total,
+				     N - total,
+				     pwrite_offset);
 		if (ret == -1)
 			return -1;
 		if (ret == 0)
@@ -549,7 +555,7 @@ int vfs_allocate_file_space(files_struct *fsp, uint64_t len)
 	DEBUG(10,("vfs_allocate_file_space: file %s, len %.0f\n",
 		  fsp_str_dbg(fsp), (double)len));
 
-	ok = vfs_valid_pwrite_range((off_t)len, 0);
+	ok = vfs_valid_allocation_range((off_t)len, 0);
 	if (!ok) {
 		DEBUG(0,("vfs_allocate_file_space: %s negative/invalid len "
 			 "requested.\n", fsp_str_dbg(fsp)));
@@ -638,7 +644,7 @@ int vfs_set_filelen(files_struct *fsp, off_t len)
 	int ret;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(len, 0);
+	ok = vfs_valid_allocation_range(len, 0);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -679,7 +685,7 @@ int vfs_slow_fallocate(files_struct *fsp, off_t offset, off_t len)
 	size_t total = 0;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(offset, len);
+	ok = vfs_valid_allocation_range(offset, len);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -726,7 +732,11 @@ int vfs_fill_sparse(files_struct *fsp, off_t len)
 	size_t num_to_write;
 	bool ok;
 
-	ok = vfs_valid_pwrite_range(len, 0);
+	if (len == VFS_PWRITE_APPEND_OFFSET) {
+		return 0;
+	}
+
+	ok = vfs_valid_allocation_range(len, 0);
 	if (!ok) {
 		errno = EINVAL;
 		return -1;
@@ -1677,8 +1687,8 @@ static void smb_vfs_call_pread_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-ssize_t SMB_VFS_PREAD_RECV(struct tevent_req *req,
-			   struct vfs_aio_state *vfs_aio_state)
+ssize_t smb_vfs_call_pread_recv(struct tevent_req *req,
+				struct vfs_aio_state *vfs_aio_state)
 {
 	struct smb_vfs_call_pread_state *state = tevent_req_data(
 		req, struct smb_vfs_call_pread_state);
@@ -1753,8 +1763,8 @@ static void smb_vfs_call_pwrite_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-ssize_t SMB_VFS_PWRITE_RECV(struct tevent_req *req,
-			    struct vfs_aio_state *vfs_aio_state)
+ssize_t smb_vfs_call_pwrite_recv(struct tevent_req *req,
+				 struct vfs_aio_state *vfs_aio_state)
 {
 	struct smb_vfs_call_pwrite_state *state = tevent_req_data(
 		req, struct smb_vfs_call_pwrite_state);
@@ -1811,6 +1821,18 @@ int smb_vfs_call_renameat(struct vfs_handle_struct *handle,
 				how);
 }
 
+int smb_vfs_call_rename_stream(struct vfs_handle_struct *handle,
+			       struct files_struct *src_fsp,
+			       const char *dst_name,
+			       bool replace_if_exists)
+{
+	VFS_FIND(rename_stream);
+	return handle->fns->rename_stream_fn(handle,
+					     src_fsp,
+					     dst_name,
+					     replace_if_exists);
+}
+
 struct smb_vfs_call_fsync_state {
 	int (*recv_fn)(struct tevent_req *req, struct vfs_aio_state *vfs_aio_state);
 	int retval;
@@ -1859,7 +1881,8 @@ static void smb_vfs_call_fsync_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-int SMB_VFS_FSYNC_RECV(struct tevent_req *req, struct vfs_aio_state *vfs_aio_state)
+int smb_vfs_call_fsync_recv(struct tevent_req *req,
+			    struct vfs_aio_state *vfs_aio_state)
 {
 	struct smb_vfs_call_fsync_state *state = tevent_req_data(
 		req, struct smb_vfs_call_fsync_state);

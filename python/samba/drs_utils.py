@@ -23,12 +23,13 @@ from samba.ndr import ndr_unpack
 from samba import dsdb
 from samba import werror
 from samba import WERRORError
-import samba
+
 import ldb
 from samba.dcerpc.drsuapi import (DRSUAPI_ATTID_name,
                                   DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V8,
                                   DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V10)
 import re
+from abc import ABCMeta, abstractmethod
 
 
 class drsException(Exception):
@@ -158,12 +159,12 @@ def drs_get_rodc_partial_attribute_set(samdb):
         ldap_display_name = str(r["lDAPDisplayName"][0])
         if "systemFlags" in r:
             system_flags      = r["systemFlags"][0]
-            if (int(system_flags) & (samba.dsdb.DS_FLAG_ATTR_NOT_REPLICATED |
-                                     samba.dsdb.DS_FLAG_ATTR_IS_CONSTRUCTED)):
+            if (int(system_flags) & (dsdb.DS_FLAG_ATTR_NOT_REPLICATED |
+                                     dsdb.DS_FLAG_ATTR_IS_CONSTRUCTED)):
                 continue
         if "searchFlags" in r:
             search_flags = r["searchFlags"][0]
-            if (int(search_flags) & samba.dsdb.SEARCH_FLAG_RODC_ATTRIBUTE):
+            if int(search_flags) & dsdb.SEARCH_FLAG_RODC_ATTRIBUTE:
                 continue
         attid = samdb.get_attid_from_lDAPDisplayName(ldap_display_name)
         attids.append(int(attid))
@@ -171,7 +172,7 @@ def drs_get_rodc_partial_attribute_set(samdb):
     # the attids do need to be sorted, or windows doesn't return
     # all the attributes we need
     attids.sort()
-    partial_attribute_set.attids         = attids
+    partial_attribute_set.attids = attids
     partial_attribute_set.num_attids = len(attids)
     return partial_attribute_set
 
@@ -186,30 +187,60 @@ def drs_copy_highwater_mark(hwm, new_hwm):
     hwm.highest_usn = new_hwm.highest_usn
 
 
-class drs_Replicate(object):
-    """DRS replication calls"""
+class drs_ReplicatorImplBase(metaclass=ABCMeta):
+    @abstractmethod
+    def process_chunk(
+        self, samdb, level, ctr, schema, req_level, req, first_chunk,
+    ) -> None: ...
 
+    @abstractmethod
+    def supports_ext(self, ext) -> bool: ...
+
+    @abstractmethod
+    def get_nc_changes(self, req_level, req) -> bool: ...
+
+
+class drs_ReplicatorImpl(drs_ReplicatorImplBase):
     def __init__(self, binding_string, lp, creds, samdb, invocation_id):
         self.drs = drsuapi.drsuapi(binding_string, lp, creds)
-        (self.drs_handle, self.supports_ext) = drs_DsBind(self.drs)
+        (self.drs_handle, self._supports_ext) = drs_DsBind(self.drs)
         self.net = Net(creds=creds, lp=lp)
-        self.samdb = samdb
         if not isinstance(invocation_id, misc.GUID):
             raise RuntimeError("Must supply GUID for invocation_id")
         if invocation_id == misc.GUID("00000000-0000-0000-0000-000000000000"):
             raise RuntimeError("Must not set GUID 00000000-0000-0000-0000-000000000000 as invocation_id")
-        self.replication_state = self.net.replicate_init(self.samdb, lp, self.drs, invocation_id)
+        self.replication_state = self.net.replicate_init(samdb, lp, self.drs, invocation_id)
+
+    def process_chunk(self, samdb, level, ctr, schema, req_level, req, first_chunk):
+        """Processes a single chunk of received replication data"""
+        # pass the replication into the py_net.c python bindings for processing
+        self.net.replicate_chunk(self.replication_state, level, ctr,
+                                 schema=schema, req_level=req_level, req=req)
+
+    def supports_ext(self, ext) -> bool:
+        return self._supports_ext & ext
+
+    def get_nc_changes(self, req_level, req) -> bool:
+        return self.drs.DsGetNCChanges(self.drs_handle, req_level, req)
+
+
+class drs_Replicator:
+    """DRS replication implementation"""
+
+    def __init__(self, repl, samdb):
+        self.samdb = samdb
+        self.repl = repl
         self.more_flags = 0
 
-    def _should_retry_with_get_tgt(self, error_code, req):
+    @staticmethod
+    def _should_retry_with_get_tgt(error_code, req):
 
         # If the error indicates we fail to resolve a target object for a
         # linked attribute, then we should retry the request with GET_TGT
         # (if we support it and haven't already tried that)
-        supports_ext = self.supports_ext
 
         return (error_code == werror.WERR_DS_DRA_RECYCLED_TARGET and
-                supports_ext & DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V10 and
+                hasattr(req, "more_flags") and
                 (req.more_flags & drsuapi.DRSUAPI_DRS_GET_TGT) == 0)
 
     @staticmethod
@@ -224,23 +255,20 @@ class drs_Replicate(object):
 
 
     def _calculate_missing_anc_locally(self, ctr):
-        self.guids_seen = set()
+        guids_seen = set()
 
-        # walk objects in ctr, add to guid_seen as we see them
+        # walk objects in ctr, add to guids_seen as we see them
         # note if an object doesn't have a parent
 
         object_to_check = ctr.first_object
 
-        while True:
-            if object_to_check is None:
-                break
-
-            self.guids_seen.add(str(object_to_check.object.identifier.guid))
+        while object_to_check is not None:
+            guids_seen.add(str(object_to_check.object.identifier.guid))
 
             if object_to_check.parent_object_guid is not None \
                and object_to_check.parent_object_guid \
                != misc.GUID("00000000-0000-0000-0000-000000000000") \
-               and str(object_to_check.parent_object_guid) not in self.guids_seen:
+               and str(object_to_check.parent_object_guid) not in guids_seen:
                 obj_dn = ldb.Dn(self.samdb, object_to_check.object.identifier.dn)
                 parent_dn = obj_dn.parent()
                 print(f"Object {parent_dn} with "
@@ -250,25 +278,22 @@ class drs_Replicate(object):
             object_to_check = object_to_check.next_object
 
 
-    def process_chunk(self, level, ctr, schema, req_level, req, first_chunk):
-        """Processes a single chunk of received replication data"""
-        # pass the replication into the py_net.c python bindings for processing
-        self.net.replicate_chunk(self.replication_state, level, ctr,
-                                 schema=schema, req_level=req_level, req=req)
-
     def replicate(self, dn, source_dsa_invocation_id, destination_dsa_guid,
                   schema=False, exop=drsuapi.DRSUAPI_EXOP_NONE, rodc=False,
-                  replica_flags=None, full_sync=True, sync_forced=False, more_flags=0):
+                  replica_flags=None, full_sync=True, sync_forced=False):
         """replicate a single DN"""
 
         # setup for a GetNCChanges call
-        if self.supports_ext & DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V10:
-            req = drsuapi.DsGetNCChangesRequest10()
-            req.more_flags = (more_flags | self.more_flags)
+        if self.repl.supports_ext(DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V10):
             req_level = 10
-        else:
+            req = drsuapi.DsGetNCChangesRequest10()
+            req.more_flags = self.more_flags
+        elif self.repl.supports_ext(DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V8):
             req_level = 8
             req = drsuapi.DsGetNCChangesRequest8()
+        else:
+            req_level = 5
+            req = drsuapi.DsGetNCChangesRequest5()
 
         req.destination_dsa_guid = destination_dsa_guid
         req.source_dsa_invocation_id = source_dsa_invocation_id
@@ -322,8 +347,7 @@ class drs_Replicate(object):
                                  drsuapi.DRSUAPI_DRS_NEVER_SYNCED |
                                  drsuapi.DRSUAPI_DRS_GET_ALL_GROUP_MEMBERSHIP)
             if rodc:
-                req.replica_flags |= (
-                     drsuapi.DRSUAPI_DRS_SPECIAL_SECRET_PROCESSING)
+                req.replica_flags |= drsuapi.DRSUAPI_DRS_SPECIAL_SECRET_PROCESSING
             else:
                 req.replica_flags |= drsuapi.DRSUAPI_DRS_WRIT_REP
 
@@ -334,37 +358,26 @@ class drs_Replicate(object):
         req.max_ndr_size = 402116
         req.extended_op = exop
         req.fsmo_info = 0
-        req.partial_attribute_set = None
-        req.partial_attribute_set_ex = None
-        req.mapping_ctr.num_mappings = 0
-        req.mapping_ctr.mappings = None
 
-        if not schema and rodc:
+        if hasattr(req, "partial_attribute_set") and not schema and rodc:
             req.partial_attribute_set = drs_get_rodc_partial_attribute_set(self.samdb)
-
-        if not self.supports_ext & DRSUAPI_SUPPORTED_EXTENSION_GETCHGREQ_V8:
-            req_level = 5
-            req5 = drsuapi.DsGetNCChangesRequest5()
-            for a in dir(req5):
-                if a[0] != '_':
-                    setattr(req5, a, getattr(req, a))
-            req = req5
 
         num_objects = 0
         num_links = 0
         first_chunk = True
 
         while True:
-            (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, req_level, req)
+            (level, ctr) = self.repl.get_nc_changes(req_level, req)
             if ctr.first_object is None and ctr.object_count != 0:
                 raise RuntimeError("DsGetNCChanges: NULL first_object with object_count=%u" % (ctr.object_count))
 
             try:
-                self.process_chunk(level, ctr, schema, req_level, req, first_chunk)
+                self.repl.process_chunk(
+                    self.samdb, level, ctr, schema, req_level, req, first_chunk
+                )
             except WERRORError as e:
                 # Check if retrying with the GET_TGT flag set might resolve this error
                 if self._should_retry_with_get_tgt(e.args[0], req):
-
                     print("Missing target object - retrying with DRS_GET_TGT")
                     req.more_flags |= drsuapi.DRSUAPI_DRS_GET_TGT
 
@@ -373,8 +386,7 @@ class drs_Replicate(object):
                     first_chunk = True
                     continue
 
-                if self._should_calculate_missing_anc_locally(e.args[0],
-                                                              req):
+                if self._should_calculate_missing_anc_locally(e.args[0], req):
                     print("Missing parent object - calculating missing objects locally")
 
                     self._calculate_missing_anc_locally(ctr)
@@ -398,14 +410,20 @@ class drs_Replicate(object):
         return (num_objects, num_links)
 
 
+class drs_Replicate(drs_Replicator):
+    """DRS replication calls"""
+
+    def __init__(self, binding_string, lp, creds, samdb, invocation_id):
+        repl = drs_ReplicatorImpl(binding_string, lp, creds, samdb, invocation_id)
+        super().__init__(repl, samdb)
+
 # Handles the special case of creating a new clone of a DB, while also renaming
 # the entire DB's objects on the way through
-class drs_ReplicateRenamer(drs_Replicate):
+class drs_ReplicateRenamer(drs_ReplicatorImplBase):
     """Uses DRS replication to rename the entire DB"""
 
-    def __init__(self, binding_string, lp, creds, samdb, invocation_id,
-                 old_base_dn, new_base_dn):
-        super().__init__(binding_string, lp, creds, samdb, invocation_id)
+    def __init__(self, repl, old_base_dn, new_base_dn):
+        self.repl = repl
         self.old_base_dn = old_base_dn
         self.new_base_dn = new_base_dn
 
@@ -419,27 +437,27 @@ class drs_ReplicateRenamer(drs_Replicate):
         """Uses string substitution to replace the base DN"""
         return re.sub('%s$' % self.old_base_dn, self.new_base_dn, dn_str)
 
-    def update_name_attr(self, base_obj):
+    @staticmethod
+    def update_name_attr(base_obj, samdb):
         """Updates the 'name' attribute for the base DN object"""
         for attr in base_obj.attribute_ctr.attributes:
             if attr.attid == DRSUAPI_ATTID_name:
-                base_dn = ldb.Dn(self.samdb, base_obj.identifier.dn)
+                base_dn = ldb.Dn(samdb, base_obj.identifier.dn)
                 new_name = base_dn.get_rdn_value()
-                attr.value_ctr.values[0].blob = new_name.encode('utf-16-le')
+                attr.value_ctr.values[0].blob = new_name.encode("utf-16-le")
 
-    def rename_top_level_object(self, first_obj):
+    def rename_top_level_object(self, first_obj, samdb):
         """Renames the first/top-level object in a partition"""
         old_dn = first_obj.identifier.dn
         first_obj.identifier.dn = self.rename_dn(first_obj.identifier.dn)
-        print("Renaming partition %s --> %s" % (old_dn,
-                                                first_obj.identifier.dn))
+        print("Renaming partition %s --> %s" % (old_dn, first_obj.identifier.dn))
 
         # we also need to fix up the 'name' attribute for the base DN,
         # otherwise the RDNs won't match
         if first_obj.identifier.dn == self.new_base_dn:
-            self.update_name_attr(first_obj)
+            self.update_name_attr(first_obj, samdb)
 
-    def process_chunk(self, level, ctr, schema, req_level, req, first_chunk):
+    def process_chunk(self, samdb, level, ctr, schema, req_level, req, first_chunk):
         """Processes a single chunk of received replication data"""
 
         # we need to rename the NC in every chunk - this gets used in searches
@@ -450,7 +468,92 @@ class drs_ReplicateRenamer(drs_Replicate):
         # rename the first object in each partition. This will cause every
         # subsequent object in the partition to be renamed as a side-effect
         if first_chunk and ctr.object_count != 0:
-            self.rename_top_level_object(ctr.first_object.object)
+            self.rename_top_level_object(ctr.first_object.object, samdb)
 
         # then do the normal repl processing to apply this chunk to our DB
-        super().process_chunk(level, ctr, schema, req_level, req, first_chunk)
+        self.repl.process_chunk(samdb, level, ctr, schema, req_level, req, first_chunk)
+
+    def supports_ext(self, ext) -> bool:
+        return self.repl.supports_ext(ext)
+
+    def get_nc_changes(self, req_level, req) -> bool:
+        return self.repl.get_nc_changes(req_level, req)
+
+
+class drs_SecretFilter(drs_ReplicatorImplBase):
+    # Objects of these types contain sensitive attributes that cannot simply be
+    # filtered out, because they are required attributes for their class
+    # (mustContain and systemMustContain). Instead of filtering out those
+    # sensitive attributes, we filter out the entire object.
+    object_classes_to_filter_out = {
+        "msKds-ProvRootKey",
+        "msFVE-RecoveryInformation",
+        "msTPM-InformationObject",
+    }
+
+    def __init__(self, repl):
+        self.repl = repl
+
+    def process_chunk(self, samdb, level, ctr, schema, req_level, req, first_chunk):
+        """Processes a single chunk of received replication data"""
+
+        def get_searchFlags(attr: drsuapi.DsReplicaAttribute) -> int:
+            attr_name = samdb.get_lDAPDisplayName_by_attid(attr.attid)
+            return samdb.get_searchFlags_from_lDAPDisplayName(attr_name)
+
+        def is_confidential(attr: drsuapi.DsReplicaAttribute) -> bool:
+            return get_searchFlags(attr) & dsdb.SEARCH_FLAG_CONFIDENTIAL
+
+        prev_obj = ctr
+        obj = ctr.first_object
+        first = True
+        while obj is not None:
+            object_class = None
+            must_contain = set()
+            for attr in obj.object.attribute_ctr.attributes:
+                if (
+                    attr.attid == drsuapi.DRSUAPI_ATTID_objectClass
+                    and attr.value_ctr.num_values
+                ):
+                    object_class = samdb.get_lDAPDisplayName_by_governsID_id(
+                        int.from_bytes(
+                            attr.value_ctr.values[0].blob, byteorder="little"
+                        )
+                    )
+                    must_contain = samdb.get_must_contain_from_lDAPDisplayName(
+                        object_class
+                    )
+                    break
+
+            if object_class in self.object_classes_to_filter_out:
+                obj = obj.next_object
+                if first:
+                    prev_obj.first_object = obj
+                else:
+                    prev_obj.next_object = obj
+
+                ctr.object_count -= 1
+                continue
+
+            for attr in filter(is_confidential, obj.object.attribute_ctr.attributes):
+                attr_name = samdb.get_lDAPDisplayName_by_attid(attr.attid)
+                if attr_name in must_contain:
+                    print(
+                        f"Warning: {attr_name} is a required attribute of {object_class} "
+                        f"— not filtering with --no-secrets"
+                    )
+                else:
+                    attr.value_ctr.num_values = 0
+
+            prev_obj = obj
+            obj = obj.next_object
+            first = False
+
+        # then do the normal repl processing to apply this chunk to our DB
+        self.repl.process_chunk(samdb, level, ctr, schema, req_level, req, first_chunk)
+
+    def supports_ext(self, ext) -> bool:
+        return self.repl.supports_ext(ext)
+
+    def get_nc_changes(self, req_level, req) -> bool:
+        return self.repl.get_nc_changes(req_level, req)

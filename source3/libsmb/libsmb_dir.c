@@ -24,7 +24,8 @@
 
 #include "includes.h"
 #include "libsmb/namequery.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmbclient.h"
 #include "libsmb_internal.h"
 #include "rpc_client/cli_pipe.h"
@@ -111,30 +112,26 @@ add_dirent(SMBCFILE *dir,
 
 	if (dir->dir_list == NULL) {
 
-		dir->dir_list = SMB_MALLOC_P(struct smbc_dir_list);
+		dir->dir_list = SMB_CALLOC_ARRAY(struct smbc_dir_list, 1);
 		if (!dir->dir_list) {
 
 			SAFE_FREE(dirent);
 			dir->dir_error = ENOMEM;
 			return -1;
-
 		}
-		ZERO_STRUCTP(dir->dir_list);
 
 		dir->dir_end = dir->dir_next = dir->dir_list;
 	}
 	else {
 
-		dir->dir_end->next = SMB_MALLOC_P(struct smbc_dir_list);
+		dir->dir_end->next = SMB_CALLOC_ARRAY(struct smbc_dir_list, 1);
 
 		if (!dir->dir_end->next) {
 
 			SAFE_FREE(dirent);
 			dir->dir_error = ENOMEM;
 			return -1;
-
 		}
-		ZERO_STRUCTP(dir->dir_end->next);
 
 		dir->dir_end = dir->dir_end->next;
 	}
@@ -165,22 +162,19 @@ static int add_dirplus(SMBCFILE *dir, struct file_info *finfo)
 	struct smbc_dirplus_list *new_entry = NULL;
 	struct libsmb_file_info *info = NULL;
 
-	new_entry = SMB_MALLOC_P(struct smbc_dirplus_list);
+	new_entry = SMB_CALLOC_ARRAY(struct smbc_dirplus_list, 1);
 	if (new_entry == NULL) {
 		dir->dir_error = ENOMEM;
 		return -1;
 	}
-	ZERO_STRUCTP(new_entry);
 	new_entry->ino = finfo->ino;
 
-	info = SMB_MALLOC_P(struct libsmb_file_info);
+	info = SMB_CALLOC_ARRAY(struct libsmb_file_info, 1);
 	if (info == NULL) {
 		SAFE_FREE(new_entry);
 		dir->dir_error = ENOMEM;
 		return -1;
 	}
-
-	ZERO_STRUCTP(info);
 
 	info->btime_ts = finfo->btime_ts;
 	info->atime_ts = finfo->atime_ts;
@@ -361,8 +355,11 @@ net_share_enum_rpc(struct cli_state *cli,
 	WERROR result;
 	uint32_t preferred_len = 0xffffffff;
         uint32_t type;
-	struct srvsvc_NetShareInfoCtr info_ctr;
-	struct srvsvc_NetShareCtr1 ctr1;
+	struct srvsvc_NetShareCtr1 ctr1 = {};
+	struct srvsvc_NetShareInfoCtr info_ctr = {
+		.level = 1,
+		.ctr.ctr1 = &ctr1,
+	};
 	fstring name = "";
         fstring comment = "";
 	struct rpc_pipe_client *pipe_hnd = NULL;
@@ -378,12 +375,6 @@ net_share_enum_rpc(struct cli_state *cli,
                 DEBUG(1, ("net_share_enum_rpc pipe open fail!\n"));
 		goto done;
         }
-
-	ZERO_STRUCT(info_ctr);
-	ZERO_STRUCT(ctr1);
-
-	info_ctr.level = 1;
-	info_ctr.ctr.ctr1 = &ctr1;
 
 	b = pipe_hnd->binding_handle;
 
@@ -531,15 +522,13 @@ SMBC_opendir_ctx(SMBCCTX *context,
 		}
 	}
 
-	dir = SMB_MALLOC_P(SMBCFILE);
+	dir = SMB_CALLOC_ARRAY(SMBCFILE, 1);
 
 	if (!dir) {
 		TALLOC_FREE(frame);
 		errno = ENOMEM;
 		return NULL;
 	}
-
-	ZERO_STRUCTP(dir);
 
 	dir->cli_fd   = 0;
 	dir->fname    = SMB_STRDUP(fname);
@@ -890,12 +879,12 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				}
                         } else {
                                 /* Neither the workgroup nor server exists */
-                                errno = ECONNREFUSED;
                                 if (dir) {
                                         SAFE_FREE(dir->fname);
                                         SAFE_FREE(dir);
                                 }
 				TALLOC_FREE(frame);
+				errno = ECONNREFUSED;
                                 return NULL;
 			}
 
@@ -943,7 +932,8 @@ SMBC_opendir_ctx(SMBCCTX *context,
 			creds = context->internal->creds;
 
 			status = cli_resolve_path(
-				frame, "",
+				context->internal->mem_ctx,
+				"",
 				creds,
 				srv->cli, path, &targetcli, &targetpath);
 			if (!NT_STATUS_IS_OK(status)) {
@@ -1050,8 +1040,8 @@ SMBC_closedir_ctx(SMBCCTX *context,
 	frame = talloc_stackframe();
 
 	if (!SMBC_dlist_contains(context->internal->files, dir)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
@@ -1152,27 +1142,27 @@ SMBC_readdir_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;
                 DEBUG(0, ("Invalid context in SMBC_readdir_ctx()\n"));
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return NULL;
 
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, dir)) {
 
-		errno = EBADF;
                 DEBUG(0, ("Invalid dir in SMBC_readdir_ctx()\n"));
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return NULL;
 
 	}
 
 	if (dir->file != False) { /* FIXME, should be dir, perhaps */
 
-		errno = ENOTDIR;
                 DEBUG(0, ("Found file vs directory in SMBC_readdir_ctx()\n"));
 		TALLOC_FREE(frame);
+		errno = ENOTDIR;
 		return NULL;
 
 	}
@@ -1185,8 +1175,8 @@ SMBC_readdir_ctx(SMBCCTX *context,
         dirent = dir->dir_next->dirent;
         if (!dirent) {
 
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
                 return NULL;
 
         }
@@ -1196,8 +1186,8 @@ SMBC_readdir_ctx(SMBCCTX *context,
 
         ret = smbc_readdir_internal(context, dirp, dirent, maxlen);
 	if (ret == -1) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
                 return NULL;
 	}
 
@@ -1416,24 +1406,24 @@ SMBC_getdents_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, dir)) {
 
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 
 	}
 
 	if (dir->file != False) { /* FIXME, should be dir, perhaps */
 
-		errno = ENOTDIR;
 		TALLOC_FREE(frame);
+		errno = ENOTDIR;
 		return -1;
 
 	}
@@ -1451,8 +1441,8 @@ SMBC_getdents_ctx(SMBCCTX *context,
 
 		if (!dirlist->dirent) {
 
-			errno = ENOENT;  /* Bad error */
 			TALLOC_FREE(frame);
+			errno = ENOENT; /* Bad error */
 			return -1;
 
 		}
@@ -1463,8 +1453,8 @@ SMBC_getdents_ctx(SMBCCTX *context,
 		ret = smbc_readdir_internal(context, dirent,
                                       dirlist->dirent, maxlen);
 		if (ret == -1) {
-			errno = EINVAL;
 			TALLOC_FREE(frame);
+			errno = EINVAL;
 			return -1;
 		}
 
@@ -1474,15 +1464,15 @@ SMBC_getdents_ctx(SMBCCTX *context,
 
 			if (rem < count) { /* We managed to copy something */
 
-				errno = 0;
 				TALLOC_FREE(frame);
+				errno = 0;
 				return count - rem;
 
 			}
 			else { /* Nothing copied ... */
 
-				errno = EINVAL;  /* Not enough space ... */
 				TALLOC_FREE(frame);
+				errno = EINVAL; /* Not enough space ... */
 				return -1;
 
 			}
@@ -1553,14 +1543,14 @@ SMBC_mkdir_ctx(SMBCCTX *context,
 	NTSTATUS status;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -1577,16 +1567,16 @@ SMBC_mkdir_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-                errno = EINVAL;
 		TALLOC_FREE(frame);
+                errno = EINVAL;
 		return -1;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -1595,22 +1585,23 @@ SMBC_mkdir_ctx(SMBCCTX *context,
                           server, port, share, &workgroup, &user, &password);
 
 	if (!srv) {
-
+		int err = errno; /* errno set by SMBC_server */
 		TALLOC_FREE(frame);
-		return -1;  /* errno set by SMBC_server */
-
+		errno = err;
+		return -1;
 	}
 
 	creds = context->internal->creds;
 
 	/*d_printf(">>>mkdir: resolving %s\n", path);*/
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(context->internal->mem_ctx,
+				  "",
 				  creds,
 				  srv->cli, path, &targetcli, &targetpath);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path);
-                errno = ENOENT;
                 TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 	/*d_printf(">>>mkdir: resolved path as %s\n", targetpath);*/
@@ -1668,14 +1659,14 @@ SMBC_rmdir_ctx(SMBCCTX *context,
 	NTSTATUS status;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -1692,16 +1683,16 @@ SMBC_rmdir_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-                errno = EINVAL;
 		TALLOC_FREE(frame);
+                errno = EINVAL;
 		return -1;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -1710,22 +1701,23 @@ SMBC_rmdir_ctx(SMBCCTX *context,
                           server, port, share, &workgroup, &user, &password);
 
 	if (!srv) {
-
+		int err = errno; /* errno set by SMBC_server */
 		TALLOC_FREE(frame);
-		return -1;  /* errno set by SMBC_server */
-
+		errno = err;
+		return -1;
 	}
 
 	creds = context->internal->creds;
 
 	/*d_printf(">>>rmdir: resolving %s\n", path);*/
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(context->internal->mem_ctx,
+				  "",
 				  creds,
 				  srv->cli, path, &targetcli, &targetpath);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path);
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 	/*d_printf(">>>rmdir: resolved path as %s\n", targetpath);*/
@@ -1745,8 +1737,8 @@ SMBC_rmdir_ctx(SMBCCTX *context,
 			lpath = talloc_asprintf(frame, "%s\\*",
 						targetpath);
 			if (!lpath) {
-				errno = ENOMEM;
 				TALLOC_FREE(frame);
+				errno = ENOMEM;
 				return -1;
 			}
 
@@ -1792,24 +1784,24 @@ SMBC_telldir_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, dir)) {
 
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 
 	}
 
 	if (dir->file != False) { /* FIXME, should be dir, perhaps */
 
-		errno = ENOTDIR;
 		TALLOC_FREE(frame);
+		errno = ENOTDIR;
 		return -1;
 
 	}
@@ -1883,16 +1875,16 @@ SMBC_lseekdir_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 
 	}
 
 	if (dir->file != False) { /* FIXME, should be dir, perhaps */
 
-		errno = ENOTDIR;
 		TALLOC_FREE(frame);
+		errno = ENOTDIR;
 		return -1;
 
 	}
@@ -1928,8 +1920,8 @@ SMBC_lseekdir_ctx(SMBCCTX *context,
 
 	ok = update_dir_ents(dir, dirent);
 	if (!ok) {
-		errno = EINVAL;   /* Bad entry */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Bad entry */
 		return -1;
 	}
 
@@ -1979,14 +1971,14 @@ SMBC_chmod_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;  /* Best I can think of ... */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Best I can think of ... */
 		return -1;
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -2003,16 +1995,16 @@ SMBC_chmod_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-                errno = EINVAL;
 		TALLOC_FREE(frame);
+                errno = EINVAL;
 		return -1;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -2021,20 +2013,23 @@ SMBC_chmod_ctx(SMBCCTX *context,
                           server, port, share, &workgroup, &user, &password);
 
 	if (!srv) {
+		int err = errno; /* errno set by SMBC_server */
 		TALLOC_FREE(frame);
-		return -1;  /* errno set by SMBC_server */
+		errno = err;
+		return -1;
 	}
 
 	creds = context->internal->creds;
 
 	/*d_printf(">>>unlink: resolving %s\n", path);*/
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(context->internal->mem_ctx,
+				  "",
 				  creds,
 				  srv->cli, path, &targetcli, &targetpath);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path);
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 
@@ -2075,14 +2070,14 @@ SMBC_utimes_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;  /* Best I can think of ... */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Best I can think of ... */
 		return -1;
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -2113,16 +2108,16 @@ SMBC_utimes_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-			errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -2131,8 +2126,10 @@ SMBC_utimes_ctx(SMBCCTX *context,
                           server, port, share, &workgroup, &user, &password);
 
 	if (!srv) {
+		int err = errno; /* errno set by SMBC_server */
 		TALLOC_FREE(frame);
-		return -1;      /* errno set by SMBC_server */
+		errno = err;
+		return -1;
 	}
 
 	ok = SMBC_setatr(
@@ -2145,8 +2142,10 @@ SMBC_utimes_ctx(SMBCCTX *context,
 		(struct timespec) { .tv_nsec = SAMBA_UTIME_OMIT },
 		0);
 	if (!ok) {
+		int err = errno; /* errno set by SMBC_setatr */
 		TALLOC_FREE(frame);
-                return -1;      /* errno set by SMBC_setatr */
+		errno = err;
+		return -1;
         }
 
 	TALLOC_FREE(frame);
@@ -2177,15 +2176,15 @@ SMBC_unlink_ctx(SMBCCTX *context,
 
 	if (!context || !context->internal->initialized) {
 
-		errno = EINVAL;  /* Best I can think of ... */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Best I can think of ... */
 		return -1;
 
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 
 	}
@@ -2201,16 +2200,16 @@ SMBC_unlink_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-                errno = EINVAL;
 		TALLOC_FREE(frame);
+                errno = EINVAL;
                 return -1;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-			errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -2219,21 +2218,23 @@ SMBC_unlink_ctx(SMBCCTX *context,
                           server, port, share, &workgroup, &user, &password);
 
 	if (!srv) {
+		int err = errno; /* SMBC_server sets errno */
 		TALLOC_FREE(frame);
-		return -1;  /* SMBC_server sets errno */
-
+		errno = err;
+		return -1;
 	}
 
 	creds = context->internal->creds;
 
 	/*d_printf(">>>unlink: resolving %s\n", path);*/
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(context->internal->mem_ctx,
+				  "",
 				  creds,
 				  srv->cli, path, &targetcli, &targetpath);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path);
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 	/*d_printf(">>>unlink: resolved path as %s\n", targetpath);*/
@@ -2318,14 +2319,14 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 	    !ocontext->internal->initialized ||
 	    !ncontext->internal->initialized) {
 
-		errno = EINVAL;  /* Best I can think of ... */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Best I can think of ... */
 		return -1;
 	}
 
 	if (!oname || !nname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -2342,41 +2343,42 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
                             &user1,
                             &password1,
                             NULL)) {
-                errno = EINVAL;
 		TALLOC_FREE(frame);
+                errno = EINVAL;
 		return -1;
 	}
 
 	if (!user1 || user1[0] == (char)0) {
 		user1 = talloc_strdup(frame, smbc_getUser(ocontext));
 		if (!user1) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
 
 	if (SMBC_parse_path(frame,
-                            ncontext,
-                            nname,
-                            NULL,
-                            &server2,
-                            &port2,
-                            &share2,
-                            &path2,
-                            &user2,
-                            &password2,
-                            NULL)) {
-                errno = EINVAL;
+			    ncontext,
+			    nname,
+			    NULL,
+			    &server2,
+			    &port2,
+			    &share2,
+			    &path2,
+			    &user2,
+			    &password2,
+			    NULL))
+	{
 		TALLOC_FREE(frame);
-                return -1;
+		errno = EINVAL;
+		return -1;
 	}
 
 	if (!user2 || user2[0] == (char)0) {
 		user2 = talloc_strdup(frame, smbc_getUser(ncontext));
 		if (!user2) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return -1;
 		}
 	}
@@ -2384,15 +2386,17 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 	if (strcmp(server1, server2) || strcmp(share1, share2) ||
 	    strcmp(user1, user2)) {
 		/* Can't rename across file systems, or users?? */
-		errno = EXDEV;
 		TALLOC_FREE(frame);
+		errno = EXDEV;
 		return -1;
 	}
 
 	srv = SMBC_server(frame, ocontext, True,
                           server1, port1, share1, &workgroup, &user1, &password1);
 	if (!srv) {
+		int err = errno;
 		TALLOC_FREE(frame);
+		errno = err;
 		return -1;
 
 	}
@@ -2406,13 +2410,14 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 	/*d_printf(">>>rename: resolving %s\n", path1);*/
 	ocreds = ocontext->internal->creds;
 
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(ocontext->internal->mem_ctx,
+				  "",
 				  ocreds,
 				  srv->cli, path1, &targetcli1, &targetpath1);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path1);
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 
@@ -2426,13 +2431,14 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 	/*d_printf(">>>rename: resolving %s\n", path2);*/
 	ncreds = ncontext->internal->creds;
 
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(ncontext->internal->mem_ctx,
+				  "",
 				  ncreds,
 				  srv->cli, path2, &targetcli2, &targetpath2);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Could not resolve %s\n", path2);
-                errno = ENOENT;
 		TALLOC_FREE(frame);
+		errno = ENOENT;
 		return -1;
 	}
 	/*d_printf(">>>rename: resolved path as %s\n", targetpath2);*/
@@ -2441,8 +2447,8 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
             strcmp(targetcli1->share, targetcli2->share))
 	{
 		/* can't rename across file systems */
-		errno = EXDEV;
 		TALLOC_FREE(frame);
+		errno = EXDEV;
 		return -1;
 	}
 
@@ -2457,8 +2463,8 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 		    !NT_STATUS_IS_OK(cli_rename(targetcli1, targetpath1,
 						targetpath2, false))) {
 
-			errno = eno;
 			TALLOC_FREE(frame);
+			errno = eno;
 			return -1;
 
 		}

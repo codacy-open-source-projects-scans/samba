@@ -85,7 +85,7 @@ static DIR *shadow_copy_fdopendir(vfs_handle_struct *handle, files_struct *fsp, 
 		return NULL;
 	}
 
-	dirp = SMB_MALLOC_P(shadow_copy_Dir);
+	dirp = SMB_CALLOC_ARRAY(shadow_copy_Dir, 1);
 	if (!dirp) {
 		DEBUG(0,("shadow_copy_fdopendir: Out of memory\n"));
 		SMB_VFS_NEXT_CLOSEDIR(handle,p);
@@ -93,8 +93,6 @@ static DIR *shadow_copy_fdopendir(vfs_handle_struct *handle, files_struct *fsp, 
 		fsp_set_fd(fsp, -1);
 		return NULL;
 	}
-
-	ZERO_STRUCTP(dirp);
 
 	while (True) {
 		struct dirent *d;
@@ -192,7 +190,7 @@ static int shadow_copy_get_shadow_copy_data(vfs_handle_struct *handle,
 	shadow_copy_data->labels = NULL;
 
 	while (True) {
-		SHADOW_COPY_LABEL *tlabels;
+		SHADOW_COPY_LABEL *tmp_labels = NULL;
 		int ret;
 
 		dname = ReadDirName(dir_hnd, &talloced);
@@ -215,27 +213,32 @@ static int shadow_copy_get_shadow_copy_data(vfs_handle_struct *handle,
 			continue;
 		}
 
-		tlabels = (SHADOW_COPY_LABEL *)TALLOC_REALLOC(shadow_copy_data,
-									shadow_copy_data->labels,
-									(shadow_copy_data->num_volumes+1)*sizeof(SHADOW_COPY_LABEL));
-		if (tlabels == NULL) {
+		tmp_labels = talloc_realloc(shadow_copy_data, shadow_copy_data->labels,
+				            SHADOW_COPY_LABEL, shadow_copy_data->num_volumes + 1);
+
+		if (tmp_labels == NULL) {
 			DEBUG(0,("shadow_copy_get_shadow_copy_data: Out of memory\n"));
+			shadow_copy_data->num_volumes = 0;
+			TALLOC_FREE(shadow_copy_data->labels);
 			TALLOC_FREE(talloced);
 			TALLOC_FREE(dir_hnd);
 			return -1;
 		}
 
-		ret = strlcpy(tlabels[shadow_copy_data->num_volumes], dname,
-			      sizeof(tlabels[shadow_copy_data->num_volumes]));
-		if (ret != sizeof(tlabels[shadow_copy_data->num_volumes]) - 1) {
+		shadow_copy_data->labels = tmp_labels;
+
+		ret = strlcpy(shadow_copy_data->labels[shadow_copy_data->num_volumes], dname,
+			      sizeof(shadow_copy_data->labels[shadow_copy_data->num_volumes]));
+		if (ret != sizeof(shadow_copy_data->labels[shadow_copy_data->num_volumes]) - 1) {
 			DBG_ERR("malformed label %s\n", dname);
+			shadow_copy_data->num_volumes = 0;
+			TALLOC_FREE(shadow_copy_data->labels);
 			TALLOC_FREE(talloced);
 			TALLOC_FREE(dir_hnd);
 			return -1;
 		}
 		shadow_copy_data->num_volumes++;
 
-		shadow_copy_data->labels = tlabels;
 		TALLOC_FREE(talloced);
 	}
 

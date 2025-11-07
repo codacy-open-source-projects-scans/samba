@@ -62,7 +62,6 @@ void ads_disp_sd(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_descripto
 
 /* The following definitions come from libads/kerberos_keytab.c  */
 
-int ads_keytab_flush(ADS_STRUCT *ads);
 int ads_keytab_list(const char *keytab_name);
 
 /* The following definitions come from libads/net_ads_setspn.c  */
@@ -230,6 +229,6 @@ struct spn_struct {
 /* parse a windows style SPN, returns NULL if parsing fails */
 struct spn_struct *parse_spn(TALLOC_CTX *ctx, const char *srvprinc);
 
-NTSTATUS sync_pw2keytabs(void);
+NTSTATUS sync_pw2keytabs(const char *prefer_dc);
 
 #endif /* _LIBADS_ADS_PROTO_H_ */

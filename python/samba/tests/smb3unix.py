@@ -37,8 +37,8 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
         super().setUp()
 
         self.samsid = os.environ["SAMSID"]
-        prefix_abs = os.environ["PREFIX_ABS"]
-        p = subprocess.run(['stat', '-f', '-c', '%T', prefix_abs], capture_output=True, text=True)
+        prefix = os.environ["PREFIX"]
+        p = subprocess.run(['stat', '-f', '-c', '%T', prefix], capture_output=True, text=True)
         self.fstype = p.stdout.strip().lower()
 
     def connections(self, share1=None, posix1=False, share2=None, posix2=True):
@@ -132,14 +132,6 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
         e = cm.exception
         self.assertEqual(e.args[0], ntstatus.NT_STATUS_INVALID_PARAMETER)
 
-    def delete_test_file(self, c, fname, mode=0):
-        f,_,cc_out = c.create_ex(fname,
-                        DesiredAccess=security.SEC_STD_ALL,
-                        CreateDisposition=libsmb.FILE_OPEN,
-                        CreateContexts=[posix_context(mode)])
-        c.delete_on_close(f, True)
-        c.close(f)
-
     def test_posix_query_dir(self):
         test_files = []
         try:
@@ -153,9 +145,10 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             for i in range(10):
                 fname = '\\test%d' % i
+                wire_mode = libsmb.unix_mode_to_wire(0o744)
                 f,_,cc_out = c.create_ex(fname,
                                 CreateDisposition=libsmb.FILE_OPEN_IF,
-                                CreateContexts=[posix_context(0o744)])
+                                CreateContexts=[posix_context(wire_mode)])
                 c.close(f)
                 test_files.append(fname)
 
@@ -170,7 +163,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
         finally:
             if len(test_files) > 0:
                 for fname in test_files:
-                    self.delete_test_file(c, fname)
+                    self.clean_file(c, fname)
 
     def test_posix_reserved_char(self):
         c = libsmb.Conn(
@@ -186,14 +179,32 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
         for fname in test_files:
             try:
+                wire_mode = libsmb.unix_mode_to_wire(0o744)
                 f,_,cc_out = c.create_ex('\\%s' % fname,
                                 CreateDisposition=libsmb.FILE_CREATE,
-                                DesiredAccess=security.SEC_STD_DELETE,
-                                CreateContexts=[posix_context(0o744)])
+                                DesiredAccess=security.SEC_FILE_READ_ATTRIBUTE,
+                                CreateContexts=[posix_context(wire_mode)])
             except NTSTATUSError as e:
                 self.fail(e)
-            c.delete_on_close(f, True)
             c.close(f)
+
+        try:
+            res = c.list('', info_level=libsmb.SMB2_FIND_POSIX_INFORMATION)
+            found_files = {get_string(i['name']): i for i in res}
+            for fname in test_files:
+                self.assertTrue(fname in found_files)
+        except NTSTATUSError as e:
+            self.fail(e)
+        finally:
+            wire_mode = libsmb.unix_mode_to_wire(0o600)
+            for fname in test_files:
+                f,_,_ = c.create_ex('\\%s' % fname,
+                                CreateDisposition=libsmb.FILE_OPEN,
+                                DesiredAccess=security.SEC_STD_DELETE,
+                                CreateContexts=[posix_context(wire_mode)])
+                c.delete_on_close(f, True)
+                c.close(f)
+
 
     def test_posix_delete_on_close(self):
         c = libsmb.Conn(
@@ -204,10 +215,11 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             posix=True)
         self.assertTrue(c.have_posix())
 
+        wire_mode = libsmb.unix_mode_to_wire(0o744)
         f,_,cc_out = c.create_ex('\\TESTING999',
                         DesiredAccess=security.SEC_STD_ALL,
                         CreateDisposition=libsmb.FILE_CREATE,
-                        CreateContexts=[posix_context(0o744)])
+                        CreateContexts=[posix_context(wire_mode)])
         c.delete_on_close(f, True)
         c.close(f)
 
@@ -221,18 +233,20 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                 posix=True)
             self.assertTrue(c.have_posix())
 
+            wire_mode = libsmb.unix_mode_to_wire(0o644)
             f,_,cc_out = c.create_ex('\\xx',
                             DesiredAccess=security.SEC_STD_ALL,
                             CreateDisposition=libsmb.FILE_CREATE,
-                            CreateContexts=[posix_context(0o644)])
+                            CreateContexts=[posix_context(wire_mode)])
             c.close(f)
 
             fail = False
+            wire_mode = libsmb.unix_mode_to_wire(0)
             try:
                 f,_,cc_out = c.create_ex('\\XX',
                                 DesiredAccess=security.SEC_STD_ALL,
                                 CreateDisposition=libsmb.FILE_OPEN,
-                                CreateContexts=[posix_context(0)])
+                                CreateContexts=[posix_context(wire_mode)])
             except NTSTATUSError:
                 pass
             else:
@@ -242,7 +256,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             self.assertFalse(fail, "Opening uppercase file didn't fail")
 
         finally:
-            self.delete_test_file(c, '\\xx')
+            self.clean_file(c, '\\xx')
 
     def test_posix_perm_files(self):
         test_files = {}
@@ -267,10 +281,11 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
                 fname = 'testfile%04o' % perm
                 test_files[fname] = perm
+                wire_mode = libsmb.unix_mode_to_wire(perm)
                 f,_,cc_out = c.create_ex('\\%s' % fname,
                                 DesiredAccess=security.SEC_FILE_ALL,
                                 CreateDisposition=libsmb.FILE_CREATE,
-                                CreateContexts=[posix_context(perm)])
+                                CreateContexts=[posix_context(wire_mode)])
                 if perm & 0o200 == 0o200:
                     c.write(f, buffer=b"data", offset=0)
                 c.close(f)
@@ -281,7 +296,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
                                 DesiredAccess=security.SEC_STD_ALL,
                                 CreateDisposition=libsmb.FILE_CREATE,
                                 CreateOptions=libsmb.FILE_DIRECTORY_FILE,
-                                CreateContexts=[posix_context(perm)])
+                                CreateContexts=[posix_context(wire_mode)])
                 c.close(f)
 
             res = c.list("", info_level=libsmb.SMB2_FIND_POSIX_INFORMATION)
@@ -331,7 +346,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
         finally:
             if len(test_files) > 0:
                 for fname in test_files.keys():
-                    self.delete_test_file(c, '\\%s' % fname)
+                    self.clean_file(c, '\\%s' % fname)
 
     def test_share_root_null_sids_fid(self):
         c = libsmb.Conn(
@@ -411,8 +426,8 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             self.assertTrue(str(cc.group).startswith("S-1-22-2-"))
 
         finally:
-            self.delete_test_file(c, '\\test_create_context_basic1_file')
-            self.delete_test_file(c, '\\test_create_context_basic1_dir')
+            self.clean_file(c, '\\test_create_context_basic1_file')
+            self.clean_file(c, '\\test_create_context_basic1_dir')
 
     def test_create_context_reparse(self):
         """
@@ -429,10 +444,11 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             tag = 0x80000025
 
+            wire_mode = libsmb.unix_mode_to_wire(0o600)
             f,_,cc_out = c.create_ex('\\reparse',
                                      DesiredAccess=security.SEC_STD_ALL,
                                      CreateDisposition=libsmb.FILE_CREATE,
-                                     CreateContexts=[posix_context(0o600)])
+                                     CreateContexts=[posix_context(wire_mode)])
 
             cc = ndr_unpack(smb3posix.smb3_posix_cc_info, cc_out[0][1])
             self.assertEqual(cc.reparse_tag, libsmb.IO_REPARSE_TAG_RESERVED_ZERO)
@@ -442,17 +458,18 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             c.close(f)
 
+            wire_mode = libsmb.unix_mode_to_wire(0o600)
             f,_,cc_out = c.create_ex('\\reparse',
                                      DesiredAccess=security.SEC_STD_ALL,
                                      CreateDisposition=libsmb.FILE_OPEN,
-                                     CreateContexts=[posix_context(0o600)])
+                                     CreateContexts=[posix_context(wire_mode)])
             c.close(f)
 
             cc = ndr_unpack(smb3posix.smb3_posix_cc_info, cc_out[0][1])
             self.assertEqual(cc.reparse_tag, tag)
 
         finally:
-            self.delete_test_file(c, '\\reparse')
+            self.clean_file(c, '\\reparse')
 
     def test_delete_on_close(self):
         """
@@ -473,12 +490,13 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             CreateDisposition=libsmb.FILE_CREATE)
         self.addCleanup(self.clean_file, winconn, 'test_delete_on_close')
 
+        wire_mode = libsmb.unix_mode_to_wire(0o600)
         fdp,_,_ = posixconn.create_ex(
             'test_delete_on_close',
             DesiredAccess=security.SEC_FILE_WRITE_ATTRIBUTE | security.SEC_STD_DELETE,
             ShareAccess=0x07,
             CreateDisposition=libsmb.FILE_OPEN,
-            CreateContexts=[posix_context(0o600)])
+            CreateContexts=[posix_context(wire_mode)])
 
         winconn.delete_on_close(fdw, 1)
         posixconn.delete_on_close(fdp, 1)
@@ -509,3 +527,82 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
             winconn.get_posix_fs_info()
         e = cm.exception
         self.assertEqual(e.args[0], ntstatus.NT_STATUS_INVALID_INFO_CLASS)
+
+    def test_copy_chunk_posix(self):
+        """
+        Test copy-chunk works with a destination handle opened in POSIX mode
+        """
+        (_, c) = self.connections()
+
+        self.clean_file(c, '\\test_copy_chunk_posix_src')
+        self.clean_file(c, '\\test_copy_chunk_posix_dst')
+
+        wire_mode = libsmb.unix_mode_to_wire(0o644)
+
+        sh,*_ = c.create_ex('\\test_copy_chunk_posix_src',
+                          DesiredAccess=security.SEC_GENERIC_ALL,
+                          CreateDisposition=libsmb.FILE_CREATE,
+                          CreateContexts=[posix_context(wire_mode)])
+
+        dh,*_ = c.create_ex('\\test_copy_chunk_posix_dst',
+                          DesiredAccess=security.SEC_GENERIC_WRITE,
+                          CreateDisposition=libsmb.FILE_CREATE,
+                          CreateContexts=[posix_context(wire_mode)])
+
+        c.write(sh, buffer=b"data", offset=0)
+
+        try:
+            written = c.copy_chunk(sh, dh, 4, 0, 0)
+        except Exception as e:
+            self.fail(str(e))
+        finally:
+            c.close(sh)
+            c.close(dh)
+            self.clean_file(c, '\\test_copy_chunk_posix_src')
+            self.clean_file(c, '\\test_copy_chunk_posix_dst')
+
+    def test_append(self):
+        """
+        Test append-io behaviour
+        """
+        (wc, pc) = self.connections()
+
+        self.clean_file(pc, '\\test_append')
+        wire_mode = libsmb.unix_mode_to_wire(0o644)
+
+        ph,*_ = pc.create_ex('\\test_append',
+                             DesiredAccess=security.SEC_FILE_APPEND_DATA | security.SEC_FILE_READ_DATA,
+                             CreateDisposition=libsmb.FILE_CREATE,
+                             ShareAccess=libsmb.FILE_SHARE_READ|libsmb.FILE_SHARE_WRITE,
+                             CreateContexts=[posix_context(wire_mode)])
+
+        wh,*_ = wc.create_ex('\\test_append',
+                             DesiredAccess=security.SEC_FILE_APPEND_DATA,
+                             ShareAccess=libsmb.FILE_SHARE_READ|libsmb.FILE_SHARE_WRITE,
+                             CreateDisposition=libsmb.FILE_OPEN)
+
+        wc.write(wh, buffer=b"hello", offset=0)
+        wc.write(wh, buffer=b"h", offset=0)
+
+        try:
+            pc.write(ph, buffer=b"world", offset=0)
+        except Exception as e:
+            self.assertEqual(e.args[0], ntstatus.NT_STATUS_INVALID_PARAMETER)
+            pass
+        else:
+            pc.close(ph)
+            wc.close(wh)
+            self.clean_file(pc, '\\test_append')
+            self.fail("Write with offset=0 must fail on POSIX handle in append mode")
+
+        pc.write(ph, buffer=b" world", offset=libsmb.VFS_PWRITE_APPEND_OFFSET)
+
+        info = pc.qfileinfo(ph, libsmb.FSCC_FILE_POSIX_INFORMATION);
+        self.assertEqual(info['size'], 11)
+
+        data = pc.read(ph, 0, 11)
+        self.assertEqual(data, b'hello world')
+
+        pc.close(ph)
+        wc.close(wh)
+        self.clean_file(pc, '\\test_append')

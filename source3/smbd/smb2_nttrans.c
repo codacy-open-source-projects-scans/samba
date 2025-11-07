@@ -28,7 +28,7 @@
 #include "passdb/lookup_sid.h"
 #include "auth.h"
 #include "smbprofile.h"
-#include "libsmb/libsmb.h"
+#include "source3/libsmb/proto.h"
 #include "lib/util_ea.h"
 #include "librpc/gen_ndr/ndr_quota.h"
 #include "librpc/gen_ndr/ndr_security.h"
@@ -167,8 +167,15 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
 
 	sd_fsp = metadata_fsp(fsp);
 	status = SMB_VFS_FSET_NT_ACL(sd_fsp, security_info_sent, psd);
-
 	TALLOC_FREE(psd);
+
+	if (NT_STATUS_IS_OK(status)) {
+		notify_fname(fsp->conn,
+			     NOTIFY_ACTION_MODIFIED,
+			     FILE_NOTIFY_CHANGE_SECURITY,
+			     fsp->fsp_name,
+			     NULL);
+	}
 
 	return status;
 }
@@ -286,8 +293,6 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	int info;
 	off_t ret=-1;
 	NTSTATUS status = NT_STATUS_OK;
-	struct smb_filename *parent = NULL;
-	struct smb_filename *pathref = NULL;
 
 	if (!CAN_WRITE(conn)) {
 		status = NT_STATUS_MEDIA_WRITE_PROTECTED;
@@ -313,7 +318,7 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 		goto out;
 	}
 
-	/* No links from a directory. */
+	/* No copy from a directory. */
 	if (S_ISDIR(smb_fname_src->st.st_ex_mode)) {
 		status = NT_STATUS_FILE_IS_A_DIRECTORY;
 		goto out;
@@ -405,16 +410,10 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 	   creates the file. This isn't the correct thing to do in the copy
 	   case. JRA */
 
-	status = SMB_VFS_PARENT_PATHNAME(conn,
-					 talloc_tos(),
-					 smb_fname_dst,
-					 &parent,
-					 NULL);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto out;
-	}
 	if (smb_fname_dst->fsp == NULL) {
-		status = synthetic_pathref(parent,
+		struct smb_filename *pathref = NULL;
+
+		status = synthetic_pathref(ctx,
 					conn->cwd_fsp,
 					smb_fname_dst->base_name,
 					smb_fname_dst->stream_name,
@@ -425,15 +424,15 @@ NTSTATUS copy_internals(TALLOC_CTX *ctx,
 
 		/* should we handle NT_STATUS_OBJECT_NAME_NOT_FOUND specially here ???? */
 		if (!NT_STATUS_IS_OK(status)) {
-			TALLOC_FREE(parent);
 			goto out;
 		}
-		file_set_dosmode(conn, pathref, fattr, parent, false);
+		file_set_dosmode(conn, pathref, fattr, dst_dirfsp, false);
 		smb_fname_dst->st.st_ex_mode = pathref->st.st_ex_mode;
+		TALLOC_FREE(pathref);
 	} else {
-		file_set_dosmode(conn, smb_fname_dst, fattr, parent, false);
+		file_set_dosmode(
+			conn, smb_fname_dst, fattr, dst_dirfsp, false);
 	}
-	TALLOC_FREE(parent);
 
 	if (ret < (off_t)smb_fname_src->st.st_ex_size) {
 		status = NT_STATUS_DISK_FULL;

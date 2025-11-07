@@ -219,8 +219,8 @@ static struct smb2_tree *test_multichannel_create_channel(
 
 	status = smb2_connect(tctx,
 			host,
-			lpcfg_smb_ports(tctx->lp_ctx),
 			share,
+			tctx->lp_ctx,
 			lpcfg_resolve_context(tctx->lp_ctx),
 			credentials,
 			&tree,
@@ -2018,8 +2018,8 @@ static bool test_multichannel_num_channels(struct torture_context *tctx,
 		torture_assert_ntstatus_ok_goto(tctx,
 			smb2_connect(tctx,
 				host,
-				lpcfg_smb_ports(tctx->lp_ctx),
 				share,
+				tctx->lp_ctx,
 				lpcfg_resolve_context(tctx->lp_ctx),
 				credentials,
 				&tree2[i],
@@ -2549,6 +2549,11 @@ static bool test_multichannel_bug_15346(struct torture_context *tctx,
 		struct socket_context *sock = NULL;
 		uint16_t port = 445;
 		struct smbcli_options options = transport1->options;
+		struct smb_transport tp = {
+			.type = SMB_TRANSPORT_TYPE_TCP,
+			.port = port,
+		};
+		struct smbXcli_transport *xtp = NULL;
 
 		conn->state = state;
 		conn->idx = i;
@@ -2563,8 +2568,16 @@ static bool test_multichannel_bug_15346(struct torture_context *tctx,
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"socket_connect_multi failed");
 
+		xtp = smbXcli_transport_bsd(state->conns,
+					    &sock->fd,
+					    TLS_VERIFY_PEER_NO_CHECK,
+					    &tp);
+		torture_assert_goto(tctx, xtp != NULL, ret, done,
+				    "smbXcli_transport_bsd failed");
+		TALLOC_FREE(sock);
+
 		conn->smbXcli = smbXcli_conn_create(state->conns,
-					sock->fd,
+					&xtp,
 					host,
 					SMB_SIGNING_OFF,
 					0,
@@ -2573,8 +2586,6 @@ static bool test_multichannel_bug_15346(struct torture_context *tctx,
 					&options.smb3_capabilities);
 		torture_assert_goto(tctx, conn->smbXcli != NULL, ret, done,
 				    "smbXcli_conn_create failed");
-		sock->fd = -1;
-		TALLOC_FREE(sock);
 	}
 
 	/*
@@ -2648,8 +2659,8 @@ static bool test_multichannel_bug_15346(struct torture_context *tctx,
 		options.only_negprot = true;
 		status = smb2_connect_ext(state->conns,
 					  host,
-					  NULL, /* ports */
 					  share,
+					  tctx->lp_ctx,
 					  resolve_ctx,
 					  samba_cmdline_get_creds(),
 					  &conn->smbXcli,

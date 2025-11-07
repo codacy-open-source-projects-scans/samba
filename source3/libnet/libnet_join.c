@@ -19,6 +19,8 @@
  */
 
 #include "includes.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "ads.h"
 #include "libsmb/namequery.h"
 #include "librpc/gen_ndr/ndr_libnet_join.h"
@@ -35,14 +37,15 @@
 #include "../libds/common/flags.h"
 #include "secrets.h"
 #include "rpc_client/init_lsa.h"
+
 #include "rpc_client/cli_pipe.h"
 #include "../libcli/security/security.h"
 #include "passdb.h"
-#include "libsmb/libsmb.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "lib/param/loadparm.h"
 #include "libcli/auth/netlogon_creds_cli.h"
 #include "auth/credentials/credentials.h"
+#include "auth/gensec/gensec.h"
 #include "libsmb/dsgetdcname.h"
 #include "rpc_client/util_netlogon.h"
 #include "libnet/libnet_join_offline.h"
@@ -552,7 +555,14 @@ static ADS_STATUS libnet_join_set_machine_spn(TALLOC_CTX *mem_ctx,
 	 * Register dns_hostname if needed, add_uniq_spn() will avoid
 	 * duplicates.
 	 */
-	dns_hostname = lp_dns_hostname();
+	if (r->in.dnshostname != NULL) {
+		dns_hostname = talloc_strdup(frame, r->in.dnshostname);
+	} else {
+		dns_hostname = talloc_asprintf(frame,
+					       "%s.%s",
+					       r->in.machine_name,
+					       r->out.dns_domain_name);
+	}
 	if (dns_hostname == NULL) {
 		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
 		goto done;
@@ -859,7 +869,7 @@ static ADS_STATUS libnet_join_set_etypes(TALLOC_CTX *mem_ctx,
 static bool libnet_join_create_keytab(TALLOC_CTX *mem_ctx,
 				      struct libnet_JoinCtx *r)
 {
-	NTSTATUS ntstatus = sync_pw2keytabs();
+	NTSTATUS ntstatus = sync_pw2keytabs(r->in.dc_name);
 
 	return NT_STATUS_IS_OK(ntstatus);
 }
@@ -1062,13 +1072,17 @@ static NTSTATUS libnet_join_connect_dc_ipc(TALLOC_CTX *mem_ctx,
 					   struct cli_state **cli)
 {
 	int flags = CLI_FULL_CONNECTION_IPC;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 	NTSTATUS status;
 
 	status = cli_full_connection_creds(mem_ctx,
 					   cli,
 					   NULL,
 					   dc,
-					   NULL, 0,
+					   NULL,
+					   &ts,
 					   "IPC$", "IPC",
 					   creds,
 					   flags);
@@ -1219,6 +1233,10 @@ static NTSTATUS libnet_join_joindomain_rpc_unsecure(TALLOC_CTX *mem_ctx,
 	cli_credentials_set_password(cli_creds,
 				     r->in.passed_machine_password,
 				     CRED_SPECIFIED);
+
+	cli_credentials_add_gensec_features(cli_creds,
+					    GENSEC_FEATURE_NO_DELEGATION,
+					    CRED_SPECIFIED);
 
 	remote_sockaddr = smbXcli_conn_remote_sockaddr(cli->conn);
 
@@ -1635,6 +1653,9 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 	NTSTATUS status;
 	int flags = CLI_FULL_CONNECTION_IPC;
 	const struct sockaddr_storage *remote_sockaddr = NULL;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	if (!dc_name) {
 		TALLOC_FREE(frame);
@@ -1660,11 +1681,16 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 					   kerberos_state,
 					   CRED_SPECIFIED);
 
+	cli_credentials_add_gensec_features(cli_creds,
+					    GENSEC_FEATURE_NO_DELEGATION,
+					    CRED_SPECIFIED);
+
 	status = cli_full_connection_creds(frame,
 					   &cli,
 					   NULL,
 					   dc_name,
-					   NULL, 0,
+					   NULL,
+					   &ts,
 					   "IPC$", "IPC",
 					   cli_creds,
 					   flags);
@@ -1682,7 +1708,8 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 						   &cli,
 						   NULL,
 						   dc_name,
-						   NULL, 0,
+						   NULL,
+						   &ts,
 						   "IPC$", "IPC",
 						   anon_creds,
 						   flags);

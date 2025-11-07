@@ -27,6 +27,7 @@
 #include "nsswitch/libwbclient/wbclient.h"
 #include "librpc/gen_ndr/dcerpc.h"
 #include "librpc/gen_ndr/winbind.h"
+#include "librpc/gen_ndr/drsblobs.h"
 
 #include "../lib/util/tevent_ntstatus.h"
 
@@ -67,14 +68,43 @@ struct winbindd_cli_state {
 	struct getgrent_state *grent_state; /* State for getgrent() */
 };
 
+struct winbindd_domain;
+
+struct winbindd_domain_ref_internals {
+	const char *location;
+	const char *func;
+	bool stale;
+	struct dom_sid sid;
+	uint64_t generation;
+	struct winbindd_domain *domain; /* might be stale */
+};
+
+struct winbindd_domain_ref {
+	struct winbindd_domain_ref_internals internals;
+};
+
+void _winbindd_domain_ref_set(struct winbindd_domain_ref *ref,
+			      struct winbindd_domain *domain,
+			      const char *location,
+			      const char *func);
+#define winbindd_domain_ref_set(__ref, __domain) \
+	_winbindd_domain_ref_set(__ref, __domain, __location__, __func__)
+
+bool _winbindd_domain_ref_get(struct winbindd_domain_ref *ref,
+			      struct winbindd_domain **_domain,
+			      const char *location,
+			      const char *func);
+#define winbindd_domain_ref_get(__ref, __domain) \
+	_winbindd_domain_ref_get(__ref, __domain, __location__, __func__)
+
 struct getpwent_state {
-	struct winbindd_domain *domain;
+	struct winbindd_domain_ref domain;
 	uint32_t next_user;
 	struct wbint_RidArray rids;
 };
 
 struct getgrent_state {
-	struct winbindd_domain *domain;
+	struct winbindd_domain_ref domain;
 	uint32_t next_group;
 	uint32_t num_groups;
 	struct wbint_Principal *groups;
@@ -101,11 +131,9 @@ struct winbindd_cm_conn {
 
 /* Async child */
 
-struct winbindd_domain;
-
 struct winbindd_child {
 	pid_t pid;
-	struct winbindd_domain *domain;
+	struct winbindd_domain *domain; /* if valid also talloc (grant) parent */
 	char *logfilename;
 
 	int sock;
@@ -128,6 +156,7 @@ struct winbindd_domain {
 	uint32_t domain_flags;                   /* Domain flags from netlogon.h */
 	uint32_t domain_type;                    /* Domain type from netlogon.h */
 	uint32_t domain_trust_attribs;           /* Trust attribs from netlogon.h */
+	struct lsa_ForestTrustInformation2 *fti;
 	struct winbindd_domain *routing_domain;
 	bool initialized;		       /* Did we already ask for the domain mode? */
 	bool active_directory;                 /* is this a win2k active directory ? */

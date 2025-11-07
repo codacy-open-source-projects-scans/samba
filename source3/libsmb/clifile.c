@@ -20,7 +20,9 @@
 
 #include "includes.h"
 #include "system/filesys.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "source3/libsmb/cli_smb2_fnum.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "async_smb.h"
 #include "libsmb/clirap.h"
@@ -2364,9 +2366,8 @@ struct tevent_req *cli_unlink_send(TALLOC_CTX *mem_ctx,
 		 * Don't allow attributes greater than
 		 * 16-bits for a 16-bit protocol value.
 		 */
-		if (tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER)) {
-			return tevent_req_post(req, ev);
-		}
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return tevent_req_post(req, ev);
 	}
 
 	SSVAL(state->vwv+0, 0, mayhave_attrs);

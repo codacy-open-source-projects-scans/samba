@@ -20,6 +20,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include "cmocka.h"
 
@@ -105,6 +106,7 @@ static void test_sddl_compile(void **state)
 	}
 	if (s == NULL) {
 		debug_fail("%s\n", sddl);
+		TALLOC_FREE(mem_ctx);
 		fail();
 	}
 
@@ -115,6 +117,7 @@ static void test_sddl_compile(void **state)
 	for (i = 0; i < compiled.length; i++) {
 		assert_int_equal(compiled.data[i], ace[i]);
 	}
+	TALLOC_FREE(mem_ctx);
 }
 
 static void test_sddl_compile2(void **state)
@@ -145,6 +148,7 @@ static void test_sddl_compile2(void **state)
 	}
 	if (s == NULL) {
 		debug_fail("%s\n", sddl);
+		TALLOC_FREE(mem_ctx);
 		fail();
 	}
 
@@ -155,6 +159,7 @@ static void test_sddl_compile2(void **state)
 	for (i = 0; i < compiled.length; i++) {
 		assert_int_equal(compiled.data[i], ace[i]);
 	}
+	TALLOC_FREE(mem_ctx);
 }
 
 static void test_full_sddl_compile(void **state)
@@ -577,6 +582,7 @@ static void test_full_sddl_ra_escapes(void **state)
 		(ndr_pull_flags_fn_t)ndr_pull_security_descriptor);
 
 	assert_true(NDR_ERR_CODE_IS_SUCCESS(ndr_err));
+	TALLOC_FREE(mem_ctx);
 }
 
 static void test_round_trips(void **state)
@@ -722,6 +728,7 @@ static void test_round_trips(void **state)
 		}
 	}
 	assert_false(failed);
+	TALLOC_FREE(mem_ctx);
 }
 
 static void test_a_number_of_valid_strings(void **state)
@@ -769,6 +776,7 @@ static void test_a_number_of_valid_strings(void **state)
 		}
 	}
 	assert_false(failed);
+	TALLOC_FREE(mem_ctx);
 }
 
 
@@ -842,6 +850,7 @@ static void test_a_number_of_invalid_strings(void **state)
 		}
 	}
 	assert_false(failed_to_fail);
+	TALLOC_FREE(mem_ctx);
 }
 
 
@@ -928,6 +937,7 @@ static void test_a_number_of_invalid_full_sddl_strings(void **state)
 	}
 	assert_false(failed_to_fail);
 	assert_false(message_wrong);
+	TALLOC_FREE(mem_ctx);
 }
 
 
@@ -979,6 +989,7 @@ static void test_valid_strings_with_trailing_crap(void **state)
 		}
 	}
 	assert_false(failed);
+	TALLOC_FREE(mem_ctx);
 }
 
 

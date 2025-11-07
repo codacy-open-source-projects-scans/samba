@@ -462,8 +462,20 @@ struct dcerpc_binding_handle *dom_child_handle(struct winbindd_domain *domain)
 
 struct wb_domain_request_state {
 	struct tevent_context *ev;
+	/*
+	 * Note we use a plain
+	 * struct winbindd_domain pointer
+	 * instead of struct winbindd_domain_ref
+	 * here, because we're protected by
+	 * queue_entry that the domain
+	 * is not free'd.
+	 *
+	 * This also makes sure
+	 * struct winbindd_child *child
+	 * does not be come invalid.
+	 */
 	struct tevent_queue_entry *queue_entry;
-	struct winbindd_domain *domain;
+	struct winbindd_domain *domain; /* no ref needed */
 	struct winbindd_child *child;
 	struct winbindd_request *request;
 	struct winbindd_request *init_req;
@@ -485,9 +497,13 @@ static void wb_domain_request_cleanup(struct tevent_req *req,
 	 * and give the next one in the queue the chance
 	 * to check for an idle child.
 	 */
+	state->child = NULL;
 	TALLOC_FREE(state->pending_subreq);
+	if (state->domain != NULL) {
+		tevent_queue_start(state->domain->queue);
+		state->domain = NULL;
+	}
 	TALLOC_FREE(state->queue_entry);
-	tevent_queue_start(state->domain->queue);
 }
 
 static void wb_domain_request_trigger(struct tevent_req *req,
@@ -532,6 +548,7 @@ static void wb_domain_request_trigger(struct tevent_req *req,
 	struct wb_domain_request_state *state = tevent_req_data(
 		req, struct wb_domain_request_state);
 	struct winbindd_domain *domain = state->domain;
+	const char *domain_name = NULL;
 	struct tevent_req *subreq = NULL;
 	size_t shortest_queue_length;
 
@@ -567,6 +584,9 @@ static void wb_domain_request_trigger(struct tevent_req *req,
 		 * and give the next one in the queue the chance
 		 * to check for an idle child.
 		 */
+		state->child = NULL;
+		tevent_queue_start(state->domain->queue);
+		state->domain = NULL;
 		TALLOC_FREE(state->queue_entry);
 		return;
 	}
@@ -604,8 +624,11 @@ static void wb_domain_request_trigger(struct tevent_req *req,
 	 * which is indicated by DS_RETURN_DNS_NAME.
 	 * For NT4 domains we still get the netbios name.
 	 */
+
+	domain_name = find_dns_domain_name(state->domain->name);
+
 	subreq = wb_dsgetdcname_send(state, state->ev,
-				     state->domain->name,
+				     domain_name,
 				     NULL, /* domain_guid */
 				     NULL, /* site_name */
 				     DS_RETURN_DNS_NAME); /* flags */
@@ -720,6 +743,9 @@ static void wb_domain_request_initialized(struct tevent_req *subreq)
 	 * and give the next one in the queue the chance
 	 * to check for an idle child.
 	 */
+	state->child = NULL;
+	tevent_queue_start(state->domain->queue);
+	state->domain = NULL;
 	TALLOC_FREE(state->queue_entry);
 }
 
@@ -780,6 +806,7 @@ void setup_child(struct winbindd_domain *domain, struct winbindd_child *child,
 {
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
+	TALLOC_CTX *mem_ctx = NULL;
 
 	if (logprefix && logname) {
 		char *logbase = NULL;
@@ -812,13 +839,19 @@ void setup_child(struct winbindd_domain *domain, struct winbindd_child *child,
 			  "logname == NULL");
 	}
 
+	if (domain != NULL) {
+		mem_ctx = domain->children;
+	} else {
+		mem_ctx = child;
+	}
+
 	child->pid = 0;
 	child->sock = -1;
 	child->domain = domain;
-	child->queue = tevent_queue_create(NULL, "winbind_child");
+	child->queue = tevent_queue_create(mem_ctx, "winbind_child");
 	SMB_ASSERT(child->queue != NULL);
 
-	child->binding_handle = wbint_binding_handle(NULL, NULL, child);
+	child->binding_handle = wbint_binding_handle(mem_ctx, NULL, child);
 	SMB_ASSERT(child->binding_handle != NULL);
 }
 
@@ -962,9 +995,9 @@ void winbindd_msg_reload_services_parent(struct messaging_context *msg,
 		tevent_thread_call_depth_set_callback(NULL, NULL);
 	}
 
-	ok = add_trusted_domains_dc();
+	ok = update_trusted_domains_dc();
 	if (!ok) {
-		DBG_ERR("add_trusted_domains_dc() failed\n");
+		DBG_ERR("update_trusted_domains_dc() failed\n");
 	}
 
 	forall_children(winbind_msg_relay_fn, &state);
@@ -1283,7 +1316,7 @@ static bool calculate_next_machine_pwd_change(const char *domain,
 		next_change = pass_last_set_time + timeout;
 		DEBUG(10,("machine password still valid until: %s\n",
 			http_timestring(talloc_tos(), next_change)));
-		*t = tevent_timeval_set(next_change, 0);
+		*t = (struct timeval) { .tv_sec = next_change, };
 
 		if (lp_clustering()) {
 			uint8_t randbuf;

@@ -113,14 +113,14 @@ static int aio_del_req_from_fsp(struct aio_req_fsp_link *lnk)
 	return 0;
 }
 
-bool aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req)
+struct aio_req_fsp_link *aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req)
 {
 	size_t array_len;
 	struct aio_req_fsp_link *lnk;
 
 	lnk = talloc(req, struct aio_req_fsp_link);
 	if (lnk == NULL) {
-		return false;
+		return NULL;
 	}
 
 	array_len = talloc_array_length(fsp->aio_requests);
@@ -130,7 +130,7 @@ bool aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req)
 		if (fsp->num_aio_requests + 10 < 10) {
 			/* Integer wrap. */
 			TALLOC_FREE(lnk);
-			return false;
+			return NULL;
 		}
 
 		/*
@@ -142,7 +142,7 @@ bool aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req)
 			fsp->num_aio_requests+10);
 		if (tmp == NULL) {
 			TALLOC_FREE(lnk);
-			return false;
+			return NULL;
 		}
 		fsp->aio_requests = tmp;
 	}
@@ -156,7 +156,7 @@ bool aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req)
 #endif
 	talloc_set_destructor(lnk, aio_del_req_from_fsp);
 
-	return true;
+	return lnk;
 }
 
 struct pwrite_fsync_state {
@@ -188,7 +188,7 @@ struct tevent_req *pwrite_fsync_send(TALLOC_CTX *mem_ctx,
 	state->fsp = fsp;
 	state->write_through = write_through;
 
-	ok = vfs_valid_pwrite_range(offset, n);
+	ok = vfs_valid_pwrite_range(fsp, offset, n);
 	if (!ok) {
 		tevent_req_error(req, EINVAL);
 		return tevent_req_post(req, ev);
@@ -368,7 +368,6 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 			(uint64_t)startpos,
 			(uint64_t)smb_maxcnt,
 			READ_LOCK,
-			lp_posix_cifsu_locktype(fsp),
 			&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
@@ -517,7 +516,6 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 			in_offset,
 			(uint64_t)in_data.length,
 			WRITE_LOCK,
-			lp_posix_cifsu_locktype(fsp),
 			&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
@@ -528,6 +526,7 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 
 	aio_ex->nbyte = in_data.length;
 	aio_ex->offset = in_offset;
+	prepare_file_modified(fsp, &aio_ex->modified_state);
 
 	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
 				in_data.data, in_data.length, in_offset,
@@ -588,7 +587,7 @@ static void aio_pwrite_smb2_done(struct tevent_req *req)
 	DEBUG(10, ("pwrite_recv returned %d, err = %s\n", (int)nwritten,
 		   (nwritten == -1) ? strerror(err) : "no error"));
 
-	mark_file_modified(fsp);
+	mark_file_modified(fsp, true, &aio_ex->modified_state);
 
         status = smb2_write_complete_nosync(subreq, nwritten, err);
 

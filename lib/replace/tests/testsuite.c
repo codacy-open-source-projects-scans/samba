@@ -380,6 +380,11 @@ static int test_asprintf(void)
 	return true;
 }
 
+/* This test explicitly triggers truncation, so we need to
+ * suppress the warning
+ */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
 static int test_snprintf(void)
 {
 	char tmp[10];
@@ -397,6 +402,7 @@ static int test_snprintf(void)
 	printf("success: snprintf\n");
 	return true;
 }
+#pragma GCC diagnostic pop
 
 static int test_vasprintf(void)
 {
@@ -448,12 +454,6 @@ static int test_dlopen(void)
 static int test_chroot(void)
 {
 	/* FIXME: chroot() */
-	return true;
-}
-
-static int test_bzero(void)
-{
-	/* FIXME: bzero */
 	return true;
 }
 
@@ -1200,7 +1200,6 @@ bool torture_local_replace(struct torture_context *ctx)
 	ret &= test_seekdir();
 	ret &= test_dlopen();
 	ret &= test_chroot();
-	ret &= test_bzero();
 	ret &= test_strerror();
 	ret &= test_errno();
 	ret &= test_mkdtemp();

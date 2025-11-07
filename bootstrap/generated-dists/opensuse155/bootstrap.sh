@@ -58,6 +58,7 @@ zypper --non-interactive install \
     libbsd-devel \
     libcap-devel \
     libcephfs-devel \
+    libevent-devel \
     libicu-devel \
     libjansson-devel \
     libpcap-devel \
@@ -98,6 +99,7 @@ zypper --non-interactive install \
     python3-requests \
     python3-semanage \
     python3-setproctitle \
+    python3-varlink \
     readline-devel \
     rng-tools \
     rpcgen \

@@ -35,6 +35,7 @@ from selftesthelpers import smbtorture4_options
 from selftesthelpers import smbcontrol
 from selftesthelpers import smbstatus
 from selftesthelpers import timelimit
+from selftesthelpers import smb_prometheus_endpoint
 smbtorture4_options.extend([
     '--option=torture:sharedelay=100000',
    '--option=torture:writetimeupdatedelay=500000',
@@ -42,13 +43,23 @@ smbtorture4_options.extend([
 
 
 def plansmbtorture4testsuite(name, env, options, description='', environ=None):
+    target = 'samba3'
+    if 'ad_dc_ntvfs' in env:
+        target = 'samba4-ntvfs'
+    elif 'ad_dc' in env:
+        target = 'samba4'
+    elif 'fl200' in env:
+        target = 'samba4'
+    elif 's4member' in env:
+        target = 'samba4'
+
     if description == '':
         modname = "samba3.%s" % (name, )
     else:
         modname = "samba3.%s %s" % (name, description)
 
     selftesthelpers.plansmbtorture4testsuite(
-        name, env, options, target='samba3', modname=modname, environ=environ)
+        name, env, options, target=target, modname=modname, environ=environ)
 
 def compare_versions(version1, version2):
     for i in range(max(len(version1),len(version2))):
@@ -96,6 +107,9 @@ have_ldwrap = ("HAVE_LDWRAP" in config_hash)
 with_pthreadpool = ("WITH_PTHREADPOOL" in config_hash)
 
 have_cluster_support = "CLUSTER_SUPPORT" in config_hash
+
+quic_ko_wrapper = ("QUIC_KO_WRAPPER" in config_hash)
+ngtcp2_environ = {'SOCKET_WRAPPER_ALLOW_DGRAM_SEQPACKET_FALLBACK': '1'}
 
 def is_module_enabled(module):
     if module in config_hash["STRING_SHARED_MODULES"]:
@@ -940,11 +954,18 @@ plantestsuite("samba3.blackbox.smbclient_old_dir", "fileserver_smb1",
                             "script/tests/test_old_dirlisting.sh"),
                timelimit, smbclient3])
 
+with_prometheus_exporter = ("HAVE_EVHTTP_NEW" and "WITH_PROFILE" in config_hash)
+
 for env in ["fileserver:local"]:
     plantestsuite("samba3.blackbox.net_usershare", env, [os.path.join(samba3srcdir, "script/tests/test_net_usershare.sh"), '$SERVER', '$SERVER_IP', '$USERNAME', '$PASSWORD', smbclient3])
 
     plantestsuite("samba3.blackbox.smbstatus", env, [os.path.join(samba3srcdir, "script/tests/test_smbstatus.sh"), '$SERVER', '$SERVER_IP', '$DOMAIN', '$USERNAME', '$PASSWORD', '$USERID', '$LOCAL_PATH', '$PREFIX', smbclient3, smbstatus, configuration, "SMB3"])
     plantestsuite("samba3.blackbox.net_registry_import", env, [os.path.join(samba3srcdir, "script/tests/test_net_registry_import.sh"), '$SERVER', '$LOCAL_PATH', '$USERNAME', '$PASSWORD'])
+    if with_prometheus_exporter:
+        plantestsuite("samba3.blackbox.smb_prometheus_endpoint", env,
+                      [os.path.join(samba3srcdir, "script/tests/test_smb_prometheus_endpoint.sh"),
+                      '$SERVER', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$LOCK_DIR', '$PREFIX',
+                      smb_prometheus_endpoint, smbclient3, configuration, "SMB3"])
 
 env = 'ad_member'
 plantestsuite("samba3.blackbox.smbget",
@@ -1142,6 +1163,7 @@ nbt = ["nbt.dgram"]
 vfs = [
     "vfs.fruit",
     "vfs.acl_xattr",
+    "vfs.streams_xattr",
     "vfs.fruit_netatalk",
     "vfs.fruit_file_id",
     "vfs.fruit_timemachine",
@@ -1221,7 +1243,8 @@ for t in tests:
     elif t == "rpc.mdssvc":
         plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
     elif t == "smb2.durable-open" or t == "smb2.durable-v2-open" or t == "smb2.replay" or t == "smb2.durable-v2-delay":
-        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/durable -U$USERNAME%$PASSWORD')
+        creds = " --option=torture:user2name=user1 --option=torture:user2password=$PASSWORD"
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/durable -U$USERNAME%$PASSWORD' + creds)
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER_IP/durable -U$USERNAME%$PASSWORD')
     elif t == "base.rw1":
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
@@ -1337,6 +1360,8 @@ for t in tests:
             plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
     elif t == "vfs.acl_xattr":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+    elif t == "vfs.streams_xattr":
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_wo_fruit -U$USERNAME%$PASSWORD')
     elif t == "smb2.compound_find":
         plansmbtorture4testsuite(t, "fileserver", '//$SERVER/compound_find -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
@@ -1353,7 +1378,6 @@ for t in tests:
         plansmbtorture4testsuite(t, "ad_dc_smb1", '//$SERVER/tmp -U$USERNAME%$PASSWORD --option=torture:wksname=samba3rpctest')
     elif t == "smb2.streams":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
-        plansmbtorture4testsuite(t, "ad_dc", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/streams_xattr -U$USERNAME%$PASSWORD', 'streams_xattr')
     elif t == "smb2.stream-inherit-perms":
         plansmbtorture4testsuite(t, "fileserver", '//$SERVER/inherit_perms -U$USERNAME%$PASSWORD')
@@ -1469,6 +1493,48 @@ for t in vfs_io_uring_tests:
     plansmbtorture4testsuite(t, "fileserver",
                              '//$SERVER_IP/io_uring -U$USERNAME%$PASSWORD',
                              "vfs_io_uring")
+
+smb_transport_tests = [
+    "smb2.bench",
+    "smb2.connect",
+    "smb2.credits",
+    "smb2.ioctl",
+    "smb2.rw",
+]
+for t in smb_transport_tests:
+    plansmbtorture4testsuite(t, "fileserver",
+                             '//$SERVER/tmp -U$USERNAME%$PASSWORD ' +
+                             '--option=clientsmbtransports=tcp ' +
+                             '--option=clientsmbtransport:force_bsd_tstream=yes',
+                             description="smb-over-bsd-tstream")
+for t in smb_transport_tests:
+    if not quic_ko_wrapper:
+        break
+    plansmbtorture4testsuite(t, "fileserver:local",
+                             '//$SERVER/tmp -U$USERNAME%$PASSWORD ' +
+                             '--option=clientsmbtransports=quic ' +
+                             '--option=tlsverifypeer=ca_and_name',
+                             description="smb-over-quic-ko-bsd")
+    plansmbtorture4testsuite(t, "fileserver:local",
+                             '//$SERVER/tmp -U$USERNAME%$PASSWORD ' +
+                             '--option=clientsmbtransports=quic ' +
+                             '--option=tlsverifypeer=ca_and_name ' +
+                             '--option=clientsmbtransport:force_bsd_tstream=yes',
+                             description="smb-over-quic-ko-tstream")
+for t in smb_transport_tests:
+    if not quic_ko_wrapper:
+        break
+    # Here we test the client using quic without
+    # quic.ko simulation based on ngtcp2 over udp.
+    # Note the server still uses quic.ko simulation
+    # so this is also behind the quic_ko_wrapper check.
+    plansmbtorture4testsuite(t, "fileserver",
+                             '//$SERVER/tmp -U$USERNAME%$PASSWORD ' +
+                             '--option=clientsmbtransports=quic ' +
+                             '--option=tlsverifypeer=no_check ' +
+                             '--option=clientsmbtransport:force_ngtcp2_quic=yes',
+                             description="smb-over-quic-ngtcp2",
+                             environ=ngtcp2_environ)
 
 test = 'rpc.lsa.lookupsids'
 auth_options = ["", "ntlm", "spnego", "spnego,ntlm", "spnego,smb1", "spnego,smb2"]
@@ -1890,6 +1956,18 @@ plantestsuite(
      "bin/net",
      "bin/samba-tool",
      '$DNSNAME'])
+
+for auth in ["$DC_USERNAME", "$DOMAIN\\\\$DC_USERNAME", "$DC_USERNAME@$REALM" ]:
+    plantestsuite(
+        "samba3.blackbox.net_ads_kerberos (%s)" % auth,
+        "ad_member:local",
+        [os.path.join(samba3srcdir,
+                      "script/tests/test_net_ads_kerberos.sh"),
+         auth,
+         '$REALM',
+         '$DC_PASSWORD',
+         '$PREFIX',
+         configuration])
 
 plantestsuite("samba3.blackbox.force-user-unlink",
               "maptoguest:local",

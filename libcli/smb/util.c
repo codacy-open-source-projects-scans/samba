@@ -267,6 +267,7 @@ static uint8_t *internal_bytes_push_str(uint8_t *buf, bool ucs2,
 				   ucs2 ? CH_UTF16LE : CH_DOS,
 				   str, str_len, &converted,
 				   &converted_size)) {
+		TALLOC_FREE(buf);
 		TALLOC_FREE(frame);
 		return NULL;
 	}
@@ -541,9 +542,11 @@ static int32_t parse_enum_val(const struct enum_list *e,
 	return ret;
 }
 
-struct smb311_capabilities smb311_capabilities_parse(const char *role,
-				const char * const *signing_algos,
-				const char * const *encryption_algos)
+struct smb311_capabilities smb311_capabilities_parse(
+	const char *role,
+	const char *const *signing_algos,
+	const char *const *encryption_algos,
+	bool smb_encryption_over_quic)
 {
 	struct smb311_capabilities c = {
 		.signing = {
@@ -552,6 +555,7 @@ struct smb311_capabilities smb311_capabilities_parse(const char *role,
 		.encryption = {
 			.num_algos = 0,
 		},
+		.smb_encryption_over_quic = smb_encryption_over_quic,
 	};
 	char sign_param[64] = { 0, };
 	char enc_param[64] = { 0, };
@@ -723,4 +727,59 @@ NTSTATUS smb311_capabilities_check(const struct smb311_capabilities *c,
 	}
 
 	return NT_STATUS_OK;
+}
+
+struct smb_transports smb_transports_parse(const char *param_name,
+					   const char * const *transports)
+{
+	struct smb_transports ts = {
+		.num_transports = 0,
+	};
+	size_t ti;
+
+	for (ti = 0; transports != NULL && transports[ti] != NULL; ti++) {
+		struct smb_transport t = {
+			.type = SMB_TRANSPORT_TYPE_UNKNOWN,
+		};
+		bool ignore = false;
+		size_t ei;
+		bool ok = false;
+
+		if (ts.num_transports >= SMB_TRANSPORTS_MAX_TRANSPORTS) {
+			DBG_ERR("WARNING: Ignoring trailing value '%s' for parameter '%s'\n",
+				transports[ti], param_name);
+			continue;
+		}
+
+		ok = smb_transport_parse(transports[ti], &t);
+		if (!ok) {
+			DBG_ERR("WARNING: Ignoring invalid value '%s' for parameter '%s'\n",
+				transports[ti], param_name);
+			continue;
+		}
+
+		for (ei = 0; ei < ts.num_transports; ei++) {
+			if (t.type != ts.transports[ei].type) {
+				continue;
+			}
+
+			if (t.port != ts.transports[ei].port) {
+				continue;
+			}
+
+			ignore = true;
+			break;
+		}
+
+		if (ignore) {
+			DBG_ERR("WARNING: Ignoring duplicate value '%s' for parameter '%s'\n",
+				transports[ti], param_name);
+			continue;
+		}
+
+		ts.transports[ts.num_transports] = t;
+		ts.num_transports += 1;
+	}
+
+	return ts;
 }

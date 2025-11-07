@@ -764,7 +764,7 @@ static DIR *mh_fdopendir(vfs_handle_struct *handle,
 	DIR *dirstream;
 
 	DEBUG(MH_INFO_DEBUG, ("Entering with fsp->fsp_name->base_name '%s'\n",
-			      fsp->fsp_name->base_name));
+			      fsp_str_dbg(fsp)));
 
 	dirstream = SMB_VFS_NEXT_FDOPENDIR(handle, fsp, mask, attr);
 	if (!dirstream)
@@ -801,7 +801,7 @@ out:
 err:
 	/* Failure is freed here. */
 	DEBUG(MH_ERR_DEBUG, ("Failing with fsp->fsp_name->base_name '%s'\n",
-			fsp->fsp_name->base_name));
+			     fsp_str_dbg(fsp)));
 	TALLOC_FREE(dirInfo);
 	return NULL;
 }
@@ -1192,11 +1192,11 @@ out:
  * Failure: set errno, return -1
  */
 static int mh_renameat(vfs_handle_struct *handle,
-		files_struct *srcfsp,
-		const struct smb_filename *smb_fname_src,
-		files_struct *dstfsp,
-		const struct smb_filename *smb_fname_dst,
-		const struct vfs_rename_how *how)
+		       files_struct *src_dirfsp,
+		       const struct smb_filename *smb_fname_src,
+		       files_struct *dst_dirfsp,
+		       const struct smb_filename *smb_fname_dst,
+		       const struct vfs_rename_how *how)
 {
 	int status = -1;
 	struct smb_filename *full_fname_src = NULL;
@@ -1215,23 +1215,23 @@ static int mh_renameat(vfs_handle_struct *handle,
 			!is_in_media_files(smb_fname_dst->base_name))
 	{
 		status = SMB_VFS_NEXT_RENAMEAT(handle,
-				srcfsp,
-				smb_fname_src,
-				dstfsp,
-				smb_fname_dst,
-				how);
+					       src_dirfsp,
+					       smb_fname_src,
+					       dst_dirfsp,
+					       smb_fname_dst,
+					       how);
 		goto out;
 	}
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),
-						      srcfsp,
+						      src_dirfsp,
 						      smb_fname_src);
 	if (full_fname_src == NULL) {
 		errno = ENOMEM;
 		goto out;
         }
 	full_fname_dst = full_path_from_dirfsp_atname(talloc_tos(),
-						      dstfsp,
+						      dst_dirfsp,
 						      smb_fname_dst);
 	if (full_fname_dst == NULL) {
 		errno = ENOMEM;
@@ -1255,11 +1255,11 @@ static int mh_renameat(vfs_handle_struct *handle,
 	}
 
 	status = SMB_VFS_NEXT_RENAMEAT(handle,
-				srcfsp->conn->cwd_fsp,
-				srcClientFname,
-				dstfsp->conn->cwd_fsp,
-				dstClientFname,
-				how);
+				       src_dirfsp->conn->cwd_fsp,
+				       srcClientFname,
+				       dst_dirfsp->conn->cwd_fsp,
+				       dstClientFname,
+				       how);
 err:
 	TALLOC_FREE(full_fname_src);
 	TALLOC_FREE(full_fname_dst);
@@ -1646,11 +1646,11 @@ out:
  * Failure: set errno, return -1
  */
 static int mh_linkat(vfs_handle_struct *handle,
-		files_struct *srcfsp,
-		const struct smb_filename *old_smb_fname,
-		files_struct *dstfsp,
-		const struct smb_filename *new_smb_fname,
-		int flags)
+		     files_struct *src_dirfsp,
+		     const struct smb_filename *old_smb_fname,
+		     files_struct *dst_dirfsp,
+		     const struct smb_filename *new_smb_fname,
+		     int flags)
 {
 	int status;
 	struct smb_filename *old_full_fname = NULL;
@@ -1661,16 +1661,16 @@ static int mh_linkat(vfs_handle_struct *handle,
 	DEBUG(MH_INFO_DEBUG, ("Entering mh_linkat\n"));
 
 	old_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						srcfsp,
-						old_smb_fname);
+						      src_dirfsp,
+						      old_smb_fname);
 	if (old_full_fname == NULL) {
 		status = -1;
 		goto err;
 	}
 
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						dstfsp,
-						new_smb_fname);
+						      dst_dirfsp,
+						      new_smb_fname);
 	if (new_full_fname == NULL) {
 		status = -1;
 		goto err;
@@ -1682,11 +1682,11 @@ static int mh_linkat(vfs_handle_struct *handle,
 		TALLOC_FREE(new_full_fname);
 
 		status = SMB_VFS_NEXT_LINKAT(handle,
-				srcfsp,
-				old_smb_fname,
-				dstfsp,
-				new_smb_fname,
-				flags);
+					     src_dirfsp,
+					     old_smb_fname,
+					     dst_dirfsp,
+					     new_smb_fname,
+					     flags);
 		goto out;
 	}
 

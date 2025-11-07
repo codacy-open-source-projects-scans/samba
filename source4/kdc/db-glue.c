@@ -45,6 +45,11 @@
 #include "kdc/pac-glue.h"
 #include "librpc/gen_ndr/ndr_irpc_c.h"
 #include "lib/messaging/irpc.h"
+#include "librpc/gen_ndr/ndr_keycredlink.h"
+#include "talloc.h"
+#include "util/data_blob.h"
+#include "util/debug.h"
+#include "util/samba_util.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_KERBEROS
@@ -68,7 +73,7 @@ enum trust_direction {
 	OUTBOUND = LSA_TRUST_DIRECTION_OUTBOUND
 };
 
-static const char *trust_attrs[] = {
+static const char * const trust_attrs[] = {
 	"securityIdentifier",
 	"flatName",
 	"trustPartner",
@@ -80,6 +85,8 @@ static const char *trust_attrs[] = {
 	"trustAuthOutgoing",
 	"whenCreated",
 	"msDS-SupportedEncryptionTypes",
+	"msDS-IngressClaimsTransformationPolicy",
+	"msDS-EgressClaimsTransformationPolicy",
 	NULL
 };
 
@@ -596,7 +603,7 @@ static krb5_error_code samba_kdc_merge_keys(struct sdb_keys *keys,
 	num_old_keys = old_keys->len;
 	total_keys = num_keys + num_old_keys;
 
-	skeys = realloc(keys->val, total_keys * sizeof keys->val[0]);
+	skeys = realloc_p(keys->val, struct sdb_key, total_keys);
 	if (skeys == NULL) {
 		return ENOMEM;
 	}
@@ -653,6 +660,11 @@ krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 	const bool exporting_keytab = flags & SDB_F_ADMIN_DATA;
 
 	*supported_enctypes_out = 0;
+
+	if (entry == NULL) {
+		DBG_ERR("entry is NULL");
+		return EINVAL;
+	}
 
 	/* Is this the krbtgt or a RODC krbtgt */
 	if (is_rodc) {
@@ -1178,6 +1190,726 @@ static krb5_error_code samba_kdc_get_entry_principal(
 	return code;
 }
 
+
+/**
+ * @brief Copy the contents of a data blob to a krb5_data element
+ *
+ * @param[in]  blob  The source data blob
+ * @param[out] krb5  The target krb5_data element
+ *
+ * @return 0      No error
+ *         ENOMEM memory allocation error
+ *
+ * @note Memory is allocated with malloc and needs to be freed
+ */
+static krb5_error_code data_blob_to_krb5_data( DATA_BLOB *blob, krb5_data *krb5)
+{
+	krb5->data = malloc(blob->length);
+	if (krb5->data == NULL) {
+		return ENOMEM;
+	}
+	memcpy(krb5->data, blob->data, blob->length);
+	krb5->length = blob->length;
+	return 0;
+}
+
+
+/**
+ * @brief Copy the contents of a hex string data blob to a binary
+ *        krb5_data element
+ *
+ * @param[in]  blob  The source data blob
+ * @param[out] krb5  The target krb5_data element
+ *
+ * @return 0      No error
+ *         ENOMEM memory allocation error
+ *         EINVAL data blob is not a valid hex string encoding
+ *
+ * @note Memory is allocated with malloc and needs to be freed
+ */
+static krb5_error_code db_hex_str_to_krb5_data(
+	DATA_BLOB *blob,
+	krb5_data *krb5)
+{
+
+	size_t size = 0;
+
+	if( (blob->length%2) != 0) {
+		DBG_ERR(
+			"Hex string [%*.*s] "
+			"does not have an even length",
+			(int) blob->length,
+			(int) blob->length,
+			(char *) blob->data);
+		return EINVAL;
+	}
+	krb5->length = (blob->length/2);
+	krb5->data = malloc(krb5->length);
+	if (krb5->data == NULL) {
+		krb5->length = 0;
+		return ENOMEM;
+	}
+	size = strhex_to_str(krb5->data,
+			     krb5->length,
+		             (const char *) blob->data,
+		             blob->length);
+	if (size != krb5->length) {
+		krb5->length = 0;
+		SAFE_FREE(krb5->data);
+		return EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * Helper macro to populate the data blob constants used by
+ * populate_certificate_mapping and parse_certificate_mapping
+ */
+#define DATA_BLOB_STRING(str) {\
+	.data = discard_const_p(uint8_t, str), \
+	.length = sizeof(str) - 1 \
+}
+static const DATA_BLOB ISSUER_NAME = DATA_BLOB_STRING("I");
+static const DATA_BLOB SUBJECT_NAME = DATA_BLOB_STRING("S");
+static const DATA_BLOB SERIAL_NUMBER = DATA_BLOB_STRING("SR");
+static const DATA_BLOB SUBJECT_KEY_IDENTIFIER = DATA_BLOB_STRING("SKI");
+static const DATA_BLOB PUBLIC_KEY = DATA_BLOB_STRING("SHA1-PUKEY");
+static const DATA_BLOB RFC822 = DATA_BLOB_STRING("RFC822");
+static const DATA_BLOB X509_HEADER = DATA_BLOB_STRING("X509:");
+#undef DATA_BLOB_STRING
+
+/**
+ * @brief Populate the certificate mapping from the tag and value
+ *
+ * @param[in]     tag      the tag i.e. I, S, SKI, .....
+ * @param[in]     value    the value associated with the tag
+ * @param[in,out] mapping  the mapping to be updated
+ *
+ * @return      0 No error
+ *         EINVAL tag or value are invalid
+ *         ENOMEM memory allocation error
+ *
+ * @note Memory is allocated with malloc and needs to be freed with
+ *       sdb_certificate_mapping_free
+ */
+static krb5_error_code populate_certificate_mapping(
+	DATA_BLOB *tag,
+	DATA_BLOB *value,
+	struct sdb_certificate_mapping *mapping)
+{
+	krb5_error_code ret = 0;
+
+	if (tag->length == 0) {
+		DBG_WARNING("altSecurityIdentities empty tag");
+		return EINVAL;
+	}
+	if (value->length == 0) {
+		DBG_WARNING("altSecurityIdentities no value for %*.*s",
+			    (int) tag->length,
+			    (int) tag->length,
+			    tag->data);
+		return EINVAL;
+	}
+
+	if (data_blob_cmp(&ISSUER_NAME, tag) == 0) {
+		/* discard any previous value */
+		if (mapping->issuer_name.data != NULL) {
+			SAFE_FREE(mapping->issuer_name.data);
+			mapping->issuer_name.length = 0;
+		}
+		ret = data_blob_to_krb5_data(value, &mapping->issuer_name);
+
+	} else if (data_blob_cmp(&SUBJECT_NAME, tag) == 0) {
+		/* discard any previous value */
+		if (mapping->subject_name.data != NULL) {
+			SAFE_FREE(mapping->subject_name.data);
+			mapping->subject_name.length = 0;
+		}
+		ret = data_blob_to_krb5_data(value, &mapping->subject_name);
+
+	} else if (data_blob_cmp(&RFC822, tag) == 0) {
+		/* discard any previous value */
+		if (mapping->rfc822.data != NULL) {
+			SAFE_FREE(mapping->rfc822.data);
+			mapping->rfc822.length = 0;
+		}
+		ret = data_blob_to_krb5_data(value, &mapping->rfc822);
+
+	} else if (data_blob_cmp(&SERIAL_NUMBER, tag ) == 0) {
+		/* discard any previous value */
+		if (mapping->serial_number.data != NULL) {
+			SAFE_FREE(mapping->serial_number.data);
+			mapping->serial_number.length = 0;
+		}
+		ret = db_hex_str_to_krb5_data(value, &mapping->serial_number);
+
+	} else if (data_blob_cmp(&SUBJECT_KEY_IDENTIFIER, tag) == 0) {
+		/* discard any previous value */
+		if (mapping->ski.data != NULL) {
+			SAFE_FREE(mapping->ski.data);
+			mapping->ski.length = 0;
+		}
+		ret = db_hex_str_to_krb5_data(value, &mapping->ski);
+
+	} else if (data_blob_cmp(&PUBLIC_KEY, tag) == 0) {
+		/* discard any previous value */
+		if (mapping->public_key.data != NULL) {
+			SAFE_FREE(mapping->public_key.data);
+			mapping->public_key.length = 0;
+		}
+		ret = db_hex_str_to_krb5_data(value, &mapping->public_key);
+
+	} else {
+		DBG_WARNING("altSecurityIdentities invalid tag %*.*s",
+			    (int) tag->length,
+			    (int) tag->length,
+			    tag->data);
+		ret = EINVAL;
+	}
+	return ret;
+}
+
+
+/**
+ * @brief does the krb5 element have a value?
+ *
+ * @param[in] krb5  The target krb5_data element
+ *
+ * @return TRUE  krb5 has a value
+ *         FALSE krb5 has no value i.e. it's empty
+ */
+static krb5_boolean krb5_data_has_value(krb5_data *krb5)
+{
+	if (krb5->data == NULL || krb5->length == 0) {
+		return FALSE;
+	}
+	return TRUE;
+}
+/**
+ * @brief is the certificate mapping a strong mapping?
+ *
+ * @param[in] mapping the certificate mapping to examine.
+ *
+ * @return TRUE  mapping is strong
+ *         FALSE mapping is weak
+ */
+static krb5_boolean is_strong_certificate_mapping(
+	struct sdb_certificate_mapping *mapping)
+{
+	/* Subject Key Identifier */
+	if (krb5_data_has_value(&mapping->ski)) {
+		return TRUE;
+	}
+	/* Public Key */
+	if (krb5_data_has_value(&mapping->public_key)) {
+		return TRUE;
+	}
+	/* Issuer Serial Number */
+	if (krb5_data_has_value(&mapping->issuer_name) &&
+	    krb5_data_has_value(&mapping->serial_number)
+	) {
+		return TRUE;
+	}
+	return FALSE;
+}
+
+
+/**
+ * @brief Parse a certificate mapping string
+ *
+ *  The expected format is a header "X509:" and then a series of
+ *  tag value pairs "<tag>value"
+ *  where tag is one of:
+ *     <I>           Issuer Name
+ *     <S>           Subject Name
+ *     <SR>          Serial Number
+ *     <SKI>         SKI Subject Key Identifier
+ *     <SHA1-PUKEY>  SHA1 checksum of the public key
+ *     <RFC822>      Email address
+ *
+ *
+ * @param[in]  value   ldb value containing an altSecurityIdentities entry
+ * @param[out] mapping data parsed from value
+ *
+ * @note it is the callers responsibility to free any memory allocated
+ *       in the mapping with a call to sdb_certificate_mapping_free.
+ *       EVEN if an error is returned, as mapping may have been partially
+ *       updated.
+ *
+ * @return 0      No error
+ *         EINVAL altSecurityIdentities entry was invalid
+ *         ENOMEM memory allocation error
+ */
+static krb5_error_code parse_certificate_mapping(
+	struct ldb_val *ldb_value,
+	struct sdb_certificate_mapping *mapping)
+{
+	krb5_error_code ret = 0;
+	size_t length = ldb_value->length;
+	uint8_t *data = ldb_value->data;
+	DATA_BLOB tag = data_blob_null;
+	DATA_BLOB value = data_blob_null;
+	enum {
+		start_state,
+		tag_state,
+		value_state
+	} state;
+	size_t i = 0;
+
+	TALLOC_CTX *tmp_ctx = talloc_new(NULL);
+	if (tmp_ctx == NULL) {
+		return ENOMEM;
+	}
+
+	/*
+	 * Ensure that there is data, and it starts with X509:
+	 * otherwise ignore the entry and return ENOENT
+	 */
+	if (data == NULL || length == 0) {
+		DBG_DEBUG("altSecurityIdentities is empty");
+		ret = ENOENT;
+		goto out;
+	}
+	if (length <= X509_HEADER.length ||
+	    memcmp(X509_HEADER.data, data, X509_HEADER.length) != 0) {
+		DBG_DEBUG("altSecurityIdentities entry is not X509, ignoring");
+		ret = ENOENT;
+		goto out;
+	}
+
+	tag = data_blob_talloc(tmp_ctx, NULL, ldb_value->length + 1);
+	if (tag.data == NULL) {
+		ret = ENOMEM;
+		goto out;
+	}
+	tag.length = 0;
+	value = data_blob_talloc(tmp_ctx, NULL, ldb_value->length + 1);
+	if (value.data == NULL) {
+		ret = ENOMEM;
+		goto out;
+	}
+	value.length = 0;
+
+	state = start_state;
+	/* point to the first byte after the header "X509:" */
+	for( i = 5; i < length; i++) {
+		uint8_t c = data[i];
+		switch (state) {
+		case start_state:
+			/* Ignore characters between the : and the first < */
+			if (c == '<') {
+				state = tag_state;
+				tag.length = 0;
+			}
+			break;
+		case tag_state:
+			if (c == '>') {
+				state = value_state;
+				tag.data[tag.length] = '\0';
+				value.length = 0;
+			} else {
+				tag.data[tag.length] = c;
+				tag.length++;
+			}
+			break;
+		case value_state:
+			if (c == '<') {
+				value.data[value.length] = '\0';
+				ret = populate_certificate_mapping(
+					&tag, &value, mapping);
+				if (ret != 0) {
+					goto out;
+				}
+				state = tag_state;
+				value.length = 0;
+				tag.length = 0;
+			} else {
+				value.data[value.length] = c;
+				value.length++;
+			}
+			break;
+		}
+	}
+	if (state != value_state) {
+		DBG_WARNING("altSecurityIdentities expected a value");
+		ret = EINVAL;
+		goto out;
+	}
+	value.data[value.length] = '\0';
+	ret = populate_certificate_mapping(
+		&tag, &value, mapping);
+	if (ret != 0) {
+		goto out;
+	}
+	mapping->strong_mapping = is_strong_certificate_mapping(mapping);
+
+out:
+	TALLOC_FREE(tmp_ctx);
+	return ret;
+}
+
+
+/**
+ * @brief extract the certificate mappings for PKINIT from the
+ *        ldb message.
+ *
+ * Processes the "X509:" certificate mappings in altSecurityIdentities.
+ *
+ * @param mem_ctx[in]	talloc memory context
+ * @param lp_ctx[in]	parameter context containing the config options
+ * @param msg[in]	ldb message containing the certificate mappings
+ * @param entry[out]	entry will be updated with the certificate mappings
+ *
+ * @note Invalid entries will be ignored
+ *
+ * @return 0  No error, and there are zero or more certificate mappings
+ *         >0 Errors detected
+ */
+static krb5_error_code get_certificate_mappings(
+	TALLOC_CTX *mem_ctx,
+	struct loadparm_context *lp_ctx,
+	struct ldb_message *msg,
+	struct sdb_entry *entry)
+{
+	krb5_error_code ret = 0;
+	struct ldb_message_element *el = NULL;
+	size_t i = 0;
+	struct sdb_certificate_mappings mappings = {};
+	unsigned int backdating = 0;
+	time_t created = 0;
+
+	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ENOMEM;
+	}
+
+	mappings.enforcement_mode =
+		lpcfg_strong_certificate_binding_enforcement(lp_ctx);
+
+	backdating = lpcfg_certificate_backdating_compensation(lp_ctx);
+	created = ldb_msg_find_krb5time_ldap_time(msg, "whenCreated", 0);
+	if (created == 0) {
+		DBG_ERR("No whenCreated entry, unable to continue");
+		ret = EINVAL;
+		goto out;
+	}
+	mappings.valid_certificate_start = created - (backdating * 60);
+
+	el = ldb_msg_find_element(msg, "altSecurityIdentities");
+	if (el == NULL || el->num_values == 0) {
+		DBG_DEBUG("No altSecurityIdentities nothing to do");
+		ret = 0;
+		entry->mappings = mappings;
+		goto out;
+	}
+
+	for (i = 0; i < el->num_values; i++) {
+		struct sdb_certificate_mapping mapping = {};
+		ret = parse_certificate_mapping(&el->values[i], &mapping);
+		if (ret != 0) {
+			DBG_DEBUG("Ignoring invalid altSecurityIdentities"
+				  " entry [%*.*s]",
+	                          (int)el->values[i].length,
+	                          (int)el->values[i].length,
+	                          (char *)el->values[i].data);
+			sdb_certificate_mapping_free(&mapping);
+			continue;
+		}
+		if (mappings.mappings == NULL) {
+			mappings.len = 0;
+			mappings.mappings = calloc(1, sizeof(mapping));
+			if (mappings.mappings == NULL) {
+				sdb_certificate_mapping_free(&mapping);
+				ret = ENOMEM;
+				goto out;
+			}
+		} else {
+			struct sdb_certificate_mapping *old_mappings =
+				mappings.mappings;
+			mappings.mappings= realloc_p(
+				mappings.mappings,
+				struct sdb_certificate_mapping,
+				mappings.len + 1);
+			if (mappings.mappings == NULL) {
+				mappings.mappings = old_mappings;
+				sdb_certificate_mappings_free(&mappings);
+				sdb_certificate_mapping_free(&mapping);
+				ret = ENOMEM;
+				goto out;
+			}
+		}
+		mappings.mappings[mappings.len] = mapping;
+		mappings.len++;
+	}
+	entry->mappings = mappings;
+	ret = 0;
+
+out:
+	TALLOC_FREE(tmp_ctx);
+	return ret;
+}
+
+
+/**
+ * @brief Extract the KeyMaterial from a KEYCREDENTIALLINK_BLOB
+ *        as a KeyMaterialInternal structure.
+ *
+ * The following validation is performed on the KEYCREDENTIALLINK_BLOB:
+ *   1) can be unpacked
+ *   2) has one and only one KeyUsage
+ *   3) that KeyUsage is KEY_USAGE_NGC
+ *   4) has one and only one KeyMaterial
+ *   5) that KeyMaterial can be unpacked
+ *
+ * @param[in] mem_ctx  talloc memory context, that will own pub_key
+ * @param[in] ldb      ldb database context
+ * @param[in] value    ldb value containing the KEYCREDENTIALLINK_BLOB
+ *                         BinaryDn
+ * @param[out] pub_key the extracted public key
+ *
+ * @return 0 No error pub_key will be valid
+ *         EINVAL KeyMaterial was invalid, pub_key will be NULL
+ *         ENOMEM memory allocation error pub_key will be NULL
+ */
+static krb5_error_code unpack_key_credential_link_blob(
+	TALLOC_CTX *mem_ctx,
+	struct ldb_context *ldb,
+	struct ldb_val *value,
+	struct KeyMaterialInternal **pub_key)
+{
+
+	krb5_error_code ret = 0;
+	enum ndr_err_code ndr_err = NDR_ERR_SUCCESS;
+	struct KEYCREDENTIALLINK_BLOB blob = {};
+	DATA_BLOB key_material = data_blob_null;
+	struct dsdb_dn *dsdb_dn = NULL;
+
+	int key_usage = 0;
+
+	size_t i = 0;
+
+	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		*pub_key = NULL;
+		return ENOMEM;
+	}
+	*pub_key = NULL;
+
+	dsdb_dn = dsdb_dn_parse(tmp_ctx, ldb, value, DSDB_SYNTAX_BINARY_DN);
+	if (dsdb_dn == NULL) {
+		DBG_WARNING("Unable to parse KEYCREDENTIALLINK_BLOB, BinaryDn");
+		ret = EINVAL;
+		goto out;
+	}
+	if (dsdb_dn->extra_part.data == NULL ||
+	    dsdb_dn->extra_part.length == 0) {
+		DBG_WARNING("KEYCREDENTIALLINK_BLOB, BinaryDn is empty");
+		ret = EINVAL;
+		goto out;
+	}
+
+	/* Unpack the KEYCREDENTIALLINK_BLOB */
+	ndr_err = ndr_pull_struct_blob_all(
+		&dsdb_dn->extra_part,
+		tmp_ctx,
+		&blob,
+		(ndr_pull_flags_fn_t)ndr_pull_KEYCREDENTIALLINK_BLOB);
+	if (ndr_err != NDR_ERR_SUCCESS) {
+		DBG_WARNING("Unable to unpack KEYCREDENTIALLINK_BLOB, "
+			    "ndr_err_code (%d)",
+			    ndr_err);
+		ret = EINVAL;
+		goto out;
+	}
+
+	/* No need to check the version as that's checked in the ndr_pull */
+
+	/* get the KeyMaterial and KeyUsage */
+	for (i = 0; i < blob.count; i++) {
+		struct KEYCREDENTIALLINK_ENTRY *e = NULL;
+		e = &blob.entries[i];
+		switch (e->identifier) {
+		case KeyMaterial:
+			if (key_material.data != NULL) {
+				DBG_WARNING("Duplicate KeyMaterial");
+				ret = EINVAL;
+				goto out;
+			}
+			key_material = e->value.keyMaterial;
+			break;
+		case KeyUsage:
+			if (key_usage != 0) {
+				DBG_WARNING("Duplicate KeyUsage");
+				ret = EINVAL;
+				goto out;
+			}
+			if (e->value.keyUsage != KEY_USAGE_NGC) {
+				DBG_WARNING("Invalid KeyUsage (%d)",
+					    e->value.keyUsage);
+				ret = EINVAL;
+				goto out;
+			}
+			key_usage = e->value.keyUsage;
+			break;
+		default:
+			break;
+		}
+	}
+	if (key_usage == 0) {
+		DBG_WARNING("No KeyUsage");
+		ret = EINVAL;
+		goto out;
+	}
+	if (key_material.data == NULL) {
+		DBG_WARNING("No KeyMaterial");
+		ret = EINVAL;
+		goto out;
+	}
+
+	/* Unpack the KeyMaterial */
+	*pub_key = talloc(mem_ctx, struct KeyMaterialInternal);
+	if (*pub_key == NULL) {
+		DBG_WARNING("Unable to allocate KeyMaterialInternal");
+		ret = ENOMEM;
+		goto out;
+	}
+	ndr_err = ndr_pull_struct_blob_all(
+		&key_material,
+		mem_ctx,
+		*pub_key,
+		(ndr_pull_flags_fn_t)ndr_pull_KeyMaterialInternal);
+	if (ndr_err != NDR_ERR_SUCCESS) {
+		DBG_WARNING("Unable to unpack KeyMaterialInternal, "
+			    "ndr_err_code (%d)",
+			    ndr_err);
+		ret = EINVAL;
+		TALLOC_FREE(*pub_key);
+		goto out;
+	}
+	/*
+	 * Steal modulus and exponent data from the ndr context onto the pub_key
+	 */
+	talloc_steal(*pub_key, (*pub_key)->modulus.data);
+	talloc_steal(*pub_key, (*pub_key)->exponent.data);
+
+out:
+	TALLOC_FREE(tmp_ctx);
+	return ret;
+}
+
+/**
+ * @brief extract the public keys for key trust authentication from the
+ *        ldb message.
+ *
+ * Processes the KEYCREDENTIALLINK_BLOBs in the msDS-KeyCredentialLink
+ * attribute, extracting all the valid public keys.
+ *
+ * @param mem_ctx[in] talloc memory context
+ * @param ldb[in]     ldb database context
+ * @param msg[in]     ldb message containing the public keys
+ * @param entry[out]  entry will be updated with the keys
+ *
+ * @note Invalid KEYCREDENTIALLINK_BLOB's will be ignored
+ * @note There may be no public keys, indicating that key trust logon is
+ *       not enabled for this object.
+ *
+ * @return 0  No error, and there are zero or more valid keys in entry
+ *         >0 Errors detected
+ */
+static krb5_error_code get_key_trust_public_keys(TALLOC_CTX *mem_ctx,
+						 struct ldb_context *ldb,
+						 struct ldb_message *msg,
+						 struct sdb_entry *entry)
+{
+	krb5_error_code ret = 0;
+	struct ldb_message_element *el = NULL;
+	size_t i = 0;
+	struct sdb_pub_keys pub_keys = {};
+
+	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return ENOMEM;
+	}
+
+	el = ldb_msg_find_element(msg, "msDS-KeyCredentialLink");
+	if (el == NULL || el->num_values == 0) {
+		/* No msDS-KeyCredentialLink nothing to do */
+		goto out;
+	}
+
+	for (i = 0; i < el->num_values; i++) {
+		krb5_error_code r = 0;
+		struct KeyMaterialInternal *kmi = NULL;
+		struct sdb_pub_key pub_key = {};
+		r = unpack_key_credential_link_blob(tmp_ctx,
+						    ldb,
+						    &el->values[i],
+						    &kmi);
+		if (r == 0) {
+			/* Get bit size*/
+			pub_key.bit_size = kmi->bit_size;
+
+			/* get Exponent */
+			pub_key.exponent.length = kmi->exponent.length;
+			pub_key.exponent.data = malloc(kmi->exponent.length);
+			if (pub_key.exponent.data == NULL) {
+				goto pub_keys_oom;
+			}
+			memcpy(pub_key.exponent.data,
+			       kmi->exponent.data,
+			       kmi->exponent.length);
+
+			/* get Modulus */
+			pub_key.modulus.length = kmi->modulus.length;
+			pub_key.modulus.data = malloc(kmi->modulus.length);
+			if (pub_key.modulus.data == NULL) {
+					SAFE_FREE(pub_key.exponent.data);
+					goto pub_keys_oom;
+			}
+			memcpy(pub_key.modulus.data,
+			       kmi->modulus.data,
+			       kmi->modulus.length);
+
+			/* Add public key to the list of public keys */
+			if (pub_keys.keys == NULL) {
+				pub_keys.len = 0;
+				pub_keys.keys = calloc(1, sizeof(pub_key));
+				if (pub_keys.keys == NULL) {
+					SAFE_FREE(pub_key.exponent.data);
+					SAFE_FREE(pub_key.modulus.data);
+					goto pub_keys_oom;
+				}
+			} else {
+				struct sdb_pub_key *keys = realloc_p(
+					pub_keys.keys,
+					struct sdb_pub_key,
+					pub_keys.len + 1);
+				if (keys == NULL) {
+					SAFE_FREE(pub_key.exponent.data);
+					SAFE_FREE(pub_key.modulus.data);
+					goto pub_keys_oom;
+				}
+				pub_keys.keys = keys;
+			}
+			pub_keys.keys[pub_keys.len] = pub_key;
+			pub_keys.len++;
+		}
+		TALLOC_FREE(kmi);
+	}
+	if (pub_keys.len != 0) {
+		entry->pub_keys = pub_keys;
+	}
+	goto out;
+
+pub_keys_oom:
+	sdb_pub_keys_free(&pub_keys);
+	ret = ENOMEM;
+
+out:
+	TALLOC_FREE(tmp_ctx);
+	return ret;
+}
+
 /*
  * Construct an hdb_entry from a directory entry.
  */
@@ -1202,7 +1934,6 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	NTTIME acct_expiry;
 	NTSTATUS status;
 	bool protected_user = false;
-	struct dom_sid sid;
 	uint32_t rid;
 	bool is_krbtgt = false;
 	bool is_rodc = false;
@@ -1232,7 +1963,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		config_kdc_enctypes != 0 ?
 		config_kdc_enctypes :
 		ENC_ALL_TYPES;
-	const char *samAccountName = ldb_msg_find_attr_as_string(msg, "samAccountName", NULL);
+	const char *samAccountName = ldb_msg_find_attr_as_string(msg, "sAMAccountName", NULL);
 
 	const struct authn_kerberos_client_policy *authn_client_policy = NULL;
 	const struct authn_server_policy *authn_server_policy = NULL;
@@ -1429,11 +2160,11 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 
 	/* The lack of password controls etc applies to krbtgt by
 	 * virtue of being that particular RID */
-	ret = samdb_result_dom_sid_buf(msg, "objectSid", &sid);
+	ret = samdb_result_dom_sid_buf(msg, "objectSid", &entry->sid);
 	if (ret) {
 		goto out;
 	}
-	status = dom_sid_split_rid(NULL, &sid, NULL, &rid);
+	status = dom_sid_split_rid(NULL, &entry->sid, NULL, &rid);
 	if (!NT_STATUS_IS_OK(status)) {
 		ret = EINVAL;
 		goto out;
@@ -1645,7 +2376,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		 * they may fail to authenticate.
 		 */
 		ret = samba_kdc_get_user_info_from_db(tmp_ctx,
-						      kdc_db_ctx->samdb,
+						      kdc_db_ctx,
 						      p,
 						      msg,
 						      &user_info_dc);
@@ -1842,6 +2573,8 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		 */
 #ifdef SAMBA4_USES_HEIMDAL
 		if (is_krbtgt) {
+			unsigned int i = 0;
+
 			/*
 			 * The krbtgt account, having no reason to
 			 * issue tickets encrypted in weaker keys,
@@ -1873,11 +2606,20 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 			 * management.
 			 */
 
+			for (i = 1; i < entry->keys.len; i++) {
+				sdb_key_free(&entry->keys.val[i]);
+			}
 			entry->keys.len = 1;
 			if (entry->etypes != NULL) {
 				entry->etypes->len = MIN(entry->etypes->len, 1);
 			}
+			for (i = 1; i < entry->old_keys.len; i++) {
+				sdb_key_free(&entry->old_keys.val[i]);
+			}
 			entry->old_keys.len = MIN(entry->old_keys.len, 1);
+			for (i = 1; i < entry->older_keys.len; i++) {
+				sdb_key_free(&entry->older_keys.val[i]);
+			}
 			entry->older_keys.len = MIN(entry->older_keys.len, 1);
 		}
 #endif
@@ -1898,6 +2640,16 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		 * hdb-ldap.c) this violates the ASN.1, but this
 		 * allows an entry with no keys (yet).
 		 */
+	}
+
+	ret = get_key_trust_public_keys(tmp_ctx, kdc_db_ctx->samdb, msg, entry);
+	if (ret != 0) {
+		goto out;
+	}
+	ret = get_certificate_mappings(
+		tmp_ctx, kdc_db_ctx->lp_ctx, msg, entry);
+	if (ret != 0) {
+		goto out;
 	}
 
 	p->msg = talloc_steal(p, msg);
@@ -2266,6 +3018,24 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 		/*
 		 * Only UPLEVEL domains support kerberos here,
 		 * as we don't support LSA_TRUST_TYPE_MIT.
+		 */
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+
+	if (tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) {
+		/*
+		 * We don't support WITHIN_FOREST yet
+		 */
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+
+	if (tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_PIM_TRUST) {
+		/*
+		 * We don't support PIM_TRUST yet
 		 */
 		krb5_clear_error_message(context);
 		ret = SDB_ERR_NOENTRY;
@@ -3366,6 +4136,7 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 	NTSTATUS status;
 	krb5_error_code ret;
 	bool check_realm = false;
+	bool only_check_main_realm = false;
 	const char *realm = NULL;
 	struct dsdb_trust_routing_table *trt = NULL;
 	const struct lsa_TrustDomainInfoInfoEx *tdo = NULL;
@@ -3381,11 +4152,41 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 		if (flags & SDB_F_FOR_AS_REQ) {
 			check_realm = true;
 		}
+		if ((flags & SDB_F_FOR_TGS_REQ) &&
+		    (flags & SDB_F_CROSS_REALM_PRINCIPAL))
+		{
+			/*
+			 * The request is not for us...
+			 * Let the caller ignore that
+			 * the client is remote and
+			 * has no local sdb_entry.
+			 */
+			TALLOC_FREE(frame);
+			return SDB_ERR_NOT_FOUND_HERE;
+		}
 	}
 	if (flags & SDB_F_GET_SERVER) {
 		if (flags & SDB_F_FOR_TGS_REQ) {
 			check_realm = true;
 		}
+
+		/* For S4U2Proxy the server has to be local */
+		if (flags & SDB_F_S4U2PROXY_PRINCIPAL) {
+			check_realm = true;
+			only_check_main_realm = true;
+		}
+	}
+
+	/*
+	 * For S4U2Self the client has to be local
+	 *
+	 * Currently there's no server lookup,
+	 * but make it strict in case it comes
+	 * along in future.
+	 */
+	if (flags & SDB_F_S4U2SELF_PRINCIPAL) {
+		check_realm = true;
+		only_check_main_realm = true;
 	}
 
 	if (!check_realm) {
@@ -3409,6 +4210,14 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 		 */
 		TALLOC_FREE(frame);
 		return SDB_ERR_NOENTRY;
+	}
+
+	if (only_check_main_realm) {
+		/*
+		 * The request is for us.
+		 */
+		TALLOC_FREE(frame);
+		return 0;
 	}
 
 	if (smb_krb5_principal_get_type(context, principal) == KRB5_NT_ENTERPRISE_PRINCIPAL) {
@@ -4052,179 +4861,6 @@ bad_option:
 			       target_principal_name);
 	talloc_free(mem_ctx);
 	return KRB5KDC_ERR_BADOPTION;
-}
-
-/*
- * This method is called for S4U2Proxy requests and implements the
- * resource-based constrained delegation variant, which can support
- * cross-realm delegation.
- */
-krb5_error_code samba_kdc_check_s4u2proxy_rbcd(
-		krb5_context context,
-		struct samba_kdc_db_context *kdc_db_ctx,
-		krb5_const_principal client_principal,
-		krb5_const_principal server_principal,
-		const struct auth_user_info_dc *user_info_dc,
-		const struct auth_user_info_dc *device_info_dc,
-		const struct auth_claims auth_claims,
-		struct samba_kdc_entry *proxy_skdc_entry)
-{
-	krb5_error_code code;
-	enum ndr_err_code ndr_err;
-	char *client_name = NULL;
-	char *server_name = NULL;
-	const char *proxy_dn = NULL;
-	const DATA_BLOB *data = NULL;
-	struct security_descriptor *rbcd_security_descriptor = NULL;
-	struct security_token *security_token = NULL;
-	uint32_t session_info_flags =
-		AUTH_SESSION_INFO_DEFAULT_GROUPS |
-		AUTH_SESSION_INFO_DEVICE_DEFAULT_GROUPS |
-		AUTH_SESSION_INFO_SIMPLE_PRIVILEGES |
-		AUTH_SESSION_INFO_FORCE_COMPOUNDED_AUTHENTICATION;
-	/*
-	 * Testing shows that although Windows grants SEC_ADS_GENERIC_ALL access
-	 * in security descriptors it creates for RBCD, its KDC only requires
-	 * SEC_ADS_CONTROL_ACCESS for the access check to succeed.
-	 */
-	uint32_t access_desired = SEC_ADS_CONTROL_ACCESS;
-	uint32_t access_granted = 0;
-	NTSTATUS nt_status;
-	TALLOC_CTX *mem_ctx = NULL;
-
-	mem_ctx = talloc_named(kdc_db_ctx,
-			       0,
-			       "samba_kdc_check_s4u2proxy_rbcd");
-	if (mem_ctx == NULL) {
-		errno = ENOMEM;
-		code = errno;
-
-		return code;
-	}
-
-	proxy_dn = ldb_dn_get_linearized(proxy_skdc_entry->msg->dn);
-	if (proxy_dn == NULL) {
-		DBG_ERR("ldb_dn_get_linearized failed for proxy_dn!\n");
-		if (errno == 0) {
-			errno = ENOMEM;
-		}
-		code = errno;
-
-		goto out;
-	}
-
-	rbcd_security_descriptor = talloc_zero(mem_ctx,
-					       struct security_descriptor);
-	if (rbcd_security_descriptor == NULL) {
-		errno = ENOMEM;
-		code = errno;
-
-		goto out;
-	}
-
-	code = krb5_unparse_name_flags(context,
-				       client_principal,
-				       KRB5_PRINCIPAL_UNPARSE_DISPLAY,
-				       &client_name);
-	if (code != 0) {
-		DBG_ERR("Unable to parse client_principal!\n");
-		goto out;
-	}
-
-	code = krb5_unparse_name_flags(context,
-				       server_principal,
-				       KRB5_PRINCIPAL_UNPARSE_DISPLAY,
-				       &server_name);
-	if (code != 0) {
-		DBG_ERR("Unable to parse server_principal!\n");
-		goto out;
-	}
-
-	DBG_INFO("Check delegation from client[%s] to server[%s] via "
-		 "proxy[%s]\n",
-		 client_name,
-		 server_name,
-		 proxy_dn);
-
-	if (!(user_info_dc->info->user_flags & NETLOGON_GUEST)) {
-		session_info_flags |= AUTH_SESSION_INFO_AUTHENTICATED;
-	}
-
-	if (device_info_dc != NULL && !(device_info_dc->info->user_flags & NETLOGON_GUEST)) {
-		session_info_flags |= AUTH_SESSION_INFO_DEVICE_AUTHENTICATED;
-	}
-
-	nt_status = auth_generate_security_token(mem_ctx,
-						 kdc_db_ctx->lp_ctx,
-						 kdc_db_ctx->samdb,
-						 user_info_dc,
-						 device_info_dc,
-						 auth_claims,
-						 session_info_flags,
-						 &security_token);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		code = map_errno_from_nt_status(nt_status);
-		goto out;
-	}
-
-	data = ldb_msg_find_ldb_val(proxy_skdc_entry->msg,
-				    "msDS-AllowedToActOnBehalfOfOtherIdentity");
-	if (data == NULL) {
-		DBG_WARNING("Could not find security descriptor "
-			    "msDS-AllowedToActOnBehalfOfOtherIdentity in "
-			    "proxy[%s]\n",
-			    proxy_dn);
-		code = KRB5KDC_ERR_BADOPTION;
-		goto out;
-	}
-
-	ndr_err = ndr_pull_struct_blob(
-			data,
-			mem_ctx,
-			rbcd_security_descriptor,
-			(ndr_pull_flags_fn_t)ndr_pull_security_descriptor);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		errno = ndr_map_error2errno(ndr_err);
-		DBG_ERR("Failed to unmarshall "
-			"msDS-AllowedToActOnBehalfOfOtherIdentity "
-			"security descriptor of proxy[%s]\n",
-			proxy_dn);
-		code = KRB5KDC_ERR_BADOPTION;
-		goto out;
-	}
-
-	if (DEBUGLEVEL >= 10) {
-		NDR_PRINT_DEBUG(security_token, security_token);
-		NDR_PRINT_DEBUG(security_descriptor, rbcd_security_descriptor);
-	}
-
-	nt_status = sec_access_check_ds(rbcd_security_descriptor,
-					security_token,
-					access_desired,
-					&access_granted,
-					NULL,
-					NULL);
-
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		DBG_WARNING("RBCD: sec_access_check_ds(access_desired=%#08x, "
-			    "access_granted:%#08x) failed with: %s\n",
-			    access_desired,
-			    access_granted,
-			    nt_errstr(nt_status));
-
-		code = KRB5KDC_ERR_BADOPTION;
-		goto out;
-	}
-
-	DBG_NOTICE("RBCD: Access granted for client[%s]\n", client_name);
-
-	code = 0;
-out:
-	SAFE_FREE(client_name);
-	SAFE_FREE(server_name);
-
-	TALLOC_FREE(mem_ctx);
-	return code;
 }
 
 NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_context *base_ctx,

@@ -318,11 +318,21 @@ ssize_t vfs_not_implemented_recvfile(vfs_handle_struct *handle, int fromfd,
 
 _PUBLIC_
 int vfs_not_implemented_renameat(vfs_handle_struct *handle,
-				 files_struct *srcfsp,
+				 files_struct *src_dirfsp,
 				 const struct smb_filename *smb_fname_src,
-				 files_struct *dstfsp,
+				 files_struct *dst_dirfsp,
 				 const struct smb_filename *smb_fname_dst,
 				 const struct vfs_rename_how *how)
+{
+	errno = ENOSYS;
+	return -1;
+}
+
+_PUBLIC_
+int vfs_not_implemented_rename_stream(struct vfs_handle_struct *handle,
+				      struct files_struct *src_fsp,
+				      const char *dst_name,
+				      bool replace_if_exists)
 {
 	errno = ENOSYS;
 	return -1;
@@ -533,11 +543,11 @@ int vfs_not_implemented_vfs_readlinkat(vfs_handle_struct *handle,
 
 _PUBLIC_
 int vfs_not_implemented_linkat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *old_smb_fname,
-			files_struct *dstfsp,
-			const struct smb_filename *new_smb_fname,
-			int flags)
+			       files_struct *src_dirfsp,
+			       const struct smb_filename *old_smb_fname,
+			       files_struct *dst_dirfsp,
+			       const struct smb_filename *new_smb_fname,
+			       int flags)
 {
 	errno = ENOSYS;
 	return -1;
@@ -1098,6 +1108,7 @@ static struct vfs_fn_pointers vfs_not_implemented_fns = {
 	.sendfile_fn = vfs_not_implemented_sendfile,
 	.recvfile_fn = vfs_not_implemented_recvfile,
 	.renameat_fn = vfs_not_implemented_renameat,
+	.rename_stream_fn = vfs_not_implemented_rename_stream,
 	.fsync_send_fn = vfs_not_implemented_fsync_send,
 	.fsync_recv_fn = vfs_not_implemented_fsync_recv,
 	.stat_fn = vfs_not_implemented_stat,

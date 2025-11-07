@@ -63,8 +63,30 @@ void smbprofile_stats_accumulate(struct profile_stats *acc,
 	do {                                               \
 		acc->values.name##_stats.count +=          \
 			add->values.name##_stats.count;    \
+		acc->values.name##_stats.failed_count +=   \
+			add->values.name##_stats.failed_count; \
 		acc->values.name##_stats.time +=           \
 			add->values.name##_stats.time;     \
+		acc->values.name##_stats.buckets[0] +=     \
+			add->values.name##_stats.buckets[0]; \
+		acc->values.name##_stats.buckets[1] +=     \
+			add->values.name##_stats.buckets[1]; \
+		acc->values.name##_stats.buckets[2] +=     \
+			add->values.name##_stats.buckets[2]; \
+		acc->values.name##_stats.buckets[3] +=     \
+			add->values.name##_stats.buckets[3]; \
+		acc->values.name##_stats.buckets[4] +=     \
+			add->values.name##_stats.buckets[4]; \
+		acc->values.name##_stats.buckets[5] +=     \
+			add->values.name##_stats.buckets[5]; \
+		acc->values.name##_stats.buckets[6] +=     \
+			add->values.name##_stats.buckets[6]; \
+		acc->values.name##_stats.buckets[7] +=     \
+			add->values.name##_stats.buckets[7]; \
+		acc->values.name##_stats.buckets[8] +=     \
+			add->values.name##_stats.buckets[8]; \
+		acc->values.name##_stats.buckets[9] +=     \
+			add->values.name##_stats.buckets[9]; \
 		acc->values.name##_stats.idle +=           \
 			add->values.name##_stats.idle;     \
 		acc->values.name##_stats.inbytes +=        \
@@ -170,12 +192,18 @@ out:
 	return rc;
 }
 
+struct smbprofile_collect_state {
+	size_t num_workers;
+	struct profile_stats *acc;
+};
+
 static int smbprofile_collect_fn(struct tdb_context *tdb,
 				 TDB_DATA key,
 				 TDB_DATA value,
 				 void *private_data)
 {
-	struct profile_stats *acc = (struct profile_stats *)private_data;
+	struct smbprofile_collect_state *state = private_data;
+	struct profile_stats *acc = state->acc;
 	const struct profile_stats *v;
 
 	if (value.dsize != sizeof(struct profile_stats)) {
@@ -188,15 +216,75 @@ static int smbprofile_collect_fn(struct tdb_context *tdb,
 		return 0;
 	}
 
+	if (!v->summary_record) {
+		state->num_workers += 1;
+	}
+
 	smbprofile_stats_accumulate(acc, v);
 	return 0;
 }
 
-void smbprofile_collect_tdb(struct tdb_context *tdb,
-			    uint64_t magic,
-			    struct profile_stats *stats)
+/*
+ * return the number of tdb records, i.e. active smbds. Includes the
+ * parent, so if you want the number of worker smbd, subtract one.
+ */
+size_t smbprofile_collect_tdb(struct tdb_context *tdb,
+			      uint64_t magic,
+			      struct profile_stats *stats)
 {
+	struct smbprofile_collect_state state = {
+		.acc = stats,
+	};
+
 	*stats = (struct profile_stats){.magic = magic};
 
-	tdb_traverse_read(tdb, smbprofile_collect_fn, stats);
+	tdb_traverse_read(tdb, smbprofile_collect_fn, &state);
+
+	return state.num_workers;
+}
+
+struct smbprofile_persvc_collector {
+	int (*cb)(const char *, const struct profile_stats *, void *);
+	void *userp;
+	int ret;
+};
+
+static int smbprofile_persvc_collect_fn(struct tdb_context *tdb,
+					TDB_DATA key,
+					TDB_DATA value,
+					void *private_data)
+{
+
+	const struct profile_stats *stats = NULL;
+	struct smbprofile_persvc_collector *col = NULL;
+
+	if (key.dsize < 5) {
+		return 0;
+	}
+
+	if (value.dsize != sizeof(*stats)) {
+		return 0;
+	}
+
+	col = (struct smbprofile_persvc_collector *)private_data;
+	stats = (const struct profile_stats *)(value.dptr);
+
+	col->ret = col->cb((const char *)key.dptr, stats, col->userp);
+	return (col->ret == 0) ? 0 : -1;
+}
+
+int smbprofile_persvc_collect_tdb(struct tdb_context *tdb,
+				  int (*fn)(const char *,
+					    const struct profile_stats *,
+					    void *),
+				  void *userp)
+{
+	struct smbprofile_persvc_collector col = {
+		.cb = fn,
+		.userp = userp,
+		.ret = 0,
+	};
+
+	tdb_traverse_read(tdb, smbprofile_persvc_collect_fn, &col);
+	return col.ret;
 }

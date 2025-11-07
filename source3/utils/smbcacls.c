@@ -28,7 +28,8 @@
 #include "../librpc/gen_ndr/ndr_lsa.h"
 #include "rpc_client/cli_lsarpc.h"
 #include "../libcli/security/security.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmb/clirap.h"
 #include "passdb/machine_sid.h"
 #include "../librpc/gen_ndr/ndr_lsa_c.h"
@@ -266,7 +267,7 @@ static uint16_t get_fileinfo(struct cli_state *cli, const char *filename)
 		cli,			/* cli */
 		filename,		/* fname */
 		0,			/* CreatFlags */
-		READ_CONTROL_ACCESS,	/* CreatFlags */
+		READ_CONTROL_ACCESS,	/* DesiredAccess */
 		0,			/* FileAttributes */
 		FILE_SHARE_READ|
 		FILE_SHARE_WRITE,	/* ShareAccess */
@@ -845,13 +846,16 @@ static struct cli_state *connect_one(struct cli_credentials *creds,
 	struct cli_state *c = NULL;
 	NTSTATUS nt_status;
 	uint32_t flags = 0;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	nt_status = cli_full_connection_creds(talloc_tos(),
 					      &c,
 					      lp_netbios_name(),
 					      server,
 					      NULL,
-					      0,
+					      &ts,
 					      share,
 					      "?????",
 					      creds,
@@ -1564,7 +1568,6 @@ static int write_dacl(struct dump_context *ctx,
 {
 	struct security_descriptor *sd = NULL;
 	char *str = NULL;
-	const char *output_fmt = "%s\r\n%s\r\n";
 	const char *tmp = NULL;
 	char *out_str = NULL;
 	uint8_t *dest = NULL;
@@ -1613,7 +1616,7 @@ static int write_dacl(struct dump_context *ctx,
 	if (tmp[0] == '\\') {
 		tmp++;
 	}
-	out_str = talloc_asprintf(frame, output_fmt, tmp, str);
+	out_str = talloc_asprintf(frame, "%s\r\n%s\r\n", tmp, str);
 
 	if (out_str == NULL) {
 		result = EXIT_FAILED;

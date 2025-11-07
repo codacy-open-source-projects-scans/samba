@@ -67,6 +67,7 @@
 #include "lib/param/s3_param.h"
 #include "lib/util/bitmap.h"
 #include "libcli/smb/smb_constants.h"
+#include "libcli/smb/smb_util.h"
 #include "tdb.h"
 #include "librpc/gen_ndr/nbt.h"
 #include "librpc/gen_ndr/dns.h"
@@ -1341,46 +1342,152 @@ bool handle_idmap_gid(struct loadparm_context *lp_ctx, struct loadparm_service *
 	return lpcfg_string_set(lp_ctx->globals->ctx, ptr, pszParmValue);
 }
 
-bool handle_smb_ports(struct loadparm_context *lp_ctx, struct loadparm_service *service,
-		      const char *pszParmValue, char **ptr)
+bool smb_transport_parse(const char *_value, struct smb_transport *_t)
 {
+	size_t _value_len = strlen(_value);
+	char value[_value_len+1];
+	const char *vparam = NULL;
+	const char *portstr = NULL;
+	char *p = NULL;
+	struct smb_transport t = {
+		.type = SMB_TRANSPORT_TYPE_UNKNOWN,
+	};
+	bool invalid = false;
+
+	memcpy(value, _value, sizeof(value));
+
+	p = strchr(value, ':');
+	if (p != NULL) {
+		vparam = p + 1;
+		p[0] = '\0';
+	}
+
+	if (strcmp("tcp", value) == 0) {
+		t.type = SMB_TRANSPORT_TYPE_TCP;
+		t.port = 445;
+	} else if (strcmp("nbt", value) == 0) {
+		t.type = SMB_TRANSPORT_TYPE_NBT;
+		t.port = 139;
+	} else if (strcmp("quic", value) == 0) {
+		t.type = SMB_TRANSPORT_TYPE_QUIC;
+		t.port = 443;
+	} else if (vparam != NULL) {
+		/*
+		 * a port number should not have
+		 * extra parameter!
+		 */
+		invalid = true;
+	} else {
+		/*
+		 * Could a port number only
+		 */
+		portstr = value;
+	}
+
+	if (!invalid && portstr == NULL) {
+		portstr = vparam;
+	}
+
+	if (portstr != NULL) {
+		char *_end = NULL;
+		int _port = 0;
+		_port = strtol(portstr, &_end, 10);
+		if (*_end != '\0' || _port <= 0 || _port > 65535) {
+			invalid = true;
+		} else {
+			t.port = _port;
+		}
+	}
+
+	if (invalid) {
+		t = (struct smb_transport) {
+			.type = SMB_TRANSPORT_TYPE_UNKNOWN,
+		};
+
+		*_t = t;
+		return false;
+	}
+
+	if (t.type == SMB_TRANSPORT_TYPE_UNKNOWN) {
+		if (t.port == 139) {
+			t.type = SMB_TRANSPORT_TYPE_NBT;
+		} else {
+			t.type = SMB_TRANSPORT_TYPE_TCP;
+		}
+	}
+
+	*_t = t;
+	return true;
+}
+
+static bool handle_smb_transports(struct loadparm_context *lp_ctx,
+				  struct loadparm_service *service,
+				  const char *pszParmValue,
+				  char **ptr,
+				  const char *optname)
+{
+	const char **list = NULL;
 	static int parm_num = -1;
-	int i;
-	const char **list;
+	size_t i;
+	bool ok;
 
 	if (!pszParmValue || !*pszParmValue) {
 		return false;
 	}
 
 	if (parm_num == -1) {
-		parm_num = lpcfg_map_parameter("smb ports");
+		parm_num = lpcfg_map_parameter(optname);
 		if (parm_num == -1) {
 			return false;
 		}
 	}
 
-	if (!set_variable_helper(lp_ctx->globals->ctx, parm_num, ptr, "smb ports",
-			       	pszParmValue)) {
+	ok = set_variable_helper(lp_ctx->globals->ctx,
+				 parm_num,
+				 ptr,
+				 optname,
+				 pszParmValue);
+	if (!ok) {
 		return false;
 	}
 
-	list = lp_ctx->globals->smb_ports;
+	list = *(const char ***)ptr;
+
 	if (list == NULL) {
 		return false;
 	}
 
-	/* Check that each port is a valid integer and within range */
+	/* Check that each transport is a valid */
 	for (i = 0; list[i] != NULL; i++) {
-		char *end = NULL;
-		int port = 0;
-		port = strtol(list[i], &end, 10);
-		if (*end != '\0' || port <= 0 || port > 65535) {
-			TALLOC_FREE(list);
+		struct smb_transport t = {
+			.type = SMB_TRANSPORT_TYPE_UNKNOWN,
+		};
+
+		ok = smb_transport_parse(list[i], &t);
+		if (!ok) {
 			return false;
 		}
 	}
 
 	return true;
+}
+
+bool handle_client_smb_transports(struct loadparm_context *lp_ctx,
+				  struct loadparm_service *service,
+				  const char *pszParmValue,
+				  char **ptr)
+{
+	return handle_smb_transports(lp_ctx, service, pszParmValue, ptr,
+				     "client smb transports");
+}
+
+bool handle_server_smb_transports(struct loadparm_context *lp_ctx,
+				  struct loadparm_service *service,
+				  const char *pszParmValue,
+				  char **ptr)
+{
+	return handle_smb_transports(lp_ctx, service, pszParmValue, ptr,
+				     "server smb transports");
 }
 
 bool handle_rpc_server_dynamic_port_range(struct loadparm_context *lp_ctx,
@@ -2734,8 +2841,12 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "ntvfs handler", "unixuid default");
 	lpcfg_do_global_parameter(lp_ctx, "max connections", "0");
 
-	lpcfg_do_global_parameter(lp_ctx, "dcerpc endpoint servers", "epmapper wkssvc samr netlogon lsarpc drsuapi dssetup unixinfo browser eventlog6 backupkey dnsserver");
-	lpcfg_do_global_parameter(lp_ctx, "server services", "s3fs rpc nbt wrepl ldap cldap kdc drepl winbindd ntp_signd kcc dnsupdate dns");
+	lpcfg_do_global_parameter(
+		lp_ctx,
+		"dcerpc endpoint servers",
+		"epmapper samr netlogon lsarpc drsuapi dssetup unixinfo "
+		"browser eventlog6 backupkey dnsserver");
+	lpcfg_do_global_parameter(lp_ctx, "server services", "s3fs rpc nbt wrepl ldap cldap kdc drepl ft_scanner winbindd ntp_signd kcc dnsupdate dns");
 	lpcfg_do_global_parameter(lp_ctx, "kccsrv:samba_kcc", "true");
 	/* the winbind method for domain controllers is for both RODC
 	   auth forwarding and for trusted domains */
@@ -2837,7 +2948,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "use mmap", "True");
 
-	lpcfg_do_global_parameter(lp_ctx, "smb ports", "445 139");
+	lpcfg_do_global_parameter(lp_ctx, "server smb transports", "tcp, nbt");
+	lpcfg_do_global_parameter(lp_ctx, "client smb transports", "tcp, nbt");
 	lpcfg_do_global_parameter_var(lp_ctx, "nbt port", "%d", NBT_NAME_SERVICE_PORT);
 	lpcfg_do_global_parameter_var(lp_ctx, "dgram port", "%d", NBT_DGRAM_SERVICE_PORT);
 	lpcfg_do_global_parameter(lp_ctx, "krb5 port", "88");
@@ -2845,6 +2957,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter_var(lp_ctx, "dns port", "%d", DNS_SERVICE_PORT);
 
 	lpcfg_do_global_parameter(lp_ctx, "kdc enable fast", "True");
+	lpcfg_do_global_parameter(lp_ctx, "strong certificate binding enforcement", "full");
+	lpcfg_do_global_parameter(lp_ctx, "certificate backdating compensation", "0");
 
 	lpcfg_do_global_parameter(lp_ctx, "nt status support", "True");
 
@@ -2931,6 +3045,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "guest account", GUEST_ACCOUNT);
 
 	lpcfg_do_global_parameter(lp_ctx, "client schannel", "True");
+
+	lpcfg_do_global_parameter(lp_ctx, "client use krb5 netlogon", "default");
 
 	lpcfg_do_global_parameter(lp_ctx, "smb encrypt", "default");
 
@@ -3078,6 +3194,8 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 
 	lpcfg_do_global_parameter(lp_ctx, "smb3 directory leases", "Auto");
 
+	lpcfg_do_global_parameter(lp_ctx, "smb3 unix extensions", "yes");
+
 	lpcfg_do_global_parameter(lp_ctx, "server multi channel support", "yes");
 
 	lpcfg_do_global_parameter(lp_ctx, "kerberos encryption types", "all");
@@ -3166,16 +3284,13 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 				  "acl claims evaluation",
 				  "AD DC only");
 
-	/* Set the default Himmelblaud globals */
 	lpcfg_do_global_parameter(lp_ctx,
-				  "himmelblaud hsm pin path",
-				  get_dyn_HIMMELBLAUD_HSM_PIN_PATH());
+				  "server smb encryption over quic",
+				  "yes");
+
 	lpcfg_do_global_parameter(lp_ctx,
-				  "himmelblaud hello enabled",
-				  "false");
-	lpcfg_do_global_parameter(lp_ctx,
-				  "himmelblaud sfa fallback",
-				  "false");
+				  "client smb encryption over quic",
+				  "yes");
 
 	for (i = 0; parm_table[i].label; i++) {
 		if (!(lp_ctx->flags[i] & FLAG_CMDLINE)) {
@@ -3679,6 +3794,17 @@ bool lpcfg_server_signing_allowed(struct loadparm_context *lp_ctx, bool *mandato
 	}
 
 	return allowed;
+}
+
+int lpcfg_client_use_krb5_netlogon(struct loadparm_context *lp_ctx)
+{
+	int val = lpcfg__client_use_krb5_netlogon(lp_ctx);
+
+	if (val == LP_ENUM_Default) {
+		val = false;
+	}
+
+	return val;
 }
 
 int lpcfg_tdb_hash_size(struct loadparm_context *lp_ctx, const char *name)

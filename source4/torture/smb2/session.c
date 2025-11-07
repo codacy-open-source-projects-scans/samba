@@ -1126,8 +1126,8 @@ static bool test_session_expire1i(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree,
@@ -1371,8 +1371,8 @@ static bool test_session_expire2i(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree,
@@ -1790,8 +1790,8 @@ static bool test_session_expire_disconnect(struct torture_context *tctx)
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree,
@@ -1929,8 +1929,8 @@ bool test_session_bind1(struct torture_context *tctx, struct smb2_tree *tree1)
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree2,
@@ -2096,8 +2096,8 @@ static bool test_session_bind2(struct torture_context *tctx, struct smb2_tree *t
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree2,
@@ -2135,8 +2135,8 @@ static bool test_session_bind2(struct torture_context *tctx, struct smb2_tree *t
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree3,
@@ -2392,8 +2392,8 @@ static bool test_session_bind_auth_mismatch(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      creds1,
 			      &tree2,
@@ -2451,6 +2451,7 @@ static bool test_session_bind_auth_mismatch(struct torture_context *tctx,
 	 * are mapped to guest.
 	 */
 	session3_1 = smb2_session_init(transport1,
+				       tctx->lp_ctx,
 				       lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 				       tctx);
 	torture_assert(tctx, session3_1 != NULL, "smb2_session_channel failed");
@@ -2689,8 +2690,8 @@ static bool test_session_bind_negative_smbXtoX(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree1,
@@ -2728,8 +2729,8 @@ static bool test_session_bind_negative_smbXtoX(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials,
 			      &tree2_0,
@@ -2805,6 +2806,7 @@ static bool test_session_bind_negative_smbXtoX(struct torture_context *tctx,
 	 * session keys.
 	 */
 	session1_2 = smb2_session_init(transport2,
+				       tctx->lp_ctx,
 				       lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 				       tree2_0);
 	torture_assert(tctx, session1_2 != NULL, "smb2_session_channel failed");
@@ -5132,8 +5134,8 @@ static bool test_session_sign_enc(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      credentials1,
 			      &tree1,
@@ -5621,8 +5623,8 @@ static bool test_session_anon_encryption1(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      anon_creds,
 			      &anon_tree,
@@ -5754,8 +5756,8 @@ static bool test_session_anon_encryption2(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      user_creds,
 			      &user_tree,
@@ -5772,6 +5774,7 @@ static bool test_session_anon_encryption2(struct torture_context *tctx,
 	torture_assert(tctx, ok, "smbXcli_session_is_authenticated(user)");
 
 	anon_session = smb2_session_init(transport,
+					 tctx->lp_ctx,
 					 lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 					 tctx);
 	torture_assert(tctx, anon_session != NULL, "smb2_session_init(anon)");
@@ -5901,8 +5904,8 @@ static bool test_session_anon_encryption3(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      user_creds,
 			      &user_tree,
@@ -5919,6 +5922,7 @@ static bool test_session_anon_encryption3(struct torture_context *tctx,
 	torture_assert(tctx, ok, "smbXcli_session_is_authenticated(user)");
 
 	anon_session = smb2_session_init(transport,
+					 tctx->lp_ctx,
 					 lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 					 tctx);
 	torture_assert(tctx, anon_session != NULL, "smb2_session_init(anon)");
@@ -6019,8 +6023,8 @@ static bool test_session_anon_signing1(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      anon_creds,
 			      &anon_tree,
@@ -6119,8 +6123,8 @@ static bool test_session_anon_signing2(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      anon_creds,
 			      &anon_tree,
@@ -6153,6 +6157,7 @@ static bool test_session_anon_signing2(struct torture_context *tctx,
 	 */
 	session_id = smb2cli_session_current_id(anon_session->smbXcli);
 	anon_session_nosign = smb2_session_init(transport,
+						tctx->lp_ctx,
 					        lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 					        tctx);
 	torture_assert(tctx, anon_session_nosign != NULL, "smb2_session_init(anon_nosign)");
@@ -6316,8 +6321,8 @@ static bool test_session_require_sign_bug15397(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      creds,
 			      &tree,

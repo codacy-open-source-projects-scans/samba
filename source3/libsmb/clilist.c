@@ -18,7 +18,9 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "source3/libsmb/cli_smb2_fnum.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "async_smb.h"
 #include "trans2.h"
@@ -64,7 +66,9 @@ NTSTATUS is_bad_finfo_name(const struct cli_state *cli,
 	NTSTATUS status = NT_STATUS_OK;
 	bool windows_names = true;
 
-	if (cli->requested_posix_capabilities & CIFS_UNIX_POSIX_PATHNAMES_CAP) {
+	if ((cli->requested_posix_capabilities & CIFS_UNIX_POSIX_PATHNAMES_CAP)
+	    || finfo->flags.posix)
+	{
 		windows_names = false;
 	}
 	if (finfo->name != NULL) {

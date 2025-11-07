@@ -33,6 +33,7 @@
 #include "../lib/util/bitmap.h"
 #include "../librpc/gen_ndr/krb5pac.h"
 #include "lib/util/iov_buf.h"
+#include "lib/async_req/async_sock.h"
 #include "auth.h"
 #include "libcli/smb/smbXcli_base.h"
 #include "source3/lib/substitute.h"
@@ -1772,7 +1773,7 @@ void smbd_server_connection_terminate_ex(struct smbXsrv_connection *xconn,
 		exit_server("smbXsrv_connection_shutdown_send failed");
 	}
 	state->xconn = xconn;
-	state->reason = talloc_strdup(state, reason);
+	state->reason = talloc_strdup(NULL, reason);
 	if (state->reason == NULL) {
 		exit_server("talloc_strdup failed");
 	}
@@ -2828,21 +2829,6 @@ NTSTATUS smbd_smb2_request_verify_sizes(struct smbd_smb2_request *req,
 	return NT_STATUS_OK;
 }
 
-bool smbXsrv_is_encrypted(uint8_t encryption_flags)
-{
-	return (!(encryption_flags & SMBXSRV_PROCESSED_UNENCRYPTED_PACKET)
-		&&
-		(encryption_flags & (SMBXSRV_PROCESSED_ENCRYPTED_PACKET |
-				     SMBXSRV_ENCRYPTION_DESIRED |
-				     SMBXSRV_ENCRYPTION_REQUIRED)));
-}
-
-bool smbXsrv_is_partially_encrypted(uint8_t encryption_flags)
-{
-	return ((encryption_flags & SMBXSRV_PROCESSED_ENCRYPTED_PACKET) &&
-		(encryption_flags & SMBXSRV_PROCESSED_UNENCRYPTED_PACKET));
-}
-
 /* Set a flag if not already set, return true if set */
 bool smbXsrv_set_crypto_flag(uint8_t *flags, uint8_t flag)
 {
@@ -2909,23 +2895,6 @@ out:
 	*update_session_globalp = update_session;
 	*update_tcon_globalp = update_tcon;
 	return;
-}
-
-bool smbXsrv_is_signed(uint8_t signing_flags)
-{
-	/*
-	 * Signing is always enabled, so unless we got an unsigned
-	 * packet and at least one signed packet that was not
-	 * encrypted, the session or tcon is "signed".
-	 */
-	return (!(signing_flags & SMBXSRV_PROCESSED_UNSIGNED_PACKET) &&
-		(signing_flags & SMBXSRV_PROCESSED_SIGNED_PACKET));
-}
-
-bool smbXsrv_is_partially_signed(uint8_t signing_flags)
-{
-	return ((signing_flags & SMBXSRV_PROCESSED_UNSIGNED_PACKET) &&
-		(signing_flags & SMBXSRV_PROCESSED_SIGNED_PACKET));
 }
 
 static NTSTATUS smbd_smb2_request_dispatch_update_counts(
@@ -3055,6 +3024,15 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 	return status;
 }
 
+#ifdef WITH_PROFILE
+static int smb2_request_to_snum(const struct smbd_smb2_request *req)
+{
+	return (req->tcon != NULL) && (req->tcon->compat != NULL)
+		       ? SNUM(req->tcon->compat)
+		       : GLOBAL_SECTION_SNUM;
+}
+#endif
+
 NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 {
 	struct smbXsrv_connection *xconn = req->xconn;
@@ -3128,11 +3106,13 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 
 	req->async_internal = false;
 	req->do_signing = false;
-	if (opcode != SMB2_OP_SESSSETUP) {
-		req->do_encryption = encryption_desired;
-	} else {
+
+	if (opcode == SMB2_OP_SESSSETUP) {
 		req->do_encryption = false;
+	} else {
+		req->do_encryption = encryption_desired;
 	}
+
 	req->was_encrypted = false;
 	if (intf_v->iov_len == SMB2_TF_HDR_SIZE) {
 		const uint8_t *intf = SMBD_SMB2_IN_TF_PTR(req);
@@ -3482,86 +3462,131 @@ skipped_signing:
 
 	switch (opcode) {
 	case SMB2_OP_NEGPROT:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_negprot, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_negprot,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_negprot(req);
 		break;
 
 	case SMB2_OP_SESSSETUP:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_sesssetup, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_sesssetup,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_sesssetup(req);
 		break;
 
 	case SMB2_OP_LOGOFF:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_logoff, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_logoff,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_logoff(req);
 		break;
 
 	case SMB2_OP_TCON:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_tcon, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_tcon,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_tcon(req);
 		break;
 
 	case SMB2_OP_TDIS:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_tdis, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_tdis,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_tdis(req);
 		break;
 
 	case SMB2_OP_CREATE:
 		if (req->subreq == NULL) {
-			SMBPROFILE_IOBYTES_ASYNC_START(smb2_create, profile_p,
-						       req->profile, _INBYTES(req));
+			SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(
+								 req),
+							 smb2_create,
+							 req->profile,
+							 req->profile_x,
+							 _INBYTES(req));
 		} else {
-			SMBPROFILE_IOBYTES_ASYNC_SET_BUSY(req->profile);
+			SMBPROFILE_IOBYTES_ASYNC_SET_BUSY_X(req->profile,
+							    req->profile_x);
 		}
 		return_value = smbd_smb2_request_process_create(req);
 		break;
 
 	case SMB2_OP_CLOSE:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_close, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_close,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_close(req);
 		break;
 
 	case SMB2_OP_FLUSH:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_flush, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_flush,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_flush(req);
 		break;
 
 	case SMB2_OP_READ:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_read, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_read,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_read(req);
 		break;
 
 	case SMB2_OP_WRITE:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_write, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_write,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_write(req);
 		break;
 
 	case SMB2_OP_LOCK:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_lock, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_lock,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_lock(req);
 		break;
 
 	case SMB2_OP_IOCTL:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_ioctl, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_ioctl,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_ioctl(req);
 		break;
 
 	case SMB2_OP_CANCEL:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_cancel, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_cancel,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_cancel(req);
-		SMBPROFILE_IOBYTES_ASYNC_END(req->profile, 0);
+		SMBPROFILE_IOBYTES_ASYNC_END_X(req->profile,
+					       req->profile_x,
+					       0,
+					       SMB2_OP_CANCEL,
+					       NT_STATUS_OK);
 
 		/*
 		 * We don't need the request anymore cancel requests never
@@ -3575,38 +3600,56 @@ skipped_signing:
 		break;
 
 	case SMB2_OP_KEEPALIVE:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_keepalive, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_keepalive,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_keepalive(req);
 		break;
 
 	case SMB2_OP_QUERY_DIRECTORY:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_find, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_find,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_query_directory(req);
 		break;
 
 	case SMB2_OP_NOTIFY:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_notify, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_notify,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_notify(req);
 		break;
 
 	case SMB2_OP_GETINFO:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_getinfo, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_getinfo,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_getinfo(req);
 		break;
 
 	case SMB2_OP_SETINFO:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_setinfo, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_setinfo,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_setinfo(req);
 		break;
 
 	case SMB2_OP_BREAK:
-		SMBPROFILE_IOBYTES_ASYNC_START(smb2_break, profile_p,
-					       req->profile, _INBYTES(req));
+		SMBPROFILE_IOBYTES_ASYNC_START_X(smb2_request_to_snum(req),
+						 smb2_break,
+						 req->profile,
+						 req->profile_x,
+						 _INBYTES(req));
 		return_value = smbd_smb2_request_process_break(req);
 		break;
 
@@ -3746,8 +3789,12 @@ static NTSTATUS smbd_smb2_request_reply(struct smbd_smb2_request *req)
 	}
 	TALLOC_FREE(req->last_sign_key);
 
-	SMBPROFILE_IOBYTES_ASYNC_END(req->profile,
-		iov_buflen(outhdr, SMBD_SMB2_NUM_IOV_PER_REQ-1));
+	SMBPROFILE_IOBYTES_ASYNC_END_X(
+		req->profile,
+		req->profile_x,
+		iov_buflen(outhdr, SMBD_SMB2_NUM_IOV_PER_REQ - 1),
+		PULL_LE_U16(outhdr->iov_base, SMB2_HDR_OPCODE),
+		NT_STATUS(IVAL(outhdr->iov_base, SMB2_HDR_STATUS)));
 
 	req->current_idx += SMBD_SMB2_NUM_IOV_PER_REQ;
 
@@ -4071,7 +4118,7 @@ NTSTATUS smbd_smb2_request_error_ex(struct smbd_smb2_request *req,
 	uint8_t *outhdr = SMBD_SMB2_OUT_HDR_PTR(req);
 	size_t unread_bytes = smbd_smb2_unread_bytes(req);
 
-	DBG_NOTICE("smbd_smb2_request_error_ex: idx[%d] status[%s] |%s| "
+	DBG_NOTICE("idx[%d] status[%s] |%s| "
 		   "at %s\n", req->current_idx, nt_errstr(status),
 		   info ? " +info" : "", location);
 

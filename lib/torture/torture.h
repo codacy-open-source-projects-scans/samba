@@ -780,6 +780,23 @@ static inline void torture_dump_data_str_cb(const char *buf, void *private_data)
 	}\
 	} while(0)
 
+#define torture_assert_nttime_not_equal(torture_ctx,got,expected,cmt) \
+	do { NTTIME __got = got, __expected = expected; \
+	if (nt_time_equal(&__got, &__expected)) { \
+		torture_result(torture_ctx, TORTURE_FAIL, __location__": "#got" was %s, expected %s: %s", nt_time_string(torture_ctx, __got), nt_time_string(torture_ctx, __expected), cmt); \
+		return false; \
+	}\
+	} while(0)
+
+#define torture_assert_nttime_not_equal_goto(torture_ctx,got,expected,ret,label,cmt) \
+	do { NTTIME __got = got, __expected = expected; \
+	if (nt_time_equal(&__got, &__expected)) { \
+		torture_result(torture_ctx, TORTURE_FAIL, __location__": "#got" was %s, expected %s: %s", nt_time_string(torture_ctx, __got), nt_time_string(torture_ctx, __expected), cmt); \
+		ret = false; \
+		goto label; \
+	}\
+	} while(0)
+
 #define torture_assert_sid_equal(torture_ctx,got,expected,cmt)\
 	do {const struct dom_sid *__got = (got), *__expected = (expected); \
 	if (!dom_sid_equal(__got, __expected)) { \
@@ -891,11 +908,16 @@ bool torture_suite_init_tcase(struct torture_suite *suite,
 			      const char *name);
 int torture_suite_children_count(const struct torture_suite *suite);
 
-struct torture_context *torture_context_init(struct tevent_context *event_ctx, struct torture_results *results);
+struct torture_context *torture_context_init(TALLOC_CTX *mem_ctx,
+					     struct tevent_context *event_ctx,
+					     struct loadparm_context *lp_ctx,
+					     struct torture_results *results,
+					     char *outputdir_template);
 
 struct torture_results *torture_results_init(TALLOC_CTX *mem_ctx, const struct torture_ui_ops *ui_ops);
 
-struct torture_context *torture_context_child(struct torture_context *tctx);
+struct torture_context *torture_context_child(TALLOC_CTX *mem_ctx,
+					      struct torture_context *parent);
 
 extern const struct torture_ui_ops torture_subunit_ui_ops;
 extern const struct torture_ui_ops torture_simple_ui_ops;

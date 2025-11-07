@@ -49,6 +49,8 @@ ok <<EOF
 	# debug script = 
 [failover]
 	# disabled = false
+	# shutdown extra timeout = 0
+	# shutdown failover timeout = 10
 [legacy]
 	# realtime scheduling = true
 	# lmaster capability = true

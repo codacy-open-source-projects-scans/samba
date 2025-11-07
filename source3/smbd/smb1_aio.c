@@ -86,7 +86,6 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 			(uint64_t)startpos,
 			(uint64_t)smb_maxcnt,
 			READ_LOCK,
-			lp_posix_cifsu_locktype(fsp),
 			&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
@@ -250,7 +249,6 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 			(uint64_t)startpos,
 			(uint64_t)numtowrite,
 			WRITE_LOCK,
-			lp_posix_cifsu_locktype(fsp),
 			&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
@@ -261,6 +259,7 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 
 	aio_ex->nbyte = numtowrite;
 	aio_ex->offset = startpos;
+	prepare_file_modified(fsp, &aio_ex->modified_state);
 
 	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
 				data, numtowrite, startpos,
@@ -337,7 +336,7 @@ static void aio_pwrite_smb1_done(struct tevent_req *req)
 		return;
 	}
 
-	mark_file_modified(fsp);
+	mark_file_modified(fsp, true, &aio_ex->modified_state);
 
 	if (fsp->fsp_flags.aio_write_behind) {
 

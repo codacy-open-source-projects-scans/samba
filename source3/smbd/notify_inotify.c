@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    Copyright (C) Andrew Tridgell 2006
@@ -24,7 +24,8 @@
 #include "includes.h"
 #include "../librpc/gen_ndr/notify.h"
 #include "smbd/smbd.h"
-#include "lib/util/sys_rw_data.h"
+#include "lib/util/sys_rw.h"
+#include "smbd/globals.h"
 
 #include <sys/inotify.h>
 
@@ -46,7 +47,7 @@ struct inotify_watch_context {
 	struct inotify_watch_context *next, *prev;
 	struct inotify_private *in;
 	int wd;
-	void (*callback)(struct sys_notify_context *ctx, 
+	void (*callback)(struct sys_notify_context *ctx,
 			 void *private_data,
 			 struct notify_event *ev,
 			 uint32_t filter);
@@ -54,6 +55,9 @@ struct inotify_watch_context {
 	uint32_t mask; /* the inotify mask */
 	uint32_t filter; /* the windows completion filter */
 	const char *path;
+
+	char *last_mkdir;
+	struct inotify_event *moved_from_event;
 };
 
 
@@ -162,25 +166,165 @@ static bool filter_match(struct inotify_watch_context *w,
 	return ok;
 }
 
+static void trigger_orphaned_moved_from(struct inotify_watch_context *w)
+{
+	struct notify_event ne = {};
+	struct inotify_event *e = w->moved_from_event;
 
+	ne = (struct notify_event){
+		.action = NOTIFY_ACTION_REMOVED,
+		.path = e->name,
+		.dir = w->path,
+	};
+
+	w->callback(w->in->ctx,
+		    w->private_data,
+		    &ne,
+		    inotify_map_mask_to_filter(e->mask));
+}
+
+static void moved_from_timeout(struct tevent_context *ev,
+			       struct tevent_timer *te,
+			       struct timeval now,
+			       void *private_data)
+{
+	struct inotify_watch_context *w = talloc_get_type_abort(
+		private_data, struct inotify_watch_context);
+
+	trigger_orphaned_moved_from(w);
+	TALLOC_FREE(w->moved_from_event);
+}
+
+static void save_moved_from(struct tevent_context *ev,
+			    struct inotify_watch_context *w,
+			    struct inotify_event *e)
+{
+	if (w->moved_from_event != NULL) {
+		trigger_orphaned_moved_from(w);
+		TALLOC_FREE(w->moved_from_event);
+	}
+
+	w->moved_from_event = talloc_memdup(
+		w, e, sizeof(struct inotify_event) + e->len);
+	if (w->moved_from_event == NULL) {
+		/*
+		 * Not much we can do here
+		 */
+		return;
+	}
+
+	tevent_add_timer(ev,
+			 w->moved_from_event,
+			 tevent_timeval_current_ofs(0, 100000),
+			 moved_from_timeout,
+			 w);
+}
+
+static bool handle_local_rename(struct inotify_watch_context *w,
+				struct inotify_event *to)
+{
+	struct inotify_private *in = w->in;
+	struct inotify_event *from = w->moved_from_event;
+	struct notify_event ne = {};
+	uint32_t filter;
+
+	if ((w->last_mkdir != NULL) && (w->moved_from_event != NULL) &&
+	    IS_SMBD_TMPNAME(w->moved_from_event->name, NULL))
+	{
+		if (strcmp(to->name, w->last_mkdir) == 0) {
+			/*
+			 * Assume this is a rename() from smbd after a
+			 * mkdir of the real target directory. See the
+			 * comment about RENAME_NOREPLACE in
+			 * mkdir_internals(). We have already sent out
+			 * the mkdir notify event, this MOVED_FROM/TO
+			 * pair is just internal fluff that the client
+			 * should not get wind of via notify.
+			 */
+			TALLOC_FREE(w->last_mkdir);
+			TALLOC_FREE(w->moved_from_event);
+			return true;
+		}
+
+		if (strcmp(w->moved_from_event->name, w->last_mkdir) == 0) {
+			/*
+			 * Assume this is a renameat2() from smbd's
+			 * mkdir_internal().
+			 */
+			TALLOC_FREE(w->last_mkdir);
+			TALLOC_FREE(w->moved_from_event);
+
+			/*
+			 * Pretend this is not a rename but a new
+			 * directory.
+			 */
+			to->mask = IN_ISDIR | IN_CREATE;
+
+			return false;
+		}
+	}
+
+	ne = (struct notify_event){
+		.action = NOTIFY_ACTION_OLD_NAME,
+		.path = from->name,
+		.dir = w->path,
+	};
+
+	if (filter_match(w, from)) {
+		filter = inotify_map_mask_to_filter(to->mask);
+		w->callback(in->ctx, w->private_data, &ne, filter);
+	}
+
+	ne = (struct notify_event){
+		.action = NOTIFY_ACTION_NEW_NAME,
+		.path = to->name,
+		.dir = w->path,
+	};
+
+	filter = inotify_map_mask_to_filter(to->mask);
+
+	if (filter_match(w, to)) {
+		w->callback(in->ctx, w->private_data, &ne, filter);
+	}
+
+	if (to->mask & IN_ISDIR) {
+		return true;
+	}
+	if ((w->filter & FILE_NOTIFY_CHANGE_CREATION) == 0) {
+		return true;
+	}
+
+	/*
+	 * SMB expects a file rename to generate three events, two for
+	 * the rename and the other for a modify of the
+	 * destination. Strange!
+	 */
+
+	ne.action = NOTIFY_ACTION_MODIFIED;
+	to->mask = IN_ATTRIB;
+
+	if (filter_match(w, to)) {
+		w->callback(in->ctx, w->private_data, &ne, filter);
+	}
+
+	return true;
+}
 
 /*
   dispatch one inotify event
 
   the cookies are used to correctly handle renames
 */
-static void inotify_dispatch(struct inotify_private *in, 
-			     struct inotify_event *e, 
-			     int prev_wd,
-			     uint32_t prev_cookie,
-			     struct inotify_event *e2)
+static void inotify_dispatch(struct tevent_context *ev,
+			     struct inotify_private *in,
+			     struct inotify_event *e)
 {
 	struct inotify_watch_context *w, *next;
 	struct notify_event ne;
 	uint32_t filter;
 
-	DEBUG(10, ("inotify_dispatch called with mask=%x, name=[%s]\n",
-		   e->mask, e->len ? e->name : ""));
+	DBG_DEBUG("called with mask=%x, name=[%s]\n",
+		  e->mask, e->len ? e->name : "");
 
 	/* ignore extraneous events, such as unmount and IN_IGNORED events */
 	if ((e->mask & (IN_ATTRIB|IN_MODIFY|IN_CREATE|IN_DELETE|
@@ -188,25 +332,50 @@ static void inotify_dispatch(struct inotify_private *in,
 		return;
 	}
 
-	/* map the inotify mask to a action. This gets complicated for
-	   renames */
+	if (e->mask & IN_MOVED_FROM) {
+		for (w = in->watches; w != NULL; w = w->next) {
+			if (e->wd != w->wd) {
+				continue;
+			}
+			save_moved_from(ev, w, e);
+		}
+		return;
+	}
+
+	if (e->mask & IN_MOVED_TO) {
+		for (w = in->watches; w != NULL; w = w->next) {
+			if ((w->wd == e->wd) &&
+			    (w->moved_from_event != NULL) &&
+			    (w->moved_from_event->cookie == e->cookie))
+			{
+				bool handled = handle_local_rename(w, e);
+				if (handled) {
+					return;
+				}
+			}
+		}
+	}
+
+	if ((e->mask & IN_CREATE) && (e->mask & IN_ISDIR)) {
+		for (w = in->watches; w != NULL; w = w->next) {
+			if (w->wd != e->wd) {
+				continue;
+			}
+			TALLOC_FREE(w->last_mkdir);
+			w->last_mkdir = talloc_strdup(w, e->name);
+		}
+
+		if (IS_SMBD_TMPNAME(e->name, NULL)) {
+			return;
+		}
+	}
+
 	if (e->mask & IN_CREATE) {
 		ne.action = NOTIFY_ACTION_ADDED;
 	} else if (e->mask & IN_DELETE) {
 		ne.action = NOTIFY_ACTION_REMOVED;
-	} else if (e->mask & IN_MOVED_FROM) {
-		if (e2 != NULL && e2->cookie == e->cookie &&
-		    e2->wd == e->wd) {
-			ne.action = NOTIFY_ACTION_OLD_NAME;
-		} else {
-			ne.action = NOTIFY_ACTION_REMOVED;
-		}
 	} else if (e->mask & IN_MOVED_TO) {
-		if ((e->cookie == prev_cookie) && (e->wd == prev_wd)) {
-			ne.action = NOTIFY_ACTION_NEW_NAME;
-		} else {
-			ne.action = NOTIFY_ACTION_ADDED;
-		}
+		ne.action = NOTIFY_ACTION_ADDED;
 	} else {
 		ne.action = NOTIFY_ACTION_MODIFIED;
 	}
@@ -225,29 +394,6 @@ static void inotify_dispatch(struct inotify_private *in,
 			w->callback(in->ctx, w->private_data, &ne, filter);
 		}
 	}
-
-	if ((ne.action == NOTIFY_ACTION_NEW_NAME) &&
-	    ((e->mask & IN_ISDIR) == 0)) {
-
-		/*
-		 * SMB expects a file rename to generate three events, two for
-		 * the rename and the other for a modify of the
-		 * destination. Strange!
-		 */
-
-		ne.action = NOTIFY_ACTION_MODIFIED;
-		e->mask = IN_ATTRIB;
-
-		for (w=in->watches;w;w=next) {
-			next = w->next;
-			if (w->wd == e->wd && filter_match(w, e) &&
-			    !(w->filter & FILE_NOTIFY_CHANGE_CREATION)) {
-				ne.dir = w->path;
-				w->callback(in->ctx, w->private_data, &ne,
-					    filter);
-			}
-		}
-	}
 }
 
 /*
@@ -258,53 +404,41 @@ static void inotify_handler(struct tevent_context *ev, struct tevent_fd *fde,
 {
 	struct inotify_private *in = talloc_get_type(private_data,
 						     struct inotify_private);
+	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
 	int bufsize = 0;
-	struct inotify_event *e0, *e;
-	uint32_t prev_cookie=0;
-	int prev_wd = -1;
+	struct inotify_event *e = NULL;
 	ssize_t ret;
 
-	/*
-	  we must use FIONREAD as we cannot predict the length of the
-	  filenames, and thus can't know how much to allocate
-	  otherwise
-	*/
-	if (ioctl(in->fd, FIONREAD, &bufsize) != 0 || 
-	    bufsize == 0) {
-		DEBUG(0,("No data on inotify fd?!\n"));
-		TALLOC_FREE(fde);
-		return;
-	}
-
-	e0 = e = (struct inotify_event *)TALLOC_SIZE(in, bufsize + 1);
-	if (e == NULL) return;
-	((uint8_t *)e)[bufsize] = '\0';
-
-	ret = read_data(in->fd, e0, bufsize);
-	if (ret != bufsize) {
+	ret = sys_read(in->fd, buf, sizeof(buf));
+	if (ret == -1) {
 		DEBUG(0, ("Failed to read all inotify data - %s\n",
 			  strerror(errno)));
-		talloc_free(e0);
 		/* the inotify fd will now be out of sync,
 		 * can't keep reading data off it */
 		TALLOC_FREE(fde);
 		return;
 	}
+	bufsize = ret;
+
+	e = (struct inotify_event *)buf;
 
 	/* we can get more than one event in the buffer */
-	while (e && (bufsize >= sizeof(*e))) {
-		struct inotify_event *e2 = NULL;
-		bufsize -= e->len + sizeof(*e);
-		if (bufsize >= sizeof(*e)) {
-			e2 = (struct inotify_event *)(e->len + sizeof(*e) + (char *)e);
-		}
-		inotify_dispatch(in, e, prev_wd, prev_cookie, e2);
-		prev_wd = e->wd;
-		prev_cookie = e->cookie;
-		e = e2;
-	}
+	while (bufsize >= sizeof(struct inotify_event)) {
+		size_t e_len = sizeof(struct inotify_event) + e->len;
 
-	talloc_free(e0);
+		if ((e_len < sizeof(struct inotify_event)) ||
+		    (e_len > bufsize))
+		{
+			DBG_ERR("Invalid data from inotify\n");
+			TALLOC_FREE(fde);
+			return;
+		}
+
+		inotify_dispatch(ev, in, e);
+
+		e = (struct inotify_event *)((char *)e + e_len);
+		bufsize -= e_len;
+	}
 }
 
 /*
@@ -421,12 +555,15 @@ int inotify_watch(TALLOC_CTX *mem_ctx,
 		return ENOMEM;
 	}
 
-	w->in = in;
-	w->callback = callback;
-	w->private_data = private_data;
-	w->mask = mask;
-	w->filter = orig_filter;
-	w->path = talloc_strdup(w, path);
+	*w = (struct inotify_watch_context) {
+		.in = in,
+		.callback = callback,
+		.private_data = private_data,
+		.mask = mask,
+		.filter = orig_filter,
+		.path = talloc_strdup(w, path),
+	};
+
 	if (w->path == NULL) {
 		*filter = orig_filter;
 		TALLOC_FREE(w);

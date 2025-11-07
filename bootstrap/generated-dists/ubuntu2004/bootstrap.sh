@@ -42,6 +42,7 @@ apt-get -y install \
     krb5-config \
     krb5-kdc \
     krb5-user \
+    landscape-common \
     language-pack-en \
     lcov \
     libacl1-dev \
@@ -55,6 +56,7 @@ apt-get -y install \
     libclang-dev \
     libcups2-dev \
     libdbus-1-dev \
+    libevent-dev \
     libglib2.0-dev \
     libgnutls28-dev \
     libgpgme11-dev \
@@ -98,7 +100,6 @@ apt-get -y install \
     python3-gpg \
     python3-iso8601 \
     python3-markdown \
-    python3-pexpect \
     python3-pyasn1 \
     python3-requests \
     python3-setproctitle \

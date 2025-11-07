@@ -512,7 +512,6 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			   const char *mask,
 			   uint32_t dirtype,
 			   bool dont_descend,
-			   bool ask_sharemode,
 			   bool get_dosmode_in,
 			   bool (*match_fn)(TALLOC_CTX *ctx,
 					    void *private_data,
@@ -640,10 +639,11 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			smb_fname->st.st_ex_mode = (smb_fname->st.st_ex_mode &
 						    ~S_IFMT) |
 						   S_IFDIR;
+			smb_fname->fsp->fsp_name->st.st_ex_mode =
+				smb_fname->st.st_ex_mode;
 
 			mode = dos_mode_msdfs(conn, dname, &smb_fname->st);
 			get_dosmode = false;
-			ask_sharemode = false;
 			goto done;
 		}
 
@@ -651,7 +651,6 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			/*
 			 * Posix always wants to see symlinks.
 			 */
-			ask_sharemode = false;
 			goto done;
 		}
 
@@ -706,19 +705,6 @@ done:
 			TALLOC_FREE(dname);
 			TALLOC_FREE(fname);
 			continue;
-		}
-
-		if (ask_sharemode && !S_ISDIR(smb_fname->st.st_ex_mode)) {
-			struct timespec write_time_ts;
-			struct file_id fileid;
-
-			fileid = vfs_file_id_from_sbuf(conn,
-						       &smb_fname->st);
-			get_file_infos(fileid, 0, NULL, &write_time_ts);
-			if (!is_omit_timespec(&write_time_ts)) {
-				update_stat_ex_mtime(&smb_fname->st,
-						     write_time_ts);
-			}
 		}
 
 		if (toplevel_dotdot) {
@@ -1103,7 +1089,7 @@ NTSTATUS OpenDir_from_pathref(TALLOC_CTX *mem_ctx,
 				   &how);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_DEBUG("fd_openat(%s) returned %s\n",
-				  dirfsp->fsp_name->base_name,
+				  fsp_str_dbg(dirfsp),
 				  nt_errstr(status));
 			file_free(NULL, new_fsp);
 			return status;
@@ -1171,7 +1157,7 @@ static NTSTATUS OpenDir_fsp(
 		goto fail;
 	}
 	dir_hnd->fsp = fsp;
-	if (fsp->fsp_flags.posix_open) {
+	if (fsp->fsp_name->flags & SMB_FILENAME_POSIX_PATH) {
 		dir_hnd->case_sensitive = true;
 	} else {
 		dir_hnd->case_sensitive = conn->case_sensitive;
@@ -1293,6 +1279,7 @@ void RewindDir(struct smb_Dir *dir_hnd)
 }
 
 struct have_file_open_below_state {
+	bool dirfsp_is_posix;
 	bool found_one;
 };
 
@@ -1307,7 +1294,9 @@ static int have_file_open_below_fn(const struct share_mode_data *data,
 		return 0;
 	}
 
-	if (e->flags & SHARE_MODE_FLAG_POSIX_OPEN) {
+	if (state->dirfsp_is_posix &&
+	    e->flags & SHARE_ENTRY_FLAG_POSIX_OPEN)
+	{
 		/* Ignore POSIX opens */
 		return 0;
 	}
@@ -1324,7 +1313,7 @@ static int have_file_open_below_fn(const struct share_mode_data *data,
 bool have_file_open_below(struct files_struct *fsp)
 {
 	struct have_file_open_below_state state = {
-		.found_one = false,
+		.dirfsp_is_posix = fsp->fsp_flags.posix_open,
 	};
 	int ret;
 

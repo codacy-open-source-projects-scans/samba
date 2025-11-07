@@ -784,8 +784,9 @@ def SAMBA_CONFIG_H(conf, path=None):
 
         conf.ADD_CFLAGS('-Werror=address', testflags=True)
         # we add these here to ensure that -Wstrict-prototypes is not set during configure
-        conf.ADD_CFLAGS('-Werror=strict-prototypes -Wstrict-prototypes',
-                        testflags=True)
+        if not Options.options.disable_warnings_as_errors:
+            conf.ADD_CFLAGS('-Werror=strict-prototypes -Wstrict-prototypes',
+                            testflags=True)
         conf.ADD_CFLAGS('-Werror=write-strings -Wwrite-strings',
                         testflags=True)
         conf.ADD_CFLAGS('-Werror-implicit-function-declaration',
@@ -834,6 +835,9 @@ int main(void) {
 
         if CHECK_CFLAGS(conf, ["-Wno-error=declaration-after-statement"]):
             conf.define('HAVE_WNO_ERROR_DECLARATION_AFTER_STATEMENT', 1)
+
+        if CHECK_CFLAGS(conf, ["-Wno-error=unused-but-set-variable"]):
+            conf.define('HAVE_WNO_ERROR_UNUSED_BUT_SET_VARIABLE', 1)
 
         if not Options.options.disable_warnings_as_errors:
             conf.ADD_NAMED_CFLAGS('PICKY_CFLAGS', '-Werror -Wno-error=deprecated-declarations', testflags=True)

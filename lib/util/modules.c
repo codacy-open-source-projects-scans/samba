@@ -151,7 +151,7 @@ init_module_fn *load_samba_modules(TALLOC_CTX *mem_ctx, const char *subsystem)
 static NTSTATUS load_module_absolute_path(const char *module_path,
 					  bool is_probe)
 {
-	void *handle;
+	void *handle = NULL;
 	init_module_fn init;
 	NTSTATUS status;
 

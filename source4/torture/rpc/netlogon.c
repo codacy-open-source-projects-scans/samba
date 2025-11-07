@@ -1925,6 +1925,8 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 	DATA_BLOB names_blob, chal, lm_resp, nt_resp;
 	int i;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
 	int flags = CLI_CRED_NTLM_AUTH;
 	if (lpcfg_client_lanman_auth(tctx->lp_ctx)) {
 		flags |= CLI_CRED_LANMAN_AUTH;
@@ -1933,6 +1935,8 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 	if (lpcfg_client_ntlmv2_auth(tctx->lp_ctx) && !null_domain) {
 		flags |= CLI_CRED_NTLMv2_AUTH;
 	}
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
 
 	cli_credentials_get_ntlm_username_domain(samba_cmdline_get_creds(),
 						 tctx,
@@ -1992,10 +1996,23 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 
 		torture_assert_ntstatus_ok(tctx, dcerpc_netr_LogonSamLogon_r(b, tctx, &r),
 			"LogonSamLogon failed");
+		if (creds->authenticate_kerberos &&
+		    auth_type != DCERPC_AUTH_TYPE_KRB5 &&
+		    auth_level != DCERPC_AUTH_LEVEL_PRIVACY)
+		{
+			torture_assert_ntstatus_equal(tctx,
+						      r.out.result,
+						      NT_STATUS_ACCESS_DENIED,
+						      "LogonSamLogon auth none krb5");
+			continue;
+		}
 		torture_assert_ntstatus_ok(tctx, r.out.result, "LogonSamLogon failed");
 
-		torture_assert(tctx, netlogon_creds_client_check(creds,
-								 &r.out.return_authenticator->cred),
+		status = netlogon_creds_client_verify(creds,
+						      &r.out.return_authenticator->cred,
+						      auth_type,
+						      auth_level);
+		torture_assert_ntstatus_ok(tctx, status,
 			"Credential chaining failed");
 		torture_assert_int_equal(tctx, *r.out.authoritative, 1,
 					 "LogonSamLogon invalid  *r.out.authoritative");
@@ -2030,10 +2047,23 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 
 		torture_assert_ntstatus_ok(tctx, dcerpc_netr_LogonSamLogon_r(b, tctx, &r),
 			"LogonSamLogon failed");
+		if (creds->authenticate_kerberos &&
+		    auth_type != DCERPC_AUTH_TYPE_KRB5 &&
+		    auth_level != DCERPC_AUTH_LEVEL_PRIVACY)
+		{
+			torture_assert_ntstatus_equal(tctx,
+						      r.out.result,
+						      NT_STATUS_ACCESS_DENIED,
+						      "LogonSamLogon auth none krb5");
+			continue;
+		}
 		torture_assert_ntstatus_ok(tctx, r.out.result, "LogonSamLogon failed");
 
-		torture_assert(tctx, netlogon_creds_client_check(creds,
-								 &r.out.return_authenticator->cred),
+		status = netlogon_creds_client_verify(creds,
+						      &r.out.return_authenticator->cred,
+						      auth_type,
+						      auth_level);
+		torture_assert_ntstatus_ok(tctx, status,
 			"Credential chaining failed");
 		torture_assert_int_equal(tctx, *r.out.authoritative, 1,
 					 "LogonSamLogon invalid  *r.out.authoritative");
@@ -2094,10 +2124,23 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 
 		torture_assert_ntstatus_ok(tctx, dcerpc_netr_LogonSamLogon_r(b, tctx, &r),
 			"LogonSamLogon failed");
+		if (creds->authenticate_kerberos &&
+		    auth_type != DCERPC_AUTH_TYPE_KRB5 &&
+		    auth_level != DCERPC_AUTH_LEVEL_PRIVACY)
+		{
+			torture_assert_ntstatus_equal(tctx,
+						      r.out.result,
+						      NT_STATUS_ACCESS_DENIED,
+						      "LogonSamLogon auth none krb5");
+			continue;
+		}
 		torture_assert_ntstatus_ok(tctx, r.out.result, "LogonSamLogon failed");
 
-		torture_assert(tctx, netlogon_creds_client_check(creds,
-								 &r.out.return_authenticator->cred),
+		status = netlogon_creds_client_verify(creds,
+						      &r.out.return_authenticator->cred,
+						      auth_type,
+						      auth_level);
+		torture_assert_ntstatus_ok(tctx, status,
 			"Credential chaining failed");
 		torture_assert_int_equal(tctx, *r.out.authoritative, 1,
 					 "LogonSamLogon invalid  *r.out.authoritative");
@@ -2127,6 +2170,10 @@ bool test_netlogon_capabilities(struct dcerpc_pipe *p, struct torture_context *t
 	struct netr_Authenticator auth, return_auth;
 	struct netlogon_creds_CredentialState tmp_creds;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
 
 	r.in.server_name = talloc_asprintf(tctx, "\\\\%s", dcerpc_server_name(p));
 	r.in.computer_name = cli_credentials_get_workstation(credentials);
@@ -2196,8 +2243,11 @@ bool test_netlogon_capabilities(struct dcerpc_pipe *p, struct torture_context *t
 
 	*creds = tmp_creds;
 
-	torture_assert(tctx, netlogon_creds_client_check(creds,
-							 &r.out.return_authenticator->cred),
+	status = netlogon_creds_client_verify(creds,
+					      &r.out.return_authenticator->cred,
+					      auth_type,
+					      auth_level);
+	torture_assert_ntstatus_ok(tctx, status,
 		       "Credential chaining failed");
 
 	torture_assert_int_equal(tctx, creds->negotiate_flags,
@@ -2227,8 +2277,11 @@ bool test_netlogon_capabilities(struct dcerpc_pipe *p, struct torture_context *t
 
 	*creds = tmp_creds;
 
-	torture_assert(tctx, netlogon_creds_client_check(creds,
-							 &r.out.return_authenticator->cred),
+	status = netlogon_creds_client_verify(creds,
+					      &r.out.return_authenticator->cred,
+					      auth_type,
+					      auth_level);
+	torture_assert_ntstatus_ok(tctx, status,
 		       "Credential chaining failed");
 
 	torture_assert_int_equal(tctx, requested_flags,

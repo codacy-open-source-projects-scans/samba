@@ -915,11 +915,11 @@ static ssize_t smb_time_audit_recvfile(vfs_handle_struct *handle, int fromfd,
 }
 
 static int smb_time_audit_renameat(vfs_handle_struct *handle,
-				files_struct *srcfsp,
-				const struct smb_filename *oldname,
-				files_struct *dstfsp,
-				const struct smb_filename *newname,
-				const struct vfs_rename_how *how)
+				   files_struct *src_dirfsp,
+				   const struct smb_filename *oldname,
+				   files_struct *dst_dirfsp,
+				   const struct smb_filename *newname,
+				   const struct vfs_rename_how *how)
 {
 	int result;
 	struct timespec ts1,ts2;
@@ -927,19 +927,15 @@ static int smb_time_audit_renameat(vfs_handle_struct *handle,
 	struct smb_filename *new_full_fname = NULL;
 
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  dstfsp,
-						  newname);
+						      dst_dirfsp,
+						      newname);
 	if (new_full_fname == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
 	clock_gettime_mono(&ts1);
-	result = SMB_VFS_NEXT_RENAMEAT(handle,
-			srcfsp,
-			oldname,
-			dstfsp,
-			newname,
-			how);
+	result = SMB_VFS_NEXT_RENAMEAT(
+		handle, src_dirfsp, oldname, dst_dirfsp, newname, how);
 	clock_gettime_mono(&ts2);
 	timediff = nsec_time_diff(&ts2,&ts1)*1.0e-9;
 
@@ -950,6 +946,38 @@ static int smb_time_audit_renameat(vfs_handle_struct *handle,
 	}
 
 	TALLOC_FREE(new_full_fname);
+	return result;
+}
+
+static int smb_time_audit_rename_stream(struct vfs_handle_struct *handle,
+					struct files_struct *src_fsp,
+					const char *dst_name,
+					bool replace_if_exists)
+{
+	int result;
+	struct timespec ts1, ts2;
+	double timediff;
+	char *msg = NULL;
+
+	clock_gettime_mono(&ts1);
+	result = SMB_VFS_NEXT_RENAME_STREAM(handle,
+					    src_fsp,
+					    dst_name,
+					    replace_if_exists);
+	clock_gettime_mono(&ts2);
+	timediff = nsec_time_diff(&ts2, &ts1) * 1.0e-9;
+
+	if (timediff > audit_timeout) {
+		msg = talloc_asprintf(talloc_tos(),
+				      "%s -> %s",
+				      fsp_str_dbg(src_fsp),
+				      dst_name);
+		if (msg != NULL) {
+			smb_time_audit_log_msg("rename_stream", timediff, msg);
+			TALLOC_FREE(msg);
+		}
+	}
+
 	return result;
 }
 
@@ -1501,11 +1529,11 @@ static int smb_time_audit_readlinkat(vfs_handle_struct *handle,
 }
 
 static int smb_time_audit_linkat(vfs_handle_struct *handle,
-				files_struct *srcfsp,
-				const struct smb_filename *old_smb_fname,
-				files_struct *dstfsp,
-				const struct smb_filename *new_smb_fname,
-				int flags)
+				 files_struct *src_dirfsp,
+				 const struct smb_filename *old_smb_fname,
+				 files_struct *dst_dirfsp,
+				 const struct smb_filename *new_smb_fname,
+				 int flags)
 {
 	struct smb_filename *new_full_fname = NULL;
 	int result;
@@ -1513,8 +1541,8 @@ static int smb_time_audit_linkat(vfs_handle_struct *handle,
 	double timediff;
 
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  dstfsp,
-						  new_smb_fname);
+						      dst_dirfsp,
+						      new_smb_fname);
 	if (new_full_fname == NULL) {
 		errno = ENOMEM;
 		return -1;
@@ -1522,11 +1550,11 @@ static int smb_time_audit_linkat(vfs_handle_struct *handle,
 
 	clock_gettime_mono(&ts1);
 	result = SMB_VFS_NEXT_LINKAT(handle,
-			srcfsp,
-			old_smb_fname,
-			dstfsp,
-			new_smb_fname,
-			flags);
+				     src_dirfsp,
+				     old_smb_fname,
+				     dst_dirfsp,
+				     new_smb_fname,
+				     flags);
 	clock_gettime_mono(&ts2);
 	timediff = nsec_time_diff(&ts2,&ts1)*1.0e-9;
 
@@ -2730,6 +2758,7 @@ static struct vfs_fn_pointers vfs_time_audit_fns = {
 	.sendfile_fn = smb_time_audit_sendfile,
 	.recvfile_fn = smb_time_audit_recvfile,
 	.renameat_fn = smb_time_audit_renameat,
+	.rename_stream_fn = smb_time_audit_rename_stream,
 	.fsync_send_fn = smb_time_audit_fsync_send,
 	.fsync_recv_fn = smb_time_audit_fsync_recv,
 	.stat_fn = smb_time_audit_stat,
@@ -2800,7 +2829,6 @@ static struct vfs_fn_pointers vfs_time_audit_fns = {
 	.durable_reconnect_fn = smb_time_audit_durable_reconnect,
 	.freaddir_attr_fn = smb_time_audit_freaddir_attr,
 };
-
 
 static_decl_vfs;
 NTSTATUS vfs_time_audit_init(TALLOC_CTX *ctx)

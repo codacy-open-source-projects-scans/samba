@@ -21,6 +21,7 @@
 import os, pwd, grp
 import ldb
 import samba
+from samba.tests import source_tree_topdir
 from samba.tests.samba_tool.base import SambaToolCmdTest
 import shutil
 from samba.netcmd.gpo import get_gpo_dn, get_gpo_info
@@ -141,21 +142,27 @@ source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../
 provision_path = os.path.join(source_path, "source4/selftest/provisions/")
 
 def has_difference(path1, path2, binary=True, xml=True, sortlines=False):
-    """Use this function to determine if the GPO backup differs from another.
+    """Use this function to determine if the GPO backup differs from
+    another. It can compare pairs of files or pairs of directories.
 
     xml=True checks whether any xml files are equal
     binary=True checks whether any .SAMBABACKUP files are equal
+    sortlines=True ignore order of lines in comparison of single
+    files.
+
+    returns None if there is no difference between the paths,
+    otherwise *something*.
     """
     if os.path.isfile(path1):
-        if sortlines:
-            file1 = open(path1).readlines()
-            file1.sort()
-            file2 = open(path1).readlines()
-            file2.sort()
-            if file1 != file2:
-                return path1
+        with open(path1) as f1, open(path2) as f2:
+            lines1 = f1.readlines()
+            lines2 = f2.readlines()
 
-        elif open(path1).read() != open(path2).read():
+        if sortlines:
+            lines1.sort()
+            lines2.sort()
+
+        if lines1 != lines2:
             return path1
 
         return None
@@ -184,8 +191,9 @@ def has_difference(path1, path2, binary=True, xml=True, sortlines=False):
             else:
                 if (l_name.endswith('.xml') and xml or
                     l_name.endswith('.SAMBABACKUP') and binary):
-                    if open(l_name, "rb").read() != open(r_name, "rb").read():
-                        return l_name
+                    with open(l_name, "rb") as f1, open(r_name, "rb") as f2:
+                        if f1.read() != f2.read():
+                            return l_name
 
     return None
 
@@ -711,7 +719,8 @@ class GpoCmdTestCase(SambaToolCmdTest):
 
         self.assertTrue(os.path.exists(reg_pol),
                         'The Registry.pol does not exist')
-        reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
+        with open(reg_pol, 'rb') as f:
+            reg_data = ndr_unpack(preg.file, f.read())
         ret = any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not added')
@@ -729,8 +738,8 @@ class GpoCmdTestCase(SambaToolCmdTest):
                               'Failed to unset apply group policies')
         after_vers = gpt_ini_version(self.gpo_guid)
         self.assertGreater(after_vers, before_vers, 'GPT.INI was not updated')
-
-        reg_data = ndr_unpack(preg.file, open(reg_pol, 'rb').read())
+        with open(reg_pol, 'rb') as f:
+            reg_data = ndr_unpack(preg.file, f.read())
         ret = not any([get_string(e.valuename) == policy and e.data == 1
             for e in reg_data.entries])
         self.assertTrue(ret, 'The sudoers entry was not removed')
@@ -804,7 +813,8 @@ class GpoCmdTestCase(SambaToolCmdTest):
                                                  os.environ["PASSWORD"]))
         self.assertCmdSuccess(result, out, err,
                               'Failed to unset MaxTicketAge')
-        inf_pol_contents = open(inf_pol, 'r').read()
+        with open(inf_pol, 'r') as f:
+            inf_pol_contents = f.read()
         self.assertNotIn('MaxTicketAge = 10', inf_pol_contents,
                       'The test entry was still found!')
         after_vers = gpt_ini_version(self.gpo_guid)
@@ -1572,6 +1582,42 @@ class GpoCmdTestCase(SambaToolCmdTest):
                                                  os.environ["PASSWORD"]))
         self.assertNotIn(text, out, 'The test entry was still found!')
 
+    def test_vgp_motd_set_thrice(self):
+        url = f'ldap://{os.environ["SERVER"]}'
+        creds = f'-U{os.environ["USERNAME"]}%{os.environ["PASSWORD"]}'
+        old_version = gpt_ini_version(self.gpo_guid)
+
+        for i in range(1, 4):
+            msg = f"message {i}\n"
+            result, out, err = self.runcmd("gpo", "manage", "motd", "set",
+                                           "-H", url,
+                                           creds,
+                                           self.gpo_guid,
+                                           msg.format(i))
+
+            self.assertCmdSuccess(result, out, err, f'MOTD set {i} failed')
+            self.assertEqual(err, "", f"not expecting errors (round {i})")
+            new_version = gpt_ini_version(self.gpo_guid)
+            self.assertGreater(new_version, old_version,
+                               f'GPT.INI was not updated in round {i}')
+            old_version = new_version
+
+            result, out, err = self.runcmd("gpo", "manage", "motd", "list",
+                                           "-H", url,
+                                           creds,
+                                           self.gpo_guid)
+
+            self.assertCmdSuccess(result, out, err, f'MOTD list {i} failed')
+            self.assertIn(msg, out)
+
+        # unset, by setting with no value
+        result, out, err = self.runcmd("gpo", "manage", "motd", "set",
+                                       "-H", url,
+                                       creds,
+                                       self.gpo_guid)
+        self.assertCmdSuccess(result, out, err, f'MOTD set {i} failed')
+        self.assertEqual(err, "", f"not expecting errors (round {i})")
+
     def test_vgp_motd(self):
         lp = LoadParm()
         lp.load(os.environ['SERVERCONFFILE'])
@@ -1834,7 +1880,7 @@ class GpoCmdTestCase(SambaToolCmdTest):
         except IndexError:
             self.fail("Failed to find GUID in output: %s" % out)
 
-        self.backup_path = os.path.join(samba.source_tree_topdir(), 'source4',
+        self.backup_path = os.path.join(source_tree_topdir(), 'source4',
                                         'selftest', 'provisions',
                                         'generalized-gpo-backup')
 

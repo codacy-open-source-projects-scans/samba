@@ -67,6 +67,7 @@
 		json_t *mime_map;
 		bool ignore_unknown_attribute;
 		bool ignore_unknown_type;
+		bool force_substring_search;
 		bool type_error;
 		YY_BUFFER_STATE s;
 		const char *result;
@@ -84,7 +85,6 @@
 	int mdsyylwrap(void);
 	bool map_spotlight_to_es_query(TALLOC_CTX *mem_ctx,
 				       json_t *mappings,
-				       const char *path_scope,
 				       const char *query_string,
 				       char **_es_query);
 }
@@ -214,6 +214,13 @@ attribute EQUAL value {
 
 function:
 FUNC_INRANGE OBRACE attribute COMMA WORD COMMA WORD CBRACE {
+	if ($3 == NULL) {
+		$$ = NULL;
+	} else {
+		$$ = map_expr($3, '~', $5, $7);
+	}
+}
+| FUNC_INRANGE OBRACE attribute COMMA isodate COMMA isodate CBRACE {
 	if ($3 == NULL) {
 		$$ = NULL;
 	} else {
@@ -392,6 +399,7 @@ static char *map_fts(const struct es_attr_map *attr,
 	struct es_parser_state *s = global_es_parser_state;
 	const char *not = NULL;
 	const char *end = NULL;
+	const char *force_substring = "";
 	char *esval = NULL;
 	char *es = NULL;
 
@@ -411,12 +419,18 @@ static char *map_fts(const struct es_attr_map *attr,
 		end = ")";
 		break;
 	default:
-		DBG_ERR("Mapping fts [%s] unexpected op [%c]\n", val, op);
+		DBG_DEBUG("Mapping fts [%s] unexpected op [%c]\n", val, op);
 		return NULL;
 	}
+
+	if (s->force_substring_search) {
+		force_substring = "*";
+	}
+
 	es = talloc_asprintf(s->frame,
-			     "%s%s%s",
+			     "%s%s%s%s",
 			     not,
+			     force_substring,
 			     esval,
 			     end);
 	if (es == NULL) {
@@ -432,6 +446,7 @@ static char *map_str(const struct es_attr_map *attr,
 	struct es_parser_state *s = global_es_parser_state;
 	char *esval = NULL;
 	char *es = NULL;
+	const char *force_substring = "";
 	const char *not = NULL;
 	const char *end = NULL;
 
@@ -455,10 +470,15 @@ static char *map_str(const struct es_attr_map *attr,
 		return NULL;
 	}
 
+	if (s->force_substring_search) {
+		force_substring = "*";
+	}
+
 	es = talloc_asprintf(s->frame,
-			     "%s%s:%s%s",
+			     "%s%s:%s%s%s",
 			     not,
 			     attr->name,
+			     force_substring,
 			     esval,
 			     end);
 	if (es == NULL) {
@@ -626,7 +646,6 @@ int mdsyylwrap(void)
  **/
 bool map_spotlight_to_es_query(TALLOC_CTX *mem_ctx,
 			       json_t *mappings,
-			       const char *path_scope,
 			       const char *query_string,
 			       char **_es_query)
 {
@@ -662,6 +681,10 @@ bool map_spotlight_to_es_query(TALLOC_CTX *mem_ctx,
 					     "elasticsearch",
 					     "ignore unknown type",
 					     false);
+	s.force_substring_search = lp_parm_bool(GLOBAL_SECTION_SNUM,
+					     "elasticsearch",
+					     "force substring search",
+					     false);
 
 	global_es_parser_state = &s;
 	result = mdsyylparse();
@@ -673,13 +696,11 @@ bool map_spotlight_to_es_query(TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
-	es_query = talloc_asprintf(mem_ctx,
-				   "(%s) AND path.real.fulltext:\\\"%s\\\"",
-				   s.result, path_scope);
-	TALLOC_FREE(s.frame);
+	es_query = talloc_strdup(mem_ctx, s.result);
 	if (es_query == NULL) {
 		return false;
 	}
+	TALLOC_FREE(s.frame);
 
 	*_es_query = es_query;
 	return true;

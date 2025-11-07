@@ -112,9 +112,9 @@ def extract_dn(text):
     if dn == 'CN=ad://ext/AuthenticationSilo,CN=Claim Types,CN=Claims Configuration,CN=Services':
         return 'CN=ad://ext/AuthenticationSilo,CN=Claim Types,CN=Claims Configuration,CN=Services,${CONFIG_DN}'
 
-    # Granting the "CN=Send-As,CN=Extended-Rights" to gMSA accounts.
-    if dn.endswith(',CN=Extended-Rights" to gMSA accounts.'):
-        dn = dn.replace('" to gMSA accounts.', '')
+    # Granting the `CN=Send-As,CN=Extended-Rights` to gMSA accounts.
+    if dn.endswith(',CN=Extended-Rights to gMSA accounts.'):
+        dn = dn.replace(' to gMSA accounts.', '')
         return dn + ",${CONFIG_DN}"
 
     return dn
@@ -253,10 +253,11 @@ def read_ms_markdown(in_file, out_folder=None, out_dict=None):
         if updates:
             for update in updates[2:]:
                 output = re.match(r'Operation (\d+): {(.*)}', update[0])
-                if output:
-                    # print output.group(1), output.group(2)
-                    guid = output.group(2)
-                    filename = "%s-{%s}.ldif" % (output.group(1).zfill(4), guid)
+                if not output:
+                    raise Exception(update)
+
+                guid = output.group(2)
+                filename = "%s-{%s}.ldif" % (output.group(1).zfill(4), guid)
 
                 found = False
 

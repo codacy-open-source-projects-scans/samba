@@ -55,6 +55,10 @@
 #include "winbindd_traceid.h"
 #include "lib/util/util_process.h"
 
+#if defined(WITH_SYSTEMD_USERDB)
+#include "winbindd_varlink.h"
+#endif
+
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
 
@@ -63,7 +67,6 @@
 static bool client_is_idle(struct winbindd_cli_state *state);
 static void remove_client(struct winbindd_cli_state *state);
 
-static bool interactive = False;
 
 /* Reload configuration */
 
@@ -1081,6 +1084,21 @@ static bool winbindd_setup_listeners(void)
 	}
 	tevent_fd_set_auto_close(fde);
 
+	if (lp_winbind_varlink_service()) {
+#if defined(WITH_SYSTEMD_USERDB)
+		/* Setup varlink socket */
+		if (!winbind_setup_varlink(global_event_context(),
+					   global_event_context())) {
+			goto failed;
+		}
+#else
+		DBG_WARNING("\"winbind varlink service\" is enabled but "
+			    "samba was built without systemd's userdb "
+			    "support. This option will not have any "
+			    "effect\n");
+#endif
+	}
+
 	winbindd_scrub_clients_handler(global_event_context(), NULL,
 				       timeval_current(), NULL);
 	return true;
@@ -1420,13 +1438,6 @@ int main(int argc, const char **argv)
 
 	log_stdout = (debug_get_log_type() == DEBUG_STDOUT);
 	if (cmdline_daemon_cfg->interactive) {
-		/*
-		 * libcmdline POPT_DAEMON callback sets "fork" to false if "-i"
-		 * for interactive is passed on the commandline. Set it back to
-		 * true. TODO: check if this is correct, smbd and nmbd don't do
-		 * this.
-		 */
-		cmdline_daemon_cfg->fork = true;
 		log_stdout = true;
 	}
 
@@ -1467,13 +1478,13 @@ int main(int argc, const char **argv)
 		const char *workgroup = lp_workgroup();
 
 		if (workgroup == NULL || strlen(workgroup) == 0) {
-			DBG_ERR("For 'secuirity = ADS' mode, the 'workgroup' "
+			DBG_ERR("For 'security = ADS' mode, the 'workgroup' "
 				"parameter is required to be set!\n");
 			exit(1);
 		}
 
 		if (realm == NULL || strlen(realm) == 0) {
-			DBG_ERR("For 'secuirity = ADS' mode, the 'realm' "
+			DBG_ERR("For 'security = ADS' mode, the 'realm' "
 				"parameter is required to be set!\n");
 			exit(1);
 		}
@@ -1603,7 +1614,7 @@ int main(int argc, const char **argv)
 	BlockSignals(False, SIGHUP);
 	BlockSignals(False, SIGCHLD);
 
-	if (!interactive) {
+	if (!cmdline_daemon_cfg->interactive) {
 		become_daemon(cmdline_daemon_cfg->fork,
 			      cmdline_daemon_cfg->no_process_group,
 			      log_stdout);
@@ -1714,7 +1725,7 @@ int main(int argc, const char **argv)
 
 	TALLOC_FREE(frame);
 
-	if (!interactive) {
+	if (!cmdline_daemon_cfg->interactive) {
 		daemon_ready("winbindd");
 	}
 

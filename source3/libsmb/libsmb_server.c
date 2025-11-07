@@ -24,7 +24,8 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmbclient.h"
 #include "libsmb_internal.h"
 #include "../librpc/gen_ndr/ndr_lsa.h"
@@ -33,6 +34,7 @@
 #include "libcli/security/security.h"
 #include "libsmb/nmblib.h"
 #include "../libcli/smb/smbXcli_base.h"
+#include "libsmb/smbsock_connect.h"
 
 /*
  * Check a server for being alive and well.
@@ -45,54 +47,55 @@ int
 SMBC_check_server(SMBCCTX * context,
                   SMBCSRV * server)
 {
-	time_t now;
+	struct cli_state *cli = server->cli;
+	time_t now, next_echo;
+	unsigned char data[16] = {0};
+	NTSTATUS status;
+	bool ok = false;
 
-	if (!cli_state_is_connected(server->cli)) {
+	if (!cli_state_is_connected(cli)) {
 		return 1;
 	}
 
 	now = time_mono(NULL);
+	next_echo = server->last_echo_time + cli->timeout/1000;
 
-	if (server->last_echo_time == (time_t)0 ||
-			now > server->last_echo_time +
-				(server->cli->timeout/1000)) {
-		unsigned char data[16] = {0};
-		NTSTATUS status = cli_echo(server->cli,
-					1,
-					data_blob_const(data, sizeof(data)));
-		if (!NT_STATUS_IS_OK(status)) {
-			bool ok = false;
-			/*
-			 * Some SMB2 servers (not Samba or Windows)
-			 * check the session status on SMB2_ECHO and return
-			 * NT_STATUS_USER_SESSION_DELETED
-			 * if the session was not set. That's OK, they still
-			 * replied.
-			 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13218
-			 */
-			if (smbXcli_conn_protocol(server->cli->conn) >=
-					PROTOCOL_SMB2_02) {
-				if (NT_STATUS_EQUAL(status,
-					    NT_STATUS_USER_SESSION_DELETED)) {
-					ok = true;
-				}
-			}
-			/*
-			 * Some NetApp servers return
-			 * NT_STATUS_INVALID_PARAMETER.That's OK, they still
-			 * replied.
-			 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13007
-			 */
-			if (NT_STATUS_EQUAL(status,
-					NT_STATUS_INVALID_PARAMETER)) {
-				ok = true;
-			}
-			if (!ok) {
-				return 1;
-			}
-		}
-		server->last_echo_time = now;
+	if ((server->last_echo_time != 0) && (now <= next_echo)) {
+		return 0;
 	}
+
+	status = cli_echo(cli, 1, data_blob_const(data, sizeof(data)));
+	if (NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
+
+	/*
+	 * Some SMB2 servers (not Samba or Windows)
+	 * check the session status on SMB2_ECHO and return
+	 * NT_STATUS_USER_SESSION_DELETED
+	 * if the session was not set. That's OK, they still
+	 * replied.
+	 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13218
+	 */
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
+		if (NT_STATUS_EQUAL(status, NT_STATUS_USER_SESSION_DELETED)) {
+			ok = true;
+		}
+	}
+	/*
+	 * Some NetApp servers return
+	 * NT_STATUS_INVALID_PARAMETER.That's OK, they still
+	 * replied.
+	 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13007
+	 */
+	if (NT_STATUS_EQUAL(status, NT_STATUS_INVALID_PARAMETER)) {
+		ok = true;
+	}
+	if (!ok) {
+		return 1;
+	}
+done:
+	server->last_echo_time = now;
 	return 0;
 }
 
@@ -117,9 +120,8 @@ SMBC_remove_unused_server(SMBCCTX * context,
 	for (file = context->internal->files; file; file = file->next) {
 		if (file->srv == srv) {
 			/* Still used */
-			DEBUG(3, ("smbc_remove_usused_server: "
-                                  "%p still used by %p.\n",
-				  srv, file));
+			DBG_NOTICE("%p still used by %p.\n",
+				   srv, file);
 			return 1;
 		}
 	}
@@ -129,7 +131,7 @@ SMBC_remove_unused_server(SMBCCTX * context,
 	cli_shutdown(srv->cli);
 	srv->cli = NULL;
 
-	DEBUG(3, ("smbc_remove_usused_server: %p removed.\n", srv));
+	DBG_NOTICE("%p removed.\n", srv);
 
 	smbc_getFunctionRemoveCachedServer(context)(context, srv);
 
@@ -241,36 +243,35 @@ check_server_cache:
 
 	}
 
-	if (srv) {
-		if (smbc_getFunctionCheckServer(context)(context, srv)) {
-			/*
-                         * This server is no good anymore
-                         * Try to remove it and check for more possible
-                         * servers in the cache
-                         */
-			if (smbc_getFunctionRemoveUnusedServer(context)(context,
-                                                                        srv)) {
-                                /*
-                                 * We could not remove the server completely,
-                                 * remove it from the cache so we will not get
-                                 * it again. It will be removed when the last
-                                 * file/dir is closed.
-                                 */
-				smbc_getFunctionRemoveCachedServer(context)(context,
-                                                                            srv);
-			}
+	if (srv == NULL) {
+		return NULL;
+	}
 
+	if (smbc_getFunctionCheckServer(context)(context, srv)) {
+		/*
+		 * This server is no good anymore
+		 * Try to remove it and check for more possible
+		 * servers in the cache
+		 */
+		if (smbc_getFunctionRemoveUnusedServer(context)(context, srv)) {
 			/*
-                         * Maybe there are more cached connections to this
-                         * server
-                         */
-			goto check_server_cache;
+			 * We could not remove the server completely,
+			 * remove it from the cache so we will not get
+			 * it again. It will be removed when the last
+			 * file/dir is closed.
+			 */
+			smbc_getFunctionRemoveCachedServer(context)(context,
+								    srv);
 		}
 
-		return srv;
- 	}
+		/*
+		 * Maybe there are more cached connections to this
+		 * server
+		 */
+		goto check_server_cache;
+	}
 
-        return NULL;
+	return srv;
 }
 
 static struct cli_credentials *SMBC_auth_credentials(TALLOC_CTX *mem_ctx,
@@ -348,7 +349,7 @@ SMBC_server_internal(TALLOC_CTX *ctx,
             SMBCCTX *context,
             bool connect_if_not_found,
             const char *server,
-            uint16_t port,
+            const struct smb_transports *transports,
             const char *share,
             char **pp_workgroup,
             char **pp_username,
@@ -369,12 +370,34 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 	struct smbXcli_tcon *tcon = NULL;
 	int signing_state = SMB_SIGNING_DEFAULT;
 	struct cli_credentials *creds = NULL;
+	struct smb_transports ats = *transports;
+	uint8_t ati;
+	const struct smb_transports *ts = &ats;
+	struct smb_transports ots = { .num_transports = 0, };
+	struct smb_transports nts = { .num_transports = 0, };
 
 	*in_cache = false;
 
 	if (server[0] == 0) {
 		errno = EPERM;
 		return NULL;
+	}
+
+	for (ati = 0; ati < ats.num_transports; ati++) {
+		const struct smb_transport *at =
+			&ats.transports[ati];
+
+		if (at->type == SMB_TRANSPORT_TYPE_NBT) {
+			struct smb_transport *nt =
+				&nts.transports[nts.num_transports];
+			*nt = *at;
+			nts.num_transports += 1;
+		} else {
+			struct smb_transport *ot =
+				&ots.transports[ots.num_transports];
+			*ot = *at;
+			ots.num_transports += 1;
+		}
 	}
 
         /* Look for a cached connection */
@@ -524,15 +547,17 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 		signing_state = SMB_SIGNING_REQUIRED;
 	}
 
-	if (port == 0) {
+	if (nts.num_transports != 0 && ots.num_transports != 0) {
 	        if (share == NULL || *share == '\0' || is_ipc) {
 			/*
 			 * Try 139 first for IPC$
 			 */
+			ts = &ots;
+
 			status = cli_connect_nb(NULL,
 						server_n,
 						NULL,
-						NBT_SMB_PORT,
+						&nts,
 						0x20,
 						smbc_getNetbiosName(context),
 						signing_state,
@@ -548,7 +573,7 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 		status = cli_connect_nb(NULL,
 					server_n,
 					NULL,
-					port,
+					ts,
 					0x20,
 					smbc_getNetbiosName(context),
 					signing_state,
@@ -628,7 +653,7 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 				creds)) {
 		cli_shutdown(c);
 		srv = SMBC_server_internal(ctx, context, connect_if_not_found,
-				newserver, port, newshare, pp_workgroup,
+				newserver, &ats, newshare, pp_workgroup,
 				pp_username, pp_password, in_cache);
 		TALLOC_FREE(newserver);
 		TALLOC_FREE(newshare);
@@ -687,14 +712,13 @@ SMBC_server_internal(TALLOC_CTX *ctx,
 	 * Let's allocate a server structure.
 	 */
 
-	srv = SMB_MALLOC_P(SMBCSRV);
+	srv = SMB_CALLOC_ARRAY(SMBCSRV, 1);
 	if (!srv) {
 		cli_shutdown(c);
 		errno = ENOMEM;
 		return NULL;
 	}
 
-	ZERO_STRUCTP(srv);
 	DLIST_ADD(srv->cli, c);
 	srv->dev = (dev_t)(str_checksum(server) ^ str_checksum(share));
         srv->no_pathinfo = False;
@@ -738,9 +762,10 @@ SMBC_server(TALLOC_CTX *ctx,
 {
 	SMBCSRV *srv=NULL;
 	bool in_cache = false;
+	struct smb_transports ts = smbsock_transports_from_port(port);
 
 	srv = SMBC_server_internal(ctx, context, connect_if_not_found,
-			server, port, share, pp_workgroup,
+			server, &ts, share, pp_workgroup,
 			pp_username, pp_password, &in_cache);
 
 	if (!srv) {
@@ -794,6 +819,8 @@ SMBC_attr_server(TALLOC_CTX *ctx,
         NTSTATUS nt_status;
 	SMBCSRV *srv=NULL;
 	SMBCSRV *ipc_srv=NULL;
+	struct smb_transports ts = smbsock_transports_from_port(port);
+	struct cli_credentials *creds = NULL;
 
 	/*
 	 * Use srv->cli->desthost and srv->cli->share instead of
@@ -816,112 +843,110 @@ SMBC_attr_server(TALLOC_CTX *ctx,
          */
         ipc_srv = SMBC_find_server(ctx, context, server, "*IPC$",
                                    pp_workgroup, pp_username, pp_password);
-        if (!ipc_srv) {
-		struct cli_credentials *creds = NULL;
+	if (ipc_srv != NULL) {
+		return ipc_srv;
+	}
 
-                /* We didn't find a cached connection.  Get the password */
-		if (!*pp_password || (*pp_password)[0] == '\0') {
-                        /* ... then retrieve it now. */
-			SMBC_call_auth_fn(ctx, context, server, share,
-                                          pp_workgroup,
-                                          pp_username,
-                                          pp_password);
-			if (!*pp_workgroup || !*pp_username || !*pp_password) {
-				errno = ENOMEM;
-				return NULL;
-			}
-                }
-
-                flags = 0;
-
-		creds = SMBC_auth_credentials(NULL,
-					      context,
-					      *pp_workgroup,
-					      *pp_username,
-					      *pp_password);
-		if (creds == NULL) {
+	/* We didn't find a cached connection.  Get the password */
+	if (!*pp_password || (*pp_password)[0] == '\0') {
+		/* ... then retrieve it now. */
+		SMBC_call_auth_fn(ctx, context, server, share,
+				  pp_workgroup,
+				  pp_username,
+				  pp_password);
+		if (!*pp_workgroup || !*pp_username || !*pp_password) {
 			errno = ENOMEM;
 			return NULL;
 		}
+	}
 
-		nt_status = cli_full_connection_creds(NULL,
-						      &ipc_cli,
-						      lp_netbios_name(),
-						      server,
-						      NULL,
-						      0,
-						      "IPC$",
-						      "?????",
-						      creds,
-						      flags);
-		if (! NT_STATUS_IS_OK(nt_status)) {
-			TALLOC_FREE(creds);
-                        DEBUG(1,("cli_full_connection failed! (%s)\n",
-                                 nt_errstr(nt_status)));
-                        errno = ENOTSUP;
-                        return NULL;
-                }
-		talloc_steal(ipc_cli, creds);
+	flags = 0;
 
-                ipc_srv = SMB_MALLOC_P(SMBCSRV);
-                if (!ipc_srv) {
-                        errno = ENOMEM;
-                        cli_shutdown(ipc_cli);
-                        return NULL;
-                }
+	creds = SMBC_auth_credentials(NULL,
+				      context,
+				      *pp_workgroup,
+				      *pp_username,
+				      *pp_password);
+	if (creds == NULL) {
+		errno = ENOMEM;
+		return NULL;
+	}
 
-                ZERO_STRUCTP(ipc_srv);
-                DLIST_ADD(ipc_srv->cli, ipc_cli);
+	nt_status = cli_full_connection_creds(NULL,
+					      &ipc_cli,
+					      lp_netbios_name(),
+					      server,
+					      NULL,
+					      &ts,
+					      "IPC$",
+					      "?????",
+					      creds,
+					      flags);
+	if (! NT_STATUS_IS_OK(nt_status)) {
+		TALLOC_FREE(creds);
+		DEBUG(1,("cli_full_connection failed! (%s)\n",
+			 nt_errstr(nt_status)));
+		errno = ENOTSUP;
+		return NULL;
+	}
+	talloc_steal(ipc_cli, creds);
 
-                nt_status = cli_rpc_pipe_open_noauth(
-			ipc_srv->cli, &ndr_table_lsarpc, &pipe_hnd);
-                if (!NT_STATUS_IS_OK(nt_status)) {
-                        DEBUG(1, ("cli_nt_session_open fail!\n"));
-                        errno = ENOTSUP;
-                        cli_shutdown(ipc_srv->cli);
-                        free(ipc_srv);
-                        return NULL;
-                }
+	ipc_srv = SMB_CALLOC_ARRAY(SMBCSRV, 1);
+	if (!ipc_srv) {
+		errno = ENOMEM;
+		cli_shutdown(ipc_cli);
+		return NULL;
+	}
+	DLIST_ADD(ipc_srv->cli, ipc_cli);
 
-                /*
-                 * Some systems don't support
-                 * SEC_FLAG_MAXIMUM_ALLOWED, but NT sends 0x2000000
-                 * so we might as well do it too.
-                 */
+	nt_status = cli_rpc_pipe_open_noauth(
+		ipc_srv->cli, &ndr_table_lsarpc, &pipe_hnd);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DEBUG(1, ("cli_nt_session_open fail!\n"));
+		errno = ENOTSUP;
+		cli_shutdown(ipc_srv->cli);
+		free(ipc_srv);
+		return NULL;
+	}
 
-                nt_status = rpccli_lsa_open_policy(
-                        pipe_hnd,
-                        talloc_tos(),
-                        True,
-                        GENERIC_EXECUTE_ACCESS,
-                        &ipc_srv->pol);
+	/*
+	 * Some systems don't support
+	 * SEC_FLAG_MAXIMUM_ALLOWED, but NT sends 0x2000000
+	 * so we might as well do it too.
+	 */
 
-                if (!NT_STATUS_IS_OK(nt_status)) {
-                        cli_shutdown(ipc_srv->cli);
-                        free(ipc_srv);
-			errno = cli_status_to_errno(nt_status);
-                        return NULL;
-                }
+	nt_status = rpccli_lsa_open_policy(
+		pipe_hnd,
+		talloc_tos(),
+		True,
+		GENERIC_EXECUTE_ACCESS,
+		&ipc_srv->pol);
 
-                /* now add it to the cache (internal or external) */
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		cli_shutdown(ipc_srv->cli);
+		free(ipc_srv);
+		errno = cli_status_to_errno(nt_status);
+		return NULL;
+	}
 
-                errno = 0;      /* let cache function set errno if it likes */
-                if (smbc_getFunctionAddCachedServer(context)(context, ipc_srv,
-                                                             server,
-                                                             "*IPC$",
-                                                             *pp_workgroup,
-                                                             *pp_username)) {
-                        DEBUG(3, (" Failed to add server to cache\n"));
-                        if (errno == 0) {
-                                errno = ENOMEM;
-                        }
-                        cli_shutdown(ipc_srv->cli);
-                        free(ipc_srv);
-                        return NULL;
-                }
+	/* now add it to the cache (internal or external) */
 
-                DLIST_ADD(context->internal->servers, ipc_srv);
-        }
+	errno = 0;      /* let cache function set errno if it likes */
+	if (smbc_getFunctionAddCachedServer(context)(context, ipc_srv,
+						     server,
+						     "*IPC$",
+						     *pp_workgroup,
+						     *pp_username)) {
+		DEBUG(3, (" Failed to add server to cache\n"));
+		if (errno == 0) {
+			errno = ENOMEM;
+		}
+		cli_shutdown(ipc_srv->cli);
+		free(ipc_srv);
+		return NULL;
+	}
+
+	DLIST_ADD(context->internal->servers, ipc_srv);
 
         return ipc_srv;
 }

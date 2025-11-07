@@ -1,18 +1,18 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Copyright (C) Jelmer Vernooij <jelmer@samba.org> 2007-2010
    Copyright (C) Matthias Dieter Wallnöfer          2009
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -98,7 +98,7 @@ static PyObject *py_dsdb_convert_schema_to_openldap(PyObject *self,
 		PyErr_SetString(PyExc_RuntimeError,
 						"dsdb_convert_schema_to_openldap failed");
 		return NULL;
-	} 
+	}
 
 	ret = PyUnicode_FromString(retstr);
 	talloc_free(retstr);
@@ -135,12 +135,12 @@ static PyObject *py_samdb_set_domain_sid(PyLdbObject *self, PyObject *args)
 	if (!ret) {
 		PyErr_SetString(PyExc_RuntimeError, "set_domain_sid failed");
 		return NULL;
-	} 
+	}
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_samdb_set_ntds_settings_dn(PyLdbObject *self, PyObject *args)
-{ 
+{
 	PyObject *py_ldb, *py_ntds_settings_dn;
 	struct ldb_context *ldb;
 	struct ldb_dn *ntds_settings_dn;
@@ -169,12 +169,12 @@ static PyObject *py_samdb_set_ntds_settings_dn(PyLdbObject *self, PyObject *args
 	if (!ret) {
 		PyErr_SetString(PyExc_RuntimeError, "set_ntds_settings_dn failed");
 		return NULL;
-	} 
+	}
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_samdb_get_domain_sid(PyLdbObject *self, PyObject *args)
-{ 
+{
 	PyObject *py_ldb;
 	struct ldb_context *ldb;
 	const struct dom_sid *sid;
@@ -254,7 +254,7 @@ static PyObject *py_dsdb_get_oid_from_attid(PyObject *self, PyObject *args)
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	
+
 	status = dsdb_schema_pfm_oid_from_attid(schema->prefixmap, attid,
 	                                        mem_ctx, &oid);
 	if (!W_ERROR_IS_OK(status)) {
@@ -315,6 +315,38 @@ static PyObject *py_dsdb_get_attid_from_lDAPDisplayName(PyObject *self, PyObject
 }
 
 /*
+  return the searchFlags as int from the attribute name
+ */
+static PyObject *py_dsdb_get_searchFlags_from_lDAPDisplayName(PyObject *self, PyObject *args)
+{
+	PyObject *py_ldb = NULL;
+	struct ldb_context *ldb = NULL;
+	struct dsdb_schema *schema = NULL;
+	const char *ldap_display_name = NULL;
+	const struct dsdb_attribute *attribute = NULL;
+
+	if (!PyArg_ParseTuple(args, "Os", &py_ldb, &ldap_display_name)) {
+		return NULL;
+	}
+
+	PyErr_LDB_OR_RAISE(py_ldb, ldb);
+
+	schema = dsdb_get_schema(ldb, NULL);
+	if (schema == NULL) {
+		PyErr_SetString(PyExc_RuntimeError, "Failed to find a schema from ldb");
+		return NULL;
+	}
+
+	attribute = dsdb_attribute_by_lDAPDisplayName(schema, ldap_display_name);
+	if (attribute == NULL) {
+		PyErr_Format(PyExc_KeyError, "Failed to find attribute '%s'", ldap_display_name);
+		return NULL;
+	}
+
+	return PyLong_FromUnsignedLong(attribute->searchFlags);
+}
+
+/*
   return the systemFlags as int from the attribute name
  */
 static PyObject *py_dsdb_get_systemFlags_from_lDAPDisplayName(PyObject *self, PyObject *args)
@@ -343,7 +375,7 @@ static PyObject *py_dsdb_get_systemFlags_from_lDAPDisplayName(PyObject *self, Py
 		return NULL;
 	}
 
-	return PyLong_FromLong(attribute->systemFlags);
+	return PyLong_FromUnsignedLong(attribute->systemFlags);
 }
 
 /*
@@ -375,7 +407,7 @@ static PyObject *py_dsdb_get_linkId_from_lDAPDisplayName(PyObject *self, PyObjec
 		return NULL;
 	}
 
-	return PyLong_FromLong(attribute->linkID);
+	return PyLong_FromUnsignedLong(attribute->linkID);
 }
 
 /*
@@ -449,6 +481,126 @@ static PyObject *py_dsdb_get_lDAPDisplayName_by_attid(PyObject *self, PyObject *
 	}
 
 	return PyUnicode_FromString(a->lDAPDisplayName);
+}
+
+static PyObject *py_dsdb_get_lDAPDisplayName_by_governsID_id(PyObject *self,
+							     PyObject *args)
+{
+	PyObject *py_ldb = NULL;
+	struct ldb_context *ldb = NULL;
+	struct dsdb_schema *schema = NULL;
+	const struct dsdb_class *c = NULL;
+	uint32_t governs_id;
+
+	if (!PyArg_ParseTuple(args, "OI", &py_ldb, &governs_id)) {
+		return NULL;
+	}
+
+	PyErr_LDB_OR_RAISE(py_ldb, ldb);
+
+	schema = dsdb_get_schema(ldb, NULL);
+	if (schema == NULL) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"Failed to find a schema from ldb");
+		return NULL;
+	}
+
+	c = dsdb_class_by_governsID_id(schema, governs_id);
+	if (c == NULL) {
+		PyErr_Format(PyExc_KeyError,
+			     "Failed to find class '0x%08x'",
+			     governs_id);
+		return NULL;
+	}
+
+	return PyUnicode_FromString(c->lDAPDisplayName);
+}
+
+
+/*
+  return the set of mandatory attributes from the class name
+ */
+static PyObject *py_dsdb_get_must_contain_from_lDAPDisplayName(PyObject *self, PyObject *args)
+{
+	PyObject *py_ldb = NULL;
+	struct ldb_context *ldb = NULL;
+	struct dsdb_schema *schema = NULL;
+	const char *ldap_display_name = NULL;
+	const struct dsdb_class *cls = NULL;
+	const char **must_contain = NULL;
+	int ret;
+
+	if (!PyArg_ParseTuple(args, "Os", &py_ldb, &ldap_display_name)) {
+		return NULL;
+	}
+
+	PyErr_LDB_OR_RAISE(py_ldb, ldb);
+
+	schema = dsdb_get_schema(ldb, NULL);
+	if (schema == NULL) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"Failed to find a schema from ldb");
+		return NULL;
+	}
+
+	cls = dsdb_class_by_lDAPDisplayName(schema, ldap_display_name);
+	if (cls == NULL) {
+		PyErr_Format(PyExc_KeyError,
+			     "Failed to find class '%s'",
+			     ldap_display_name);
+		return NULL;
+	}
+
+	{
+		PyObject *set = NULL;
+
+		set = PySet_New(NULL);
+		if (set == NULL) {
+			return PyErr_NoMemory();
+		}
+
+		must_contain = cls->systemMustContain;
+		if (must_contain != NULL) {
+			for (; *must_contain != NULL; ++must_contain) {
+				PyObject *attr = NULL;
+
+				attr = PyUnicode_FromString(*must_contain);
+				if (attr == NULL) {
+					Py_DECREF(set);
+					return NULL;
+				}
+
+				ret = PySet_Add(set, attr);
+				if (ret) {
+					Py_DECREF(attr);
+					Py_DECREF(set);
+					return NULL;
+				}
+			}
+		}
+
+		must_contain = cls->mustContain;
+		if (must_contain != NULL) {
+			for (; *must_contain != NULL; ++must_contain) {
+				PyObject *attr = NULL;
+
+				attr = PyUnicode_FromString(*must_contain);
+				if (attr == NULL) {
+					Py_DECREF(set);
+					return NULL;
+				}
+
+				ret = PySet_Add(set, attr);
+				if (ret) {
+					Py_DECREF(attr);
+					Py_DECREF(set);
+					return NULL;
+				}
+			}
+		}
+
+		return set;
+	}
 }
 
 
@@ -1139,7 +1291,7 @@ static PyObject *py_dsdb_allocate_rid(PyObject *self, PyObject *args)
 	TALLOC_FREE(rid_return);
 	TALLOC_FREE(ext_res);
 
-	return PyLong_FromLong(rid);
+	return PyLong_FromUnsignedLong(rid);
 }
 
 #ifdef AD_DC_BUILD_IS_ENABLED
@@ -1582,6 +1734,8 @@ static PyMethodDef py_dsdb_methods[] = {
 		METH_VARARGS, NULL },
 	{ "_dsdb_get_syntax_oid_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_syntax_oid_from_lDAPDisplayName,
 		METH_VARARGS, NULL },
+	{ "_dsdb_get_searchFlags_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_searchFlags_from_lDAPDisplayName,
+		METH_VARARGS, NULL },
 	{ "_dsdb_get_systemFlags_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_systemFlags_from_lDAPDisplayName,
 		METH_VARARGS, NULL },
 	{ "_dsdb_get_linkId_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_linkId_from_lDAPDisplayName,
@@ -1589,6 +1743,10 @@ static PyMethodDef py_dsdb_methods[] = {
 	{ "_dsdb_get_lDAPDisplayName_by_attid", (PyCFunction)py_dsdb_get_lDAPDisplayName_by_attid,
 		METH_VARARGS, NULL },
 	{ "_dsdb_get_backlink_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_backlink_from_lDAPDisplayName,
+		METH_VARARGS, NULL },
+	{ "_dsdb_get_lDAPDisplayName_by_governsID_id", (PyCFunction)py_dsdb_get_lDAPDisplayName_by_governsID_id,
+		METH_VARARGS, NULL },
+	{ "_dsdb_get_must_contain_from_lDAPDisplayName", (PyCFunction)py_dsdb_get_must_contain_from_lDAPDisplayName,
 		METH_VARARGS, NULL },
 	{ "_dsdb_set_ntds_invocation_id",
 		(PyCFunction)py_dsdb_set_ntds_invocation_id, METH_VARARGS,
@@ -1684,7 +1842,7 @@ MODULE_INIT_FUNC(dsdb)
 	if (m == NULL)
 		return NULL;
 
-#define ADD_DSDB_FLAG(val)  PyModule_AddObject(m, #val, PyLong_FromLong(val))
+#define ADD_DSDB_FLAG(val)  PyModule_AddObject(m, #val, PyLong_FromUnsignedLong(val))
 
 	/* "userAccountControl" flags */
 	ADD_DSDB_FLAG(UF_NORMAL_ACCOUNT);
@@ -1911,9 +2069,11 @@ MODULE_INIT_FUNC(dsdb)
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_DEPARTMENT);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_DNS_HOST_NAME);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_INSTANCE_TYPE);
+	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_MS_DS_KEY_CREDENTIAL_LINK);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_MS_SFU_30);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_NT_SECURITY_DESCRIPTOR);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_PRIMARY_GROUP_ID);
+	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_SAM_ACCOUNT_NAME);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_SERVICE_PRINCIPAL_NAME);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_USER_ACCOUNT_CONTROL);
 	ADD_DSDB_STRING(DS_GUID_SCHEMA_ATTR_USER_PASSWORD);

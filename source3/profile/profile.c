@@ -25,12 +25,16 @@
 #include "messages.h"
 #include "smbprofile.h"
 #include "lib/tdb_wrap/tdb_wrap.h"
+#include "lib/util/util_tdb.h"
 #include <tevent.h>
 #include "../lib/crypto/crypto.h"
+#include "source3/smbd/globals.h"
 
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
 #endif
+
+static void smbprofile_persvc_dump(void);
 
 struct profile_stats *profile_p;
 struct smbprofile_global_state smbprofile_state;
@@ -63,6 +67,7 @@ void set_profile_level(int level, const struct server_id *src)
 		break;
 	case 3:		/* reset profile values */
 		ZERO_STRUCT(profile_p->values);
+		smbprofile_persvc_reset();
 		tdb_wipe_all(smbprofile_state.internal.db->tdb);
 		DEBUG(1,("INFO: Profiling values cleared from pid %d\n",
 			 (int)procid_to_pid(src)));
@@ -162,10 +167,12 @@ out:
 	return ok;
 }
 
-void smbprofile_dump_setup(struct tevent_context *ev)
+void smbprofile_dump_setup(struct tevent_context *ev,
+			   struct smbd_server_connection *sconn)
 {
 	TALLOC_FREE(smbprofile_state.internal.te);
 	smbprofile_state.internal.ev = ev;
+	smbprofile_state.internal.sconn = sconn;
 }
 
 static void smbprofile_dump_timer(struct tevent_context *ev,
@@ -173,7 +180,7 @@ static void smbprofile_dump_timer(struct tevent_context *ev,
 				  struct timeval current_time,
 				  void *private_data)
 {
-	smbprofile_dump();
+	smbprofile_dump(smbprofile_state.internal.sconn);
 }
 
 void smbprofile_dump_schedule_timer(void)
@@ -210,7 +217,7 @@ static int profile_stats_parser(TDB_DATA key, TDB_DATA value,
 	return 0;
 }
 
-void smbprofile_dump(void)
+void smbprofile_dump(struct smbd_server_connection *sconn)
 {
 	pid_t pid = 0;
 	TDB_DATA key = { .dptr = (uint8_t *)&pid, .dsize = sizeof(pid) };
@@ -257,6 +264,17 @@ void smbprofile_dump(void)
 		rself.ru_stime.tv_usec;
 #endif /* HAVE_GETRUSAGE */
 
+	if (sconn != NULL) {
+		/*
+		 * Sessions, tcons and files don't add up, they are
+		 * transient counters
+		 */
+		profile_p->values.num_sessions_stats.count = sconn->num_users;
+		profile_p->values.num_tcons_stats.count =
+			sconn->num_connections;
+		profile_p->values.num_files_stats.count = sconn->num_files;
+	}
+
 	tdb_store(smbprofile_state.internal.db->tdb, key,
 		  (TDB_DATA) {
 			.dptr = (uint8_t *)profile_p,
@@ -266,6 +284,8 @@ void smbprofile_dump(void)
 
 	tdb_chainunlock(smbprofile_state.internal.db->tdb, key);
 	ZERO_STRUCT(profile_p->values);
+
+	smbprofile_persvc_dump();
 
 	return;
 }
@@ -310,7 +330,16 @@ void smbprofile_cleanup(pid_t pid, pid_t dst)
 
 	smbprofile_stats_accumulate(&acc, &s);
 
+	/*
+	 * Sessions, tcons and files don't add up, they are transient.
+	 */
+	acc.values.num_sessions_stats.count = 0;
+	acc.values.num_tcons_stats.count = 0;
+	acc.values.num_files_stats.count = 0;
+
 	acc.magic = profile_p->magic;
+	acc.summary_record = true;
+
 	tdb_store(smbprofile_state.internal.db->tdb, key,
 		  (TDB_DATA) {
 			.dptr = (uint8_t *)&acc,
@@ -329,4 +358,218 @@ void smbprofile_collect(struct profile_stats *stats)
 	smbprofile_collect_tdb(smbprofile_state.internal.db->tdb,
 			       profile_p->magic,
 			       stats);
+}
+
+/* Per-share profiling */
+
+static bool smbprofile_persvc_grow(int snum)
+{
+	struct profile_stats_persvc **new_tbl = NULL;
+	const size_t cur_cap = talloc_array_length(smbprofile_state.persvc.tbl);
+	size_t new_cap = 0;
+
+	if ((size_t)snum < cur_cap) {
+		return true;
+	}
+
+	new_cap = (size_t)snum + 1;
+	new_tbl = talloc_realloc_zero(NULL,
+				      smbprofile_state.persvc.tbl,
+				      struct profile_stats_persvc *,
+				      new_cap);
+
+	if (new_tbl == NULL) {
+		DBG_ERR("Failed to realloc persvc table for snum %d\n", snum);
+		return false;
+	}
+
+	smbprofile_state.persvc.tbl = new_tbl;
+	return true;
+}
+
+static struct profile_stats_persvc *smbprofile_persvc_lookup(int snum)
+{
+	if (!smbprofile_active() || (snum < 0) ||
+	    (snum >= (int)talloc_array_length(smbprofile_state.persvc.tbl))) {
+		return NULL;
+	}
+
+	return smbprofile_state.persvc.tbl[snum];
+}
+
+static struct profile_stats_persvc *smbprofile_persvc_insert(int snum,
+							     const char *svc,
+							     const char *remote)
+{
+	struct profile_stats_persvc *entry = NULL;
+	char *dbkey = NULL;
+	size_t len = 0;
+	bool ok;
+
+	ok = smbprofile_persvc_grow(snum);
+	if (!ok) {
+		return NULL;
+	}
+
+	dbkey = talloc_asprintf(talloc_tos(),
+				"%s:%d.%d[%s]",
+				svc,
+				(int)tevent_cached_getpid(),
+				snum,
+				remote);
+	if (dbkey == NULL) {
+		return NULL;
+	}
+
+	len = strlen(dbkey);
+	entry = talloc_zero_size(NULL, sizeof(*entry) + len + 1);
+	if (entry == NULL) {
+		TALLOC_FREE(dbkey);
+		DBG_ERR("Failed to allocate entry for snum %d\n", snum);
+		return NULL;
+	}
+
+	entry->snum = snum;
+	entry->refcnt = 0;
+	memcpy(entry->dbkey, dbkey, len);
+	TALLOC_FREE(dbkey);
+
+	smbprofile_state.persvc.tbl[snum] = entry;
+	return entry;
+}
+
+static void smbprofile_persvc_delete(struct profile_stats_persvc *entry)
+{
+	SMB_ASSERT(entry->snum >= 0);
+	SMB_ASSERT(smbprofile_state.persvc.tbl[entry->snum] == entry);
+
+	smbprofile_state.persvc.tbl[entry->snum] = NULL;
+	TALLOC_FREE(entry);
+}
+
+void smbprofile_persvc_mkref(int snum, const char *svc, const char *remote)
+{
+	struct profile_stats_persvc *persvc = NULL;
+
+	if (!smbprofile_active() || (snum < 0) || (svc == NULL)) {
+		return;
+	}
+
+	persvc = smbprofile_persvc_lookup(snum);
+	if (persvc == NULL) {
+		persvc = smbprofile_persvc_insert(snum, svc, remote);
+	}
+
+	if (persvc != NULL) {
+		persvc->refcnt++;
+		persvc->active = true;
+	}
+}
+
+void smbprofile_persvc_unref(int snum)
+{
+	struct profile_stats_persvc *persvc = NULL;
+
+	persvc = smbprofile_persvc_lookup(snum);
+	if (persvc != NULL) {
+		persvc->refcnt--;
+	}
+}
+
+struct profile_stats *smbprofile_persvc_get(int snum)
+{
+	struct profile_stats_persvc *persvc = NULL;
+
+	if (!smbprofile_active() || (snum < 0)) {
+		return NULL;
+	}
+
+	persvc = smbprofile_persvc_lookup(snum);
+	if (persvc == NULL) {
+		return NULL;
+	}
+
+	persvc->active = true;
+	return &persvc->stats;
+}
+
+static TDB_DATA tdb_keyof(struct profile_stats_persvc *persvc)
+{
+	return string_tdb_data(persvc->dbkey);
+}
+
+static void smbprofile_persvc_store(struct profile_stats_persvc *persvc)
+{
+	TDB_DATA val = {.dptr = (uint8_t *)(&persvc->stats),
+			.dsize = sizeof(persvc->stats)};
+
+	tdb_store(smbprofile_state.internal.db->tdb, tdb_keyof(persvc), val, 0);
+}
+
+static void smbprofile_persvc_clear(struct profile_stats_persvc *persvc)
+{
+	tdb_delete(smbprofile_state.internal.db->tdb, tdb_keyof(persvc));
+	smbprofile_persvc_delete(persvc);
+}
+
+static void smbprofile_persvc_dump(void)
+{
+	struct profile_stats_persvc *entry = NULL;
+	size_t i, cap;
+
+	if (!smbprofile_active()) {
+		return;
+	}
+
+	if (smbprofile_state.internal.db == NULL) {
+		return;
+	}
+
+	cap = talloc_array_length(smbprofile_state.persvc.tbl);
+	for (i = 0; i < cap; ++i) {
+		entry = smbprofile_state.persvc.tbl[i];
+		if (entry != NULL) {
+			if (entry->refcnt == 0) {
+				smbprofile_persvc_clear(entry);
+			} else if (entry->active) {
+				smbprofile_persvc_store(entry);
+				entry->active = false;
+			}
+		}
+	}
+}
+
+int smbprofile_persvc_collect(int (*fn)(const char *key,
+					const struct profile_stats *stats,
+					void *private_data),
+			      void *private_data)
+{
+	if (smbprofile_state.internal.db == NULL) {
+		return 0;
+	}
+	return smbprofile_persvc_collect_tdb(smbprofile_state.internal.db->tdb,
+					     fn,
+					     private_data);
+}
+
+void smbprofile_persvc_reset(void)
+{
+	struct profile_stats_persvc *entry = NULL;
+	size_t i, cap;
+
+	if (!smbprofile_active()) {
+		return;
+	}
+
+	if (smbprofile_state.internal.db == NULL) {
+		return;
+	}
+
+	cap = talloc_array_length(smbprofile_state.persvc.tbl);
+	for (i = 0; i < cap; ++i) {
+		entry = smbprofile_state.persvc.tbl[i];
+		if ((entry != NULL) && entry->refcnt) {
+			ZERO_STRUCT(entry->stats);
+		}
+	}
 }

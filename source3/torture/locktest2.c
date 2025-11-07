@@ -18,7 +18,8 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "system/filesys.h"
 #include "locking/share_mode_lock.h"
 #include "locking/proto.h"
@@ -180,6 +181,9 @@ static struct cli_state *connect_one(char *share)
 	static int count;
 	NTSTATUS nt_status;
 	struct cli_credentials *creds = NULL;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	fstrcpy(server,share+2);
 	share = strchr_m(server,'\\');
@@ -220,7 +224,7 @@ static struct cli_state *connect_one(char *share)
 					      myname,
 					      server_n,
 					      NULL,
-					      0,
+					      &ts,
 					      share,
 					      "?????",
 					      creds,

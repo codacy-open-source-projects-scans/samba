@@ -62,23 +62,13 @@ class cmd_testparm(Command):
                help="Suppress prompt for enter"),
         Option("-v", "--verbose", action="store_true",
                default=False, help="Show default options too"),
-        # We need support for smb.conf macros before this will work again
-        Option("--server", type=str, help="Set %L macro to servername"),
-        # These are harder to do with the new code structure
-        Option("--show-all-parameters", action="store_true", default=False,
-               help="Show the parameters, type, possible values")
     ]
 
     takes_args = []
 
     def run(self, sambaopts, versionopts, section_name=None,
             parameter_name=None, client_ip=None, client_name=None,
-            verbose=False, suppress_prompt=None, show_all_parameters=False,
-            server=None):
-        if server:
-            raise NotImplementedError("--server not yet implemented")
-        if show_all_parameters:
-            raise NotImplementedError("--show-all-parameters not yet implemented")
+            verbose=False, suppress_prompt=None):
         if client_name is not None and client_ip is None:
             raise CommandError("Both a DNS name and an IP address are "
                                "required for the host access check")
@@ -89,7 +79,8 @@ class cmd_testparm(Command):
             raise CommandError(err)
 
         # We need this to force the output
-        samba.set_debug_level(2)
+        if samba.get_debug_level() < 2:
+            samba.set_debug_level(2)
 
         logger = self.get_logger("testparm")
 
@@ -145,14 +136,12 @@ class cmd_testparm(Command):
         lockdir = lp.get("lockdir")
 
         if not os.path.isdir(lockdir):
-            logger.error("lock directory %s does not exist", lockdir)
-            valid = False
+            logger.warning("lock directory %s does not exist", lockdir)
 
         piddir = lp.get("pid directory")
 
         if not os.path.isdir(piddir):
-            logger.error("pid directory %s does not exist", piddir)
-            valid = False
+            logger.warning("pid directory %s does not exist", piddir)
 
         winbind_separator = lp.get("winbind separator")
 
@@ -192,6 +181,16 @@ class cmd_testparm(Command):
                 "Please change to 'yes' (preferred) or "
                 "'allow_sasl_without_tls_channel_bindings' "
                 "(if really needed).")
+
+        cli_krb5_netlogon = lp.get("client use krb5 netlogon")
+        if cli_krb5_netlogon not in ["no", "default"]:
+            logger.error(
+                "You have configured "
+                "'client use krb5 netlogon = %s'.\n"
+                "This is experimental in Samba %s "
+                "and should not be used in production!\n\n" %
+                (cli_krb5_netlogon, samba.version))
+            valid = False
 
         return valid
 

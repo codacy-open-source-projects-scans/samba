@@ -1299,12 +1299,9 @@ def setup_samdb(path, session_info, provision_backend, lp, names,
         options.append("lmdb_env_size:" + str(store_size))
     if batch_mode:
         options.append("batch_mode:1")
-    if batch_mode:
-        # Estimate the number of index records in the transaction_index_cache
-        # Numbers chosen give the prime 202481 for the default backend size,
-        # which works well for a 100,000 user database
-        cache_size = int(store_size / 42423) + 1
-        options.append("transaction_index_cache_size:" + str(cache_size))
+
+    # For bulk operations like this we use a large transaction index cache.
+    options.append("transaction_index_cache_size:200000")
 
     # Load the database, but don's load the global schema and don't connect
     # quite yet
@@ -1465,11 +1462,15 @@ def fill_samdb(samdb, lp, names, logger, policyguid,
         protected1wd_descr = b64encode(get_config_delete_protected1wd_descriptor(names.domainsid)).decode('utf8')
         protected2_descr = b64encode(get_config_delete_protected2_descriptor(names.domainsid)).decode('utf8')
 
+        incl_2012 = ""
+        incl_2016 = ""
         if "2008" in schema.base_schema:
-            # exclude 2012-specific changes if we're using a 2008 schema
+            # exclude 2012 and later changes if we're using a 2008 schema
             incl_2012 = "#"
-        else:
-            incl_2012 = ""
+            incl_2016 = "#"
+        elif "2012" in schema.base_schema:
+            # exclude 2016 and later changes if we're using a 2012 schema
+            incl_2016 = "#"
 
         setup_add_ldif(samdb, setup_path("provision_configuration.ldif"), {
                 "CONFIGDN": names.configdn,
@@ -1496,6 +1497,7 @@ def fill_samdb(samdb, lp, names, logger, policyguid,
         setup_add_ldif(samdb, setup_path("extended-rights.ldif"), {
                 "CONFIGDN": names.configdn,
                 "INC2012": incl_2012,
+                "INC2016": incl_2016,
                 })
 
         logger.info("Setting up display specifiers")
@@ -1651,7 +1653,7 @@ def set_gpos_acl(sysvol, dnsdomain, domainsid, domaindn, samdb, lp, use_ntvfs, p
         acl = ndr_unpack(security.descriptor,
                          policy["nTSecurityDescriptor"][0]).as_sddl()
         policy_path = getpolicypath(sysvol, dnsdomain, str(policy["cn"]))
-        set_dir_acl(policy_path, dsacl2fsacl(acl, domainsid), lp,
+        set_dir_acl(policy_path, dsacl2fsacl(acl, domainsid, as_sddl=False), lp,
                     str(domainsid), use_ntvfs,
                     passdb=passdb)
 

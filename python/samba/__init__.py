@@ -31,25 +31,6 @@ from samba import _glue
 from samba._ldb import Ldb as _Ldb
 
 
-def source_tree_topdir():
-    """Return the top level source directory."""
-    paths = ["../../..", "../../../.."]
-    for p in paths:
-        topdir = os.path.normpath(os.path.join(os.path.dirname(__file__), p))
-        if os.path.exists(os.path.join(topdir, 'source4')):
-            return topdir
-    raise RuntimeError("unable to find top level source directory")
-
-
-def in_source_tree():
-    """Return True if we are running from within the samba source tree"""
-    try:
-        topdir = source_tree_topdir()
-    except RuntimeError:
-        return False
-    return True
-
-
 class Ldb(_Ldb):
     """Simple Samba-specific LDB subclass that takes care
     of setting up the modules dir, credentials pointers, etc.

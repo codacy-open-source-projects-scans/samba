@@ -617,7 +617,15 @@ static void ctdb_do_updateip_callback(struct ctdb_context *ctdb, int status,
 		 */
 		ctdb_vnn_unassign_iface(ctdb, state->vnn);
 		state->vnn->iface = state->old;
-		state->vnn->iface->references++;
+		/*
+		 * state->old (above) can be NULL if the IP wasn't
+		 * recorded as held by this node but the system thinks
+		 * the IP was assigned.  In that case, a move could
+		 * still be desirable..
+		 */
+		if (state->vnn->iface != NULL) {
+			state->vnn->iface->references++;
+		}
 
 		ctdb_request_control_reply(ctdb, state->c, NULL, status, NULL);
 		talloc_free(state);
@@ -2519,8 +2527,9 @@ int32_t ctdb_control_start_ipreallocate(struct ctdb_context *ctdb,
 	struct start_ipreallocate_callback_state *state;
 
 	/* Nodes that are not RUNNING can not host IPs */
-	if (ctdb->runstate != CTDB_RUNSTATE_RUNNING) {
-		DBG_INFO("Skipping \"startipreallocate\" event, not RUNNING\n");
+	if (ctdb->runstate < CTDB_RUNSTATE_RUNNING) {
+		DBG_INFO("Skipping \"startipreallocate\" event, "
+			 "not RUNNING/SHUTDOWN\n");
 		return 0;
 	}
 

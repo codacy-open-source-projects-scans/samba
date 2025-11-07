@@ -30,7 +30,9 @@
 #include "../libcli/smbreadline/smbreadline.h"
 #include "../libcli/security/security.h"
 #include "passdb.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "libsmb/smbsock_connect.h"
 #include "auth/gensec/gensec.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "messages.h"
@@ -1018,6 +1020,11 @@ static NTSTATUS do_cmd(struct cli_state *cli,
 					return ntresult;
 				}
 
+				cli_credentials_add_gensec_features(
+					trust_creds,
+					GENSEC_FEATURE_NO_DELEGATION,
+					CRED_SPECIFIED);
+
 				ntresult = rpccli_create_netlogon_creds_ctx(
 					trust_creds,
 					dc_name,
@@ -1319,13 +1326,15 @@ out_free:
 	}
 
 	if (transport == NCACN_NP) {
+		struct smb_transports ts = smbsock_transports_from_port(opt_port);
+
 		nt_status = cli_full_connection_creds(frame,
 						      &cli,
 						      lp_netbios_name(),
 						      host,
 						      opt_ipaddr ? &server_ss
 								 : NULL,
-						      opt_port,
+						      &ts,
 						      "IPC$",
 						      "IPC",
 						      creds,

@@ -20,6 +20,13 @@
 #ifndef __CTDB_TUNABLE_H__
 #define __CTDB_TUNABLE_H__
 
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <talloc.h>
+
+#include "protocol/protocol.h"
+
 void ctdb_tunable_set_defaults(struct ctdb_tunable_list *tun_list);
 bool ctdb_tunable_get_value(struct ctdb_tunable_list *tun_list,
 			    const char *tunable_str, uint32_t *value);
@@ -31,5 +38,8 @@ char *ctdb_tunable_names_to_string(TALLOC_CTX *mem_ctx);
 bool ctdb_tunable_load_file(TALLOC_CTX *mem_ctx,
 			    struct ctdb_tunable_list *tun_list,
 			    const char *file);
+bool ctdb_tunable_load_directory(TALLOC_CTX *mem_ctx,
+				 struct ctdb_tunable_list *tun_list,
+				 const char *dir);
 
 #endif /* __CTDB_TUNABLE_H__ */

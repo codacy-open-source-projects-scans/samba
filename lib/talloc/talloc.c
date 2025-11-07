@@ -2750,6 +2750,10 @@ _PUBLIC_ char *talloc_asprintf_append_buffer(char *s, const char *fmt, ...)
 	return s;
 }
 
+/*
+ * Function to make string-building simple by handling intermediate
+ * realloc failures. See for example commit a37ea9d750e1.
+ */
 _PUBLIC_ void talloc_asprintf_addbuf(char **ps, const char *fmt, ...)
 {
 	va_list ap;
@@ -2804,6 +2808,39 @@ _PUBLIC_ void *_talloc_realloc_array(const void *ctx, void *ptr, size_t el_size,
 		return NULL;
 	}
 	return _talloc_realloc(ctx, ptr, el_size * count, name);
+}
+
+/*
+ * realloc an array, checking for integer overflow in the array size
+ * and zero out potential additional memory
+ */
+_PUBLIC_ void *_talloc_realloc_array_zero(const void *ctx,
+					  void *ptr,
+					  size_t el_size,
+					  unsigned count,
+					  const char *name)
+{
+	size_t existing, newsize;
+	void *newptr = NULL;
+
+	if (count >= MAX_TALLOC_SIZE / el_size) {
+		return NULL;
+	}
+
+	existing = talloc_get_size(ptr);
+	newsize = el_size * count;
+
+	newptr = _talloc_realloc(ctx, ptr, newsize, name);
+	if (newptr == NULL) {
+		return NULL;
+	}
+
+	if (newsize > existing) {
+		size_t to_zero = newsize - existing;
+		memset_s(((char *)newptr) + existing, to_zero, 0, to_zero);
+	}
+
+	return newptr;
 }
 
 /*

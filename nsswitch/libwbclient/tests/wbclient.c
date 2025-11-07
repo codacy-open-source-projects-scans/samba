@@ -231,16 +231,18 @@ static bool test_wbc_sidtostring(struct torture_context *tctx)
 	struct wbcDomainSid sid;
 	const char *sid_string = "S-1-5-32";
 	char *sid_string2;
+	bool ret = true;
 
 	torture_assert_wbc_ok(tctx, wbcStringToSid(sid_string, &sid),
 			      "wbcStringToSid of %s failed", sid_string);
 	torture_assert_wbc_ok(tctx, wbcSidToString(&sid, &sid_string2),
 			      "wbcSidToString of %s failed", sid_string);
-	torture_assert_str_equal(tctx, sid_string, sid_string2,
+	torture_assert_str_equal_goto(tctx, sid_string, sid_string2, ret, done,
 		"sid strings differ");
+ done:
 	wbcFreeMemory(sid_string2);
 
-	return true;
+	return ret;
 }
 
 static bool test_wbc_guidtostring(struct torture_context *tctx)
@@ -248,16 +250,18 @@ static bool test_wbc_guidtostring(struct torture_context *tctx)
 	struct wbcGuid guid;
 	const char *guid_string = "f7cf07b4-1487-45c7-824d-8b18cc580811";
 	char *guid_string2;
+	bool ret = true;
 
 	torture_assert_wbc_ok(tctx, wbcStringToGuid(guid_string, &guid),
 			      "wbcStringToGuid of %s failed", guid_string);
 	torture_assert_wbc_ok(tctx, wbcGuidToString(&guid, &guid_string2),
 			      "wbcGuidToString of %s failed", guid_string);
-	torture_assert_str_equal(tctx, guid_string, guid_string2,
+	torture_assert_str_equal_goto(tctx, guid_string, guid_string2, ret, done,
 				 "guid strings differ");
+ done:
 	wbcFreeMemory(guid_string2);
 
-	return true;
+	return ret;
 }
 
 static bool test_wbc_domain_info(struct torture_context *tctx)
@@ -644,6 +648,7 @@ static bool test_wbc_resolve_winsbyname(struct torture_context *tctx)
 		torture_assert_wbc_ok(tctx, ret, "wbcResolveWinsByName for %s failed", name);
 	}
 
+	wbcFreeMemory(ip);
 	return true;
 }
 
@@ -695,8 +700,9 @@ static bool test_wbc_lookup_rids(struct torture_context *tctx)
 	torture_assert_wbc_ok_goto_fail(
 		tctx, ret, "%s", "wbcLookupRids for 544 and 545 failed");
 
-	torture_assert_str_equal(
+	torture_assert_str_equal_goto(
 		tctx, names[0], "Administrators",
+		ret, fail,
 		"S-1-5-32-544 not mapped to 'Administrators'");
 	torture_assert_str_equal_goto_fail(
 		tctx, names[1], "Users", "S-1-5-32-545 not mapped to 'Users'");

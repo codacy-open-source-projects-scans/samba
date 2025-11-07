@@ -36,7 +36,8 @@
 #include "smb_krb5.h"
 #include "secrets.h"
 #include "../libcli/security/security.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "lib/param/loadparm.h"
 #include "utils/net_dns.h"
 #include "auth/kerberos/pac_utils.h"
@@ -1359,7 +1360,7 @@ int net_ads_group(struct net_context *c, int argc, const char **argv)
 	char *disp_fields[2] = {NULL, NULL};
 	int ret = -1;
 
-	if (argc >= 0) {
+	if (argc > 0) {
 		TALLOC_FREE(tmp_ctx);
 		return net_run_function(c, argc, argv, "net ads group", func);
 	}
@@ -2113,17 +2114,17 @@ static int net_ads_dns(struct net_context *c, int argc, const char *argv[])
 			"register",
 			net_ads_dns_register,
 			NET_TRANSPORT_ADS,
-			N_("Add host dns entry to AD"),
-			N_("net ads dns register\n"
-			   "    Add host dns entry to AD")
+			N_("Add FQDN dns entry to AD"),
+			N_("net ads dns register [FQDN [IP [IP.....]]]\n"
+			   "    Add FQDN dns entry to AD")
 		},
 		{
 			"unregister",
 			net_ads_dns_unregister,
 			NET_TRANSPORT_ADS,
-			N_("Remove host dns entry from AD"),
-			N_("net ads dns unregister\n"
-			   "    Remove host dns entry from AD")
+			N_("Remove FQDN dns entry from AD"),
+			N_("net ads dns unregister <FQDN>\n"
+			   "    Remove FQDN dns entry from AD")
 		},
 		{
 			"async",
@@ -2291,6 +2292,9 @@ static int net_ads_printer_publish(struct net_context *c,
 	LDAPMessage *res = NULL;
 	bool ok;
 	int ret = -1;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	if (argc < 1 || c->display_usage) {
 		d_printf("%s\n%s",
@@ -2340,7 +2344,7 @@ static int net_ads_printer_publish(struct net_context *c,
 					      lp_netbios_name(),
 					      servername,
 					      &server_ss,
-					      0,
+					      &ts,
 					      "IPC$",
 					      "IPC",
 					      c->creds,
@@ -2911,45 +2915,8 @@ out:
 	return ret;
 }
 
-static int net_ads_keytab_flush(struct net_context *c,
-				int argc,
-				const char **argv)
-{
-	TALLOC_CTX *tmp_ctx = talloc_stackframe();
-	ADS_STRUCT *ads = NULL;
-	ADS_STATUS status;
-	int ret = -1;
-
-	if (c->display_usage) {
-		d_printf(  "%s\n"
-			   "net ads keytab flush\n"
-			   "    %s\n",
-			 _("Usage:"),
-			 _("Delete the whole keytab"));
-		TALLOC_FREE(tmp_ctx);
-		return -1;
-	}
-
-	if (!c->explicit_credentials) {
-		net_use_krb_machine_account(c);
-	}
-
-	status = ads_startup(c, true, tmp_ctx, &ads);
-	if (!ADS_ERR_OK(status)) {
-		goto out;
-	}
-
-	ret = ads_keytab_flush(ads);
-out:
-	TALLOC_FREE(tmp_ctx);
-	return ret;
-}
-
 static int net_ads_keytab_create(struct net_context *c, int argc, const char **argv)
 {
-	TALLOC_CTX *tmp_ctx = talloc_stackframe();
-	ADS_STRUCT *ads = NULL;
-	ADS_STATUS status;
 	NTSTATUS ntstatus;
 	int ret = -1;
 
@@ -2959,7 +2926,6 @@ static int net_ads_keytab_create(struct net_context *c, int argc, const char **a
 			   "    %s\n",
 			 _("Usage:"),
 			 _("Create (sync) new default keytab"));
-		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
 
@@ -2969,15 +2935,8 @@ static int net_ads_keytab_create(struct net_context *c, int argc, const char **a
 		net_use_krb_machine_account(c);
 	}
 
-	status = ads_startup(c, true, tmp_ctx, &ads);
-	if (!ADS_ERR_OK(status)) {
-		goto out;
-	}
-
-	ntstatus = sync_pw2keytabs();
+	ntstatus = sync_pw2keytabs(c->opt_host);
 	ret = NT_STATUS_IS_OK(ntstatus) ? 0 : 1;
-out:
-	TALLOC_FREE(tmp_ctx);
 	return ret;
 }
 
@@ -2989,7 +2948,7 @@ static int net_ads_keytab_list(struct net_context *c, int argc, const char **arg
 		d_printf("%s\n%s",
 			 _("Usage:"),
 			 _("net ads keytab list [keytab]\n"
-			   "  List a local keytab\n"
+			   "  List a local keytab (default: krb5 default)\n"
 			   "    keytab\tKeytab to list\n"));
 		return -1;
 	}
@@ -3011,14 +2970,6 @@ int net_ads_keytab(struct net_context *c, int argc, const char **argv)
 			N_("Create (sync) a fresh keytab"),
 			N_("net ads keytab create\n"
 			   "    Create (sync) a fresh keytab or update existing one (see also smb.conf 'sync machine password to keytab'.")
-		},
-		{
-			"flush",
-			net_ads_keytab_flush,
-			NET_TRANSPORT_ADS,
-			N_("Remove all keytab entries"),
-			N_("net ads keytab flush\n"
-			   "    Remove all keytab entries")
 		},
 		{
 			"list",
@@ -3047,7 +2998,7 @@ static int net_ads_kerberos_renew(struct net_context *c, int argc, const char **
 		return -1;
 	}
 
-	ret = smb_krb5_renew_ticket(NULL, NULL, NULL, NULL);
+	ret = smb_krb5_renew_ticket(c->opt_krb5_ccache, NULL, NULL, NULL);
 	if (ret) {
 		d_printf(_("failed to renew kerberos ticket: %s\n"),
 			error_message(ret));
@@ -3102,7 +3053,7 @@ static int net_ads_kerberos_pac_common(struct net_context *c, int argc, const ch
 				     0,
 				     NULL,
 				     NULL,
-				     NULL,
+				     c->opt_krb5_ccache,
 				     true,
 				     true,
 				     2592000, /* one month */
@@ -3283,7 +3234,7 @@ static int net_ads_kerberos_kinit(struct net_context *c, int argc, const char **
 					  0,
 					  NULL,
 					  NULL,
-					  NULL,
+					  c->opt_krb5_ccache,
 					  true,
 					  true,
 					  2592000, /* one month */
@@ -3345,7 +3296,7 @@ static int net_ads_setspn_list(struct net_context *c,
 	if (c->display_usage) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn list <machinename>\n"));
+			 _("net ads setspn list [machinename]\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3378,7 +3329,7 @@ static int net_ads_setspn_add(struct net_context *c, int argc, const char **argv
 	if (c->display_usage || argc < 1) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn add <machinename> SPN\n"));
+			 _("net ads setspn add [machinename] spn\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3411,7 +3362,7 @@ static int net_ads_setspn_delete(struct net_context *c, int argc, const char **a
 	if (c->display_usage || argc < 1) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn delete <machinename> SPN\n"));
+			 _("net ads setspn delete [machinename] spn\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3441,7 +3392,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_list,
 			NET_TRANSPORT_ADS,
 			N_("List Service Principal Names (SPN)"),
-			N_("net ads setspn list machine\n"
+			N_("net ads setspn list [machine]\n"
 			   "    List Service Principal Names (SPN)")
 		},
 		{
@@ -3449,7 +3400,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_add,
 			NET_TRANSPORT_ADS,
 			N_("Add Service Principal Names (SPN)"),
-			N_("net ads setspn add machine spn\n"
+			N_("net ads setspn add [machine] spn\n"
 			   "    Add Service Principal Names (SPN)")
 		},
 		{
@@ -3457,7 +3408,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_delete,
 			NET_TRANSPORT_ADS,
 			N_("Delete Service Principal Names (SPN)"),
-			N_("net ads setspn delete machine spn\n"
+			N_("net ads setspn delete [machine] spn\n"
 			   "    Delete Service Principal Names (SPN)")
 		},
 		{NULL, NULL, 0, NULL, NULL}
@@ -3561,7 +3512,7 @@ static int net_ads_enctypes_list(struct net_context *c, int argc, const char **a
 
 	if (c->display_usage || (argc < 1)) {
 		d_printf(  "%s\n"
-			   "net ads enctypes list\n"
+			   "net ads enctypes list <account_name>\n"
 			   "    %s\n",
 			 _("Usage:"),
 			 _("List supported enctypes"));
@@ -3743,7 +3694,7 @@ static int net_ads_enctypes(struct net_context *c, int argc, const char **argv)
 			net_ads_enctypes_list,
 			NET_TRANSPORT_ADS,
 			N_("List the supported encryption types"),
-			N_("net ads enctypes list\n"
+			N_("net ads enctypes list <account_name>\n"
 			   "    List the supported encryption types")
 		},
 		{
@@ -3751,16 +3702,16 @@ static int net_ads_enctypes(struct net_context *c, int argc, const char **argv)
 			net_ads_enctypes_set,
 			NET_TRANSPORT_ADS,
 			N_("Set the supported encryption types"),
-			N_("net ads enctypes set\n"
+			N_("net ads enctypes set <account_name> [enctypes]\n"
 			   "    Set the supported encryption types")
 		},
 		{
 			"delete",
 			net_ads_enctypes_delete,
 			NET_TRANSPORT_ADS,
-			N_("Delete the supported encryption types"),
-			N_("net ads enctypes delete\n"
-			   "    Delete the supported encryption types")
+			N_("Delete the msDS-SupportedEncryptionTypes attribute"),
+			N_("net ads enctypes delete <account_name>\n"
+			   "    Delete the LDAP attribute")
 		},
 
 		{NULL, NULL, 0, NULL, NULL}

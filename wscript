@@ -40,20 +40,6 @@ DEFAULT_PRIVATE_LIBS = get_default_private_libs()
 # install in /usr/local/samba by default
 default_prefix = Options.default_prefix = '/usr/local/samba'
 
-# This callback optionally takes a list of paths as arguments:
-# --with-system_mitkrb5 /path/to/krb5 /another/path
-def system_mitkrb5_callback(option, opt, value, parser):
-    setattr(parser.values, option.dest, True)
-    value = []
-    for arg in parser.rargs:
-        # stop on --foo like options
-        if arg[:2] == "--" and len(arg) > 2:
-            break
-        value.append(arg)
-    if len(value)>0:
-        del parser.rargs[:len(value)]
-        setattr(parser.values, option.dest, value)
-
 def options(opt):
     opt.BUILTIN_DEFAULT('NONE')
     opt.PRIVATE_EXTENSION_DEFAULT('private-samba')
@@ -91,9 +77,10 @@ def options(opt):
     opt.samba_add_onoff_option('pthreadpool', with_name="enable", without_name="disable", default=True)
 
     opt.add_option('--with-system-mitkrb5',
-                   help='build Samba with system MIT Kerberos. ' +
-                        'You may specify list of paths where Kerberos is installed (e.g. /usr/local /usr/kerberos) to search krb5-config',
-                   action='callback', callback=system_mitkrb5_callback, dest='with_system_mitkrb5', default=False)
+                   help='build Samba with system MIT Kerberos.',
+                   action='store_true',
+                   dest='with_system_mitkrb5',
+                   default=False)
 
     opt.add_option('--with-experimental-mit-ad-dc',
                    help='Enable the experimental MIT Kerberos-backed AD DC.  ' +
@@ -104,7 +91,7 @@ def options(opt):
 
     opt.add_option('--with-system-mitkdc',
                    help=('Specify the path to the krb5kdc binary from MIT Kerberos'),
-                   type="string",
+                   type=str,
                    dest='with_system_mitkdc',
                    default=None)
 
@@ -152,7 +139,7 @@ def options(opt):
     # enable options related to building python extensions
 
     opt.add_option('--with-json',
-                   action='store_true', dest='with_json',
+                   action='store_true', dest='with_json', default=True,
                    help=("Build with JSON support (default=True). This "
                          "requires the jansson development headers."))
     opt.add_option('--without-json',
@@ -165,14 +152,15 @@ def options(opt):
 
     opt.add_option('--vendor-suffix',
                    help=('Specify a vendor (or packager) name to include in the version string'),
-                   type="string",
+                   type=str,
                    dest='SAMBA_VERSION_VENDOR_SUFFIX',
                    default=None)
 
-    opt.add_option('--with-himmelblau', default=False,
-                  help=('Build with Azure Entra ID support.'),
-                  action='store_true', dest='enable_himmelblau')
-
+    opt.samba_add_onoff_option('systemd-userdb',
+                               help=("Build winbind with support for systemd "
+                                     "User/Group Record Lookup API via "
+                                     "Varlink"),
+                               default=False)
 
 def configure(conf):
     if Options.options.SAMBA_VERSION_VENDOR_SUFFIX:
@@ -511,14 +499,6 @@ def configure(conf):
 
     conf.env.debug = Options.options.debug
     conf.env.developer = Options.options.developer
-    conf.env.enable_himmelblau = Options.options.enable_himmelblau
-    if Options.options.enable_himmelblau:
-        if not conf.env.enable_rust:
-            conf.fatal('--with-himmelblau cannot be specified without '
-                       '--enable-rust')
-        if ssl.OPENSSL_VERSION_INFO[0] < 3:
-            conf.fatal('--with-himmelblau cannot be specified with '
-                       '%s' % ssl.OPENSSL_VERSION)
 
     #
     # FreeBSD is broken. It doesn't include 'extern char **environ'

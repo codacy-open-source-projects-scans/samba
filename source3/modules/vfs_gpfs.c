@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "smbd/smbd.h"
+#include "smbd/globals.h"
 #include "include/smbprofile.h"
 #include "modules/non_posix_acls.h"
 #include "libcli/security/security.h"
@@ -29,6 +30,7 @@
 #include "system/filesys.h"
 #include "auth.h"
 #include "lib/util/tevent_unix.h"
+#include "lib/pthreadpool/pthreadpool_tevent.h"
 #include "lib/util/gpfswrap.h"
 
 #include <gnutls/gnutls.h>
@@ -55,9 +57,7 @@ struct gpfs_config_data {
 	bool acl;
 	bool settimes;
 	bool recalls;
-	struct {
-		bool gpfs_fstat_x;
-	} pathref_ok;
+	bool clamp_invalid_times;
 };
 
 struct gpfs_fsp_extension {
@@ -141,14 +141,14 @@ static int set_gpfs_sharemode(files_struct *fsp, uint32_t access_mask,
 	if (errno == EACCES) {
 		DBG_NOTICE("GPFS share mode denied for %s/%s.\n",
 			   fsp->conn->connectpath,
-			   fsp->fsp_name->base_name);
+			   fsp_str_dbg(fsp));
 	} else if (errno == EPERM) {
 		DBG_ERR("Samba requested GPFS sharemode for %s/%s, but the "
 			"GPFS file system is not configured accordingly. "
 			"Configure file system with mmchfs -D nfs4 or "
 			"set gpfs:sharemodes=no in Samba.\n",
 			fsp->conn->connectpath,
-			fsp->fsp_name->base_name);
+			fsp_str_dbg(fsp));
 	} else {
 		DBG_ERR("gpfs_set_share failed: %s\n", strerror(errno));
 	}
@@ -212,7 +212,7 @@ static int vfs_gpfs_close(vfs_handle_struct *handle, files_struct *fsp)
 			DBG_ERR("Clearing GPFS sharemode on close failed for "
 				" %s/%s: %s\n",
 				fsp->conn->connectpath,
-				fsp->fsp_name->base_name,
+				fsp_str_dbg(fsp),
 				strerror(errno));
 		}
 	}
@@ -526,7 +526,7 @@ again:
 }
 
 /* Tries to get nfs4 acls and returns SMB ACL allocated.
- * On failure returns 1 if it got non-NFSv4 ACL to prompt 
+ * On failure returns 1 if it got non-NFSv4 ACL to prompt
  * retry with POSIX ACL checks.
  * On failure returns -1 if there is system (GPFS) error, check errno.
  * Returns 0 on success
@@ -1435,9 +1435,320 @@ static unsigned int vfs_gpfs_dosmode_to_winattrs(uint32_t dosmode)
 	return winattrs;
 }
 
-static struct timespec gpfs_timestruc64_to_timespec(struct gpfs_timestruc64 g)
+struct vfs_gpfs_get_dos_attributes_state {
+	struct vfs_pthreadpool_job_state job_state;
+	struct gpfs_winattr attrs;
+	uint32_t dosmode;
+};
+
+static int vfs_gpfs_get_dos_attributes_state_destructor(
+		struct vfs_gpfs_get_dos_attributes_state *state)
 {
-	return (struct timespec) { .tv_sec = g.tv_sec, .tv_nsec = g.tv_nsec };
+	return -1;
+}
+
+static int vfs_gpfs_get_winattrs_helper(
+	struct vfs_gpfs_get_dos_attributes_state *state)
+{
+	int ret = 0;
+	files_struct* fd = state->job_state.smb_fname->fsp;
+
+	ret = gpfswrap_get_winattrs(fsp_get_pathref_fd(fd), &state->attrs);
+
+	if (ret == -1) {
+		state->job_state.vfs_aio_state.error = errno;
+		return ret;
+	}
+
+	if (ret == -1 && errno == EACCES) {
+		int saved_errno = 0;
+
+		/*
+		 * According to MS-FSA 2.1.5.1.2.1 "Algorithm to Check Access to
+		 * an Existing File" FILE_LIST_DIRECTORY on a directory implies
+		 * FILE_READ_ATTRIBUTES for directory entries. Being able to
+		 * open a file implies FILE_LIST_DIRECTORY.
+		 */
+
+		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
+
+		ret = gpfswrap_get_winattrs(
+			fsp_get_pathref_fd(fd),
+			&state->attrs);
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+
+		drop_effective_capability(DAC_OVERRIDE_CAPABILITY);
+
+		if (saved_errno != 0) {
+			state->job_state.vfs_aio_state.error = saved_errno;
+			ret = saved_errno;
+		}
+	}
+	return ret;
+}
+
+static void vfs_gpfs_get_winattrs_do_sync(struct tevent_req *req);
+static void vfs_gpfs_get_winattrs_do_async(void *private_data);
+static void vfs_gpfs_get_winattrs_done(struct tevent_req *subreq);
+
+static struct tevent_req *vfs_gpfs_get_dos_attributes_send(
+						TALLOC_CTX *mem_ctx,
+						struct tevent_context *ev,
+						struct vfs_handle_struct *handle,
+						files_struct *dir_fsp,
+						struct smb_filename *smb_fname)
+{
+	struct tevent_req *req = NULL;
+	struct tevent_req *subreq = NULL;
+	struct vfs_gpfs_get_dos_attributes_state *state = NULL;
+	bool do_async = false;
+	struct gpfs_config_data *config;
+
+	SMB_VFS_HANDLE_GET_DATA(handle, config,
+				struct gpfs_config_data,
+				return NULL);
+
+	if (!config->winattr) {
+		return SMB_VFS_GET_DOS_ATTRIBUTES_SEND(mem_ctx,
+				ev,
+				dir_fsp,
+				smb_fname);
+	}
+
+	SMB_ASSERT(!is_named_stream(smb_fname));
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct vfs_gpfs_get_dos_attributes_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	*state = (struct vfs_gpfs_get_dos_attributes_state) {
+		.job_state.ev = ev,
+		.job_state.handle = handle,
+		.job_state.dir_fsp = dir_fsp,
+		.job_state.smb_fname = smb_fname,
+	};
+
+	do_async = vfswrap_check_async_with_thread_creds(
+						dir_fsp->conn->sconn->pool);
+
+	SMBPROFILE_BYTES_ASYNC_START_X(SNUM(handle->conn),
+						syscall_asys_getxattrat,
+						state->job_state.profile_bytes,
+						state->job_state.profile_bytes_x,
+						0);
+
+
+	if (fsp_get_pathref_fd(dir_fsp) == -1) {
+		DBG_ERR("Need a valid directory fd for [%s]\n",
+		fsp_str_dbg(dir_fsp));
+
+		tevent_req_error(req, EINVAL);
+		return tevent_req_post(req, ev);
+	}
+
+	if (!do_async) {
+		vfs_gpfs_get_winattrs_do_sync(req);
+		return tevent_req_post(req, ev);
+	}
+
+	/*
+	 * Now allocate all parameters from a memory context that won't go away
+	 * no matter what. These parameters will get used in threads and we
+	 * can't reliably cancel threads, so all buffers passed to the threads
+	 * must not be freed before all referencing threads terminate.
+	 */
+
+	state->job_state.name = talloc_strdup(state, smb_fname->base_name);
+	if (tevent_req_nomem(state->job_state.name, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	/*
+	 * This is a hot codepath so at first glance one might think we should
+	 * somehow optimize away the token allocation and do a
+	 * talloc_reference() or similar black magic instead. But due to the
+	 * talloc_stackframe pool per SMB2 request this should be a simple copy
+	 * without a malloc in most cases.
+	 */
+	if (geteuid() == sec_initial_uid()) {
+		state->job_state.token = root_unix_token(state);
+	} else {
+		state->job_state.token = copy_unix_token(
+						state,
+						dir_fsp->conn->session_info->unix_token);
+	}
+
+	if (tevent_req_nomem(state->job_state.token, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	SMBPROFILE_BYTES_ASYNC_SET_IDLE_X(state->job_state.profile_bytes,
+						state->job_state.profile_bytes_x);
+
+	subreq = pthreadpool_tevent_job_send(
+			state,
+			ev,
+			dir_fsp->conn->sconn->pool,
+			vfs_gpfs_get_winattrs_do_async,
+			state);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, vfs_gpfs_get_winattrs_done, req);
+
+	talloc_set_destructor(
+		state,
+		vfs_gpfs_get_dos_attributes_state_destructor);
+
+	return req;
+}
+
+static void vfs_gpfs_get_winattrs_do_async(void *private_data)
+{
+	struct vfs_gpfs_get_dos_attributes_state *state = talloc_get_type_abort(
+		private_data, struct vfs_gpfs_get_dos_attributes_state);
+
+	struct timespec start_time, end_time;
+	int ret;
+
+	PROFILE_TIMESTAMP(&start_time);
+
+	SMBPROFILE_BYTES_ASYNC_SET_BUSY_X(state->job_state.profile_bytes,
+						state->job_state.profile_bytes_x);
+
+	/*
+	 * Here we simulate a getxattrat()
+	 * call using fchdir();getxattr()
+	 */
+
+	per_thread_cwd_activate();
+
+	/* Become the correct credential on this thread. */
+	ret = set_thread_credentials(state->job_state.token->uid,
+					state->job_state.token->gid,
+					(size_t)state->job_state.token->ngroups,
+					state->job_state.token->groups);
+
+	if (ret != 0) {
+		state->job_state.vfs_aio_state.error = errno;
+		goto end_profile;
+	}
+
+	ret = vfs_gpfs_get_winattrs_helper(state);
+
+	if (ret == -1) {
+		DBG_WARNING("Getting winattrs failed for %s: %s\n",
+				state->job_state.dir_fsp->fsp_name->base_name,
+				strerror(errno));
+		goto end_profile;
+	}
+
+end_profile:
+	PROFILE_TIMESTAMP(&end_time);
+	state->job_state.vfs_aio_state.duration = nsec_time_diff(
+		&end_time,
+		&start_time);
+	SMBPROFILE_BYTES_ASYNC_SET_IDLE_X(state->job_state.profile_bytes,
+					state->job_state.profile_bytes_x);
+}
+
+static void vfs_gpfs_get_winattrs_done(struct tevent_req *subreq)
+{
+	int ret;
+	bool ok;
+	struct timespec ts;
+
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+
+	struct vfs_gpfs_get_dos_attributes_state *state = tevent_req_data(
+		req, struct vfs_gpfs_get_dos_attributes_state);
+
+	/*
+	 * Make sure we run as the user again
+	 */
+	ok = change_to_user_and_service_by_fsp(state->job_state.dir_fsp);
+	SMB_ASSERT(ok);
+
+	ret = pthreadpool_tevent_job_recv(subreq);
+	TALLOC_FREE(subreq);
+	SMBPROFILE_BYTES_ASYNC_END_X(state->job_state.profile_bytes,
+					state->job_state.profile_bytes_x);
+	talloc_set_destructor(state, NULL);
+	if (ret != 0) {
+		if (ret != EAGAIN) {
+			tevent_req_error(req, ret);
+			return;
+		}
+
+		/*
+		 * If we get EAGAIN from pthreadpool_tevent_job_recv() this
+		 * means the lower level pthreadpool failed to create a new
+		 * thread. Fallback to sync processing in that case to allow
+		 * some progress for the client.
+		 */
+		vfs_gpfs_get_winattrs_do_sync(req);
+		return;
+	}
+
+	ts.tv_sec = state->attrs.creationTime.tv_sec;
+	ts.tv_nsec = state->attrs.creationTime.tv_nsec;
+
+	state->dosmode = vfs_gpfs_winattrs_to_dosmode(state->attrs.winAttrs);
+	update_stat_ex_create_time(&(state->job_state.dir_fsp->fsp_name->st),
+								ts);
+
+	tevent_req_done(req);
+}
+
+static NTSTATUS vfs_gpfs_get_dos_attributes_recv(
+					struct tevent_req *req,
+					struct vfs_aio_state *aio_state,
+					uint32_t *dosmode)
+{
+	struct vfs_gpfs_get_dos_attributes_state *state =
+		tevent_req_data(req,
+		struct vfs_gpfs_get_dos_attributes_state);
+
+	if (tevent_req_is_unix_error(req, &aio_state->error)) {
+		tevent_req_received(req);
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	*aio_state = state->job_state.vfs_aio_state;
+	*dosmode = state->dosmode;
+
+	tevent_req_received(req);
+	return NT_STATUS_OK;
+}
+
+static void vfs_gpfs_get_winattrs_do_sync(struct tevent_req *req)
+{
+	struct timespec ts;
+	int ret;
+
+	struct vfs_gpfs_get_dos_attributes_state *state =
+		tevent_req_data(req,
+		struct vfs_gpfs_get_dos_attributes_state);
+
+	ret = vfs_gpfs_get_winattrs_helper(state);
+
+	if (ret == -1) {
+		state->job_state.vfs_aio_state.error = errno;
+		tevent_req_error(req, errno);
+		return;
+	}
+
+	ts.tv_sec = state->attrs.creationTime.tv_sec;
+	ts.tv_nsec = state->attrs.creationTime.tv_nsec;
+
+	state->dosmode = vfs_gpfs_winattrs_to_dosmode(state->attrs.winAttrs);
+	update_stat_ex_create_time(&(state->job_state.dir_fsp->fsp_name->st), ts);
+
+	tevent_req_done(req);
 }
 
 static NTSTATUS vfs_gpfs_fget_dos_attributes(struct vfs_handle_struct *handle,
@@ -1445,11 +1756,7 @@ static NTSTATUS vfs_gpfs_fget_dos_attributes(struct vfs_handle_struct *handle,
 					     uint32_t *dosmode)
 {
 	struct gpfs_config_data *config;
-	int fd = fsp_get_pathref_fd(fsp);
-	struct sys_proc_fd_path_buf buf;
-	const char *p = NULL;
-	struct gpfs_iattr64 iattr = { };
-	unsigned int litemask = 0;
+	struct gpfs_winattr attrs = { };
 	struct timespec ts;
 	int ret;
 
@@ -1461,19 +1768,7 @@ static NTSTATUS vfs_gpfs_fget_dos_attributes(struct vfs_handle_struct *handle,
 		return SMB_VFS_NEXT_FGET_DOS_ATTRIBUTES(handle, fsp, dosmode);
 	}
 
-	if (fsp->fsp_flags.is_pathref && !config->pathref_ok.gpfs_fstat_x) {
-		if (fsp->fsp_flags.have_proc_fds) {
-			p = sys_proc_fd_path(fd, &buf);
-		} else {
-			p = fsp->fsp_name->base_name;
-		}
-	}
-
-	if (p != NULL) {
-		ret = gpfswrap_stat_x(p, &litemask, &iattr, sizeof(iattr));
-	} else {
-		ret = gpfswrap_fstat_x(fd, &litemask, &iattr, sizeof(iattr));
-	}
+	ret = gpfswrap_get_winattrs(fsp_get_pathref_fd(fsp), &attrs);
 	if (ret == -1 && errno == ENOSYS) {
 		return SMB_VFS_NEXT_FGET_DOS_ATTRIBUTES(handle, fsp, dosmode);
 	}
@@ -1490,17 +1785,7 @@ static NTSTATUS vfs_gpfs_fget_dos_attributes(struct vfs_handle_struct *handle,
 
 		set_effective_capability(DAC_OVERRIDE_CAPABILITY);
 
-		if (p != NULL) {
-			ret = gpfswrap_stat_x(p,
-					      &litemask,
-					      &iattr,
-					      sizeof(iattr));
-		} else {
-			ret = gpfswrap_fstat_x(fd,
-					       &litemask,
-					       &iattr,
-					       sizeof(iattr));
-		}
+		ret = gpfswrap_get_winattrs(fsp_get_pathref_fd(fsp), &attrs);
 		if (ret == -1) {
 			saved_errno = errno;
 		}
@@ -1514,16 +1799,43 @@ static NTSTATUS vfs_gpfs_fget_dos_attributes(struct vfs_handle_struct *handle,
 
 	if (ret == -1) {
 		DBG_WARNING("Getting winattrs failed for %s: %s\n",
-			    fsp->fsp_name->base_name, strerror(errno));
+			    fsp_str_dbg(fsp),
+			    strerror(errno));
 		return map_nt_error_from_unix(errno);
 	}
 
-	ts = gpfs_timestruc64_to_timespec(iattr.ia_createtime);
+	ts.tv_sec = attrs.creationTime.tv_sec;
+	ts.tv_nsec = attrs.creationTime.tv_nsec;
 
-	*dosmode |= vfs_gpfs_winattrs_to_dosmode(iattr.ia_winflags);
+	*dosmode |= vfs_gpfs_winattrs_to_dosmode(attrs.winAttrs);
 	update_stat_ex_create_time(&fsp->fsp_name->st, ts);
 
 	return NT_STATUS_OK;
+}
+
+static int timespec_to_gpfs_timestruc(struct gpfs_config_data *config,
+				      struct timespec ts,
+				      struct gpfs_timestruc *gt)
+{
+	if (ts.tv_sec < 0 || ts.tv_sec > UINT32_MAX) {
+		if (!config->clamp_invalid_times) {
+			DBG_NOTICE("GPFS uses 32-bit unsigned timestamps "
+				   "and cannot handle %jd.\n",
+				   (intmax_t)ts.tv_sec);
+			errno = ERANGE;
+			return -1;
+		}
+		if (ts.tv_sec < 0) {
+			ts.tv_sec = 0;
+		} else {
+			ts.tv_sec = UINT32_MAX;
+		}
+	}
+
+	gt->tv_sec = ts.tv_sec;
+	gt->tv_nsec = ts.tv_nsec;
+
+	return 0;
 }
 
 static NTSTATUS vfs_gpfs_fset_dos_attributes(struct vfs_handle_struct *handle,
@@ -1542,43 +1854,19 @@ static NTSTATUS vfs_gpfs_fset_dos_attributes(struct vfs_handle_struct *handle,
 		return SMB_VFS_NEXT_FSET_DOS_ATTRIBUTES(handle, fsp, dosmode);
 	}
 
+	ret = timespec_to_gpfs_timestruc(config,
+					 fsp->fsp_name->st.st_ex_btime,
+					 &attrs.creationTime);
+	if (ret == -1) {
+		return map_nt_error_from_unix(errno);
+	}
+
 	attrs.winAttrs = vfs_gpfs_dosmode_to_winattrs(dosmode);
 
-	if (!fsp->fsp_flags.is_pathref) {
-		ret = gpfswrap_set_winattrs(fsp_get_io_fd(fsp),
-					    GPFS_WINATTR_SET_ATTRS, &attrs);
-		if (ret == -1) {
-			DBG_WARNING("Setting winattrs failed for %s: %s\n",
-				    fsp_str_dbg(fsp), strerror(errno));
-			return map_nt_error_from_unix(errno);
-		}
-		return NT_STATUS_OK;
-	}
-
-	if (fsp->fsp_flags.have_proc_fds) {
-		int fd = fsp_get_pathref_fd(fsp);
-		struct sys_proc_fd_path_buf buf;
-
-		ret = gpfswrap_set_winattrs_path(sys_proc_fd_path(fd, &buf),
-						 GPFS_WINATTR_SET_ATTRS,
-						 &attrs);
-		if (ret == -1) {
-			DBG_WARNING("Setting winattrs failed for "
-				    "[%s][%s]: %s\n",
-				    buf.buf,
-				    fsp_str_dbg(fsp),
-				    strerror(errno));
-			return map_nt_error_from_unix(errno);
-		}
-		return NT_STATUS_OK;
-	}
-
-	/*
-	 * This is no longer a handle based call.
-	 */
-	ret = gpfswrap_set_winattrs_path(fsp->fsp_name->base_name,
-					 GPFS_WINATTR_SET_ATTRS,
-					 &attrs);
+	ret = gpfswrap_set_winattrs(fsp_get_pathref_fd(fsp),
+				    GPFS_WINATTR_SET_CREATION_TIME|
+				    GPFS_WINATTR_SET_ATTRS,
+				    &attrs);
 	if (ret == -1) {
 		DBG_WARNING("Setting winattrs failed for [%s]: %s\n",
 			    fsp_str_dbg(fsp), strerror(errno));
@@ -1588,30 +1876,31 @@ static NTSTATUS vfs_gpfs_fset_dos_attributes(struct vfs_handle_struct *handle,
 	return NT_STATUS_OK;
 }
 
-static int timespec_to_gpfs_time(
-	struct timespec ts, gpfs_timestruc_t *gt, int idx, int *flags)
+static int timespec_to_gpfs_time(struct gpfs_config_data *config,
+				 struct timespec ts,
+				 gpfs_timestruc_t *gt,
+				 int idx,
+				 int *flags)
 {
+	int ret;
+
 	if (is_omit_timespec(&ts)) {
 		return 0;
 	}
 
-	if (ts.tv_sec < 0 || ts.tv_sec > UINT32_MAX) {
-		DBG_NOTICE("GPFS uses 32-bit unsigned timestamps "
-			   "and cannot handle %jd.\n",
-			   (intmax_t)ts.tv_sec);
-		errno = ERANGE;
-		return -1;
+	ret = timespec_to_gpfs_timestruc(config, ts, &gt[idx]);
+	if (ret == -1) {
+		return ret;
 	}
 
 	*flags |= 1 << idx;
-	gt[idx].tv_sec = ts.tv_sec;
-	gt[idx].tv_nsec = ts.tv_nsec;
 	DBG_DEBUG("Setting GPFS time %d, flags 0x%x\n", idx, *flags);
 
 	return 0;
 }
 
-static int smbd_gpfs_set_times(struct files_struct *fsp,
+static int smbd_gpfs_set_times(struct gpfs_config_data *config,
+			       struct files_struct *fsp,
 			       struct smb_file_time *ft)
 {
 	gpfs_timestruc_t gpfs_times[4];
@@ -1619,18 +1908,22 @@ static int smbd_gpfs_set_times(struct files_struct *fsp,
 	int rc;
 
 	ZERO_ARRAY(gpfs_times);
-	rc = timespec_to_gpfs_time(ft->atime, gpfs_times, 0, &flags);
+	rc = timespec_to_gpfs_time(config, ft->atime, gpfs_times, 0, &flags);
 	if (rc != 0) {
 		return rc;
 	}
 
-	rc = timespec_to_gpfs_time(ft->mtime, gpfs_times, 1, &flags);
+	rc = timespec_to_gpfs_time(config, ft->mtime, gpfs_times, 1, &flags);
 	if (rc != 0) {
 		return rc;
 	}
 
 	/* No good mapping from LastChangeTime to ctime, not storing */
-	rc = timespec_to_gpfs_time(ft->create_time, gpfs_times, 3, &flags);
+	rc = timespec_to_gpfs_time(config,
+				   ft->create_time,
+				   gpfs_times,
+				   3,
+				   &flags);
 	if (rc != 0) {
 		return rc;
 	}
@@ -1685,7 +1978,6 @@ static int vfs_gpfs_fntimes(struct vfs_handle_struct *handle,
 		struct smb_file_time *ft)
 {
 
-	struct gpfs_winattr attrs;
 	int ret;
 	struct gpfs_config_data *config;
 
@@ -1696,11 +1988,10 @@ static int vfs_gpfs_fntimes(struct vfs_handle_struct *handle,
 
 	/* Try to use gpfs_set_times if it is enabled and available */
 	if (config->settimes) {
-		return smbd_gpfs_set_times(fsp, ft);
+		return smbd_gpfs_set_times(config, fsp, ft);
 	}
 
-	DBG_DEBUG("gpfs_set_times() not available or disabled, "
-		  "use ntimes and winattr\n");
+	DBG_DEBUG("gpfs_set_times() not available or disabled.\n");
 
 	ret = SMB_VFS_NEXT_FNTIMES(handle, fsp, ft);
 	if (ret == -1) {
@@ -1709,56 +2000,6 @@ static int vfs_gpfs_fntimes(struct vfs_handle_struct *handle,
 			DBG_WARNING("SMB_VFS_NEXT_FNTIMES failed: %s\n",
 				    strerror(errno));
 		}
-		return -1;
-	}
-
-	if (is_omit_timespec(&ft->create_time)) {
-		DBG_DEBUG("Create Time is NULL\n");
-		return 0;
-	}
-
-	if (!config->winattr) {
-		return 0;
-	}
-
-	attrs.winAttrs = 0;
-	attrs.creationTime.tv_sec = ft->create_time.tv_sec;
-	attrs.creationTime.tv_nsec = ft->create_time.tv_nsec;
-
-	if (!fsp->fsp_flags.is_pathref) {
-		ret = gpfswrap_set_winattrs(fsp_get_io_fd(fsp),
-					    GPFS_WINATTR_SET_CREATION_TIME,
-					    &attrs);
-		if (ret == -1 && errno != ENOSYS) {
-			DBG_WARNING("Set GPFS ntimes failed %d\n", ret);
-			return -1;
-		}
-		return ret;
-	}
-
-	if (fsp->fsp_flags.have_proc_fds) {
-		int fd = fsp_get_pathref_fd(fsp);
-		struct sys_proc_fd_path_buf buf;
-
-		ret = gpfswrap_set_winattrs_path(
-			sys_proc_fd_path(fd, &buf),
-			GPFS_WINATTR_SET_CREATION_TIME,
-			&attrs);
-		if (ret == -1 && errno != ENOSYS) {
-			DBG_WARNING("Set GPFS ntimes failed %d\n", ret);
-			return -1;
-		}
-		return ret;
-	}
-
-	/*
-	 * This is no longer a handle based call.
-	 */
-	ret = gpfswrap_set_winattrs_path(fsp->fsp_name->base_name,
-					 GPFS_WINATTR_SET_CREATION_TIME,
-					 &attrs);
-	if (ret == -1 && errno != ENOSYS) {
-		DBG_WARNING("Set GPFS ntimes failed %d\n", ret);
 		return -1;
 	}
 
@@ -1880,68 +2121,6 @@ static ssize_t vfs_gpfs_sendfile(vfs_handle_struct *handle, int tofd,
 	return SMB_VFS_NEXT_SENDFILE(handle, tofd, fsp, hdr, offset, n);
 }
 
-#ifdef O_PATH
-static int vfs_gpfs_check_pathref_fstat_x(struct gpfs_config_data *config,
-					  struct connection_struct *conn)
-{
-	struct gpfs_iattr64 iattr = {0};
-	unsigned int litemask = 0;
-	int saved_errno;
-	int fd;
-	int ret;
-
-	fd = open(conn->connectpath, O_PATH);
-	if (fd == -1) {
-		DBG_ERR("openat() of share with O_PATH failed: %s\n",
-			strerror(errno));
-		return -1;
-	}
-
-	ret = gpfswrap_fstat_x(fd, &litemask, &iattr, sizeof(iattr));
-	if (ret == 0) {
-		close(fd);
-		config->pathref_ok.gpfs_fstat_x = true;
-		return 0;
-	}
-
-	saved_errno = errno;
-	ret = close(fd);
-	if (ret != 0) {
-		DBG_ERR("close failed: %s\n", strerror(errno));
-		return -1;
-	}
-
-	if (saved_errno != EBADF) {
-		DBG_ERR("gpfswrap_fstat_x() of O_PATH handle failed: %s\n",
-			strerror(saved_errno));
-		return -1;
-	}
-
-	return 0;
-}
-#endif
-
-static int vfs_gpfs_check_pathref(struct gpfs_config_data *config,
-				  struct connection_struct *conn)
-{
-#ifndef O_PATH
-	/*
-	 * This code path leaves all struct gpfs_config_data.pathref_ok members
-	 * initialized to false.
-	 */
-	return 0;
-#else
-	int ret;
-
-	ret = vfs_gpfs_check_pathref_fstat_x(config, conn);
-	if (ret != 0) {
-		return -1;
-	}
-
-	return 0;
-#endif
-}
-
 static int vfs_gpfs_connect(struct vfs_handle_struct *handle,
 			    const char *service, const char *user)
 {
@@ -2048,13 +2227,8 @@ static int vfs_gpfs_connect(struct vfs_handle_struct *handle,
 	config->recalls = lp_parm_bool(SNUM(handle->conn), "gpfs",
 				       "recalls", true);
 
-	ret = vfs_gpfs_check_pathref(config, handle->conn);
-	if (ret != 0) {
-		DBG_ERR("vfs_gpfs_check_pathref() on [%s] failed\n",
-			handle->conn->connectpath);
-		TALLOC_FREE(config);
-		return -1;
-	}
+	config->clamp_invalid_times = lp_parm_bool(SNUM(handle->conn), "gpfs",
+				       "clamp_invalid_times", false);
 
 	SMB_VFS_HANDLE_SET_DATA(handle, config,
 				NULL, struct gpfs_config_data,
@@ -2084,12 +2258,6 @@ static int vfs_gpfs_connect(struct vfs_handle_struct *handle,
 					"false");
 		}
 	}
-
-	/*
-	 * Unless we have an async implementation of get_dos_attributes turn
-	 * this off.
-	 */
-	lp_do_parameter(SNUM(handle->conn), "smbd async dosmode", "false");
 
 	return 0;
 }
@@ -2520,8 +2688,8 @@ static struct vfs_fn_pointers vfs_gpfs_fns = {
 	.filesystem_sharemode_fn = vfs_gpfs_filesystem_sharemode,
 	.linux_setlease_fn = vfs_gpfs_setlease,
 	.get_real_filename_at_fn = vfs_gpfs_get_real_filename_at,
-	.get_dos_attributes_send_fn = vfs_not_implemented_get_dos_attributes_send,
-	.get_dos_attributes_recv_fn = vfs_not_implemented_get_dos_attributes_recv,
+	.get_dos_attributes_send_fn = vfs_gpfs_get_dos_attributes_send,
+	.get_dos_attributes_recv_fn = vfs_gpfs_get_dos_attributes_recv,
 	.fget_dos_attributes_fn = vfs_gpfs_fget_dos_attributes,
 	.fset_dos_attributes_fn = vfs_gpfs_fset_dos_attributes,
 	.fget_nt_acl_fn = gpfsacl_fget_nt_acl,

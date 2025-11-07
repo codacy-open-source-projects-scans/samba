@@ -314,7 +314,7 @@ int main(int argc, char * const *argv)
 {
 	int i, seed = -1;
 	int num_loops = 5000;
-	int num_procs = 3;
+	unsigned num_procs = 3;
 	int c, pfds[2];
 	extern char *optarg;
 	pid_t *pids;
@@ -327,7 +327,7 @@ int main(int argc, char * const *argv)
 	while ((c = getopt(argc, argv, "n:l:s:H:thkm")) != -1) {
 		switch (c) {
 		case 'n':
-			num_procs = strtol(optarg, NULL, 0);
+			num_procs = strtoul(optarg, NULL, 0);
 			break;
 		case 'l':
 			num_loops = strtol(optarg, NULL, 0);
@@ -364,7 +364,7 @@ int main(int argc, char * const *argv)
 		seed = (getpid() + time(NULL)) & 0x7FFFFFFF;
 	}
 
-	printf("Testing with %d processes, %d loops, %d hash_size, seed=%d%s\n",
+	printf("Testing with %u processes, %d loops, %d hash_size, seed=%d%s\n",
 	       num_procs, num_loops, hash_size, seed,
 	       (always_transaction ? " (all within transactions)" : ""));
 
@@ -374,12 +374,12 @@ int main(int argc, char * const *argv)
 		goto done;
 	}
 
-	pids = (pid_t *)calloc(sizeof(pid_t), num_procs);
+	pids = (pid_t *)calloc(num_procs, sizeof(pid_t));
 	if (pids == NULL) {
 		perror("Unable to allocate memory for pids");
 		exit(1);
 	}
-	done = (int *)calloc(sizeof(int), num_procs);
+	done = (int *)calloc(num_procs, sizeof(int));
 	if (done == NULL) {
 		perror("Unable to allocate memory for done");
 		exit(1);

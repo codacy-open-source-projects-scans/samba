@@ -23,9 +23,11 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmbclient.h"
 #include "libsmb_internal.h"
+#include "libsmb/smbsock_connect.h"
 #include "secrets.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "auth/credentials/credentials.h"
@@ -50,6 +52,13 @@ SMBC_module_init(void * punused)
 	bool conf_loaded = False;
 	char *home = NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
+
+	/*
+	 * We can't rely on periodic connection
+	 * monitoring, so we can't use
+	 * the ngtcp2 over udp quic support.
+	 */
+	smbsock_connect_require_bsd_socket = true;
 
 	setup_logging("libsmbclient", DEBUG_STDOUT);
 
@@ -149,16 +158,14 @@ smbc_new_context(void)
          * All newly added context fields should be placed in
          * SMBC_internal_data, not directly in SMBCCTX.
          */
-        context = SMB_MALLOC_P(SMBCCTX);
+        context = SMB_CALLOC_ARRAY(SMBCCTX, 1);
         if (!context) {
 		TALLOC_FREE(frame);
                 errno = ENOMEM;
                 return NULL;
         }
 
-        ZERO_STRUCTP(context);
-
-        context->internal = SMB_MALLOC_P(struct SMBC_internal_data);
+        context->internal = SMB_CALLOC_ARRAY(struct SMBC_internal_data, 1);
         if (!context->internal) {
 		TALLOC_FREE(frame);
                 SAFE_FREE(context);
@@ -166,12 +173,18 @@ smbc_new_context(void)
                 return NULL;
         }
 
-        /* Initialize the context and establish reasonable defaults */
-        ZERO_STRUCTP(context->internal);
+	context->internal->mem_ctx = talloc_new(NULL);
+	if (context->internal->mem_ctx == NULL) {
+		SAFE_FREE(context->internal);
+		SAFE_FREE(context);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 
-	context->internal->lp_ctx = loadparm_init_s3(NULL,
+	context->internal->lp_ctx = loadparm_init_s3(context->internal->mem_ctx,
 						     loadparm_s3_helpers());
 	if (context->internal->lp_ctx == NULL) {
+		TALLOC_FREE(context->internal->mem_ctx);
 		SAFE_FREE(context->internal);
 		SAFE_FREE(context);
 		TALLOC_FREE(frame);
@@ -186,15 +199,15 @@ smbc_new_context(void)
         smbc_setOptionFullTimeNames(context, False);
         smbc_setOptionOpenShareMode(context, SMBC_SHAREMODE_DENY_NONE);
         smbc_setOptionSmbEncryptionLevel(context, SMBC_ENCRYPTLEVEL_DEFAULT);
-        smbc_setOptionUseCCache(context, True);
+	{
+		bool no_ccache = (getenv("LIBSMBCLIENT_NO_CCACHE") == NULL);
+		smbc_setOptionUseCCache(context, !no_ccache);
+	}
         smbc_setOptionCaseSensitive(context, False);
         smbc_setOptionBrowseMaxLmbCount(context, 3);    /* # LMBs to query */
         smbc_setOptionUrlEncodeReaddirEntries(context, False);
         smbc_setOptionOneSharePerServer(context, False);
         smbc_setOptionPosixExtensions(context, false);
-	if (getenv("LIBSMBCLIENT_NO_CCACHE") != NULL) {
-		smbc_setOptionUseCCache(context, false);
-	}
 
         smbc_setFunctionAuthData(context, SMBC_get_auth_data);
         smbc_setFunctionCheckServer(context, SMBC_check_server);
@@ -236,6 +249,7 @@ smbc_new_context(void)
         smbc_setFunctionUtimes(context, SMBC_utimes_ctx);
         smbc_setFunctionSetxattr(context, SMBC_setxattr_ctx);
         smbc_setFunctionGetxattr(context, SMBC_getxattr_ctx);
+        smbc_setFunctionFGetxattr(context, SMBC_fgetxattr_ctx);
         smbc_setFunctionRemovexattr(context, SMBC_removexattr_ctx);
         smbc_setFunctionListxattr(context, SMBC_listxattr_ctx);
 
@@ -330,14 +344,11 @@ smbc_free_context(SMBCCTX *context,
         smbc_setNetbiosName(context, NULL);
         smbc_setUser(context, NULL);
 
-        DEBUG(3, ("Context %p successfully freed\n", context));
-
-	/* Free any DFS auth context. */
-	TALLOC_FREE(context->internal->creds);
-
-	TALLOC_FREE(context->internal->lp_ctx);
+	TALLOC_FREE(context->internal->mem_ctx);
 	SAFE_FREE(context->internal);
         SAFE_FREE(context);
+
+        DEBUG(3, ("Context %p successfully freed\n", context));
 
         /* Protect access to the count of contexts in use */
 	if (SMB_THREAD_LOCK(initialized_ctx_count_mutex) != 0) {
@@ -770,7 +781,7 @@ void smbc_set_credentials_with_fallback(SMBCCTX *context,
 		password = "";
 	}
 
-	creds = cli_credentials_init(NULL);
+	creds = cli_credentials_init(context->internal->mem_ctx);
 	if (creds == NULL) {
 		DEBUG(0, ("smbc_set_credentials_with_fallback: allocation fail\n"));
 		return;

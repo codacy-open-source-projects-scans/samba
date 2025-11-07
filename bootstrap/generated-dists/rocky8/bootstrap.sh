@@ -71,6 +71,7 @@ yum install -y \
     libbsd-devel \
     libcap-devel \
     libcephfs-devel \
+    libevent-devel \
     libicu-devel \
     libpcap-devel \
     libtasn1-devel \
@@ -111,6 +112,7 @@ yum install -y \
     python3-pyasn1 \
     python3-requests \
     python3-setproctitle \
+    python3-varlink \
     quota-devel \
     readline-devel \
     redhat-lsb \

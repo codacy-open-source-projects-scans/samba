@@ -251,7 +251,7 @@ interface security
 	const string SID_NT_RESTRICTED            = "S-1-5-12";
 	const string SID_NT_TERMINAL_SERVER_USERS = "S-1-5-13";
 	const string SID_NT_REMOTE_INTERACTIVE    = "S-1-5-14";
-	const string SID_NT_THIS_ORGANISATION     = "S-1-5-15";
+	const string SID_NT_THIS_ORGANIZATION     = "S-1-5-15";
 	const string SID_NT_IUSR                  = "S-1-5-17";
 	const string SID_NT_SYSTEM                = "S-1-5-18";
 	const string SID_NT_LOCAL_SERVICE         = "S-1-5-19";
@@ -259,7 +259,8 @@ interface security
 	const string SID_NT_DIGEST_AUTHENTICATION = "S-1-5-64-21";
 	const string SID_NT_NTLM_AUTHENTICATION   = "S-1-5-64-10";
 	const string SID_NT_SCHANNEL_AUTHENTICATION = "S-1-5-64-14";
-	const string SID_NT_OTHER_ORGANISATION    = "S-1-5-1000";
+	const string SID_NT_THIS_ORGANIZATION_CERTIFICATE = "S-1-5-65-1";
+	const string SID_NT_OTHER_ORGANIZATION    = "S-1-5-1000";
 
 	/* SECURITY_BUILTIN_DOMAIN_RID */
 	const string NAME_BUILTIN                  = "BUILTIN";
@@ -374,6 +375,8 @@ interface security
 	const int DOMAIN_RID_PROTECTED_USERS         = 525;
 	const int DOMAIN_RID_KEY_ADMINS              = 526;
 	const int DOMAIN_RID_ENTERPRISE_KEY_ADMINS   = 527;
+	const int DOMAIN_RID_FOREST_TRUST_ACCOUNTS   = 528;
+	const int DOMAIN_RID_EXTERNAL_TRUST_ACCOUNTS = 529;
 	const int DOMAIN_RID_RAS_SERVERS             = 553;
 	const int DOMAIN_RID_RODC_ALLOW              = 571;
 	const int DOMAIN_RID_RODC_DENY               = 572;
@@ -960,6 +963,7 @@ interface security
 	const string GUID_DRS_DNS_HOST_NAME           = "72e39547-7b18-11d1-adef-00c04fd8d5cd";
 	const string GUID_DRS_ADD_DNS_HOST_NAME       = "80863791-dbe9-4eb8-837e-7f0ab55d9ac7";
 	const string GUID_DRS_BEHAVIOR_VERSION        = "d31a8757-2447-4545-8081-3bb610cacbf2";
+	const string GUID_DRS_DS_VALIDATED_WRITE_COMPUTER = "9b026da6-0d3c-465c-8bee-5199d7165cba";
 
 	/* A type to describe the mapping of generic access rights to object
 	   specific access rights. */

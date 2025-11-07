@@ -703,6 +703,7 @@ static int tldap_msg_msgid(struct tevent_req *req)
 
 static void tldap_msg_received(struct tevent_req *subreq)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct tldap_context *ld = tevent_req_callback_data(
 		subreq, struct tldap_context);
 	struct tevent_req *req;
@@ -718,7 +719,7 @@ static void tldap_msg_received(struct tevent_req *subreq)
 	uint8_t type;
 	bool ok;
 
-	received = read_ldap_recv(subreq, talloc_tos(), &inbuf, &err);
+	received = read_ldap_recv(subreq, frame, &inbuf, &err);
 	TALLOC_FREE(subreq);
 	ld->read_req = NULL;
 	if (received == -1) {
@@ -726,7 +727,7 @@ static void tldap_msg_received(struct tevent_req *subreq)
 		goto fail;
 	}
 
-	data = asn1_init(talloc_tos(), ASN1_MAX_TREE_DEPTH);
+	data = asn1_init(frame, ASN1_MAX_TREE_DEPTH);
 	if (data == NULL) {
 		/*
 		 * We have to disconnect all, we can't tell which of
@@ -757,8 +758,8 @@ static void tldap_msg_received(struct tevent_req *subreq)
 			"tldap_msg_received: got msgid 0 of "
 			"type %"PRIu8", disconnecting\n",
 			type);
-		tldap_context_disconnect(ld, TLDAP_SERVER_DOWN);
-		return;
+		status = TLDAP_SERVER_DOWN;
+		goto fail;
 	}
 
 	num_pending = talloc_array_length(ld->pending);
@@ -791,6 +792,7 @@ static void tldap_msg_received(struct tevent_req *subreq)
 
  done:
 	if (num_pending == 0) {
+		TALLOC_FREE(frame);
 		return;
 	}
 
@@ -801,10 +803,12 @@ static void tldap_msg_received(struct tevent_req *subreq)
 		goto fail;
 	}
 	tevent_req_set_callback(ld->read_req, tldap_msg_received, ld);
+	TALLOC_FREE(frame);
 	return;
 
  fail:
 	tldap_context_disconnect(ld, status);
+	TALLOC_FREE(frame);
 }
 
 static TLDAPRC tldap_msg_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
@@ -1415,13 +1419,16 @@ static bool tldap_unescape_inplace(char *value, size_t *val_len)
 
 static bool tldap_push_filter_basic(struct tldap_context *ld,
 				    struct asn1_data *data,
+				    TALLOC_CTX *tmpctx,
 				    const char **_s);
 static bool tldap_push_filter_substring(struct tldap_context *ld,
 					struct asn1_data *data,
+					TALLOC_CTX *tmpctx,
 					const char *val,
 					const char **_s);
 static bool tldap_push_filter_int(struct tldap_context *ld,
 				  struct asn1_data *data,
+				  TALLOC_CTX *tmpctx,
 				  const char **_s)
 {
 	const char *s = *_s;
@@ -1453,7 +1460,7 @@ static bool tldap_push_filter_int(struct tldap_context *ld,
 		tldap_debug(ld, TLDAP_DEBUG_TRACE, "Filter op: NOT\n");
 		if (!asn1_push_tag(data, TLDAP_FILTER_NOT)) return false;
 		s++;
-		ret = tldap_push_filter_int(ld, data, &s);
+		ret = tldap_push_filter_int(ld, data, tmpctx, &s);
 		if (!ret) {
 			return false;
 		}
@@ -1472,7 +1479,7 @@ static bool tldap_push_filter_int(struct tldap_context *ld,
 		return false;
 
 	default:
-		ret = tldap_push_filter_basic(ld, data, &s);
+		ret = tldap_push_filter_basic(ld, data, tmpctx, &s);
 		if (!ret) {
 			return false;
 		}
@@ -1489,7 +1496,7 @@ static bool tldap_push_filter_int(struct tldap_context *ld,
 	}
 
 	while (*s) {
-		ret = tldap_push_filter_int(ld, data, &s);
+		ret = tldap_push_filter_int(ld, data, tmpctx, &s);
 		if (!ret) {
 			return false;
 		}
@@ -1520,9 +1527,9 @@ done:
 
 static bool tldap_push_filter_basic(struct tldap_context *ld,
 				    struct asn1_data *data,
+				    TALLOC_CTX *tmpctx,
 				    const char **_s)
 {
-	TALLOC_CTX *tmpctx = talloc_tos();
 	const char *s = *_s;
 	const char *e;
 	const char *eq;
@@ -1693,7 +1700,7 @@ static bool tldap_push_filter_basic(struct tldap_context *ld,
 			/* substring */
 			if (!asn1_push_tag(data, TLDAP_FILTER_SUB)) return false;
 			if (!asn1_write_OctetString(data, s, e - s)) return false;
-			ret = tldap_push_filter_substring(ld, data, val, &s);
+			ret = tldap_push_filter_substring(ld, data, tmpctx, val, &s);
 			if (!ret) {
 				return false;
 			}
@@ -1731,10 +1738,10 @@ static bool tldap_push_filter_basic(struct tldap_context *ld,
 
 static bool tldap_push_filter_substring(struct tldap_context *ld,
 					struct asn1_data *data,
+					TALLOC_CTX *tmpctx,
 					const char *val,
 					const char **_s)
 {
-	TALLOC_CTX *tmpctx = talloc_tos();
 	bool initial = true;
 	const char *star;
 	char *chunk;
@@ -1830,15 +1837,18 @@ static bool tldap_push_filter(struct tldap_context *ld,
 			      struct asn1_data *data,
 			      const char *filter)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	const char *s = filter;
 	bool ret;
 
-	ret = tldap_push_filter_int(ld, data, &s);
+	ret = tldap_push_filter_int(ld, data, frame, &s);
 	if (ret && *s) {
 		tldap_debug(ld, TLDAP_DEBUG_ERROR,
 			    "Incomplete or malformed filter\n");
+		TALLOC_FREE(frame);
 		return false;
 	}
+	TALLOC_FREE(frame);
 	return ret;
 }
 
@@ -1851,7 +1861,7 @@ struct tevent_req *tldap_search_send(TALLOC_CTX *mem_ctx,
 				     struct tldap_context *ld,
 				     const char *base, int scope,
 				     const char *filter,
-				     const char **attrs,
+				     const char * const *attrs,
 				     int num_attrs,
 				     int attrsonly,
 				     struct tldap_control *sctrls,
@@ -1894,6 +1904,17 @@ struct tevent_req *tldap_search_send(TALLOC_CTX *mem_ctx,
 				sctrls, num_sctrls);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
+	}
+	if (timelimit != 0) {
+		struct timeval end;
+		bool ok;
+
+		end = timeval_current_ofs(timelimit * 1.5F, 0);
+		ok = tevent_req_set_endtime(subreq, ev, end);
+		if (!ok) {
+			tevent_req_oom(req);
+			return tevent_req_post(req, ev);
+		}
 	}
 	tevent_req_set_callback(subreq, tldap_search_done, req);
 	return req;
@@ -1978,7 +1999,7 @@ static void tldap_search_all_done(struct tevent_req *subreq);
 struct tevent_req *tldap_search_all_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	struct tldap_context *ld, const char *base, int scope,
-	const char *filter, const char **attrs, int num_attrs, int attrsonly,
+	const char *filter, const char * const *attrs, int num_attrs, int attrsonly,
 	struct tldap_control *sctrls, int num_sctrls,
 	struct tldap_control *cctrls, int num_cctrls,
 	int timelimit, int sizelimit, int deref)
@@ -2062,7 +2083,7 @@ TLDAPRC tldap_search_all_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 
 TLDAPRC tldap_search(struct tldap_context *ld,
 		     const char *base, int scope, const char *filter,
-		     const char **attrs, int num_attrs, int attrsonly,
+		     const char * const *attrs, int num_attrs, int attrsonly,
 		     struct tldap_control *sctrls, int num_sctrls,
 		     struct tldap_control *cctrls, int num_cctrls,
 		     int timelimit, int sizelimit, int deref,
@@ -2791,6 +2812,15 @@ int tldap_msg_type(const struct tldap_message *msg)
 	return msg->type;
 }
 
+TLDAPRC tldap_msg_rc(const struct tldap_message *msg)
+{
+	if (msg == NULL) {
+		return TLDAP_LOCAL_ERROR;
+	}
+
+	return msg->lderr;
+}
+
 const char *tldap_msg_matcheddn(struct tldap_message *msg)
 {
 	if (msg == NULL) {
@@ -2832,134 +2862,183 @@ struct tldap_message *tldap_ctx_lastmsg(struct tldap_context *ld)
 	return ld->last_msg;
 }
 
-static const struct { TLDAPRC rc; const char *string; } tldaprc_errmap[] =
-{
-	{ TLDAP_SUCCESS,
-	  "TLDAP_SUCCESS" },
-	{ TLDAP_OPERATIONS_ERROR,
-	  "TLDAP_OPERATIONS_ERROR" },
-	{ TLDAP_PROTOCOL_ERROR,
-	  "TLDAP_PROTOCOL_ERROR" },
-	{ TLDAP_TIMELIMIT_EXCEEDED,
-	  "TLDAP_TIMELIMIT_EXCEEDED" },
-	{ TLDAP_SIZELIMIT_EXCEEDED,
-	  "TLDAP_SIZELIMIT_EXCEEDED" },
-	{ TLDAP_COMPARE_FALSE,
-	  "TLDAP_COMPARE_FALSE" },
-	{ TLDAP_COMPARE_TRUE,
-	  "TLDAP_COMPARE_TRUE" },
-	{ TLDAP_STRONG_AUTH_NOT_SUPPORTED,
-	  "TLDAP_STRONG_AUTH_NOT_SUPPORTED" },
-	{ TLDAP_STRONG_AUTH_REQUIRED,
-	  "TLDAP_STRONG_AUTH_REQUIRED" },
-	{ TLDAP_REFERRAL,
-	  "TLDAP_REFERRAL" },
-	{ TLDAP_ADMINLIMIT_EXCEEDED,
-	  "TLDAP_ADMINLIMIT_EXCEEDED" },
-	{ TLDAP_UNAVAILABLE_CRITICAL_EXTENSION,
-	  "TLDAP_UNAVAILABLE_CRITICAL_EXTENSION" },
-	{ TLDAP_CONFIDENTIALITY_REQUIRED,
-	  "TLDAP_CONFIDENTIALITY_REQUIRED" },
-	{ TLDAP_SASL_BIND_IN_PROGRESS,
-	  "TLDAP_SASL_BIND_IN_PROGRESS" },
-	{ TLDAP_NO_SUCH_ATTRIBUTE,
-	  "TLDAP_NO_SUCH_ATTRIBUTE" },
-	{ TLDAP_UNDEFINED_TYPE,
-	  "TLDAP_UNDEFINED_TYPE" },
-	{ TLDAP_INAPPROPRIATE_MATCHING,
-	  "TLDAP_INAPPROPRIATE_MATCHING" },
-	{ TLDAP_CONSTRAINT_VIOLATION,
-	  "TLDAP_CONSTRAINT_VIOLATION" },
-	{ TLDAP_TYPE_OR_VALUE_EXISTS,
-	  "TLDAP_TYPE_OR_VALUE_EXISTS" },
-	{ TLDAP_INVALID_SYNTAX,
-	  "TLDAP_INVALID_SYNTAX" },
-	{ TLDAP_NO_SUCH_OBJECT,
-	  "TLDAP_NO_SUCH_OBJECT" },
-	{ TLDAP_ALIAS_PROBLEM,
-	  "TLDAP_ALIAS_PROBLEM" },
-	{ TLDAP_INVALID_DN_SYNTAX,
-	  "TLDAP_INVALID_DN_SYNTAX" },
-	{ TLDAP_IS_LEAF,
-	  "TLDAP_IS_LEAF" },
-	{ TLDAP_ALIAS_DEREF_PROBLEM,
-	  "TLDAP_ALIAS_DEREF_PROBLEM" },
-	{ TLDAP_INAPPROPRIATE_AUTH,
-	  "TLDAP_INAPPROPRIATE_AUTH" },
-	{ TLDAP_INVALID_CREDENTIALS,
-	  "TLDAP_INVALID_CREDENTIALS" },
-	{ TLDAP_INSUFFICIENT_ACCESS,
-	  "TLDAP_INSUFFICIENT_ACCESS" },
-	{ TLDAP_BUSY,
-	  "TLDAP_BUSY" },
-	{ TLDAP_UNAVAILABLE,
-	  "TLDAP_UNAVAILABLE" },
-	{ TLDAP_UNWILLING_TO_PERFORM,
-	  "TLDAP_UNWILLING_TO_PERFORM" },
-	{ TLDAP_LOOP_DETECT,
-	  "TLDAP_LOOP_DETECT" },
-	{ TLDAP_NAMING_VIOLATION,
-	  "TLDAP_NAMING_VIOLATION" },
-	{ TLDAP_OBJECT_CLASS_VIOLATION,
-	  "TLDAP_OBJECT_CLASS_VIOLATION" },
-	{ TLDAP_NOT_ALLOWED_ON_NONLEAF,
-	  "TLDAP_NOT_ALLOWED_ON_NONLEAF" },
-	{ TLDAP_NOT_ALLOWED_ON_RDN,
-	  "TLDAP_NOT_ALLOWED_ON_RDN" },
-	{ TLDAP_ALREADY_EXISTS,
-	  "TLDAP_ALREADY_EXISTS" },
-	{ TLDAP_NO_OBJECT_CLASS_MODS,
-	  "TLDAP_NO_OBJECT_CLASS_MODS" },
-	{ TLDAP_RESULTS_TOO_LARGE,
-	  "TLDAP_RESULTS_TOO_LARGE" },
-	{ TLDAP_AFFECTS_MULTIPLE_DSAS,
-	  "TLDAP_AFFECTS_MULTIPLE_DSAS" },
-	{ TLDAP_OTHER,
-	  "TLDAP_OTHER" },
-	{ TLDAP_SERVER_DOWN,
-	  "TLDAP_SERVER_DOWN" },
-	{ TLDAP_LOCAL_ERROR,
-	  "TLDAP_LOCAL_ERROR" },
-	{ TLDAP_ENCODING_ERROR,
-	  "TLDAP_ENCODING_ERROR" },
-	{ TLDAP_DECODING_ERROR,
-	  "TLDAP_DECODING_ERROR" },
-	{ TLDAP_TIMEOUT,
-	  "TLDAP_TIMEOUT" },
-	{ TLDAP_AUTH_UNKNOWN,
-	  "TLDAP_AUTH_UNKNOWN" },
-	{ TLDAP_FILTER_ERROR,
-	  "TLDAP_FILTER_ERROR" },
-	{ TLDAP_USER_CANCELLED,
-	  "TLDAP_USER_CANCELLED" },
-	{ TLDAP_PARAM_ERROR,
-	  "TLDAP_PARAM_ERROR" },
-	{ TLDAP_NO_MEMORY,
-	  "TLDAP_NO_MEMORY" },
-	{ TLDAP_CONNECT_ERROR,
-	  "TLDAP_CONNECT_ERROR" },
-	{ TLDAP_NOT_SUPPORTED,
-	  "TLDAP_NOT_SUPPORTED" },
-	{ TLDAP_CONTROL_NOT_FOUND,
-	  "TLDAP_CONTROL_NOT_FOUND" },
-	{ TLDAP_NO_RESULTS_RETURNED,
-	  "TLDAP_NO_RESULTS_RETURNED" },
-	{ TLDAP_MORE_RESULTS_TO_RETURN,
-	  "TLDAP_MORE_RESULTS_TO_RETURN" },
-	{ TLDAP_CLIENT_LOOP,
-	  "TLDAP_CLIENT_LOOP" },
-	{ TLDAP_REFERRAL_LIMIT_EXCEEDED,
-	  "TLDAP_REFERRAL_LIMIT_EXCEEDED" },
-};
-
 const char *tldap_rc2string(TLDAPRC rc)
 {
-	size_t i;
-
-	for (i=0; i<ARRAY_SIZE(tldaprc_errmap); i++) {
-		if (TLDAP_RC_EQUAL(rc, tldaprc_errmap[i].rc)) {
-			return tldaprc_errmap[i].string;
-		}
+	switch (TLDAP_RC_V(rc)) {
+	case 0x00:
+		return "TLDAP_SUCCESS";
+		break;
+	case 0x01:
+		return "TLDAP_OPERATIONS_ERROR";
+		break;
+	case 0x02:
+		return "TLDAP_PROTOCOL_ERROR";
+		break;
+	case 0x03:
+		return "TLDAP_TIMELIMIT_EXCEEDED";
+		break;
+	case 0x04:
+		return "TLDAP_SIZELIMIT_EXCEEDED";
+		break;
+	case 0x05:
+		return "TLDAP_COMPARE_FALSE";
+		break;
+	case 0x06:
+		return "TLDAP_COMPARE_TRUE";
+		break;
+	case 0x07:
+		return "TLDAP_STRONG_AUTH_NOT_SUPPORTED";
+		break;
+	case 0x08:
+		return "TLDAP_STRONG_AUTH_REQUIRED";
+		break;
+	case 0x0a:
+		return "TLDAP_REFERRAL";
+		break;
+	case 0x0b:
+		return "TLDAP_ADMINLIMIT_EXCEEDED";
+		break;
+	case 0x0c:
+		return "TLDAP_UNAVAILABLE_CRITICAL_EXTENSION";
+		break;
+	case 0x0d:
+		return "TLDAP_CONFIDENTIALITY_REQUIRED";
+		break;
+	case 0x0e:
+		return "TLDAP_SASL_BIND_IN_PROGRESS";
+		break;
+	case 0x10:
+		return "TLDAP_NO_SUCH_ATTRIBUTE";
+		break;
+	case 0x11:
+		return "TLDAP_UNDEFINED_TYPE";
+		break;
+	case 0x12:
+		return "TLDAP_INAPPROPRIATE_MATCHING";
+		break;
+	case 0x13:
+		return "TLDAP_CONSTRAINT_VIOLATION";
+		break;
+	case 0x14:
+		return "TLDAP_TYPE_OR_VALUE_EXISTS";
+		break;
+	case 0x15:
+		return "TLDAP_INVALID_SYNTAX";
+		break;
+	case 0x20:
+		return "TLDAP_NO_SUCH_OBJECT";
+		break;
+	case 0x21:
+		return "TLDAP_ALIAS_PROBLEM";
+		break;
+	case 0x22:
+		return "TLDAP_INVALID_DN_SYNTAX";
+		break;
+	case 0x23:
+		return "TLDAP_IS_LEAF";
+		break;
+	case 0x24:
+		return "TLDAP_ALIAS_DEREF_PROBLEM";
+		break;
+	case 0x30:
+		return "TLDAP_INAPPROPRIATE_AUTH";
+		break;
+	case 0x31:
+		return "TLDAP_INVALID_CREDENTIALS";
+		break;
+	case 0x32:
+		return "TLDAP_INSUFFICIENT_ACCESS";
+		break;
+	case 0x33:
+		return "TLDAP_BUSY";
+		break;
+	case 0x34:
+		return "TLDAP_UNAVAILABLE";
+		break;
+	case 0x35:
+		return "TLDAP_UNWILLING_TO_PERFORM";
+		break;
+	case 0x36:
+		return "TLDAP_LOOP_DETECT";
+		break;
+	case 0x40:
+		return "TLDAP_NAMING_VIOLATION";
+		break;
+	case 0x41:
+		return "TLDAP_OBJECT_CLASS_VIOLATION";
+		break;
+	case 0x42:
+		return "TLDAP_NOT_ALLOWED_ON_NONLEAF";
+		break;
+	case 0x43:
+		return "TLDAP_NOT_ALLOWED_ON_RDN";
+		break;
+	case 0x44:
+		return "TLDAP_ALREADY_EXISTS";
+		break;
+	case 0x45:
+		return "TLDAP_NO_OBJECT_CLASS_MODS";
+		break;
+	case 0x46:
+		return "TLDAP_RESULTS_TOO_LARGE";
+		break;
+	case 0x47:
+		return "TLDAP_AFFECTS_MULTIPLE_DSAS";
+		break;
+	case 0x50:
+		return "TLDAP_OTHER";
+		break;
+	case 0x51:
+		return "TLDAP_SERVER_DOWN";
+		break;
+	case 0x52:
+		return "TLDAP_LOCAL_ERROR";
+		break;
+	case 0x53:
+		return "TLDAP_ENCODING_ERROR";
+		break;
+	case 0x54:
+		return "TLDAP_DECODING_ERROR";
+		break;
+	case 0x55:
+		return "TLDAP_TIMEOUT";
+		break;
+	case 0x56:
+		return "TLDAP_AUTH_UNKNOWN";
+		break;
+	case 0x57:
+		return "TLDAP_FILTER_ERROR";
+		break;
+	case 0x58:
+		return "TLDAP_USER_CANCELLED";
+		break;
+	case 0x59:
+		return "TLDAP_PARAM_ERROR";
+		break;
+	case 0x5a:
+		return "TLDAP_NO_MEMORY";
+		break;
+	case 0x5b:
+		return "TLDAP_CONNECT_ERROR";
+		break;
+	case 0x5c:
+		return "TLDAP_NOT_SUPPORTED";
+		break;
+	case 0x5d:
+		return "TLDAP_CONTROL_NOT_FOUND";
+		break;
+	case 0x5e:
+		return "TLDAP_NO_RESULTS_RETURNED";
+		break;
+	case 0x5f:
+		return "TLDAP_MORE_RESULTS_TO_RETURN";
+		break;
+	case 0x60:
+		return "TLDAP_CLIENT_LOOP";
+		break;
+	case 0x61:
+		return "TLDAP_REFERRAL_LIMIT_EXCEEDED";
+		break;
 	}
 
 	return "Unknown LDAP Error";

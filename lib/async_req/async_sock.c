@@ -24,6 +24,7 @@
 #include "replace.h"
 #include "system/network.h"
 #include "system/filesys.h"
+#include "system/select.h"
 #include <talloc.h>
 #include <tevent.h>
 #include "lib/async_req/async_sock.h"
@@ -33,6 +34,104 @@
 /* Note: lib/util/ is currently GPL */
 #include "lib/util/tevent_unix.h"
 #include "lib/util/samba_util.h"
+#include "lib/util/select.h"
+
+int samba_socket_poll_error(int fd)
+{
+	struct pollfd pfd = {
+		.fd = fd,
+#ifdef POLLRDHUP
+		.events = POLLRDHUP, /* POLLERR and POLLHUP are not needed */
+#endif
+	};
+	int ret;
+
+	errno = 0;
+	ret = sys_poll_intr(&pfd, 1, 0);
+	if (ret == 0) {
+		return 0;
+	}
+	if (ret != 1) {
+		return POLLNVAL;
+	}
+
+	if (pfd.revents & POLLERR) {
+		return POLLERR;
+	}
+	if (pfd.revents & POLLHUP) {
+		return POLLHUP;
+	}
+#ifdef POLLRDHUP
+	if (pfd.revents & POLLRDHUP) {
+		return POLLRDHUP;
+	}
+#endif
+
+	/* should never be reached! */
+	return POLLNVAL;
+}
+
+int samba_socket_sock_error(int fd)
+{
+	int ret, error = 0;
+	socklen_t len = sizeof(error);
+
+	/*
+	 * if no data is available check if the socket is in error state. For
+	 * dgram sockets it's the way to return ICMP error messages of
+	 * connected sockets to the caller.
+	 */
+	ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len);
+	if (ret == -1) {
+		return ret;
+	}
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
+	return 0;
+}
+
+int samba_socket_poll_or_sock_error(int fd)
+{
+	int ret;
+	int poll_error = 0;
+
+	poll_error = samba_socket_poll_error(fd);
+	if (poll_error == 0) {
+		return 0;
+	}
+
+#ifdef POLLRDHUP
+	if (poll_error == POLLRDHUP) {
+		errno = ECONNRESET;
+		return -1;
+	}
+#endif
+
+	if (poll_error == POLLHUP) {
+		errno = EPIPE;
+		return -1;
+	}
+
+	/*
+	 * POLLERR and POLLNVAL fallback to
+	 * getsockopt(fd, SOL_SOCKET, SO_ERROR)
+	 * and force EPIPE as fallback.
+	 */
+
+	errno = 0;
+	ret = samba_socket_sock_error(fd);
+	if (ret == 0) {
+		errno = EPIPE;
+	}
+
+	if (errno == 0) {
+		errno = EPIPE;
+	}
+
+	return -1;
+}
 
 struct async_connect_state {
 	int fd;
@@ -235,6 +334,7 @@ struct writev_state {
 	struct tevent_context *ev;
 	struct tevent_queue_entry *queue_entry;
 	int fd;
+	bool is_sock;
 	struct tevent_fd *fde;
 	struct iovec *iov;
 	int count;
@@ -264,6 +364,7 @@ struct tevent_req *writev_send(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	}
 	state->ev = ev;
 	state->fd = fd;
+	state->is_sock = true;
 	state->total_size = 0;
 	state->count = count;
 	state->iov = (struct iovec *)talloc_memdup(
@@ -338,10 +439,23 @@ static bool writev_cancel(struct tevent_req *req)
 
 static void writev_do(struct tevent_req *req, struct writev_state *state)
 {
-	ssize_t written;
+	ssize_t written = -1;
 	bool ok;
 
-	written = writev(state->fd, state->iov, state->count);
+	if (state->is_sock) {
+		struct msghdr msg = {
+			.msg_iov = state->iov,
+			.msg_iovlen = state->count,
+		};
+
+		written = sendmsg(state->fd, &msg, 0);
+		if ((written == -1) && (errno == ENOTSOCK)) {
+			state->is_sock = false;
+		}
+	}
+	if (!state->is_sock) {
+		written = writev(state->fd, state->iov, state->count);
+	}
 	if ((written == -1) &&
 	    ((errno == EINTR) ||
 	     (errno == EAGAIN) ||
@@ -434,6 +548,7 @@ ssize_t writev_recv(struct tevent_req *req, int *perrno)
 
 struct read_packet_state {
 	int fd;
+	bool is_sock;
 	struct tevent_fd *fde;
 	uint8_t *buf;
 	size_t nread;
@@ -443,6 +558,8 @@ struct read_packet_state {
 
 static void read_packet_cleanup(struct tevent_req *req,
 				 enum tevent_req_state req_state);
+static void read_packet_do(struct tevent_req *req,
+			   uint16_t ready_flags);
 static void read_packet_handler(struct tevent_context *ev,
 				struct tevent_fd *fde,
 				uint16_t flags, void *private_data);
@@ -463,6 +580,7 @@ struct tevent_req *read_packet_send(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 	state->fd = fd;
+	state->is_sock = true;
 	state->nread = 0;
 	state->more = more;
 	state->private_data = private_data;
@@ -471,6 +589,17 @@ struct tevent_req *read_packet_send(TALLOC_CTX *mem_ctx,
 
 	state->buf = talloc_array(state, uint8_t, initial);
 	if (tevent_req_nomem(state->buf, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	/*
+	 * Call read_packet_do()
+	 * with ready_flags = 0,
+	 * so only recvmsg(MSG_DONTWAIT)
+	 * will be tried.
+	 */
+	read_packet_do(req, 0);
+	if (!tevent_req_is_in_progress(req)) {
 		return tevent_req_post(req, ev);
 	}
 
@@ -492,26 +621,54 @@ static void read_packet_cleanup(struct tevent_req *req,
 	TALLOC_FREE(state->fde);
 }
 
-static void read_packet_handler(struct tevent_context *ev,
-				struct tevent_fd *fde,
-				uint16_t flags, void *private_data)
+static void read_packet_do(struct tevent_req *req,
+			   uint16_t ready_flags)
 {
-	struct tevent_req *req = talloc_get_type_abort(
-		private_data, struct tevent_req);
 	struct read_packet_state *state =
 		tevent_req_data(req, struct read_packet_state);
-	size_t total = talloc_get_size(state->buf);
-	ssize_t nread, more;
+	size_t total;
+	ssize_t nread = -1, more;
 	uint8_t *tmp;
 
-	nread = recv(state->fd, state->buf+state->nread, total-state->nread,
-		     0);
-	if ((nread == -1) && (errno == ENOTSOCK)) {
+retry:
+	total = talloc_get_size(state->buf);
+	if (state->is_sock) {
+		struct iovec iov = {
+			.iov_base = state->buf+state->nread,
+			.iov_len = total-state->nread,
+		};
+		struct msghdr msg = {
+			.msg_iov = &iov,
+			.msg_iovlen = 1,
+		};
+
+		nread = recvmsg(state->fd, &msg, MSG_DONTWAIT);
+		if ((nread == -1) && (errno == ENOTSOCK)) {
+			state->is_sock = false;
+		}
+	}
+	if (!state->is_sock) {
+		if (!(ready_flags & TEVENT_FD_READ)) {
+			/*
+			 * With out TEVENT_FD_READ read() may block,
+			 * so we just return here and retry via
+			 * fd event handler
+			 */
+			return;
+		}
 		nread = read(state->fd, state->buf+state->nread,
 			     total-state->nread);
 	}
 	if ((nread == -1) && (errno == EINTR)) {
-		/* retry */
+		/* retry directly */
+		goto retry;
+	}
+	if ((nread == -1) && (errno == EAGAIN)) {
+		/* retry later via fd event handler */
+		return;
+	}
+	if ((nread == -1) && (errno == EWOULDBLOCK)) {
+		/* retry later via fd event handler */
 		return;
 	}
 	if (nread == -1) {
@@ -522,6 +679,13 @@ static void read_packet_handler(struct tevent_context *ev,
 		tevent_req_error(req, EPIPE);
 		return;
 	}
+
+	/*
+	 * We have pulled some data out of the fd!
+	 * A possible retry can't rely
+	 * on TEVENT_FD_READ semantics anymore.
+	 */
+	ready_flags &= ~TEVENT_FD_READ;
 
 	state->nread += nread;
 	if (state->nread < total) {
@@ -560,6 +724,27 @@ static void read_packet_handler(struct tevent_context *ev,
 		return;
 	}
 	state->buf = tmp;
+
+	/*
+	 * We already cleared TEVENT_FD_READ,
+	 * we do a retry without it.
+	 *
+	 * We either do recvmsg(MSG_DONTWAIT)
+	 * or return without any further read
+	 * because TEVENT_FD_READ was already
+	 * cleared.
+	 */
+	goto retry;
+}
+
+static void read_packet_handler(struct tevent_context *ev,
+				struct tevent_fd *fde,
+				uint16_t flags, void *private_data)
+{
+	struct tevent_req *req = talloc_get_type_abort(
+		private_data, struct tevent_req);
+
+	read_packet_do(req, flags);
 }
 
 ssize_t read_packet_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
@@ -674,6 +859,86 @@ bool wait_for_read_recv(struct tevent_req *req, int *perr)
 	}
 
 	return true;
+}
+
+struct wait_for_error_state {
+	struct tevent_fd *fde;
+	int fd;
+};
+
+static void wait_for_error_cleanup(struct tevent_req *req,
+				   enum tevent_req_state req_state);
+static void wait_for_error_done(struct tevent_context *ev,
+				struct tevent_fd *fde,
+				uint16_t flags,
+				void *private_data);
+
+struct tevent_req *wait_for_error_send(TALLOC_CTX *mem_ctx,
+				       struct tevent_context *ev,
+				       int fd)
+{
+	struct tevent_req *req = NULL;
+	struct wait_for_error_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state, struct wait_for_error_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->fd = fd;
+
+	tevent_req_set_cleanup_fn(req, wait_for_error_cleanup);
+
+	state->fde = tevent_add_fd(ev,
+				   state,
+				   state->fd,
+				   TEVENT_FD_ERROR,
+				   wait_for_error_done,
+				   req);
+	if (tevent_req_nomem(state->fde, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	return req;
+}
+
+static void wait_for_error_cleanup(struct tevent_req *req,
+				  enum tevent_req_state req_state)
+{
+	struct wait_for_error_state *state =
+		tevent_req_data(req, struct wait_for_error_state);
+
+	TALLOC_FREE(state->fde);
+	state->fd = -1;
+}
+
+static void wait_for_error_done(struct tevent_context *ev,
+			       struct tevent_fd *fde,
+			       uint16_t flags,
+			       void *private_data)
+{
+	struct tevent_req *req =
+		talloc_get_type_abort(private_data,
+		struct tevent_req);
+	struct wait_for_error_state *state =
+		tevent_req_data(req,
+		struct wait_for_error_state);
+	int ret;
+
+	errno = 0;
+	ret = samba_socket_poll_or_sock_error(state->fd);
+	if (ret == 0) {
+		errno = EPIPE;
+	}
+	if (errno == 0) {
+		errno = EPIPE;
+	}
+
+	tevent_req_error(req, errno);
+}
+
+int wait_for_error_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_unix(req);
 }
 
 struct accept_state {

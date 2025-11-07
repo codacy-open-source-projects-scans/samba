@@ -23,7 +23,8 @@
 #ifndef __TORTURE_H__
 #define __TORTURE_H__
 
-struct cli_state;
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 
 /* The following definitions come from torture/denytest.c  */
 
@@ -75,6 +76,16 @@ bool torture_chkpath_test(int dummy);
 NTSTATUS torture_setup_unix_extensions(struct cli_state *cli);
 void torture_conn_set_sockopt(struct cli_state *cli);
 void torture_deltree(struct cli_state *cli, const char *dname);
+
+NTSTATUS cli_smb(TALLOC_CTX *mem_ctx, struct cli_state *cli,
+		 uint8_t smb_command, uint8_t additional_flags,
+		 uint8_t wct, uint16_t *vwv,
+		 uint32_t num_bytes, const uint8_t *bytes,
+		 struct tevent_req **result_parent,
+		 uint8_t min_wct, uint8_t *pwct, uint16_t **pvwv,
+		 uint32_t *pnum_bytes, uint8_t **pbytes);
+NTSTATUS cli_smbwrite(struct cli_state *cli, uint16_t fnum, char *buf,
+		      off_t offset, size_t size1, size_t *ptotal);
 
 NTSTATUS cli_qpathinfo1(struct cli_state *cli,
 			const char *fname,

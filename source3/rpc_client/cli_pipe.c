@@ -37,7 +37,8 @@
 #include "librpc/rpc/dcerpc_util.h"
 #include "rpc_dce.h"
 #include "cli_pipe.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "auth/gensec/gensec.h"
 #include "auth/credentials/credentials.h"
 #include "auth/auth_util.h"
@@ -2725,7 +2726,7 @@ static void rpccli_bh_do_ndr_print(struct dcerpc_binding_handle *h,
 {
 	void *struct_ptr = discard_const(_struct_ptr);
 
-	if (DEBUGLEVEL < 10) {
+	if (!CHECK_DEBUGLVLC(DBGC_RPC_PARSE, 10)) {
 		return;
 	}
 
@@ -4252,6 +4253,94 @@ NTSTATUS cli_rpc_pipe_open_noauth(struct cli_state *cli,
 						  remote_name,
 						  remote_sockaddr,
 						  presult);
+}
+
+/****************************************************************************
+ * Reopen a connection with the same parameters.
+ *
+ * This is useful if we try an RPC function the server doesn't know about and
+ * disconnects us.
+ ****************************************************************************/
+NTSTATUS cli_rpc_pipe_reopen_np_noauth(struct rpc_pipe_client *rpccli)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	enum dcerpc_transport_t transport;
+	struct cli_state *cli = NULL;
+	struct rpc_client_association *assoc = NULL;
+	struct rpc_client_connection *new_conn = NULL;
+	struct pipe_auth_data *new_auth = NULL;
+	NTSTATUS status;
+
+	if (rpccli->assoc == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_INVALID_PARAMETER_MIX;
+	}
+
+	transport = dcerpc_binding_get_transport(rpccli->assoc->binding);
+	if (transport != NCACN_NP) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_INVALID_PARAMETER_MIX;
+	}
+
+	if (rpccli->np_cli == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_INVALID_PARAMETER_MIX;
+	}
+	cli = rpccli->np_cli;
+
+	/*
+	 * close the old connection
+	 */
+	TALLOC_FREE(rpccli->conn);
+
+	/*
+	 * Free the auth context
+	 */
+	TALLOC_FREE(rpccli->auth);
+
+	/*
+	 * Reset the association
+	 */
+	assoc = talloc_move(frame, &rpccli->assoc);
+	status = dcerpc_binding_set_assoc_group_id(assoc->binding, 0);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	assoc->features.negotiated = 0;
+	if (assoc->features.client != 0) {
+		assoc->features.negotiation_done = false;
+	}
+	assoc->next_call_id = 0;
+
+	status = rpc_client_connection_np(cli,
+					  assoc,
+					  &new_conn);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	rpccli->assoc = talloc_move(rpccli, &assoc);
+	rpccli->conn = talloc_move(rpccli, &new_conn);
+
+	/* rpc_pipe_bind_send should allocate an id... */
+	rpccli->pres_context_id = UINT16_MAX;
+	rpccli->verified_pcontext = false;
+
+	status = rpccli_anon_bind_data(rpccli, &new_auth);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	status = rpc_pipe_bind(rpccli, new_auth);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	TALLOC_FREE(frame);
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************

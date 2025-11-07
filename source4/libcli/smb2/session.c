@@ -29,11 +29,13 @@
 #include "auth/gensec/gensec.h"
 #include "auth/credentials/credentials.h"
 #include "../libcli/smb/smbXcli_base.h"
+#include "lib/param/param.h"
 
 /**
   initialise a smb2_session structure
  */
 struct smb2_session *smb2_session_init(struct smb2_transport *transport,
+				       struct loadparm_context *lp_ctx,
 				       struct gensec_settings *settings,
 				       TALLOC_CTX *parent_ctx)
 {
@@ -45,6 +47,11 @@ struct smb2_session *smb2_session_init(struct smb2_transport *transport,
 		return NULL;
 	}
 	session->transport = talloc_steal(session, transport);
+	session->debug_encryption = lpcfg_debug_encryption(lp_ctx);
+	session->wireshark_keyfile = lpcfg_parm_string(lp_ctx,
+						       NULL,
+						       "debug encryption",
+						       "wireshark keyfile");
 
 	session->smbXcli = smbXcli_session_create(session, transport->conn);
 	if (session->smbXcli == NULL) {
@@ -425,6 +432,44 @@ static void smb2_session_setup_spnego_both_ready(struct tevent_req *req)
 							 state->recv_iov);
 		if (tevent_req_nterror(req, status)) {
 			return;
+		}
+		if ((smbXcli_conn_protocol(session->transport->conn) >=
+		     PROTOCOL_SMB3_00)
+		    && session->debug_encryption)
+		{
+			DATA_BLOB sig, app, enc, dec;
+
+			status = smb2cli_session_signing_key(
+				session->smbXcli, state, &sig);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smbXcli_session_application_key(
+				session->smbXcli, state, &app);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smb2cli_session_encryption_key(
+				session->smbXcli, state, &enc);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+			status = smb2cli_session_decryption_key(
+				session->smbXcli, state, &dec);
+			if (tevent_req_nterror(req, status)) {
+				return;
+			}
+
+			smbXcli_session_dump_keys(
+				smb2cli_session_current_id(session->smbXcli),
+				&session_key,
+				smb2cli_conn_server_signing_algo(
+					session->transport->conn),
+				&sig,
+				&app,
+				&enc,
+				&dec,
+				session->wireshark_keyfile);
 		}
 	}
 	tevent_req_done(req);

@@ -213,7 +213,7 @@ static void exit_server_common(enum server_exit_reason how,
 	client = NULL;
 	netlogon_creds_cli_close_global_db();
 	TALLOC_FREE(global_smbXsrv_client);
-	smbprofile_dump();
+	smbprofile_dump(NULL);
 	global_messaging_context_free();
 	global_event_context_free();
 	TALLOC_FREE(smbd_memcache_ctx);
@@ -226,12 +226,11 @@ static void exit_server_common(enum server_exit_reason how,
 
 		/* Notreached. */
 		exit(1);
-	} else {
-		DEBUG(3,("Server exit (%s)\n",
-			(reason ? reason : "normal exit")));
-		if (am_parent) {
-			pidfile_unlink(lp_pid_directory(), "smbd");
-		}
+	}
+
+	DBG_NOTICE("Server exit (%s)\n", reason ? reason : "normal exit");
+	if (am_parent) {
+		pidfile_unlink(lp_pid_directory(), "smbd");
 	}
 
 	exit(0);

@@ -926,7 +926,7 @@ char *ldb_dn_alloc_linearized(TALLOC_CTX *mem_ctx, struct ldb_dn *dn)
 
 static bool ldb_dn_casefold_internal(struct ldb_dn *dn)
 {
-	unsigned int i;
+	unsigned int i, j;
 	int ret;
 
 	if ( ! dn || dn->invalid) return false;
@@ -954,18 +954,24 @@ static bool ldb_dn_casefold_internal(struct ldb_dn *dn)
 						 &(dn->components[i].value),
 						 &(dn->components[i].cf_value));
 		if (ret != 0) {
-			goto failed;
+			goto failed_1;
 		}
 	}
 
 	dn->valid_case = true;
 
 	return true;
-
-failed:
-	for (i = 0; i < dn->comp_num; i++) {
-		LDB_FREE(dn->components[i].cf_name);
-		LDB_FREE(dn->components[i].cf_value.data);
+  failed_1:
+	/*
+	 * Although we try to always initialise .cf_name and .cf.value.data to
+	 * NULL, we want to avoid TALLOC_FREEing the values we have not just
+	 * set here.
+	 */
+	TALLOC_FREE(dn->components[i].cf_name);
+  failed:
+	for (j = 0; j < i; j++) {
+		TALLOC_FREE(dn->components[j].cf_name);
+		TALLOC_FREE(dn->components[j].cf_value.data);
 	}
 	return false;
 }
@@ -1056,13 +1062,15 @@ int ldb_dn_compare_base(struct ldb_dn *base, struct ldb_dn *dn)
 		if (base->linearized && dn->linearized && dn->special == base->special) {
 			/* try with a normal compare first, if we are lucky
 			 * we will avoid exploding and casefolding */
-			int dif;
-			dif = strlen(dn->linearized) - strlen(base->linearized);
-			if (dif < 0) {
-				return dif;
+			size_t len_dn = strlen(dn->linearized);
+			size_t len_base = strlen(base->linearized);
+
+			if (len_dn < len_base) {
+				return -1;
 			}
+
 			if (strcmp(base->linearized,
-				   &dn->linearized[dif]) == 0) {
+				   &dn->linearized[len_dn - len_base]) == 0) {
 				return 0;
 			}
 		}
@@ -1165,6 +1173,7 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 	}
 
 	if (( ! dn0->valid_case) || ( ! dn1->valid_case)) {
+		bool ok0, ok1;
 		if (dn0->linearized && dn1->linearized) {
 			/* try with a normal compare first, if we are lucky
 			 * we will avoid exploding and casefolding */
@@ -1172,15 +1181,20 @@ int ldb_dn_compare(struct ldb_dn *dn0, struct ldb_dn *dn1)
 				return 0;
 			}
 		}
-
-		if ( ! ldb_dn_casefold_internal(dn0)) {
+		/*
+		 * If a DN can't casefold, it goes to the end.
+		 */
+		ok0 = ldb_dn_casefold_internal(dn0);
+		ok1 = ldb_dn_casefold_internal(dn1);
+		if (! ok0) {
+			if (! ok1) {
+				return 0;
+			}
 			return 1;
 		}
-
-		if ( ! ldb_dn_casefold_internal(dn1)) {
+		if (! ok1) {
 			return -1;
 		}
-
 	}
 
 	/*

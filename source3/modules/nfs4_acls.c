@@ -99,10 +99,10 @@ int smbacl4_get_vfs_params(struct connection_struct *conn,
 	}
 	params->acedup = (enum smbacl4_acedup_enum)enumval;
 	if (params->acedup == e_ignore) {
-		DBG_WARNING("nfs4:acedup ignore is deprecated.\n");
+		DBG_WARNING("nfs4:acedup = ignore is deprecated.\n");
 	}
 	if (params->acedup == e_reject) {
-		DBG_WARNING("nfs4:acedup ignore is deprecated.\n");
+		DBG_WARNING("nfs4:acedup = reject is deprecated.\n");
 	}
 
 	params->map_full_control = lp_acl_map_full_control(SNUM(conn));
@@ -216,7 +216,8 @@ int nfs4_acl_fstat(struct vfs_handle_struct *handle,
 			lp_fake_directory_create_times(SNUM(handle->conn));
 
 		DBG_DEBUG("fstat for %s failed with EACCES. Trying with "
-			  "CAP_DAC_OVERRIDE.\n", fsp->fsp_name->base_name);
+			  "CAP_DAC_OVERRIDE.\n",
+			  fsp_str_dbg(fsp));
 		ret = fstat_with_cap_dac_override(fsp_get_pathref_fd(fsp),
 						  sbuf,
 						  fake_dctime);
@@ -254,7 +255,8 @@ int nfs4_acl_fstatat(struct vfs_handle_struct *handle,
 			lp_fake_directory_create_times(SNUM(handle->conn));
 
 		DBG_DEBUG("fstatat for %s failed with EACCES. Trying with "
-			  "CAP_DAC_OVERRIDE.\n", dirfsp->fsp_name->base_name);
+			  "CAP_DAC_OVERRIDE.\n",
+			  fsp_str_dbg(dirfsp));
 		ret = fstatat_with_cap_dac_override(fsp_get_pathref_fd(dirfsp),
 						    smb_fname->base_name,
 						    sbuf,
@@ -324,7 +326,7 @@ struct SMB4ACL_T *smb_create_smb4acl(TALLOC_CTX *mem_ctx)
 	theacl = talloc_zero(mem_ctx, struct SMB4ACL_T);
 	if (theacl==NULL)
 	{
-		DEBUG(0, ("TALLOC_SIZE failed\n"));
+		DBG_ERR("talloc_zero failed\n");
 		errno = ENOMEM;
 		return NULL;
 	}

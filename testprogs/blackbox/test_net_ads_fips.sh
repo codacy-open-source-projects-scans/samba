@@ -1,6 +1,6 @@
 if [ $# -lt 4 ]; then
 	cat <<EOF
-Usage: test_net_ads_fips.sh DC_SERVER DC_USERNAME DC_PASSWORD PREFIX_ABS
+Usage: test_net_ads_fips.sh DC_SERVER DC_USERNAME DC_PASSWORD PREFIX
 EOF
 	exit 1
 fi
@@ -10,7 +10,7 @@ DC_USERNAME=$2
 DC_PASSWORD=$3
 BASEDIR=$4
 
-HOSTNAME=$(dd if=/dev/urandom bs=1 count=32 2>/dev/null | sha1sum | cut -b 1-10)
+HOSTNAME=$(LD_PRELOAD='' dd if=/dev/urandom bs=1 count=32 2>/dev/null | sha1sum | cut -b 1-10)
 
 RUNDIR=$(pwd)
 cd $BASEDIR

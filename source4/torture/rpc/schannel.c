@@ -521,15 +521,27 @@ static bool test_samr_ops(struct torture_context *tctx,
 /*
   do some lsa ops using the schannel connection
  */
-static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
+static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p,
+		         struct cli_credentials *credentials)
 {
 	struct lsa_GetUserName r;
 	bool ret = true;
 	struct lsa_String *account_name_p = NULL;
 	struct lsa_String *authority_name_p = NULL;
 	struct dcerpc_binding_handle *b = p->binding_handle;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
+	const char *expected_account_name = "ANONYMOUS LOGON";
+	const char *expected_authority_name = "NT AUTHORITY";
 
 	torture_comment(tctx, "\nTesting GetUserName\n");
+
+	dcerpc_binding_handle_auth_info(b, &auth_type, &auth_level);
+
+	if (auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
+		expected_account_name = cli_credentials_get_username(credentials);
+		expected_authority_name = cli_credentials_get_domain(credentials);
+	}
 
 	r.in.system_name = "\\";
 	r.in.account_name = &account_name_p;
@@ -550,9 +562,9 @@ static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
 			return false;
 		}
 
-		if (strcmp(account_name_p->string, "ANONYMOUS LOGON") != 0) {
+		if (!strequal(account_name_p->string, expected_account_name)) {
 			torture_comment(tctx, "GetUserName returned wrong user: %s, expected %s\n",
-			       account_name_p->string, "ANONYMOUS LOGON");
+			       account_name_p->string, expected_account_name);
 			/* FIXME: gd */
 			if (!torture_setting_bool(tctx, "samba3", false)) {
 				return false;
@@ -562,9 +574,9 @@ static bool test_lsa_ops(struct torture_context *tctx, struct dcerpc_pipe *p)
 			return false;
 		}
 
-		if (strcmp(authority_name_p->string, "NT AUTHORITY") != 0) {
+		if (!strequal(authority_name_p->string, expected_authority_name)) {
 			torture_comment(tctx, "GetUserName returned wrong user: %s, expected %s\n",
-			       authority_name_p->string, "NT AUTHORITY");
+			       authority_name_p->string, expected_authority_name);
 			/* FIXME: gd */
 			if (!torture_setting_bool(tctx, "samba3", false)) {
 				return false;
@@ -608,6 +620,19 @@ static bool test_schannel(struct torture_context *tctx,
 
 	status = dcerpc_binding_set_flags(b, dcerpc_flags, DCERPC_AUTH_OPTIONS);
 	torture_assert_ntstatus_ok(tctx, status, "set flags");
+
+	transport = dcerpc_binding_get_transport(b);
+
+	if (transport == NCALRPC &&
+	    dcerpc_flags & DCERPC_SCHANNEL_KRB5)
+	{
+		torture_skip(tctx, "Skip DCERPC_SCHANNEL_KRB5 for ncalrpc");
+	}
+	if (cli_credentials_get_realm(credentials) == NULL &&
+	    dcerpc_flags & DCERPC_SCHANNEL_KRB5)
+	{
+		torture_skip(tctx, "Skip DCERPC_SCHANNEL_KRB5 for NT4 Domain");
+	}
 
 	status = dcerpc_pipe_connect_b(tctx, &p, b, &ndr_table_samr,
 				       credentials, tctx->ev, tctx->lp_ctx);
@@ -655,7 +680,6 @@ static bool test_schannel(struct torture_context *tctx,
 		       "Failed to process schannel secured NETLOGON EX for BUG 14932");
 
 	/* we *MUST* use ncacn_np for openpolicy etc. */
-	transport = dcerpc_binding_get_transport(b);
 	status = dcerpc_binding_set_transport(b, NCACN_NP);
 	torture_assert_ntstatus_ok(tctx, status, "set transport");
 
@@ -668,7 +692,7 @@ static bool test_schannel(struct torture_context *tctx,
 				      credentials, tctx->ev, tctx->lp_ctx),
 		"failed to connect lsarpc with schannel");
 
-	torture_assert(tctx, test_lsa_ops(tctx, p_lsa),
+	torture_assert(tctx, test_lsa_ops(tctx, p_lsa, credentials),
 		"Failed to process schannel secured LSA ops");
 
 	talloc_free(p_lsa);
@@ -861,6 +885,12 @@ bool torture_rpc_schannel(struct torture_context *torture)
 		uint16_t acct_flags;
 		uint32_t dcerpc_flags;
 	} tests[] = {
+		/*
+		 * Note the order of these combinations is important
+		 * otherwise exceptions like:
+		 * 'server schannel require seal:schannel2$ = no'
+		 * in selftest/target/Samba4.pm get out of sync.
+		 */
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_AUTO},
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AUTO},
 		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_128},
@@ -872,7 +902,11 @@ bool torture_rpc_schannel(struct torture_context *torture)
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_128 },
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_128 },
 		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_AES },
-		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AES }
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_AES },
+		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_KRB5},
+		{ ACB_WSTRUST,   DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_KRB5},
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SIGN | DCERPC_SCHANNEL_KRB5},
+		{ ACB_SVRTRUST,  DCERPC_SCHANNEL | DCERPC_SEAL | DCERPC_SCHANNEL_KRB5},
 	};
 	int i;
 

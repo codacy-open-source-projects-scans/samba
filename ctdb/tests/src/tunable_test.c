@@ -23,7 +23,17 @@
 #include <talloc.h>
 #include <assert.h>
 
+#include "common/logging.c"
+
 #include "common/tunable.c"
+
+static void usage(const char * prog)
+{
+	fprintf(stderr,
+		"Usage: %s <filename> [<filename>|<dir>]\n",
+		prog);
+	exit(1);
+}
 
 int main(int argc, const char **argv)
 {
@@ -34,13 +44,19 @@ int main(int argc, const char **argv)
 	int ret = 0;
 	int i;
 
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
-		return 1;
+	if (argc != 2 && argc != 3) {
+		usage(argv[0]);
 	}
 
 	mem_ctx = talloc_new(NULL);
 	assert(mem_ctx != NULL);
+
+	ret = logging_init(mem_ctx, "file:", NULL, "tunable_test");
+	if (ret != 0) {
+		fprintf(stderr, "%s: error initialising logging\n", argv[0]);
+	}
+
+	ctdb_tunable_set_defaults(&tun_list);
 
 	status = ctdb_tunable_load_file(mem_ctx, &tun_list, argv[1]);
 	if (!status) {
@@ -48,9 +64,44 @@ int main(int argc, const char **argv)
 		goto done;
 	}
 
+	if (argc == 3) {
+		struct stat st = {};
+		int stat_failed = false;
+
+		ret = stat(argv[2], &st);
+		if (ret != 0) {
+			if (errno == ENOENT || errno == EACCES) {
+				stat_failed = true;
+			} else {
+				usage(argv[0]);
+			}
+		}
+
+		/*
+		 * If stat() failed then continue and test the failure
+		 * path in directory loading.  The failure path in
+		 * file loading can already be tested with the
+		 * mandatory 1st file argument.
+		 */
+		if (stat_failed || S_ISDIR(st.st_mode)) {
+			status = ctdb_tunable_load_directory(mem_ctx,
+							     &tun_list,
+							     argv[2]);
+		} else {
+			status = ctdb_tunable_load_file(mem_ctx,
+							&tun_list,
+							argv[2]);
+		}
+		if (!status) {
+			ret = EINVAL;
+			goto done;
+		}
+	}
+
 	list = ctdb_tunable_names(mem_ctx);
 	assert(list != NULL);
 
+	ret = 0;
 	for (i = 0; i < list->count; i++) {
 		const char *var = list->var[i];
 		uint32_t val;

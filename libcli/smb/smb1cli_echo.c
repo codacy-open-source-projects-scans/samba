@@ -96,8 +96,7 @@ static void smb1cli_echo_done(struct tevent_req *subreq)
 				  NULL, /* pbytes_offset */
 				  NULL, /* pinbuf */
 				  expected, ARRAY_SIZE(expected));
-	if (!NT_STATUS_IS_OK(status)) {
-		tevent_req_nterror(req, status);
+	if (tevent_req_nterror(req, status)) {
 		return;
 	}
 
@@ -134,36 +133,4 @@ static void smb1cli_echo_done(struct tevent_req *subreq)
 NTSTATUS smb1cli_echo_recv(struct tevent_req *req)
 {
 	return tevent_req_simple_recv_ntstatus(req);
-}
-
-NTSTATUS smb1cli_echo(struct smbXcli_conn *conn, uint32_t timeout_msec,
-		      uint16_t num_echos, DATA_BLOB data)
-{
-	TALLOC_CTX *frame = talloc_stackframe();
-	struct tevent_context *ev;
-	struct tevent_req *req;
-	NTSTATUS status = NT_STATUS_NO_MEMORY;
-
-	if (smbXcli_conn_has_async_calls(conn)) {
-		/*
-		 * Can't use sync call while an async call is in flight
-		 */
-		status = NT_STATUS_INVALID_PARAMETER;
-		goto fail;
-	}
-	ev = samba_tevent_context_init(frame);
-	if (ev == NULL) {
-		goto fail;
-	}
-	req = smb1cli_echo_send(frame, ev, conn, timeout_msec, num_echos, data);
-	if (req == NULL) {
-		goto fail;
-	}
-	if (!tevent_req_poll_ntstatus(req, ev, &status)) {
-		goto fail;
-	}
-	status = smb1cli_echo_recv(req);
- fail:
-	TALLOC_FREE(frame);
-	return status;
 }

@@ -24,6 +24,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include <cmocka.h>
 #include <stdbool.h>
@@ -1137,7 +1138,7 @@ static void test_lzxpress_huffman_short_boring_strings(void **state)
 	size_t i;
 	/*
 	 * How do short repetitive strings work? We're poking at the limit
-	 * around which LZ77 comprssion is turned on.
+	 * around which LZ77 compression is turned on.
 	 *
 	 * For this test we don't change the blob memory between runs, just
 	 * the declared length.

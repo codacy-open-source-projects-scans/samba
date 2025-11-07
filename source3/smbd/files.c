@@ -92,13 +92,16 @@ fail:
 
 void fsp_set_gen_id(files_struct *fsp)
 {
-	static uint64_t gen_id = 1;
+	static uint64_t gen_id = UINT32_MAX;
 
 	/*
-	 * A billion of 64-bit increments per second gives us
-	 * more than 500 years of runtime without wrap.
+	 * These ids are only used for internal opens, which gives us 4 billion
+	 * opens until we wrap.
 	 */
 	gen_id++;
+	if (gen_id == 0) {
+		gen_id = UINT32_MAX;
+	}
 	fh_set_gen_id(fsp->fh, gen_id);
 }
 
@@ -114,13 +117,15 @@ NTSTATUS fsp_bind_smb(struct files_struct *fsp, struct smb_request *req)
 
 	if (req == NULL) {
 		DBG_DEBUG("INTERNAL_OPEN_ONLY, skipping smbXsrv_open\n");
+		fsp_set_gen_id(fsp);
 		return NT_STATUS_OK;
 	}
 
 	now = timeval_to_nttime(&fsp->open_time);
 
 	status = smbXsrv_open_create(req->xconn,
-				     fsp->conn->session_info,
+				     req->session,
+				     fsp->conn->tcon,
 				     now,
 				     &op);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -128,6 +133,7 @@ NTSTATUS fsp_bind_smb(struct files_struct *fsp, struct smb_request *req)
 	}
 	fsp->op = op;
 	op->compat = fsp;
+	fh_set_gen_id(fsp->fh, fsp->op->global->open_global_id);
 	fsp->fnum = op->local_id;
 
 	fsp->mid = req->mid;
@@ -158,8 +164,6 @@ NTSTATUS file_new(struct smb_request *req, connection_struct *conn,
 		file_free(NULL, fsp);
 		return status;
 	}
-
-	fsp_set_gen_id(fsp);
 
 	/*
 	 * Create an smb_filename with "" for the base_name.  There are very
@@ -421,7 +425,6 @@ static NTSTATUS openat_pathref_fullname(
 	}
 
 	GetTimeOfDay(&fsp->open_time);
-	fsp_set_gen_id(fsp);
 	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
 
 	fsp->fsp_flags.is_pathref = true;
@@ -598,7 +601,6 @@ NTSTATUS open_rootdir_pathref_fsp(connection_struct *conn,
 		goto fail;
 	}
 	GetTimeOfDay(&fsp->open_time);
-	fsp_set_gen_id(fsp);
 	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
 	fsp->fsp_flags.is_pathref = true;
 
@@ -678,7 +680,6 @@ NTSTATUS open_stream_pathref_fsp(
 	}
 
 	GetTimeOfDay(&fsp->open_time);
-	fsp_set_gen_id(fsp);
 	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
 
 	fsp->fsp_flags.is_pathref = true;
@@ -1078,7 +1079,6 @@ NTSTATUS openat_pathref_fsp_nosymlink(
 	}
 
 	GetTimeOfDay(&fsp->open_time);
-	fsp_set_gen_id(fsp);
 	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
 
 	fsp->fsp_name = &full_fname;
@@ -1551,7 +1551,6 @@ NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
 	}
 
 	GetTimeOfDay(&fsp->open_time);
-	fsp_set_gen_id(fsp);
 	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
 
 	fsp->fsp_flags.is_pathref = true;
@@ -1559,7 +1558,7 @@ NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
 	full_fname = full_path_from_dirfsp_atname(conn, dirfsp, smb_fname_rel);
 	if (full_fname == NULL) {
 		DBG_DEBUG("full_path_from_dirfsp_atname(%s/%s) failed\n",
-			  dirfsp->fsp_name->base_name,
+			  fsp_str_dbg(dirfsp),
 			  smb_fname_rel->base_name);
 		file_free(NULL, fsp);
 		return NT_STATUS_NO_MEMORY;
@@ -1586,7 +1585,7 @@ NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
 	if ((fd == -1) && (errno == ENOENT)) {
 		status = map_nt_error_from_unix(errno);
 		DBG_DEBUG("smb_vfs_openat(%s/%s) failed: %s\n",
-			  dirfsp->fsp_name->base_name,
+			  fsp_str_dbg(dirfsp),
 			  smb_fname_rel->base_name,
 			  strerror(errno));
 		file_free(NULL, fsp);
@@ -1631,7 +1630,7 @@ NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
 		status = map_nt_error_from_unix(errno);
 		DBG_DEBUG("SMB_VFS_%sSTAT(%s/%s) failed: %s\n",
 			  (fd >= 0) ? "F" : "",
-			  dirfsp->fsp_name->base_name,
+			  fsp_str_dbg(dirfsp),
 			  smb_fname_rel->base_name,
 			  strerror(errno));
 		fd_close(fsp);
@@ -1660,6 +1659,113 @@ NTSTATUS openat_pathref_fsp_lcomp(struct files_struct *dirfsp,
 	DBG_DEBUG("fsp [%s]: OK, fd=%d\n", fsp_str_dbg(fsp), fd);
 
 	talloc_set_destructor(smb_fname_rel, smb_fname_fsp_destructor);
+	return NT_STATUS_OK;
+}
+
+NTSTATUS openat_pathref_fsp_dot(TALLOC_CTX *mem_ctx,
+				struct files_struct *dirfsp,
+				uint32_t flags,
+				struct smb_filename **_dot)
+{
+	struct connection_struct *conn = dirfsp->conn;
+	struct files_struct *fsp = NULL;
+	struct smb_filename *full_fname = NULL;
+	struct vfs_open_how how = { .flags = O_NOFOLLOW, };
+        struct smb_filename *dot = NULL;
+        NTSTATUS status;
+        int fd;
+
+#ifdef O_DIRECTORY
+        how.flags |= O_DIRECTORY;
+#endif
+
+#ifdef O_PATH
+	how.flags |= O_PATH;
+#else
+	how.flags |= (O_RDONLY | O_NONBLOCK);
+#endif
+
+	dot = synthetic_smb_fname(mem_ctx, ".", NULL, NULL, 0, flags);
+	if (dot == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = fsp_new(conn, conn, &fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("fsp_new() failed: %s\n", nt_errstr(status));
+		return status;
+	}
+
+	GetTimeOfDay(&fsp->open_time);
+	ZERO_STRUCT(conn->sconn->fsp_fi_cache);
+
+	fsp->fsp_flags.is_pathref = true;
+
+	full_fname = full_path_from_dirfsp_atname(conn, dirfsp, dot);
+	if (full_fname == NULL) {
+		DBG_DEBUG("full_path_from_dirfsp_atname(%s/%s) failed\n",
+			  dirfsp->fsp_name->base_name,
+			  dot->base_name);
+		file_free(NULL, fsp);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = fsp_attach_smb_fname(fsp, &full_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("fsp_attach_smb_fname(fsp, %s) failed: %s\n",
+			  smb_fname_str_dbg(full_fname),
+			  nt_errstr(status));
+		file_free(NULL, fsp);
+		return status;
+	}
+
+	fd = SMB_VFS_OPENAT(conn, dirfsp, dot, fsp, &how);
+	if (fd == -1) {
+		status = map_nt_error_from_unix(errno);
+		DBG_DEBUG("smb_vfs_openat(%s/%s) failed: %s\n",
+			  dirfsp->fsp_name->base_name,
+			  dot->base_name,
+			  strerror(errno));
+		file_free(NULL, fsp);
+		return status;
+	}
+
+	fsp_set_fd(fsp, fd);
+
+	status = vfs_stat_fsp(fsp);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("vfs_stat_fsp(\"/\") failed: %s\n",
+			  nt_errstr(status));
+		fd_close(fsp);
+		file_free(NULL, fsp);
+		return status;
+	}
+
+	fsp->fsp_flags.is_directory = S_ISDIR(fsp->fsp_name->st.st_ex_mode);
+	fsp->fsp_flags.posix_open =
+		((dot->flags & SMB_FILENAME_POSIX_PATH) != 0);
+	fsp->file_id = vfs_file_id_from_sbuf(conn, &fsp->fsp_name->st);
+
+	dot->st = fsp->fsp_name->st;
+
+	status = fsp_smb_fname_link(fsp,
+				    &dot->fsp_link,
+				    &dot->fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("fsp_smb_fname_link() failed: %s\n",
+			  nt_errstr(status));
+		fd_close(fsp);
+		file_free(NULL, fsp);
+		return status;
+	}
+
+	DBG_DEBUG("fsp [%s]: OK, fd=%d\n", fsp_str_dbg(fsp), fd);
+
+	talloc_set_destructor(dot, smb_fname_fsp_destructor);
+
+	*_dot = dot;
+
 	return NT_STATUS_OK;
 }
 
@@ -1741,7 +1847,7 @@ NTSTATUS reference_smb_fname_fsp_link(struct smb_filename *smb_fname_dst,
  * Create an smb_fname and open smb_fname->fsp pathref
  **/
 NTSTATUS synthetic_pathref(TALLOC_CTX *mem_ctx,
-			   struct files_struct *dirfsp,
+			   const struct files_struct *dirfsp,
 			   const char *base_name,
 			   const char *stream_name,
 			   const SMB_STRUCT_STAT *psbuf,
@@ -2203,7 +2309,9 @@ bool file_find_subpath(files_struct *dir_fsp)
 		if (fsp == dir_fsp) {
 			continue;
 		}
-		if (fsp->fsp_flags.posix_open) {
+		if (dir_fsp->fsp_flags.posix_open &&
+		    fsp->fsp_flags.posix_open)
+		{
 			continue;
 		}
 
@@ -2302,9 +2410,6 @@ void fsp_unbind_smb(struct smb_request *req, files_struct *fsp)
 		notify_remove(fsp->conn->sconn->notify_ctx, fsp, fullpath);
 		TALLOC_FREE(fsp->notify);
 	}
-
-	/* Ensure this event will never fire. */
-	TALLOC_FREE(fsp->update_write_time_event);
 
 	if (fsp->op != NULL) {
 		fsp->op->compat = NULL;
@@ -2663,4 +2768,31 @@ bool fsp_getinfo_ask_sharemode(struct files_struct *fsp)
 	}
 
 	return lp_smbd_getinfo_ask_sharemode(SNUM(fsp->conn));
+}
+
+void fsp_apply_private_ntcreatex_flags(struct files_struct *fsp,
+				       uint32_t flags)
+{
+	/*
+	 * This might be called twice when first trying to open something as a
+	 * file, which fails for directories, triggering a second open-directory
+	 * attempt via open_directory(). To handle this case make sure to reset
+	 * fsp_flags if the corresponding flag is not set, as we might get passed
+	 * different flags in pass one and pass two.
+	 */
+	if (flags & NTCREATEX_FLAG_DENY_DOS) {
+		fsp->fsp_flags.ntcreatex_deny_dos = true;
+	} else {
+		fsp->fsp_flags.ntcreatex_deny_dos = false;
+	}
+	if (flags & NTCREATEX_FLAG_DENY_FCB) {
+		fsp->fsp_flags.ntcreatex_deny_fcb = true;
+	} else {
+		fsp->fsp_flags.ntcreatex_deny_fcb = false;
+	}
+	if (flags & NTCREATEX_FLAG_STREAM_BASEOPEN) {
+		fsp->fsp_flags.ntcreatex_stream_baseopen = true;
+	} else {
+		fsp->fsp_flags.ntcreatex_stream_baseopen = false;
+	}
 }

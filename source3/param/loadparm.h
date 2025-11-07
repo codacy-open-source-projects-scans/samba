@@ -72,6 +72,9 @@ enum samba_weak_crypto lp_weak_crypto(void);
 bool lp_strict_rename(int snum);
 int lp_smb3_directory_leases(void);
 
+struct smbXsrv_connection;
+int lp_server_smb_encrypt(struct smbXsrv_connection *xconn, int snum);
+
 int lp_wi_scan_global_parametrics(
 	const char *regex, size_t max_matches,
 	bool (*cb)(const char *string, regmatch_t matches[],
@@ -165,6 +168,7 @@ bool lp_load_global_no_reinit(const char *file_name);
 bool lp_load_no_reinit(const char *file_name);
 bool lp_load_client_no_reinit(const char *file_name);
 bool lp_load_with_registry_shares(const char *pszFname);
+bool lp_load_with_registry_without_shares(const char *pszFname);
 int lp_numservices(void);
 void lp_dump(FILE *f, bool show_defaults, int maxtoprint);
 void lp_dump_one(FILE * f, bool show_defaults, int snum);
@@ -187,8 +191,6 @@ uint32_t lp_get_spoolss_state( void );
 struct smb1_signing_state;
 void set_use_sendfile(int snum, bool val);
 void lp_set_mangling_method(const char *new_method);
-bool lp_posix_pathnames(void);
-void lp_set_posix_pathnames(void);
 enum brl_flavour lp_posix_cifsu_locktype(files_struct *fsp);
 void lp_set_posix_default_cifsx_readwrite_locktype(enum brl_flavour val);
 int lp_min_receive_file_size(void);

@@ -32,7 +32,9 @@
 #include "../libcli/smbreadline/smbreadline.h"
 #include "../libcli/security/security.h"
 #include "system/select.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
+#include "libsmb/smbsock_connect.h"
 #include "libsmb/clirap.h"
 #include "trans2.h"
 #include "libsmb/nmblib.h"
@@ -64,7 +66,7 @@ static int io_timeout = (CLIENT_TIMEOUT/1000); /* Per operation timeout (in seco
 static int name_type = 0x20;
 
 static int process_tok(char *tok);
-static int cmd_help(void);
+static int cmd_help(TALLOC_CTX *mem_ctx);
 
 /* value for unused fid field in trans2 secondary request */
 #define FID_UNUSED (0xFFFF)
@@ -330,7 +332,7 @@ static int do_dskattr(void)
  Show cd/pwd.
 ****************************************************************************/
 
-static int cmd_pwd(void)
+static int cmd_pwd(TALLOC_CTX *mem_ctx)
 {
 	d_printf("Current directory is %s",service);
 	d_printf("%s\n",client_get_cur_dir());
@@ -383,7 +385,7 @@ char *client_clean_name(TALLOC_CTX *ctx, const char *name)
  Change directory - inner section.
 ****************************************************************************/
 
-static int do_cd(const char *new_dir)
+static int do_cd(TALLOC_CTX *mem_ctx, const char *new_dir)
 {
 	char *newdir = NULL;
 	char *saved_dir = NULL;
@@ -397,8 +399,7 @@ static int do_cd(const char *new_dir)
 
 	newdir = talloc_strdup(ctx, new_dir);
 	if (!newdir) {
-		TALLOC_FREE(ctx);
-		return 1;
+		goto out;
 	}
 
 	normalize_name(newdir);
@@ -407,8 +408,7 @@ static int do_cd(const char *new_dir)
 
 	saved_dir = talloc_strdup(ctx, client_get_cur_dir());
 	if (!saved_dir) {
-		TALLOC_FREE(ctx);
-		return 1;
+		goto out;
 	}
 
 	if (*newdir == CLI_DIRSEP_CHAR) {
@@ -435,7 +435,12 @@ static int do_cd(const char *new_dir)
 	new_cd = client_clean_name(ctx, new_cd);
 	client_set_cur_dir(new_cd);
 
-	status = cli_resolve_path(ctx, "",
+	/*
+	 * This needs to use a long lived memory context, as it might return a
+	 * new or already existing cli context.
+	 */
+	status = cli_resolve_path(mem_ctx,
+				  "",
 				  creds,
 				cli, new_cd, &targetcli, &targetpath);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -445,8 +450,8 @@ static int do_cd(const char *new_dir)
 	}
 
 	if (strequal(targetpath,CLI_DIRSEP_STR )) {
-		TALLOC_FREE(ctx);
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
 
@@ -481,13 +486,13 @@ out:
  Change directory.
 ****************************************************************************/
 
-static int cmd_cd(void)
+static int cmd_cd(TALLOC_CTX *mem_ctx)
 {
 	char *buf = NULL;
 	int rc = 0;
 
 	if (next_token_talloc(talloc_tos(), &cmd_ptr, &buf,NULL)) {
-		rc = do_cd(buf);
+		rc = do_cd(mem_ctx, buf);
 	} else {
 		d_printf("Current directory is %s\n",client_get_cur_dir());
 	}
@@ -499,9 +504,9 @@ static int cmd_cd(void)
  Change directory.
 ****************************************************************************/
 
-static int cmd_cd_oneup(void)
+static int cmd_cd_oneup(TALLOC_CTX *mem_ctx)
 {
-	return do_cd("..");
+	return do_cd(mem_ctx, "..");
 }
 
 /*******************************************************************
@@ -889,7 +894,7 @@ NTSTATUS do_list(const char *mask,
  Get a directory listing.
 ****************************************************************************/
 
-static int cmd_dir(void)
+static int cmd_dir(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	uint32_t attribute = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN;
@@ -944,7 +949,7 @@ static int cmd_dir(void)
  Get a directory listing.
 ****************************************************************************/
 
-static int cmd_du(void)
+static int cmd_du(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	uint32_t attribute = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN;
@@ -996,7 +1001,7 @@ static int cmd_du(void)
 	return rc;
 }
 
-static int cmd_echo(void)
+static int cmd_echo(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *num;
@@ -1167,7 +1172,7 @@ static int do_get(const char *rname, const char *lname_in, bool reget)
  Get a file.
 ****************************************************************************/
 
-static int cmd_get(void)
+static int cmd_get(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *lname = NULL;
@@ -1285,7 +1290,7 @@ static NTSTATUS do_mget(struct cli_state *cli_state, struct file_info *finfo,
  View the file using the pager.
 ****************************************************************************/
 
-static int cmd_more(void)
+static int cmd_more(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *rname = NULL;
@@ -1353,7 +1358,7 @@ static int cmd_more(void)
  Do a mget command.
 ****************************************************************************/
 
-static int cmd_mget(void)
+static int cmd_mget(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	uint32_t attribute = FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN;
@@ -1469,19 +1474,20 @@ static bool do_altname(const char *name)
  Exit client.
 ****************************************************************************/
 
-static int cmd_quit(void)
+static int cmd_quit(TALLOC_CTX *mem_ctx)
 {
 	cli_shutdown(cli);
-	exit(0);
-	/* NOTREACHED */
-	return 0;
+	cli = NULL;
+
+	/* Use INT_MAX for QUIT */
+	return INT_MAX;
 }
 
 /****************************************************************************
  Make a directory.
 ****************************************************************************/
 
-static int cmd_mkdir(void)
+static int cmd_mkdir(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -1561,7 +1567,7 @@ static int cmd_mkdir(void)
  Show alt name.
 ****************************************************************************/
 
-static int cmd_altname(void)
+static int cmd_altname(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *name;
@@ -1820,7 +1826,7 @@ static int do_allinfo(const char *name)
  Show all info we can get
 ****************************************************************************/
 
-static int cmd_allinfo(void)
+static int cmd_allinfo(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *name;
@@ -1959,7 +1965,7 @@ static int do_put(const char *rname, const char *lname, bool reput)
 		put_total_time_ms += this_time;
 		put_total_size += state.nread;
 
-		DEBUG(1,("(%3.1f kb/s) (average %3.1f kb/s)\n",
+		DEBUG(1,("(%3.1f kB/s) (average %3.1f kB/s)\n",
 			 state.nread / (1.024*this_time + 1.0e-4),
 			 put_total_size / (1.024*put_total_time_ms)));
 	}
@@ -1976,7 +1982,7 @@ static int do_put(const char *rname, const char *lname, bool reput)
  Put a file.
 ****************************************************************************/
 
-static int cmd_put(void)
+static int cmd_put(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *lname;
@@ -2068,7 +2074,7 @@ static bool seek_list(struct file_list *list, char *name)
  Set the file selection mask.
 ****************************************************************************/
 
-static int cmd_select(void)
+static int cmd_select(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *new_fs = NULL;
@@ -2160,7 +2166,7 @@ static int file_find(TALLOC_CTX *ctx,
  mput some files.
 ****************************************************************************/
 
-static int cmd_mput(void)
+static int cmd_mput(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *p = NULL;
@@ -2175,6 +2181,7 @@ static int cmd_mput(void)
 		ret = file_find(ctx, &file_list, ".", p, true);
 		if (ret) {
 			free_file_list(file_list);
+			file_list = NULL;
 			continue;
 		}
 
@@ -2265,12 +2272,19 @@ static int cmd_mput(void)
 					break;
 				}
 			}
-			do_put(rname, lname, false);
+			ret = do_put(rname, lname, false);
+			if (ret != 0) {
+				break;
+			}
 		}
 		free_file_list(file_list);
+		file_list = NULL;
 		SAFE_FREE(quest);
 		SAFE_FREE(lname);
 		SAFE_FREE(rname);
+		if (ret != 0) {
+			return ret;
+		}
 	}
 
 	return 0;
@@ -2298,7 +2312,7 @@ static int do_cancel(int job)
  Cancel a print job.
 ****************************************************************************/
 
-static int cmd_cancel(void)
+static int cmd_cancel(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf = NULL;
@@ -2320,7 +2334,7 @@ static int cmd_cancel(void)
  Print a file.
 ****************************************************************************/
 
-static int cmd_print(void)
+static int cmd_print(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *lname = NULL;
@@ -2368,7 +2382,7 @@ static void queue_fn(struct print_job_info *p)
  Show a print queue.
 ****************************************************************************/
 
-static int cmd_queue(void)
+static int cmd_queue(TALLOC_CTX *mem_ctx)
 {
 	cli_print_queue(cli, queue_fn);
 	return 0;
@@ -2423,7 +2437,7 @@ out:
  Delete some files.
 ****************************************************************************/
 
-static int cmd_del(void)
+static int cmd_del(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -2560,7 +2574,7 @@ static NTSTATUS do_deltree_list(struct cli_state *cli_state,
 	return NT_STATUS_OK;
 }
 
-static int cmd_deltree(void)
+static int cmd_deltree(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf = NULL;
@@ -2674,7 +2688,7 @@ static int cmd_deltree(void)
  Wildcard delete some files.
 ****************************************************************************/
 
-static int cmd_wdel(void)
+static int cmd_wdel(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -2727,7 +2741,7 @@ static int cmd_wdel(void)
 /****************************************************************************
 ****************************************************************************/
 
-static int cmd_open(void)
+static int cmd_open(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -2784,7 +2798,7 @@ static int cmd_open(void)
 	return 0;
 }
 
-static int cmd_posix_encrypt(void)
+static int cmd_posix_encrypt(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
@@ -2853,7 +2867,7 @@ static int cmd_posix_encrypt(void)
 /****************************************************************************
 ****************************************************************************/
 
-static int cmd_posix_open(void)
+static int cmd_posix_open(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -2920,7 +2934,7 @@ static int cmd_posix_open(void)
 	return 0;
 }
 
-static int cmd_posix_mkdir(void)
+static int cmd_posix_mkdir(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -2976,7 +2990,7 @@ static int cmd_posix_mkdir(void)
 	return 0;
 }
 
-static int cmd_posix_unlink(void)
+static int cmd_posix_unlink(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -3026,7 +3040,7 @@ static int cmd_posix_unlink(void)
 	return 0;
 }
 
-static int cmd_posix_rmdir(void)
+static int cmd_posix_rmdir(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -3076,7 +3090,7 @@ static int cmd_posix_rmdir(void)
 	return 0;
 }
 
-static int cmd_mkfifo(void)
+static int cmd_mkfifo(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -3134,7 +3148,7 @@ static int cmd_mkfifo(void)
 	return 0;
 }
 
-static int cmd_close(void)
+static int cmd_close(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf = NULL;
@@ -3156,7 +3170,7 @@ static int cmd_close(void)
 	return 0;
 }
 
-static int cmd_posix(void)
+static int cmd_posix(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	uint16_t major, minor;
@@ -3242,7 +3256,7 @@ static int cmd_posix(void)
 	return 0;
 }
 
-static int cmd_lock(void)
+static int cmd_lock(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf = NULL;
@@ -3299,7 +3313,7 @@ static int cmd_lock(void)
 	return 0;
 }
 
-static int cmd_unlock(void)
+static int cmd_unlock(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf = NULL;
@@ -3341,7 +3355,7 @@ static int cmd_unlock(void)
 	return 0;
 }
 
-static int cmd_posix_whoami(void)
+static int cmd_posix_whoami(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
@@ -3397,7 +3411,7 @@ static int cmd_posix_whoami(void)
  Remove a directory.
 ****************************************************************************/
 
-static int cmd_rmdir(void)
+static int cmd_rmdir(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *mask = NULL;
@@ -3444,7 +3458,7 @@ static int cmd_rmdir(void)
  UNIX hardlink.
 ****************************************************************************/
 
-static int cmd_link(void)
+static int cmd_link(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *oldname = NULL;
@@ -3516,7 +3530,7 @@ static int cmd_link(void)
  UNIX readlink.
 ****************************************************************************/
 
-static int cmd_readlink(void)
+static int cmd_readlink(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *name= NULL;
@@ -3573,7 +3587,7 @@ static int cmd_readlink(void)
  UNIX symlink.
 ****************************************************************************/
 
-static int cmd_symlink(void)
+static int cmd_symlink(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *link_target = NULL;
@@ -3637,7 +3651,7 @@ static int cmd_symlink(void)
  UNIX chmod.
 ****************************************************************************/
 
-static int cmd_chmod(void)
+static int cmd_chmod(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -3798,7 +3812,7 @@ static char *perms_to_string(fstring permstr, unsigned char perms)
  UNIX getfacl.
 ****************************************************************************/
 
-static int cmd_getfacl(void)
+static int cmd_getfacl(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -3995,7 +4009,7 @@ static int cmd_getfacl(void)
  Get the EA list of a file
 ****************************************************************************/
 
-static int cmd_geteas(void)
+static int cmd_geteas(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -4054,7 +4068,7 @@ static int cmd_geteas(void)
  Set an EA of a file
 ****************************************************************************/
 
-static int cmd_setea(void)
+static int cmd_setea(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -4108,7 +4122,7 @@ static int cmd_setea(void)
  UNIX stat.
 ****************************************************************************/
 
-static int cmd_stat(void)
+static int cmd_stat(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -4225,7 +4239,7 @@ static int cmd_stat(void)
  UNIX chown.
 ****************************************************************************/
 
-static int cmd_chown(void)
+static int cmd_chown(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src = NULL;
@@ -4291,7 +4305,7 @@ static int cmd_chown(void)
  Rename some file.
 ****************************************************************************/
 
-static int cmd_rename(void)
+static int cmd_rename(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src, *dest;
@@ -4379,7 +4393,7 @@ static int scopy_status(off_t written, void *priv)
 	clock_gettime_mono(&tp_end);
 	scopy_total_time_ms = nsec_time_diff(&tp_end,&st->tp_start)/1000000;
 
-	DEBUG(5,("Copied %jd bytes at an average %3.1f kb/s\n",
+	DEBUG(5,("Copied %jd bytes at an average %3.1f kB/s\n",
 		 (intmax_t)written, written / (1.024*scopy_total_time_ms)));
 
 	return true;
@@ -4389,7 +4403,7 @@ static int scopy_status(off_t written, void *priv)
  Server-Side copy some file.
 ****************************************************************************/
 
-static int cmd_scopy(void)
+static int cmd_scopy(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src, *dest;
@@ -4514,7 +4528,7 @@ static int cmd_scopy(void)
  Print the volume name.
 ****************************************************************************/
 
-static int cmd_volume(void)
+static int cmd_volume(TALLOC_CTX *mem_ctx)
 {
 	char *volname;
 	uint32_t serial_num;
@@ -4538,7 +4552,7 @@ static int cmd_volume(void)
  Hard link files using the NT call.
 ****************************************************************************/
 
-static int cmd_hardlink(void)
+static int cmd_hardlink(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *src, *dest;
@@ -4600,7 +4614,7 @@ static int cmd_hardlink(void)
  Toggle the prompt flag.
 ****************************************************************************/
 
-static int cmd_prompt(void)
+static int cmd_prompt(TALLOC_CTX *mem_ctx)
 {
 	prompt = !prompt;
 	DEBUG(2,("prompting is now %s\n",prompt?"on":"off"));
@@ -4611,7 +4625,7 @@ static int cmd_prompt(void)
  Set the newer than time.
 ****************************************************************************/
 
-static int cmd_newer(void)
+static int cmd_newer(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -4639,7 +4653,7 @@ static int cmd_newer(void)
  Watch directory changes
 ****************************************************************************/
 
-static int cmd_notify(void)
+static int cmd_notify(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	char *name, *buf;
@@ -4704,7 +4718,7 @@ fail:
  Set the archive level.
 ****************************************************************************/
 
-static int cmd_archive(void)
+static int cmd_archive(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -4722,7 +4736,7 @@ static int cmd_archive(void)
  Toggle the backup_intent state.
 ****************************************************************************/
 
-static int cmd_backup(void)
+static int cmd_backup(TALLOC_CTX *mem_ctx)
 {
 	backup_intent = !backup_intent;
 	cli_set_backup_intent(cli, backup_intent);
@@ -4734,7 +4748,7 @@ static int cmd_backup(void)
  Toggle the lowercaseflag.
 ****************************************************************************/
 
-static int cmd_lowercase(void)
+static int cmd_lowercase(TALLOC_CTX *mem_ctx)
 {
 	lowercase = !lowercase;
 	DEBUG(2,("filename lowercasing is now %s\n",lowercase?"on":"off"));
@@ -4745,7 +4759,7 @@ static int cmd_lowercase(void)
  Toggle the case sensitive flag.
 ****************************************************************************/
 
-static int cmd_setcase(void)
+static int cmd_setcase(TALLOC_CTX *mem_ctx)
 {
 	bool orig_case_sensitive = cli_set_case_sensitive(cli, false);
 
@@ -4759,7 +4773,7 @@ static int cmd_setcase(void)
  Toggle the showacls flag.
 ****************************************************************************/
 
-static int cmd_showacls(void)
+static int cmd_showacls(TALLOC_CTX *mem_ctx)
 {
 	showacls = !showacls;
 	DEBUG(2,("showacls is now %s\n",showacls?"on":"off"));
@@ -4771,7 +4785,7 @@ static int cmd_showacls(void)
  Toggle the recurse flag.
 ****************************************************************************/
 
-static int cmd_recurse(void)
+static int cmd_recurse(TALLOC_CTX *mem_ctx)
 {
 	recurse = !recurse;
 	DEBUG(2,("directory recursion is now %s\n",recurse?"on":"off"));
@@ -4782,7 +4796,7 @@ static int cmd_recurse(void)
  Toggle the translate flag.
 ****************************************************************************/
 
-static int cmd_translate(void)
+static int cmd_translate(TALLOC_CTX *mem_ctx)
 {
 	translation = !translation;
 	DEBUG(2,("CR/LF<->LF and print text translation now %s\n",
@@ -4794,7 +4808,7 @@ static int cmd_translate(void)
  Do the lcd command.
  ****************************************************************************/
 
-static int cmd_lcd(void)
+static int cmd_lcd(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -4819,7 +4833,7 @@ static int cmd_lcd(void)
  Get a file restarting at end of local file.
  ****************************************************************************/
 
-static int cmd_reget(void)
+static int cmd_reget(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *local_name = NULL;
@@ -4858,7 +4872,7 @@ static int cmd_reget(void)
  Put a file restarting at end of local file.
  ****************************************************************************/
 
-static int cmd_reput(void)
+static int cmd_reput(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *local_name = NULL;
@@ -5069,7 +5083,7 @@ static bool list_servers(const char *wk_grp)
  Print or set current VUID
 ****************************************************************************/
 
-static int cmd_vuid(void)
+static int cmd_vuid(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -5088,7 +5102,7 @@ static int cmd_vuid(void)
  Setup a new VUID, by issuing a session setup
 ****************************************************************************/
 
-static int cmd_logon(void)
+static int cmd_logon(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *l_username, *l_password;
@@ -5141,7 +5155,7 @@ static int cmd_logon(void)
  * close the session
  */
 
-static int cmd_logoff(void)
+static int cmd_logoff(TALLOC_CTX *mem_ctx)
 {
 	NTSTATUS status;
 
@@ -5160,7 +5174,7 @@ static int cmd_logoff(void)
  * tree connect (connect to a share)
  */
 
-static int cmd_tcon(void)
+static int cmd_tcon(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *sharename;
@@ -5193,7 +5207,7 @@ static int cmd_tcon(void)
  * tree disconnect (disconnect from a share)
  */
 
-static int cmd_tdis(void)
+static int cmd_tdis(TALLOC_CTX *mem_ctx)
 {
 	NTSTATUS status;
 
@@ -5212,7 +5226,7 @@ static int cmd_tdis(void)
  * get or set tid
  */
 
-static int cmd_tid(void)
+static int cmd_tid(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *tid_str;
@@ -5239,7 +5253,7 @@ static int cmd_tid(void)
  list active connections
 ****************************************************************************/
 
-static int cmd_list_connect(void)
+static int cmd_list_connect(TALLOC_CTX *mem_ctx)
 {
 	cli_cm_display(cli);
 	return 0;
@@ -5249,7 +5263,7 @@ static int cmd_list_connect(void)
  display the current active client connection
 ****************************************************************************/
 
-static int cmd_show_connect( void )
+static int cmd_show_connect(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	struct cli_state *targetcli;
@@ -5277,7 +5291,7 @@ static int cmd_show_connect( void )
  * Read a filename and four times from the client command line and update
  * the file times. A value of -1 for a time means don't change.
  */
-static int cmd_utimes(void)
+static int cmd_utimes(TALLOC_CTX *mem_ctx)
 {
 	char *buf;
 	char *fname = NULL;
@@ -5424,7 +5438,7 @@ int set_remote_attr(const char *filename, uint32_t new_attr, int mode)
  * Read a filename and mode from the client command line and update
  * the file DOS attributes.
  */
-int cmd_setmode(void)
+int cmd_setmode(TALLOC_CTX *mem_ctx)
 {
 	char *buf;
 	char *fname = NULL;
@@ -5509,7 +5523,7 @@ out:
  iosize command
 ***************************************************************************/
 
-int cmd_iosize(void)
+static int cmd_iosize(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -5560,7 +5574,7 @@ int cmd_iosize(void)
  timeout command
 ***************************************************************************/
 
-static int cmd_timeout(void)
+static int cmd_timeout(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	char *buf;
@@ -5584,7 +5598,7 @@ static int cmd_timeout(void)
 /****************************************************************************
 history
 ****************************************************************************/
-static int cmd_history(void)
+static int cmd_history(TALLOC_CTX *mem_ctx)
 {
 #if defined(HAVE_LIBREADLINE) && defined(HAVE_HISTORY_LIST)
 	HIST_ENTRY **hlist;
@@ -5615,7 +5629,7 @@ static int cmd_history(void)
  */
 static struct {
 	const char *name;
-	int (*fn)(void);
+	int (*fn)(TALLOC_CTX *mem_ctx);
 	const char *description;
 	char compl_args[2];      /* Completion argument info */
 } commands[] = {
@@ -5751,7 +5765,7 @@ static int process_tok(char *tok)
  Help.
 ****************************************************************************/
 
-static int cmd_help(void)
+static int cmd_help(TALLOC_CTX *mem_ctx)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	int i=0,j;
@@ -5777,30 +5791,34 @@ static int cmd_help(void)
  Process a -c command string.
 ****************************************************************************/
 
-static int process_command_string(const char *cmd_in)
+static int process_command_string(TALLOC_CTX *mem_ctx, const char *cmd_in)
 {
-	TALLOC_CTX *ctx = talloc_tos();
-	char *cmd = talloc_strdup(ctx, cmd_in);
-	int rc = 0;
+	TALLOC_CTX *frame = talloc_stackframe();
+	char *cmd = talloc_strdup(frame, cmd_in);
+	int rc = 1;
 	struct cli_credentials *creds = samba_cmdline_get_creds();
+	struct smb_transports ts = smbsock_transports_from_port(port);
 
 	if (!cmd) {
-		return 1;
+		goto out;
 	}
 	/* establish the connection if not already */
 
 	if (!cli) {
 		NTSTATUS status;
 
-		status = cli_cm_open(talloc_tos(), NULL,
+		/* cli_cm_open() needs to use a long lived talloc context */
+		status = cli_cm_open(mem_ctx,
+				     NULL,
 				     desthost,
 				     service,
 				     creds,
-				     have_ip ? &dest_ss : NULL, port,
+				     have_ip ? &dest_ss : NULL,
+				     &ts,
 				     name_type,
 				     &cli);
 		if (!NT_STATUS_IS_OK(status)) {
-			return 1;
+			goto out;
 		}
 		cli_set_timeout(cli, io_timeout*1000);
 	}
@@ -5822,19 +5840,28 @@ static int process_command_string(const char *cmd_in)
 
 		/* and get the first part of the command */
 		cmd_ptr = line;
-		if (!next_token_talloc(ctx, &cmd_ptr,&tok,NULL)) {
+		if (!next_token_talloc(frame, &cmd_ptr, &tok, NULL)) {
 			continue;
 		}
 
 		if ((i = process_tok(tok)) >= 0) {
-			rc = commands[i].fn();
+			rc = commands[i].fn(frame);
+			/* QUIT COMMAND */
+			if (rc == INT_MAX) {
+				TALLOC_FREE(tok);
+				rc = 0;
+				break;
+			}
 		} else if (i == -2) {
 			d_printf("%s: command abbreviation ambiguous\n",tok);
 		} else {
 			d_printf("%s: command not found\n",tok);
 		}
+		TALLOC_FREE(tok);
 	}
 
+out:
+	TALLOC_FREE(frame);
 	return rc;
 }
 
@@ -6124,42 +6151,14 @@ cleanup:
 
 static bool finished;
 
-/****************************************************************************
- Make sure we swallow keepalives during idle time.
-****************************************************************************/
-
-static void readline_callback(void)
+static void cli_status_check(void)
 {
-	static time_t last_t;
-	struct timespec now;
-	time_t t;
 	NTSTATUS status;
-	unsigned char garbage[16];
 
-	clock_gettime_mono(&now);
-	t = now.tv_sec;
-
-	if (t - last_t < 5)
-		return;
-
-	last_t = t;
-
-	/* Ping the server to keep the connection alive using SMBecho. */
-	memset(garbage, 0xf0, sizeof(garbage));
-	status = cli_echo(cli, 1, data_blob_const(garbage, sizeof(garbage)));
-	if (NT_STATUS_IS_OK(status) ||
-			NT_STATUS_EQUAL(status, NT_STATUS_INVALID_PARAMETER)) {
-		/*
-		 * Even if server returns NT_STATUS_INVALID_PARAMETER
-		 * it still responded.
-		 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13007
-		 */
-		return;
-	}
-
-	if (!cli_state_is_connected(cli)) {
-		DEBUG(0,("SMBecho failed (%s). The connection is "
-			 "disconnected now\n", nt_errstr(status)));
+	status = smbXcli_conn_monitor_once(cli->conn);
+	if (!NT_STATUS_IS_OK(status)) {
+		D_ERR("The connection is disconnected now: %s\n",
+		      nt_errstr(status));
 		finished = true;
 		smb_readline_done();
 	}
@@ -6171,6 +6170,7 @@ static void readline_callback(void)
 
 static int process_stdin(void)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int rc = 0;
 
 	if (!quiet) {
@@ -6178,7 +6178,6 @@ static int process_stdin(void)
 	}
 
 	while (!finished) {
-		TALLOC_CTX *frame = talloc_stackframe();
 		char *tok = NULL;
 		char *the_prompt = NULL;
 		char *line = NULL;
@@ -6189,12 +6188,11 @@ static int process_stdin(void)
 					     "smb: %s> ",
 					     client_get_cur_dir());
 		if (the_prompt == NULL) {
-			TALLOC_FREE(frame);
 			break;
 		}
-		line = smb_readline(the_prompt, readline_callback, completion_fn);
+		line = smb_readline(the_prompt, cli_status_check, completion_fn);
+		TALLOC_FREE(the_prompt);
 		if (!line) {
-			TALLOC_FREE(frame);
 			break;
 		}
 
@@ -6205,28 +6203,35 @@ static int process_stdin(void)
 					line+1);
 			}
 			SAFE_FREE(line);
-			TALLOC_FREE(frame);
 			continue;
 		}
 
 		/* and get the first part of the command */
 		cmd_ptr = line;
 		if (!next_token_talloc(frame, &cmd_ptr,&tok,NULL)) {
-			TALLOC_FREE(frame);
 			SAFE_FREE(line);
 			continue;
 		}
 
 		if ((i = process_tok(tok)) >= 0) {
-			rc = commands[i].fn();
+			rc = commands[i].fn(frame);
+			/* QUIT COMMAND */
+			if (rc == INT_MAX) {
+				rc = 0;
+				SAFE_FREE(line);
+				TALLOC_FREE(tok);
+				break;
+			}
 		} else if (i == -2) {
 			d_printf("%s: command abbreviation ambiguous\n",tok);
 		} else {
 			d_printf("%s: command not found\n",tok);
 		}
+		TALLOC_FREE(tok);
 		SAFE_FREE(line);
-		TALLOC_FREE(frame);
 	}
+
+	TALLOC_FREE(frame);
 	return rc;
 }
 
@@ -6234,17 +6239,19 @@ static int process_stdin(void)
  Process commands from the client.
 ****************************************************************************/
 
-static int process(const char *base_directory)
+static int process(TALLOC_CTX *mem_ctx, const char *base_directory)
 {
 	int rc = 0;
 	NTSTATUS status;
 	struct cli_credentials *creds = samba_cmdline_get_creds();
+	struct smb_transports ts = smbsock_transports_from_port(port);
 
-	status = cli_cm_open(talloc_tos(), NULL,
+	status = cli_cm_open(mem_ctx, NULL,
 			     desthost,
 			     service,
 			     creds,
-			     have_ip ? &dest_ss : NULL, port,
+			     have_ip ? &dest_ss : NULL,
+			     &ts,
 			     name_type, &cli);
 	if (!NT_STATUS_IS_OK(status)) {
 		return 1;
@@ -6253,7 +6260,7 @@ static int process(const char *base_directory)
 	cli_set_timeout(cli, io_timeout*1000);
 
 	if (base_directory && *base_directory) {
-		rc = do_cd(base_directory);
+		rc = do_cd(mem_ctx, base_directory);
 		if (rc) {
 			cli_shutdown(cli);
 			return rc;
@@ -6261,9 +6268,9 @@ static int process(const char *base_directory)
 	}
 
 	if (cmdstr) {
-		rc = process_command_string(cmdstr);
+		rc = process_command_string(mem_ctx, cmdstr);
 	} else {
-		process_stdin();
+		rc = process_stdin();
 	}
 
 	cli_shutdown(cli);
@@ -6274,17 +6281,20 @@ static int process(const char *base_directory)
  Handle a -L query.
 ****************************************************************************/
 
-static int do_host_query(struct loadparm_context *lp_ctx,
+static int do_host_query(TALLOC_CTX *mem_ctx,
+			 struct loadparm_context *lp_ctx,
 			 const char *query_host)
 {
 	NTSTATUS status;
 	struct cli_credentials *creds = samba_cmdline_get_creds();
+	struct smb_transports ts = smbsock_transports_from_port(port);
 
-	status = cli_cm_open(talloc_tos(), NULL,
+	status = cli_cm_open(mem_ctx, NULL,
 			     query_host,
 			     "IPC$",
 			     creds,
-			     have_ip ? &dest_ss : NULL, port,
+			     have_ip ? &dest_ss : NULL,
+			     &ts,
 			     name_type, &cli);
 	if (!NT_STATUS_IS_OK(status)) {
 		return 1;
@@ -6318,6 +6328,9 @@ static int do_host_query(struct loadparm_context *lp_ctx,
 	if (port != NBT_SMB_PORT ||
 	    smbXcli_conn_protocol(cli->conn) > PROTOCOL_NT1)
 	{
+		const char *nbt[] = { "nbt", NULL, };
+		struct smb_transports nbt_ts = smb_transports_parse("forced-nbt",
+								    nbt);
 		/*
 		 * Workgroups simply don't make sense over anything
 		 * else but port 139 and SMB1.
@@ -6326,11 +6339,12 @@ static int do_host_query(struct loadparm_context *lp_ctx,
 		cli_shutdown(cli);
 		d_printf("Reconnecting with SMB1 for workgroup listing.\n");
 		lpcfg_set_cmdline(lp_ctx, "client max protocol", "NT1");
-		status = cli_cm_open(talloc_tos(), NULL,
+		status = cli_cm_open(mem_ctx, NULL,
 				     query_host,
 				     "IPC$",
 				     creds,
-				     have_ip ? &dest_ss : NULL, NBT_SMB_PORT,
+				     have_ip ? &dest_ss : NULL,
+				     &nbt_ts,
 				     name_type, &cli);
 		if (!NT_STATUS_IS_OK(status)) {
 			d_printf("Unable to connect with SMB1 "
@@ -6351,21 +6365,23 @@ out:
  Handle a tar operation.
 ****************************************************************************/
 
-static int do_tar_op(const char *base_directory)
+static int do_tar_op(TALLOC_CTX *mem_ctx, const char *base_directory)
 {
 	struct tar *tar_ctx = tar_get_ctx();
 	int ret = 0;
 	struct cli_credentials *creds = samba_cmdline_get_creds();
+	struct smb_transports ts = smbsock_transports_from_port(port);
 
 	/* do we already have a connection? */
 	if (!cli) {
 		NTSTATUS status;
 
-		status = cli_cm_open(talloc_tos(), NULL,
+		status = cli_cm_open(mem_ctx, NULL,
 				     desthost,
 				     service,
 				     creds,
-				     have_ip ? &dest_ss : NULL, port,
+				     have_ip ? &dest_ss : NULL,
+				     &ts,
 				     name_type, &cli);
 		if (!NT_STATUS_IS_OK(status)) {
             ret = 1;
@@ -6377,7 +6393,7 @@ static int do_tar_op(const char *base_directory)
 	recurse = true;
 
 	if (base_directory && *base_directory)  {
-		ret = do_cd(base_directory);
+		ret = do_cd(mem_ctx, base_directory);
 		if (ret) {
             goto out_cli;
 		}
@@ -6395,18 +6411,21 @@ static int do_tar_op(const char *base_directory)
  Handle a message operation.
 ****************************************************************************/
 
-static int do_message_op(struct cli_credentials *creds)
+static int do_message_op(TALLOC_CTX *mem_ctx, struct cli_credentials *creds)
 {
 	NTSTATUS status;
+	struct smb_transports ts =
+		smbsock_transports_from_port(port ? port : NBT_SMB_PORT);
 
 	if (lp_disable_netbios()) {
 		d_printf("NetBIOS over TCP disabled.\n");
 		return 1;
 	}
 
-	status = cli_connect_nb(talloc_tos(),
+	status = cli_connect_nb(mem_ctx,
 				desthost, have_ip ? &dest_ss : NULL,
-				port ? port : NBT_SMB_PORT, name_type,
+				&ts,
+				name_type,
 				lp_netbios_name(),
 				SMB_SIGNING_OFF,
 				0,
@@ -6770,8 +6789,8 @@ int main(int argc,char *argv[])
 
 	if (tar_to_process(tar_ctx)) {
 		if (cmdstr)
-			process_command_string(cmdstr);
-		rc = do_tar_op(base_directory);
+			process_command_string(frame, cmdstr);
+		rc = do_tar_op(frame, base_directory);
 	} else if (query_host && *query_host) {
 		char *qhost = query_host;
 		char *slash;
@@ -6790,10 +6809,10 @@ int main(int argc,char *argv[])
 			sscanf(p, "%x", &name_type);
 		}
 
-		rc = do_host_query(lp_ctx, qhost);
+		rc = do_host_query(frame, lp_ctx, qhost);
 	} else if (message) {
-		rc = do_message_op(creds);
-	} else if (process(base_directory)) {
+		rc = do_message_op(frame, creds);
+	} else if (process(frame, base_directory)) {
 		rc = 1;
 	}
 

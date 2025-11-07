@@ -35,6 +35,7 @@ struct dcesrv_lsa_TranslatedItem {
 	uint32_t flags;
 	uint32_t wb_idx;
 	bool done;
+	bool invalid_sid;
 	struct {
 		const char *domain; /* only $DOMAIN\ */
 		const char *namespace; /* $NAMESPACE\ or @$NAMESPACE */
@@ -380,6 +381,10 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_call(struct dcesrv_lsa_LookupSids_bas
 			status = view->lookup_sid(state, item);
 			if (NT_STATUS_IS_OK(status)) {
 				item->done = true;
+			} else if (NT_STATUS_EQUAL(status, NT_STATUS_INVALID_SID)) {
+				item->done = true;
+				item->invalid_sid = true;
+				status = NT_STATUS_OK;
 			} else if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
 				status = NT_STATUS_OK;
 			} else if (NT_STATUS_EQUAL(status, NT_STATUS_SOME_NOT_MAPPED)) {
@@ -438,6 +443,7 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_finish(
 	struct dcesrv_lsa_LookupSids_base_state *state)
 {
 	struct lsa_LookupSids3 *r = &state->r;
+	uint32_t num_invalid_sid = 0;
 	uint32_t i;
 
 	for (i=0;i<r->in.sids->num_sids;i++) {
@@ -470,9 +476,18 @@ static NTSTATUS dcesrv_lsa_LookupSids_base_finish(
 		if (item->type != SID_NAME_UNKNOWN) {
 			(*r->out.count)++;
 		}
+		if (item->invalid_sid) {
+			num_invalid_sid++;
+		}
 	}
 
 	if (*r->out.count == 0) {
+		if (num_invalid_sid != 0) {
+			for (i=0;i<r->out.names->count;i++) {
+				r->out.names->names[i].name.string = NULL;
+			}
+			return NT_STATUS_INVALID_SID;
+		}
 		return NT_STATUS_NONE_MAPPED;
 	}
 	if (*r->out.count != r->in.sids->num_sids) {
@@ -1804,7 +1819,6 @@ static NTSTATUS dcesrv_lsa_lookup_name_account(
 
 	if (!try_lookup) {
 		const struct lsa_TrustDomainInfoInfoEx *tdo = NULL;
-		const struct lsa_ForestTrustDomainInfo *di = NULL;
 
 		if (state->routing_table == NULL) {
 			status = dsdb_trust_routing_table_load(policy_state->sam_ldb,
@@ -1815,9 +1829,19 @@ static NTSTATUS dcesrv_lsa_lookup_name_account(
 			}
 		}
 
-		tdo = dsdb_trust_domain_by_name(state->routing_table,
-						item->hints.namespace,
-						&di);
+		if (item->hints.domain != item->hints.namespace) {
+			/*
+			 * This means the client asked for an UPN,
+			 * we need to find the domain by toplevel
+			 * name in order to handle uPNSuffixes too.
+			 */
+			tdo = dsdb_trust_routing_by_name(state->routing_table,
+							 item->hints.namespace);
+		} else {
+			tdo = dsdb_trust_domain_by_name(state->routing_table,
+							item->hints.namespace,
+							NULL);
+		}
 		if (tdo == NULL) {
 			/*
 			 * The name is not resolvable at all...

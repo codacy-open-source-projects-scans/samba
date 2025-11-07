@@ -24,6 +24,8 @@
 #ifndef _KDC_SDB_H_
 #define _KDC_SDB_H_
 
+#include "librpc/gen_ndr/security.h"
+
 struct sdb_salt {
 	unsigned int type;
 	krb5_data salt;
@@ -84,6 +86,36 @@ struct SDBFlags {
 	unsigned int do_not_store:1;
 };
 
+struct sdb_pub_key {
+	unsigned int bit_size;
+	krb5_data modulus;
+	krb5_data exponent;
+};
+
+struct sdb_pub_keys {
+	unsigned int len;
+	struct sdb_pub_key *keys;
+};
+
+struct sdb_certificate_mappings {
+	int enforcement_mode;
+	time_t valid_certificate_start;
+	unsigned int len;
+	struct sdb_certificate_mapping *mappings;
+};
+
+
+struct sdb_certificate_mapping {
+	krb5_boolean strong_mapping;
+	krb5_data issuer_name;
+	krb5_data subject_name;
+	krb5_data serial_number;
+	krb5_data ski;
+	krb5_data public_key;
+	krb5_data rfc822;
+};
+
+
 struct sdb_entry {
 	struct samba_kdc_entry *skdc_entry;
 	krb5_principal principal;
@@ -101,6 +133,9 @@ struct sdb_entry {
 	int *max_life;
 	int *max_renew;
 	struct SDBFlags flags;
+	struct sdb_pub_keys pub_keys;
+	struct sdb_certificate_mappings mappings;
+	struct dom_sid sid;
 };
 
 #define SDB_ERR_NOENTRY 36150275
@@ -109,18 +144,24 @@ struct sdb_entry {
 
 /* These must match the values in hdb.h */
 
-#define SDB_F_DECRYPT		1	/* decrypt keys */
-#define SDB_F_GET_CLIENT	4	/* fetch client */
-#define SDB_F_GET_SERVER	8	/* fetch server */
-#define SDB_F_GET_KRBTGT	16	/* fetch krbtgt */
-#define SDB_F_GET_ANY		28	/* fetch any of client,server,krbtgt */
-#define SDB_F_CANON		32	/* want canonicalization */
-#define SDB_F_ADMIN_DATA	64	/* want data that kdc don't use  */
-#define SDB_F_KVNO_SPECIFIED	128	/* we want a particular KVNO */
-#define SDB_F_FOR_AS_REQ	4096	/* fetch is for a AS REQ */
-#define SDB_F_FOR_TGS_REQ	8192	/* fetch is for a TGS REQ */
-#define SDB_F_ARMOR_PRINCIPAL 262144	/* fetch is for the client of an armor ticket */
-#define SDB_F_USER2USER_PRINCIPAL 524288/* fetch is for the server of a user2user tgs-req */
+#define SDB_F_DECRYPT			0x00001	/* decrypt keys */
+#define SDB_F_REPLACE			0x00002	/* replace entry */
+#define SDB_F_GET_CLIENT		0x00004	/* fetch client */
+#define SDB_F_GET_SERVER		0x00008	/* fetch server */
+#define SDB_F_GET_KRBTGT		0x00010	/* fetch krbtgt */
+#define SDB_F_GET_ANY			( SDB_F_GET_CLIENT | \
+					  SDB_F_GET_SERVER | \
+					  SDB_F_GET_KRBTGT ) /* fetch any of client,server,krbtgt */
+#define SDB_F_CANON			0x00020	/* want canonicalization */
+#define SDB_F_ADMIN_DATA		0x00040	/* want data that kdc don't use  */
+#define SDB_F_KVNO_SPECIFIED		0x00080	/* we want a particular KVNO */
+#define SDB_F_FOR_AS_REQ		0x01000	/* fetch is for a AS REQ */
+#define SDB_F_FOR_TGS_REQ		0x02000	/* fetch is for a TGS REQ */
+#define SDB_F_ARMOR_PRINCIPAL		0x40000	/* fetch is for the client of an armor ticket */
+#define SDB_F_USER2USER_PRINCIPAL	0x80000	/* fetch is for the server of a user2user tgs-req */
+#define SDB_F_CROSS_REALM_PRINCIPAL	0x100000 /* fetch is cross-realm ticket */
+#define SDB_F_S4U2SELF_PRINCIPAL	0x200000 /* fetch is for S4U2Self */
+#define SDB_F_S4U2PROXY_PRINCIPAL	0x400000 /* fetch is for S4U2Proxy */
 
 #define SDB_F_HDB_MASK		(SDB_F_DECRYPT | \
 				 SDB_F_GET_CLIENT| \
@@ -132,12 +173,19 @@ struct sdb_entry {
 				 SDB_F_FOR_AS_REQ | \
 				 SDB_F_FOR_TGS_REQ | \
 				 SDB_F_ARMOR_PRINCIPAL| \
-				 SDB_F_USER2USER_PRINCIPAL)
+				 SDB_F_USER2USER_PRINCIPAL| \
+				 SDB_F_CROSS_REALM_PRINCIPAL| \
+				 SDB_F_S4U2SELF_PRINCIPAL| \
+				 SDB_F_S4U2PROXY_PRINCIPAL)
 
 /* These are not supported by HDB */
-#define SDB_F_FORCE_CANON	16384	/* force canonicalization */
-#define SDB_F_RODC_NUMBER_SPECIFIED	32768	/* we want a particular RODC number */
+#define SDB_F_FORCE_CANON		0x4000	/* force canonicalization */
+#define SDB_F_RODC_NUMBER_SPECIFIED	0x8000	/* we want a particular RODC number */
 
+void sdb_certificate_mapping_free(struct sdb_certificate_mapping *m);
+void sdb_certificate_mappings_free(struct sdb_certificate_mappings *m);
+void sdb_pub_key_free(struct sdb_pub_key *key);
+void sdb_pub_keys_free(struct sdb_pub_keys *keys);
 void sdb_key_free(struct sdb_key *key);
 void sdb_keys_free(struct sdb_keys *keys);
 void sdb_entry_free(struct sdb_entry *e);

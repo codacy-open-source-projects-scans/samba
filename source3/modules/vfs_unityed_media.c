@@ -566,8 +566,7 @@ static DIR *um_fdopendir(vfs_handle_struct *handle,
 	struct um_dirinfo_struct *dirInfo = NULL;
 	DIR *dirstream;
 
-	DEBUG(10, ("Entering with fsp->fsp_name->base_name '%s'\n",
-		   fsp->fsp_name->base_name));
+	DBG_DEBUG("Entering with fsp->fsp_name '%s'\n", fsp_str_dbg(fsp));
 
 	dirstream = SMB_VFS_NEXT_FDOPENDIR(handle, fsp, mask, attr);
 	if (!dirstream) {
@@ -600,8 +599,7 @@ out:
 	return (DIR *) dirInfo;
 
 err:
-	DEBUG(1, ("Failing with fsp->fsp_name->base_name '%s'\n",
-		  fsp->fsp_name->base_name));
+	DBG_WARNING("Failing with fsp->fsp_name '%s'\n", fsp_str_dbg(fsp));
 	TALLOC_FREE(dirInfo);
 	return NULL;
 }
@@ -923,11 +921,11 @@ err:
 }
 
 static int um_renameat(vfs_handle_struct *handle,
-		files_struct *srcfsp,
-		const struct smb_filename *smb_fname_src,
-		files_struct *dstfsp,
-		const struct smb_filename *smb_fname_dst,
-		const struct vfs_rename_how *how)
+		       files_struct *src_dirfsp,
+		       const struct smb_filename *smb_fname_src,
+		       files_struct *dst_dirfsp,
+		       const struct smb_filename *smb_fname_dst,
+		       const struct vfs_rename_how *how)
 {
 	int status;
 	struct smb_filename *src_full_fname = NULL;
@@ -936,15 +934,15 @@ static int um_renameat(vfs_handle_struct *handle,
 	struct smb_filename *dst_client_fname = NULL;
 
 	src_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  srcfsp,
-						  smb_fname_src);
+						      src_dirfsp,
+						      smb_fname_src);
 	if (src_full_fname == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
 	dst_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  dstfsp,
-						  smb_fname_dst);
+						      dst_dirfsp,
+						      smb_fname_dst);
 	if (dst_full_fname == NULL) {
 		TALLOC_FREE(src_full_fname);
 		errno = ENOMEM;
@@ -963,11 +961,11 @@ static int um_renameat(vfs_handle_struct *handle,
 		TALLOC_FREE(src_full_fname);
 		TALLOC_FREE(dst_full_fname);
 		return SMB_VFS_NEXT_RENAMEAT(handle,
-					srcfsp,
-					smb_fname_src,
-					dstfsp,
-					smb_fname_dst,
-					how);
+					     src_dirfsp,
+					     smb_fname_src,
+					     dst_dirfsp,
+					     smb_fname_dst,
+					     how);
 	}
 
 	status = alloc_get_client_smb_fname(handle, talloc_tos(),
@@ -1091,8 +1089,7 @@ static int um_fstat(vfs_handle_struct *handle,
 {
 	int status = 0;
 
-	DEBUG(10, ("Entering with fsp->fsp_name->base_name "
-		   "'%s'\n", fsp_str_dbg(fsp)));
+	DBG_DEBUG("Entering with fsp->fsp_name '%s'\n", fsp_str_dbg(fsp));
 
 	status = SMB_VFS_NEXT_FSTAT(handle, fsp, sbuf);
 	if (status != 0) {
@@ -1314,11 +1311,11 @@ err:
 }
 
 static int um_linkat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *old_smb_fname,
-			files_struct *dstfsp,
-			const struct smb_filename *new_smb_fname,
-			int flags)
+		     files_struct *src_dirfsp,
+		     const struct smb_filename *old_smb_fname,
+		     files_struct *dst_dirfsp,
+		     const struct smb_filename *new_smb_fname,
+		     int flags)
 {
 	int status;
 	struct smb_filename *old_full_fname = NULL;
@@ -1327,14 +1324,14 @@ static int um_linkat(vfs_handle_struct *handle,
 	struct smb_filename *new_client_fname = NULL;
 
 	old_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  srcfsp,
-						  old_smb_fname);
+						      src_dirfsp,
+						      old_smb_fname);
 	if (old_full_fname == NULL) {
 		return -1;
 	}
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						  dstfsp,
-						  new_smb_fname);
+						      dst_dirfsp,
+						      new_smb_fname);
 	if (new_full_fname == NULL) {
 		TALLOC_FREE(old_full_fname);
 		return -1;
@@ -1346,11 +1343,11 @@ static int um_linkat(vfs_handle_struct *handle,
 		TALLOC_FREE(old_full_fname);
 		TALLOC_FREE(new_full_fname);
 		return SMB_VFS_NEXT_LINKAT(handle,
-				srcfsp,
-				old_smb_fname,
-				dstfsp,
-				new_smb_fname,
-				flags);
+					   src_dirfsp,
+					   old_smb_fname,
+					   dst_dirfsp,
+					   new_smb_fname,
+					   flags);
 	}
 
 	status = alloc_get_client_smb_fname(handle, talloc_tos(),

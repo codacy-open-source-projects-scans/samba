@@ -285,13 +285,6 @@ dynconfig = {
          'HELPTEXT':  'Where to put the smbpasswd file',
          'DELAY':     True,
     },
-    'HIMMELBLAUD_HSM_PIN_PATH': {
-         'STD-PATH':  '${LOCALSTATEDIR}/lib/himmelblaud/hsm-pin',
-         'FHS-PATH':  '${LOCALSTATEDIR}/lib/himmelblaud/hsm-pin',
-         'OPTION':    '--with-himmelblaud-hsm-pin-path',
-         'HELPTEXT':  'Where to store the hsm pin',
-         'DELAY':     True,
-    },
 }
 
 def options(opt):
@@ -302,8 +295,7 @@ def options(opt):
         option = opt.parser.get_option(k)
         if option:
             opt.parser.remove_option(k)
-    del opt.parser.defaults['PRIVATELIBDIR']
-    del opt.parser.defaults['MODULESDIR']
+    opt.parser.set_defaults(PRIVATELIBDIR=None, MODULESDIR=None)
 
     # get all the basic GNU options from the gnu_dirs tool
 

@@ -20,6 +20,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include "cmocka.h"
 
@@ -153,6 +154,7 @@ static void test_device_claims_composite(void **state)
 	assert_non_null(sd);
 	status = se_access_check(sd, &token, 0x10, &access_granted);
 	assert_ntstatus_equal(status, NT_STATUS_OK, "access check failed\n");
+	TALLOC_FREE(mem_ctx);
 }
 
 
@@ -228,7 +230,8 @@ static bool fill_sd(TALLOC_CTX *mem_ctx,
 	};							\
 	struct security_descriptor *sd = NULL;
 
-
+#define DEINIT()						\
+	TALLOC_FREE(mem_ctx);
 
 static void test_composite_different_order(void **state)
 {
@@ -240,6 +243,7 @@ static void test_composite_different_order(void **state)
 	 * Claim arrays are sets, so we assume conditional ACE ones are too.
 	 */
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_different_order_with_dupes(void **state)
@@ -249,6 +253,7 @@ static void test_composite_different_order_with_dupes(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\", \"orange\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_different_order_with_dupes_in_composite(void **state)
@@ -258,6 +263,7 @@ static void test_composite_different_order_with_dupes_in_composite(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_different_order_with_SID_dupes(void **state)
@@ -267,6 +273,7 @@ static void test_composite_different_order_with_SID_dupes(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{SID(AA), SID(AA), SID(WD)}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_different_order_with_SID_dupes_in_composite(void **state)
@@ -276,6 +283,7 @@ static void test_composite_different_order_with_SID_dupes_in_composite(void **st
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{SID(AA), SID(WD)}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_mixed_types(void **state)
@@ -289,6 +297,7 @@ static void test_composite_mixed_types(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{SID(AA), SID(WD)}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_mixed_types_different_last(void **state)
@@ -302,6 +311,7 @@ static void test_composite_mixed_types_different_last(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{SID(AA), SID(WD)}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_composite_mixed_types_deny(void **state)
@@ -316,6 +326,7 @@ static void test_composite_mixed_types_deny(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{SID(AA), SID(WD)}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_different_case(void **state)
@@ -325,6 +336,7 @@ static void test_different_case(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_different_case_with_case_sensitive_flag(void **state)
@@ -336,6 +348,7 @@ static void test_different_case_with_case_sensitive_flag(void **state)
 	/* set the flag bit */
 	token.device_claims[0].flags = CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -346,6 +359,7 @@ static void test_claim_name_different_case(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_claim_name_different_case_case_flag(void **state)
@@ -359,6 +373,7 @@ static void test_claim_name_different_case_case_flag(void **state)
 	 */
 	token.device_claims[0].flags = CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE;
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_more_values_not_equal(void **state)
@@ -368,6 +383,7 @@ static void test_more_values_not_equal(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_contains(void **state)
@@ -377,6 +393,7 @@ static void test_contains(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_contains_incomplete(void **state)
@@ -386,6 +403,7 @@ static void test_contains_incomplete(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_any_of(void **state)
@@ -395,6 +413,7 @@ static void test_any_of(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_any_of_match_last(void **state)
@@ -404,6 +423,7 @@ static void test_any_of_match_last(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_any_of_1(void **state)
@@ -413,6 +433,7 @@ static void test_any_of_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_contains_1(void **state)
@@ -422,6 +443,7 @@ static void test_contains_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_contains_1_fail(void **state)
@@ -431,6 +453,7 @@ static void test_contains_1_fail(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_any_of_1_fail(void **state)
@@ -440,6 +463,7 @@ static void test_any_of_1_fail(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -450,6 +474,7 @@ static void test_not_any_of_1_fail(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_any_of_composite_1(void **state)
@@ -459,6 +484,7 @@ static void test_not_any_of_composite_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_contains_1_fail(void **state)
@@ -468,6 +494,7 @@ static void test_not_contains_1_fail(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_contains_1(void **state)
@@ -477,6 +504,7 @@ static void test_not_contains_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_any_of_1(void **state)
@@ -486,6 +514,7 @@ static void test_not_any_of_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_Not_Any_of_1(void **state)
@@ -495,6 +524,7 @@ static void test_not_Not_Any_of_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_Not_Contains_1(void **state)
@@ -504,6 +534,7 @@ static void test_not_Not_Contains_1(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -514,6 +545,7 @@ static void test_not_not_Not_Member_of(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_SIDS("BA", "BG");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_not_Not_Member_of_fail(void **state)
@@ -523,6 +555,7 @@ static void test_not_not_Not_Member_of_fail(void **state)
 	USER_SIDS("WD", "AA");
 	DEVICE_SIDS("BA", "BG");
 	DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_not_not_not_not_not_not_not_not_not_not_Not_Member_of(void **state)
@@ -533,6 +566,7 @@ static void test_not_not_not_not_not_not_not_not_not_not_Not_Member_of(void **st
 	USER_SIDS("WD", "AA");
 	DEVICE_SIDS("BA", "BG");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -544,6 +578,7 @@ static void test_Device_Member_of_and_Member_of(void **state)
 	SD("D:(XA;;0x1f;;;AA;"
 	   "(Device_Member_of{SID(BA)} && Member_of{SID(WD)}))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -555,6 +590,7 @@ static void test_Device_claim_contains_Resource_claim(void **state)
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour Contains @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"blue\"))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -566,6 +602,7 @@ static void test_device_claim_contains_resource_claim(void **state)
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour Contains @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"blue\"))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_device_claim_eq_resource_claim(void **state)
@@ -576,6 +613,7 @@ static void test_device_claim_eq_resource_claim(void **state)
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour == @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"blue\"))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_user_claim_eq_device_claim(void **state)
@@ -586,6 +624,7 @@ static void test_user_claim_eq_device_claim(void **state)
 	DEVICE_CLAIMS("colour", "\"blue\"");
 	SD("D:(XA;;0x1f;;;AA;(@User.colour == @Device.colour))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_device_claim_eq_resource_claim_2(void **state)
@@ -595,6 +634,7 @@ static void test_device_claim_eq_resource_claim_2(void **state)
 	DEVICE_CLAIMS("colour", "{\"orange\", \"blue\"}");
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour == {\"orange\", \"blue\"}))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_resource_ace_multi(void **state)
@@ -605,6 +645,7 @@ static void test_resource_ace_multi(void **state)
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour Contains @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"blue\", \"red\"))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_resource_ace_multi_any_of(void **state)
@@ -615,6 +656,7 @@ static void test_resource_ace_multi_any_of(void **state)
 	SD("D:(XA;;0x1f;;;AA;(@Device.colour Any_of @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"grue\", \"blue\", \"red\"))");
 	ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_horrible_fuzz_derived_test_3(void **state)
@@ -622,6 +664,7 @@ static void test_horrible_fuzz_derived_test_3(void **state)
 	INIT();
 	USER_SIDS("WD", "AA", "IS");
 	SD_FAIL("S:PPD:(XA;OI;0x1;;;IS;(q>))");
+	DEINIT()
 }
 
 static void test_resource_ace_single(void **state)
@@ -632,6 +675,7 @@ static void test_resource_ace_single(void **state)
         SD("D:(XA;;0x1f;;;AA;(@Device.colour Contains @Resource.colour))"
 	   "S:(RA;;;;;WD;(\"colour\",TS,0,\"blue\"))");
         ALLOW_CHECK(0x10);
+	DEINIT()
 }
 
 
@@ -642,6 +686,7 @@ static void test_user_attr_any_of_missing_resource_and_user_attr(void **state)
         DEVICE_CLAIMS("colour", "\"blue\"");
         SD("D:(XD;;FX;;;S-1-1-0;(@User.Project Any_of @Resource.Project))");
         DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_user_attr_any_of_missing_resource_attr(void **state)
@@ -651,6 +696,7 @@ static void test_user_attr_any_of_missing_resource_attr(void **state)
         USER_CLAIMS("Project", "3");
         SD("D:(XD;;FX;;;S-1-1-0;(@User.Project Any_of @Resource.Project))");
         DENY_CHECK(0x10);
+	DEINIT()
 }
 
 static void test_user_attr_any_of_missing_user_attr(void **state)
@@ -660,6 +706,7 @@ static void test_user_attr_any_of_missing_user_attr(void **state)
         SD("D:(XD;;FX;;;S-1-1-0;(@User.Project Any_of @Resource.Project))"
 	   "S:(RA;;;;;WD;(\"Project\",TX,0,1234))");
         DENY_CHECK(0x10);
+	DEINIT()
 }
 
 

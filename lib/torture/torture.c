@@ -19,6 +19,8 @@
 */
 
 #include "source4/include/includes.h"
+#include <tevent.h>
+#include "../lib/util/talloc_report.h"
 #include "../torture/torture.h"
 #include "../lib/util/dlinklist.h"
 #include "param/param.h"
@@ -42,22 +44,38 @@ struct torture_results *torture_results_init(TALLOC_CTX *mem_ctx, const struct t
 /**
  * Initialize a torture context
  */
-struct torture_context *torture_context_init(struct tevent_context *event_ctx, 
-											 struct torture_results *results)
+struct torture_context *torture_context_init(TALLOC_CTX *mem_ctx,
+					     struct tevent_context *event_ctx,
+					     struct loadparm_context *lp_ctx,
+					     struct torture_results *results,
+					     char *outputdir_template)
 {
-	struct torture_context *torture = talloc_zero(event_ctx, 
-						      struct torture_context);
+	struct torture_context *torture = NULL;
 
-	if (torture == NULL)
+	SMB_ASSERT(event_ctx);
+	SMB_ASSERT(lp_ctx);
+	SMB_ASSERT(results);
+	SMB_ASSERT(outputdir_template);
+
+	torture = talloc_zero(mem_ctx, struct torture_context);
+	if (torture == NULL) {
 		return NULL;
+	}
 
 	torture->ev = event_ctx;
-	torture->results = talloc_reference(torture, results);
+	torture->lp_ctx = lp_ctx;
+	torture->results = results;
 
 	/*
 	 * We start with an empty subunit prefix
 	 */
 	torture_subunit_prefix_reset(torture, NULL);
+
+	torture->outputdir = mkdtemp(outputdir_template);
+	if (torture->outputdir == NULL) {
+		TALLOC_FREE(torture);
+		return NULL;
+	}
 
 	return torture;
 }
@@ -65,17 +83,33 @@ struct torture_context *torture_context_init(struct tevent_context *event_ctx,
 /**
  * Create a sub torture context
  */
-struct torture_context *torture_context_child(struct torture_context *parent)
+struct torture_context *torture_context_child(TALLOC_CTX *mem_ctx,
+					      struct torture_context *parent)
 {
-	struct torture_context *subtorture = talloc_zero(parent, struct torture_context);
+	struct torture_context *subtorture = NULL;
 
-	if (subtorture == NULL)
+	SMB_ASSERT(parent);
+	SMB_ASSERT(parent->ev);
+	SMB_ASSERT(parent->lp_ctx);
+	SMB_ASSERT(parent->results);
+	SMB_ASSERT(parent->outputdir);
+
+	subtorture = talloc_zero(mem_ctx, struct torture_context);
+	if (subtorture == NULL) {
 		return NULL;
+	}
 
-	subtorture->ev = talloc_reference(subtorture, parent->ev);
-	subtorture->lp_ctx = talloc_reference(subtorture, parent->lp_ctx);
-	subtorture->outputdir = talloc_reference(subtorture, parent->outputdir);
-	subtorture->results = talloc_reference(subtorture, parent->results);
+	subtorture->ev = parent->ev;
+	subtorture->lp_ctx = parent->lp_ctx;
+	subtorture->results = parent->results;
+	subtorture->outputdir = parent->outputdir;
+
+	if (parent->active_prefix != NULL) {
+		memcpy(subtorture->_initial_prefix.subunit_prefix,
+		       parent->active_prefix->subunit_prefix,
+		       sizeof(subtorture->active_prefix->subunit_prefix));
+	}
+	subtorture->active_prefix = &subtorture->_initial_prefix;
 
 	return subtorture;
 }
@@ -484,22 +518,97 @@ static bool test_needs_running(const char *name, const char **restricted)
 	return false;
 }
 
-static bool internal_torture_run_test(struct torture_context *context,
+static void torture_dummy_signal0_handler(struct tevent_context *ev,
+					  struct tevent_signal *se,
+					  int signum,
+					  int count,
+					  void *siginfo,
+					  void *private_data)
+{
+}
+
+static bool internal_torture_run_test(struct torture_context *_context,
 					  struct torture_tcase *tcase,
 					  struct torture_test *test,
 					  bool already_setup,
 					  const char **restricted)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct torture_context *context = NULL;
+	char *subunit_testname = NULL;
 	bool success;
-	char *subunit_testname = torture_subunit_test_name(context, tcase, test);
+	size_t evtb1 = 0;
+	size_t evtb2 = 0;
 
-	if (!test_needs_running(subunit_testname, restricted))
+	if (already_setup) {
+		context = _context;
+	} else {
+		context = torture_context_child(frame, _context);
+		if (context == NULL) {
+			torture_ui_test_start(_context, tcase, test);
+			torture_ui_test_result(_context, TORTURE_ERROR,
+					       "torture_context_child() failed");
+			TALLOC_FREE(frame);
+			return false;
+		}
+	}
+
+	subunit_testname = torture_subunit_test_name(context, tcase, test);
+	if (subunit_testname == NULL) {
+		torture_ui_test_start(context, tcase, test);
+		torture_ui_test_result(context, TORTURE_ERROR,
+				       "torture_subunit_test_name() failed");
+		TALLOC_FREE(frame);
+		return false;
+	}
+	talloc_steal(frame, subunit_testname);
+
+	if (!test_needs_running(subunit_testname, restricted)) {
+		TALLOC_FREE(frame);
 		return true;
+	}
 
 	context->active_tcase = tcase;
 	context->active_test = test;
 
 	torture_ui_test_start(context, tcase, test);
+
+	if (!already_setup) {
+		struct tevent_signal *dummy_se = NULL;
+		int rc;
+
+		rc = tevent_re_initialise(context->ev);
+		if (rc != 0) {
+			torture_ui_test_result(context, TORTURE_ERROR,
+					       "tevent_re_initialise() failed");
+			TALLOC_FREE(frame);
+			return false;
+		}
+
+		/*
+		 * We call tevent_add_signal() in order
+		 * to have tevent_common_wakeup_init()
+		 * called.
+		 *
+		 * So that talloc_total_blocks(context->ev)
+		 * gives stable results.
+		 */
+		dummy_se = tevent_add_signal(context->ev,
+					     context,
+					     SIGCONT,
+					     0, /* sa_flags */
+					     torture_dummy_signal0_handler,
+					     NULL);
+		if (dummy_se == NULL) {
+			torture_ui_test_result(context, TORTURE_ERROR,
+					       "tevent_add_signal() failed");
+			TALLOC_FREE(frame);
+			return false;
+		}
+		TALLOC_FREE(dummy_se);
+
+		evtb1 = talloc_total_blocks(context->ev);
+	}
 
 	context->last_reason = NULL;
 	context->last_result = TORTURE_OK;
@@ -537,11 +646,25 @@ static bool internal_torture_run_test(struct torture_context *context,
 	torture_ui_test_result(context, context->last_result,
 			       context->last_reason);
 
-	talloc_free(context->last_reason);
-	context->last_reason = NULL;
+	if (!already_setup) {
+		TALLOC_FREE(context);
 
-	context->active_test = NULL;
-	context->active_tcase = NULL;
+		evtb2 = talloc_total_blocks(_context->ev);
+		if (evtb1 != evtb2) {
+			char *rp = talloc_report_str(frame, _context->ev);
+			DBG_ERR("%s: evtb1[%zu] evtb2[%zu]\n%s\n",
+				subunit_testname, evtb1, evtb2, rp);
+			TALLOC_FREE(rp);
+			if (success) {
+				SMB_ASSERT(evtb1 == evtb2);
+			}
+		}
+	}
+
+	TALLOC_FREE(frame);
+	if (!already_setup) {
+		tevent_re_initialise(_context->ev);
+	}
 
 	return success;
 }
@@ -552,19 +675,71 @@ bool torture_run_tcase(struct torture_context *context,
 	return torture_run_tcase_restricted(context, tcase, NULL);
 }
 
-bool torture_run_tcase_restricted(struct torture_context *context,
+bool torture_run_tcase_restricted(struct torture_context *_context,
 		       struct torture_tcase *tcase, const char **restricted)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct torture_context *context = NULL;
+	struct tevent_signal *dummy_se = NULL;
 	bool ret = true;
 	struct torture_test *test;
 	bool setup_succeeded = true;
 	const char * setup_reason = "Setup failed";
+	enum torture_result fail_result = TORTURE_FAIL;
+	size_t evtb1 = 0;
+	size_t evtb2 = 0;
+	int rc;
+
+	context = torture_context_child(frame, _context);
+	if (context == NULL) {
+		setup_succeeded = false;
+		setup_reason = "torture_context_child() failed";
+		fail_result = TORTURE_ERROR;
+		context = _context;
+		goto setup_failed;
+	}
+
+	rc = tevent_re_initialise(context->ev);
+	if (rc != 0) {
+		setup_succeeded = false;
+		setup_reason = "tevent_re_initialise() failed";
+		fail_result = TORTURE_ERROR;
+		context = _context;
+		goto setup_failed;
+	}
+
+	/*
+	 * We call tevent_add_signal() in order
+	 * to have tevent_common_wakeup_init()
+	 * called.
+	 *
+	 * So that talloc_total_blocks(context->ev)
+	 * gives stable results.
+	 */
+	dummy_se = tevent_add_signal(context->ev,
+				     context,
+				     SIGCONT,
+				     0, /* sa_flags */
+				     torture_dummy_signal0_handler,
+				     NULL);
+	if (dummy_se == NULL) {
+		setup_succeeded = false;
+		setup_reason = "tevent_add_signal() failed";
+		fail_result = TORTURE_ERROR;
+		context = _context;
+		goto setup_failed;
+	}
+	TALLOC_FREE(dummy_se);
+
+	evtb1 = talloc_total_blocks(context->ev);
+
+setup_failed:
 
 	context->active_tcase = tcase;
 	if (context->results->ui_ops->tcase_start) 
 		context->results->ui_ops->tcase_start(context, tcase);
 
-	if (tcase->fixture_persistent && tcase->setup) {
+	if (setup_succeeded && tcase->fixture_persistent && tcase->setup) {
 		setup_succeeded = tcase->setup(context, &tcase->data);
 	}
 
@@ -588,7 +763,7 @@ bool torture_run_tcase_restricted(struct torture_context *context,
 			context->active_tcase = tcase;
 			context->active_test = test;
 			torture_ui_test_start(context, tcase, test);
-			torture_ui_test_result(context, TORTURE_FAIL, setup_reason);
+			torture_ui_test_result(context, fail_result, setup_reason);
 		}
 	}
 
@@ -602,6 +777,26 @@ bool torture_run_tcase_restricted(struct torture_context *context,
 
 	if (context->results->ui_ops->tcase_finish)
 		context->results->ui_ops->tcase_finish(context, tcase);
+
+	if (setup_succeeded) {
+		if (context != _context) {
+			TALLOC_FREE(context);
+		}
+
+		evtb2 = talloc_total_blocks(_context->ev);
+		if (evtb1 != evtb2) {
+			char *rp = talloc_report_str(frame, _context->ev);
+			DBG_ERR("%s: evtb1[%zu] evtb2[%zu]\n%s\n",
+				tcase->name, evtb1, evtb2, rp);
+			TALLOC_FREE(rp);
+			if (ret) {
+				SMB_ASSERT(evtb1 == evtb2);
+			}
+		}
+	}
+
+	TALLOC_FREE(frame);
+	tevent_re_initialise(_context->ev);
 
 	return (!setup_succeeded) ? false : ret;
 }

@@ -36,6 +36,7 @@
 #include "lib/string_replace.h"
 #include "utils/net.h"
 #include "lib/global_contexts.h"
+#include "source3/smbd/smbd.h"
 
 #define NET_VFS_CMD_STREAM_TO_ADOUBLE "stream2adouble"
 
@@ -208,6 +209,7 @@ static int net_vfs_get_ntacl(struct net_context *net,
 			     const char **argv)
 {
 	const char *path = NULL;
+	struct files_struct *dirfsp = NULL;
 	struct smb_filename *smb_fname = NULL;
 	files_struct *fsp = NULL;
 	struct security_descriptor *sd = NULL;
@@ -236,24 +238,25 @@ static int net_vfs_get_ntacl(struct net_context *net,
 		goto done;
 	}
 
-	ret = SMB_VFS_STAT(state.conn_tos->conn, smb_fname);
-	if (ret != 0) {
-		fprintf(stderr, "stat [%s] failed: %s\n",
-			smb_fname_str_dbg(smb_fname), strerror(errno));
-		goto done;
-	}
-
-	status = openat_pathref_fsp(state.conn_tos->conn->cwd_fsp, smb_fname);
+	status = filename_convert_dirfsp(state.mem_ctx,
+					 state.conn_tos->conn,
+					 path,
+					 UCF_POSIX_PATHNAMES |
+						 UCF_LCOMP_LNK_OK,
+					 0,
+					 &dirfsp,
+					 &smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_ERR("openat_pathref_fsp [%s] failed: %s\n",
-			smb_fname_str_dbg(smb_fname), nt_errstr(status));
+		DBG_ERR("filename_convert_dirfsp() [%s] failed: %s\n",
+			smb_fname_str_dbg(smb_fname),
+			nt_errstr(status));
 		goto done;
 	}
 
 	status = SMB_VFS_CREATE_FILE(
 		state.conn_tos->conn,
 		NULL,				/* req */
-		NULL,
+		dirfsp,
 		smb_fname,
 		FILE_READ_ATTRIBUTES|READ_CONTROL_ACCESS,
 		FILE_SHARE_READ|FILE_SHARE_WRITE,
@@ -269,9 +272,13 @@ static int net_vfs_get_ntacl(struct net_context *net,
 		&fsp,
 		NULL,				/* info */
 		NULL, NULL);			/* create context */
+
+	close_file_free(NULL, &dirfsp, ERROR_CLOSE);
+
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("SMB_VFS_CREATE_FILE [%s] failed: %s\n",
 			smb_fname_str_dbg(smb_fname), nt_errstr(status));
+		TALLOC_FREE(smb_fname);
 		goto done;
 	}
 
@@ -308,6 +315,7 @@ done:
 			rc = 1;
 		}
 	}
+	TALLOC_FREE(smb_fname);
 	return rc;
 }
 
@@ -316,8 +324,7 @@ static bool do_unfruit(const char *path)
 	struct smb_filename *smb_fname = NULL;
 	char *p = NULL;
 	bool converted;
-	int ret;
-	bool ok;
+	NTSTATUS status;
 
 	p = strrchr_m(path, '/');
 	if (p != NULL) {
@@ -336,22 +343,16 @@ static bool do_unfruit(const char *path)
 		return false;
 	}
 
-	ret = SMB_VFS_STAT(state.conn_tos->conn, smb_fname);
-	if (ret != 0) {
-		fprintf(stderr, "%s: %s\n", path, strerror(errno));
-		if (state.c->opt_continue_on_error) {
-			return true;
-		}
-		return false;
-	}
-
-	ok = ad_unconvert(state.mem_ctx,
-			  state.conn_tos->conn->vfs_handles,
-			  macos_string_replace_map,
-			  smb_fname,
-			  &converted);
-	if (!ok) {
-		fprintf(stderr, "Converting failed: %s\n", path);
+	status = ad_unconvert(state.mem_ctx,
+			      state.conn_tos->conn->vfs_handles,
+			      macos_string_replace_map,
+			      smb_fname,
+			      &converted);
+	if (!NT_STATUS_IS_OK(status)) {
+		fprintf(stderr,
+			"Converting \"%s\" failed: %s\n",
+			path,
+			nt_errstr(status));
 		if (state.c->opt_continue_on_error) {
 			return true;
 		}

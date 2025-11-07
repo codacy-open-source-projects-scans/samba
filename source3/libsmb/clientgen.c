@@ -19,7 +19,8 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "../libcli/smb/smb_signing.h"
 #include "../libcli/smb/smb_seal.h"
@@ -64,7 +65,7 @@ bool cli_set_backup_intent(struct cli_state *cli, bool flag)
 struct GUID cli_state_client_guid;
 
 struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
-				   int fd,
+				   struct smbXcli_transport **ptransport,
 				   const char *remote_name,
 				   enum smb_signing_setting signing_state,
 				   int flags)
@@ -77,9 +78,11 @@ struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 	uint32_t smb1_capabilities = 0;
 	uint32_t smb2_capabilities = 0;
 	struct smb311_capabilities smb3_capabilities =
-		smb311_capabilities_parse("client",
+		smb311_capabilities_parse(
+			"client",
 			lp_client_smb3_signing_algorithms(),
-			lp_client_smb3_encryption_algorithms());
+			lp_client_smb3_encryption_algorithms(),
+			lp_client_smb_encryption_over_quic());
 	struct GUID client_guid;
 
 	if (!GUID_all_zero(&cli_state_client_guid)) {
@@ -192,7 +195,9 @@ struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 
 	smb2_capabilities = SMB2_CAP_ALL;
 
-	cli->conn = smbXcli_conn_create(cli, fd, remote_name,
+	cli->conn = smbXcli_conn_create(cli,
+					ptransport,
+					remote_name,
 					signing_state,
 					smb1_capabilities,
 					&client_guid,
@@ -609,41 +614,4 @@ NTSTATUS cli_echo(struct cli_state *cli, uint16_t num_echos, DATA_BLOB data)
  fail:
 	TALLOC_FREE(frame);
 	return status;
-}
-
-NTSTATUS cli_smb(TALLOC_CTX *mem_ctx, struct cli_state *cli,
-		 uint8_t smb_command, uint8_t additional_flags,
-		 uint8_t wct, uint16_t *vwv,
-		 uint32_t num_bytes, const uint8_t *bytes,
-		 struct tevent_req **result_parent,
-		 uint8_t min_wct, uint8_t *pwct, uint16_t **pvwv,
-		 uint32_t *pnum_bytes, uint8_t **pbytes)
-{
-        struct tevent_context *ev;
-        struct tevent_req *req = NULL;
-        NTSTATUS status = NT_STATUS_NO_MEMORY;
-
-        if (smbXcli_conn_has_async_calls(cli->conn)) {
-                return NT_STATUS_INVALID_PARAMETER;
-        }
-        ev = samba_tevent_context_init(mem_ctx);
-        if (ev == NULL) {
-                goto fail;
-        }
-        req = cli_smb_send(mem_ctx, ev, cli, smb_command, additional_flags, 0,
-			   wct, vwv, num_bytes, bytes);
-        if (req == NULL) {
-                goto fail;
-        }
-        if (!tevent_req_poll_ntstatus(req, ev, &status)) {
-                goto fail;
-        }
-        status = cli_smb_recv(req, NULL, NULL, min_wct, pwct, pvwv,
-			      pnum_bytes, pbytes);
-fail:
-        TALLOC_FREE(ev);
-	if (NT_STATUS_IS_OK(status) && (result_parent != NULL)) {
-		*result_parent = req;
-	}
-        return status;
 }

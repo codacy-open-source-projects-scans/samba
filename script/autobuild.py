@@ -176,18 +176,13 @@ builddirs = {
 }
 
 ctdb_configure_params = " --enable-developer ${PREFIX}"
-samba_configure_params = " ${ENABLE_COVERAGE} ${PREFIX} --with-profiling-data"
+samba_configure_params = " ${ENABLE_COVERAGE} ${PREFIX} --with-profiling-data --with-prometheus-exporter"
 
-# We cannot configure himmelblau on old systems missing openssl 3, with glibc
-# older than version 2.32, or when cargo isn't available.
-himmelblau_configure_params = ''
 rust_configure_param = ''
 glibc_vers = float('.'.join(get_libc_version().split('.')[:2]))
 cargo = shutil.which('cargo')
 if glibc_vers >= 2.32 and cargo != None:
     rust_configure_param = ' --enable-rust'
-if ssl.OPENSSL_VERSION_INFO[0] >= 3 and rust_configure_param:
-    himmelblau_configure_params = rust_configure_param + ' --with-himmelblau'
 
 samba_libs_envvars = "PYTHONPATH=${PYTHON_PREFIX}:$PYTHONPATH"
 samba_libs_envvars += " PKG_CONFIG_PATH=$PKG_CONFIG_PATH:${PREFIX_DIR}/lib/pkgconfig"
@@ -197,6 +192,22 @@ samba_libs_configure_libs = samba_libs_configure_base + " --bundled-libraries=cm
 samba_libs_configure_bundled_libs = " --bundled-libraries=!talloc,!pytalloc-util,!tdb,!pytdb,!tevent,!pytevent,!popt"
 samba_libs_configure_samba = samba_libs_configure_base + samba_libs_configure_bundled_libs
 
+is_ubuntu = False
+try:
+    from landscape.lib.os_release import parse_os_release
+    v = parse_os_release()
+    if v["distributor-id"] == "Ubuntu":
+        is_ubuntu = True
+except ImportError:
+    pass
+
+# on ubuntu gcc implies _FORTIFY_SOURCE
+# before 24.04 it was _FORTIFY_SOURCE=2
+# and 24.04 has _FORTIFY_SOURCE=3
+# so we do not specify it explicitly.
+samba_o3_cflags = "-O3"
+if not is_ubuntu:
+    samba_o3_cflags += " -Wp,-D_FORTIFY_SOURCE=2"
 
 def format_option(name, value=None):
     """Format option as str list."""
@@ -282,7 +293,7 @@ tasks = {
     "samba-mit-build": {
         "git-clone-required": True,
         "sequence": [
-            ("configure", "./configure.developer --with-system-mitkrb5 --with-experimental-mit-ad-dc" + samba_configure_params),
+            ("configure", "./configure.developer --with-system-mitkrb5 --with-experimental-mit-ad-dc --with-systemd-userdb" + samba_configure_params),
             ("make", "make -j"),
             ("check-clean-tree", CLEAN_SOURCE_TREE_CMD),
             ("chmod-R-a-w", "chmod -R a-w ."),
@@ -838,7 +849,7 @@ tasks = {
     "samba-o3": {
         "sequence": [
             ("random-sleep", random_sleep(300, 900)),
-            ("configure", "ADDITIONAL_CFLAGS='-O3 -Wp,-D_FORTIFY_SOURCE=2' ./configure.developer --abi-check-disable" + himmelblau_configure_params + samba_configure_params),
+            ("configure", "ADDITIONAL_CFLAGS='" + samba_o3_cflags + "' ./configure.developer --abi-check-disable" + samba_configure_params),
             ("make", "make -j"),
             ("test", make_test(cmd='make test', TESTS="--exclude=selftest/slow-none", include_envs=["none"])),
             ("quicktest", make_test(cmd='make quicktest', include_envs=["ad_dc", "ad_dc_smb1", "ad_dc_smb1_done"])),
@@ -879,6 +890,8 @@ tasks = {
          "./configure.developer ${PREFIX} "
          "--with-selftest-prefix=./bin/ab "
          "--with-cluster-support "
+         "--with-profiling-data "
+         "--with-prometheus-exporter "
          "--bundled-libraries=!tdb"),
             ("samba-make", "make"),
             ("samba-check", "./bin/smbd --configfile=/dev/null -b | grep CLUSTER_SUPPORT"),
@@ -1039,7 +1052,7 @@ tasks = {
         "sequence": [
         # build the fuzzers (static) via the oss-fuzz script
             ("fuzzers-mkdir-prefix", "mkdir -p ${PREFIX_DIR}"),
-            ("fuzzers-build", "OUT=${PREFIX_DIR} LIB_FUZZING_ENGINE= SANITIZER=address CXX= CFLAGS= ADDITIONAL_LDFLAGS='-fuse-ld=bfd' ./lib/fuzzing/oss-fuzz/build_samba.sh --enable-afl-fuzzer"),
+            ("fuzzers-build", "OUT=${PREFIX_DIR} LIB_FUZZING_ENGINE= SANITIZER=address CXX= CFLAGS= ADDITIONAL_LDFLAGS='-fuse-ld=bfd' ./lib/fuzzing/oss-fuzz/build_samba.sh --enable-afl-fuzzer --with-profiling-data --with-prometheus-exporter"),
         ],
     },
 
@@ -1070,7 +1083,7 @@ tasks = {
             ("allprivate-def-configure", "./configure.developer " + samba_configure_params + " --private-libraries=ALL"),
             ("allprivate-def-make", "nice -n 19 make -j 2"),
             # note wrapper libraries need to be public
-            ("allprivate-def-no-public", "ls ./bin/shared | egrep -v '^private$|lib[nprsu][saeoi][smscd].*-wrapper.so$|pam_set_items.so|pam_matrix.so' | wc -l | grep -q '^0'"),
+            ("allprivate-def-no-public", "ls ./bin/shared | egrep -v '^private$|lib[npqrsu][saueoi][smiscd].*-wrapper.so$|pam_set_items.so|pam_matrix.so' | wc -l | grep -q '^0'"),
             ("allprivate-def-only-private-ext", "ls ./bin/shared/private | egrep 'private-samba' | wc -l | grep -q '^0' && exit 1; exit 0"),
             ("allprivate-def-no-non-private-ext", "ls ./bin/shared/private | egrep -v 'private-samba|^libpypamtest.so$' | wc -l | grep -q '^0'"),
             ("allprivate-def-test", make_test(TESTS="samba3.smb2.create.*nt4_dc")),
@@ -1084,7 +1097,7 @@ tasks = {
             ("allprivate-ext-configure", "./configure.developer " + samba_configure_params + " --private-libraries=ALL --private-library-extension=private-library --private-extension-exception=pac,ndr"),
             ("allprivate-ext-make", "nice -n 19 make -j 2"),
             # note wrapper libraries need to be public
-            ("allprivate-ext-no-public", "ls ./bin/shared | egrep -v '^private$|lib[nprsu][saeoi][smscd].*-wrapper.so$|pam_set_items.so|pam_matrix.so' | wc -l | grep -q '^0'"),
+            ("allprivate-ext-no-public", "ls ./bin/shared | egrep -v '^private$|lib[npqrsu][saueoi][smiscd].*-wrapper.so$|pam_set_items.so|pam_matrix.so' | wc -l | grep -q '^0'"),
             ("allprivate-ext-no-private-default-ext", "ls ./bin/shared/private | grep 'private-samba' | wc -l | grep -q '^0'"),
             ("allprivate-ext-has-private-ext", "ls ./bin/shared/private | grep 'private-library' | wc -l | grep -q '^0' && exit 1; exit 0"),
             ("allprivate-ext-libndr-no-private-ext", "ls ./bin/shared/private | grep -v 'private-library' | grep 'libndr' | wc -l | grep -q '^1'"),
@@ -1118,7 +1131,7 @@ tasks = {
         "sequence": [
             ("random-sleep", random_sleep(300, 900)),
 
-            ("configure", "./configure.developer ${ENABLE_COVERAGE} ${PREFIX} --with-profiling-data --disable-python --without-ad-dc"),
+            ("configure", "./configure.developer " + samba_configure_params + " --disable-python --without-ad-dc"),
             ("make", "make -j"),
             ("find-python", "script/find_python.sh ${PREFIX}"),
             ("test", "make test-nopython"),

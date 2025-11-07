@@ -43,8 +43,8 @@ struct tstream_context;
 struct gensec_security;
 
 enum dcerpc_transport_t {
-	NCA_UNKNOWN, NCACN_NP, NCACN_IP_TCP, NCACN_IP_UDP, NCACN_VNS_IPC, 
-	NCACN_VNS_SPP, NCACN_AT_DSP, NCADG_AT_DDP, NCALRPC, NCACN_UNIX_STREAM, 
+	NCA_UNKNOWN, NCACN_NP, NCACN_IP_TCP, NCACN_IP_UDP, NCACN_VNS_IPC,
+	NCACN_VNS_SPP, NCACN_AT_DSP, NCADG_AT_DDP, NCALRPC, NCACN_UNIX_STREAM,
 	NCADG_UNIX_DGRAM, NCACN_HTTP, NCADG_IPX, NCACN_SPX, NCACN_INTERNAL };
 
 /** this describes a binding to a particular transport/pipe */
@@ -113,6 +113,8 @@ struct dcerpc_binding;
 #define DCERPC_PACKET			(1<<26)
 
 #define DCERPC_SMB1                    (1<<27)
+
+#define DCERPC_SCHANNEL_KRB5           (1<<28)
 
 /* The following definitions come from ../librpc/rpc/dcerpc_error.c  */
 

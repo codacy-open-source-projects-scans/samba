@@ -426,6 +426,61 @@
 	    </listitem>
 	  </varlistentry>
 
+	  <varlistentry>
+	    <term>fruit:veto_localized = yes | no</term>
+	    <listitem>
+
+	      <para>When <parameter>fruit:veto_localized</parameter> is set to
+	      <parameter>yes</parameter>, vfs_fruit will automatically veto any
+	      attempts to access the <emphasis>.localized</emphasis> file or directory.
+	      These can be created in order to let Mac OS provide localized
+	      translations for folder names (typically for localized versions
+	      of <emphasis>Desktop</emphasis>, <emphasis>Music</emphasis>, etc.).
+	      When very large directories are listed a Mac client might do queries for
+	      the presence of the .localized file for each and every entry in that
+	      directory listing. In combination with clustered filesystems this might
+	      have a significant impact on the overal directory listing performance.
+	      When potential folder name translation is not desired this option allows
+	      to avoid the additional network overhead by not letting the server go
+	      down to the filesystem layer for any queries.</para>
+	      <para>The default is <emphasis>no</emphasis>.</para>
+
+            </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:posix_opens = yes | no</term>
+	    <listitem>
+
+	      <para>When <parameter>fruit:posix_opens</parameter> is set to
+	      <parameter>yes</parameter>, vfs_fruit will internally translate
+	      all filesystem semantics to use POSIX behaviour instead of Windows
+	      behaviour. As Macs are closer to POSIX than Windows with regard
+	      to filesystem semantics, this improves access semantics for
+	      a lot of corner cases.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+
+            </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:ignore_zero_aces = yes | no</term>
+	    <listitem>
+
+	      <para>When <parameter>fruit:ignore_zero_aces</parameter> is
+	      enabled, attempts to modify filesystem permissions fail if the ACL
+	      sent over the wire contains no ACEs. This is completely valid
+	      client behaviour, but it means subsequently no further access is
+	      possible to the file, unless permissions get fixed by an
+	      administrator.</para>
+	      <para>This problematic behaviour has been reported for latest
+	      macOS versions and this new option allows to work around
+	      it.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+
+            </listitem>
+	  </varlistentry>
+
 	</variablelist>
 </refsect1>
 

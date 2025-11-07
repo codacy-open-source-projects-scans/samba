@@ -54,7 +54,8 @@
 #include "messages.h"
 #include "rpc_server/spoolss/srv_spoolss_nt.h"
 #include "util_tdb.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "printing/printer_list.h"
 #include "../lib/tsocket/tsocket.h"
 #include "rpc_client/cli_winreg_spoolss.h"
@@ -2462,6 +2463,9 @@ static bool spoolss_connect_to_client(struct rpc_pipe_client **pp_pipe, struct c
 	struct sockaddr_storage rm_addr;
 	char addr[INET6_ADDRSTRLEN];
 	struct cli_credentials *anon_creds = NULL;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	if ( is_zero_addr(client_ss) ) {
 		DEBUG(2,("spoolss_connect_to_client: resolving %s\n",
@@ -2496,7 +2500,7 @@ static bool spoolss_connect_to_client(struct rpc_pipe_client **pp_pipe, struct c
 					lp_netbios_name(),
 					remote_machine,
 					&rm_addr,
-					0,
+					&ts,
 					"IPC$",
 					"IPC",
 					anon_creds,

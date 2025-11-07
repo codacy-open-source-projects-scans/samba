@@ -24,7 +24,7 @@ import sys
 sys.path.insert(0, 'bin/python')
 
 import samba.tests
-from samba.dcerpc import srvsvc, dnsserver
+from samba.dcerpc import srvsvc, dnsserver, netlogon
 import os
 from samba.samba3 import libsmb_samba_internal as libsmb
 from samba.samba3 import param as s3param
@@ -45,6 +45,37 @@ import re
 
 
 class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
+    netlogon_aes_flags = (
+        netlogon.NETLOGON_NEG_ACCOUNT_LOCKOUT |
+        netlogon.NETLOGON_NEG_PERSISTENT_SAMREPL |
+        netlogon.NETLOGON_NEG_ARCFOUR |
+        netlogon.NETLOGON_NEG_PROMOTION_COUNT |
+        netlogon.NETLOGON_NEG_CHANGELOG_BDC |
+        netlogon.NETLOGON_NEG_FULL_SYNC_REPL |
+        netlogon.NETLOGON_NEG_MULTIPLE_SIDS |
+        netlogon.NETLOGON_NEG_REDO |
+        netlogon.NETLOGON_NEG_PASSWORD_CHANGE_REFUSAL |
+        netlogon.NETLOGON_NEG_SEND_PASSWORD_INFO_PDC |
+        netlogon.NETLOGON_NEG_GENERIC_PASSTHROUGH |
+        netlogon.NETLOGON_NEG_CONCURRENT_RPC |
+        netlogon.NETLOGON_NEG_AVOID_ACCOUNT_DB_REPL |
+        netlogon.NETLOGON_NEG_AVOID_SECURITYAUTH_DB_REPL |
+        netlogon.NETLOGON_NEG_STRONG_KEYS |
+        netlogon.NETLOGON_NEG_TRANSITIVE_TRUSTS |
+        netlogon.NETLOGON_NEG_DNS_DOMAIN_TRUSTS |
+        netlogon.NETLOGON_NEG_PASSWORD_SET2 |
+        netlogon.NETLOGON_NEG_GETDOMAININFO |
+        netlogon.NETLOGON_NEG_CROSS_FOREST_TRUSTS |
+        netlogon.NETLOGON_NEG_SUPPORTS_AES |
+        netlogon.NETLOGON_NEG_AUTHENTICATED_RPC_LSASS |
+        netlogon.NETLOGON_NEG_AUTHENTICATED_RPC)
+    # "0x610FFFFF"
+    netlogon_aes_flags_str = "0x%08X" % netlogon_aes_flags
+    netlogon_krb_flags = (
+        netlogon_aes_flags |
+        netlogon.NETLOGON_NEG_SUPPORTS_KERBEROS_AUTH)
+    # "0xE10FFFFF"
+    netlogon_krb_flags_str = "0x%08X" % netlogon_krb_flags
 
     def setUp(self):
         super().setUp()
@@ -1129,14 +1160,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = os.environ["PASSWORD"]
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 1)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_interactive_bad_password(self):
 
@@ -1162,14 +1198,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = "badPassword"
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 1)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_interactive_bad_user(self):
 
@@ -1195,14 +1236,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = os.environ["PASSWORD"]
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 1)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_network(self):
 
@@ -1226,14 +1272,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = os.environ["PASSWORD"]
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_network_bad_password(self):
 
@@ -1258,13 +1309,13 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = "badPassword"
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
 
     def test_samlogon_network_bad_user(self):
@@ -1290,14 +1341,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = os.environ["PASSWORD"]
         samlogon = "samlogon %s %s %s %d" % (user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_network_mschap(self):
 
@@ -1323,14 +1379,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         samlogon = "samlogon %s %s %s %d 0x00010000" % (
             user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_network_mschap_bad_password(self):
 
@@ -1357,14 +1418,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         samlogon = "samlogon %s %s %s %d 0x00010000" % (
             user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_network_mschap_bad_user(self):
 
@@ -1391,14 +1457,19 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         samlogon = "samlogon %s %s %s %d 0x00010000" % (
             user, password, workstation, 2)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     def test_samlogon_schannel_seal(self):
 
@@ -1422,13 +1493,13 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         password = os.environ["PASSWORD"]
         samlogon = "schannel;samlogon %s %s %s" % (user, password, workstation)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
 
         # Check the second to last message it should be an Authorization
@@ -1439,6 +1510,56 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         self.assertEqual("schannel", msg["Authorization"]["authType"])
         self.assertEqual("SEAL", msg["Authorization"]["transportProtection"])
         self.assertTrue(self.is_guid(msg["Authorization"]["sessionId"]))
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
+
+    def test_samlogon_krb5_seal(self):
+
+        workstation = "AuthLogTests"
+
+        def isLastExpectedMessage(msg):
+            return ((msg["type"] == "Authentication") and
+                    (msg["Authentication"]["serviceDescription"] ==
+                        "SamLogon") and
+                    (msg["Authentication"]["authDescription"] == "network") and
+                    (msg["Authentication"]["status"] == "NT_STATUS_OK") and
+                    (msg["Authentication"]["workstation"] ==
+                        r"\\%s" % workstation) and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_SUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
+
+        server = os.environ["SERVER"]
+        user = os.environ["USERNAME"]
+        password = os.environ["PASSWORD"]
+        samlogon = "schannel;samlogon %s %s %s" % (user, password, workstation)
+
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=yes"])
+
+        messages = self.waitForMessages(isLastExpectedMessage)
+        messages = self.remove_netlogon_messages(messages)
+        received = len(messages)
+        self.assertIn(received, [6],
+                      "Did not receive the expected number of messages")
+
+        # Check the second to last message it should be an Authorization
+        msg = messages[-2]
+        self.assertEqual("Authorization", msg["type"])
+        self.assertEqual("DCE/RPC",
+                          msg["Authorization"]["serviceDescription"])
+        self.assertEqual("krb5", msg["Authorization"]["authType"])
+        self.assertEqual("SEAL", msg["Authorization"]["transportProtection"])
+        self.assertTrue(self.is_guid(msg["Authorization"]["sessionId"]))
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_krb_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
     # Signed logons get promoted to sealed, this test ensures that
     # this behaviour is not removed accidentally
@@ -1465,13 +1586,13 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         samlogon = "schannelsign;samlogon %s %s %s" % (
             user, password, workstation)
 
-        call(["bin/rpcclient", "-c", samlogon, "-U%", server])
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=no"])
 
         messages = self.waitForMessages(isLastExpectedMessage)
         messages = self.remove_netlogon_messages(messages)
         received = len(messages)
-        self.assertIs(True,
-                      (received == 4 or received == 5),
+        self.assertIn(received, [4, 5],
                       "Did not receive the expected number of messages")
 
         # Check the second to last message it should be an Authorization
@@ -1483,6 +1604,58 @@ class AuthLogTests(samba.tests.auth_log_base.AuthLogTestBase):
         self.assertEqual("SEAL", msg["Authorization"]["transportProtection"])
         self.assertTrue(self.is_guid(msg["Authorization"]["sessionId"]))
 
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_aes_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
+
+    # Signed logons get promoted to sealed, this test ensures that
+    # this behaviour is not removed accidentally
+    def test_samlogon_krb5_sign(self):
+
+        workstation = "AuthLogTests"
+
+        def isLastExpectedMessage(msg):
+            return ((msg["type"] == "Authentication") and
+                    (msg["Authentication"]["serviceDescription"] ==
+                        "SamLogon") and
+                    (msg["Authentication"]["authDescription"] == "network") and
+                    (msg["Authentication"]["status"] == "NT_STATUS_OK") and
+                    (msg["Authentication"]["workstation"] ==
+                        r"\\%s" % workstation) and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_SUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
+
+        server = os.environ["SERVER"]
+        user = os.environ["USERNAME"]
+        password = os.environ["PASSWORD"]
+        samlogon = "schannelsign;samlogon %s %s %s" % (
+            user, password, workstation)
+
+        call(["bin/rpcclient", "-c", samlogon, "-U%", server,
+             "--option=clientusekrb5netlogon=yes"])
+
+        messages = self.waitForMessages(isLastExpectedMessage)
+        messages = self.remove_netlogon_messages(messages)
+        received = len(messages)
+        self.assertIn(received, [6],
+                      "Did not receive the expected number of messages")
+
+        # Check the second to last message it should be an Authorization
+        msg = messages[-2]
+        self.assertEqual("Authorization", msg["type"])
+        self.assertEqual("DCE/RPC",
+                          msg["Authorization"]["serviceDescription"])
+        self.assertEqual("krb5", msg["Authorization"]["authType"])
+        self.assertEqual("SEAL", msg["Authorization"]["transportProtection"])
+        self.assertTrue(self.is_guid(msg["Authorization"]["sessionId"]))
+
+        msg = messages[-1]
+        self.assertEqual("Authentication", msg["type"])
+        self.assertEqual(self.netlogon_krb_flags_str,
+                         msg["Authentication"]["netlogonNegotiateFlags"])
 
 if __name__ == '__main__':
     import unittest

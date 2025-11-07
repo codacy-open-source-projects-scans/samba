@@ -33,16 +33,17 @@
 
 #include "hx_locl.h"
 #include "crypto-headers.h"
+#include "rfc2459_asn1.h"
 #include <rtbl.h>
 
 /**
  * @page page_cert The basic certificate
  *
- * The basic hx509 cerificate object in hx509 is hx509_cert. The
+ * The basic hx509 certificate object in hx509 is hx509_cert. The
  * hx509_cert object is representing one X509/PKIX certificate and
  * associated attributes; like private key, friendly name, etc.
  *
- * A hx509_cert object is usully found via the keyset interfaces (@ref
+ * A hx509_cert object is usually found via the keyset interfaces (@ref
  * page_keyset), but its also possible to create a certificate
  * directly from a parsed object with hx509_cert_init() and
  * hx509_cert_init_data().
@@ -622,7 +623,7 @@ hx509_verify_attach_anchors(hx509_verify_ctx ctx, hx509_certs set)
 }
 
 /**
- * Attach an revocation context to the verfication context, , makes an
+ * Attach an revocation context to the verification context, makes an
  * reference to the revoke context, so the consumer can free the
  * revoke context independent of the destruction of the verification
  * context. If there is no revoke context, the verification process is
@@ -648,7 +649,7 @@ hx509_verify_attach_revoke(hx509_verify_ctx ctx, hx509_revoke_ctx revoke_ctx)
  * set the current time will be used.
  *
  * @param ctx a verification context.
- * @param t the time the verifiation is using.
+ * @param t the time the verification is using.
  *
  *
  * @ingroup hx509_verify
@@ -672,7 +673,7 @@ _hx509_verify_get_time(hx509_verify_ctx ctx)
  * builder is going to try.
  *
  * @param ctx a verification context
- * @param max_depth maxium depth of the certificate chain, include
+ * @param max_depth maximum depth of the certificate chain, include
  * trust anchor.
  *
  * @ingroup hx509_verify
@@ -703,9 +704,9 @@ hx509_verify_set_proxy_certificate(hx509_verify_ctx ctx, int boolean)
 }
 
 /**
- * Select strict RFC3280 verification of certificiates. This means
+ * Select strict RFC3280 verification of certificates. This means
  * checking key usage on CA certificates, this will make version 1
- * certificiates unuseable.
+ * certificates unusable.
  *
  * @param ctx a verification context
  * @param boolean if non zero, use strict verification.
@@ -864,6 +865,34 @@ find_extension_eku(const Certificate *cert, ExtKeyUsage *eku)
 }
 
 static int
+find_extension_ntds_security_extension(const Certificate *subject,
+				       SidExtension *sid_extension)
+{
+    const Extension *e;
+    size_t size;
+    size_t i = 0;
+    int ret;
+
+    memset(sid_extension, 0, sizeof(*sid_extension));
+
+    e = find_extension(subject, &asn1_oid_szOID_NTDS_CA_SECURITY_EXT, &i);
+    if (e == NULL)
+	return HX509_EXTENSION_NOT_FOUND;
+
+    ret = decode_SidExtension(e->extnValue.data,
+			      e->extnValue.length,
+			      sid_extension,
+			      &size);
+    if (ret)
+	return ret;
+
+    if (size != e->extnValue.length)
+	return HX509_EXTRA_DATA_AFTER_STRUCTURE;
+
+    return ret;
+}
+
+static int
 add_to_list(hx509_octet_string_list *list, const heim_octet_string *entry)
 {
     void *p;
@@ -954,6 +983,63 @@ hx509_cert_find_subjectAltName_otherName(hx509_context context,
 		    hx509_set_error_string(context, 0, ret,
 					   "Error adding an extra SAN to "
 					   "return list");
+		    hx509_free_octet_string_list(list);
+		    free_GeneralNames(&sa);
+		    return ret;
+		}
+	    }
+	}
+	free_GeneralNames(&sa);
+    }
+}
+
+/**
+ * @brief Return a list of rfc822 subject alternative names (email addresses)
+ *
+ * @param[in]  context hx509 context.
+ * @param[in]  cert    hx509 certificate
+ * @param[out] list    of rfc822 subjectAltNames.
+ *
+ * @return An hx509 error code, see hx509_get_error_string().
+ *
+ * @ingroup hx509_cert
+ *
+ * @note The returned list of octet string should be freed with
+ *        hx509_free_octet_string_list().
+ *
+ */
+HX509_LIB_FUNCTION int HX509_LIB_CALL
+hx509_cert_find_subjectAltName_rfc822(hx509_context context,
+				      hx509_cert cert,
+				      hx509_octet_string_list *list)
+{
+    GeneralNames sa;
+    int ret = 0;
+    size_t i = 0;
+    size_t j = 0;
+
+    list->val = NULL;
+    list->len = 0;
+
+    i = 0;
+    while (1) {
+	ret = find_extension_subject_alt_name(_hx509_get_cert(cert), &i, &sa);
+	if (ret == HX509_EXTENSION_NOT_FOUND) {
+	    return 0;
+	} else if (ret != 0) {
+	    hx509_set_error_string(
+		context, 0, ret, "Error searching for RFC822 names");
+	    hx509_free_octet_string_list(list);
+	    return ret;
+	}
+
+	for (j = 0; j < sa.len; j++) {
+	    if (sa.val[j].element == choice_GeneralName_rfc822Name) {
+		ret = add_to_list(list, &sa.val[j].u.rfc822Name);
+		if (ret) {
+		    hx509_set_error_string(context, 0, ret,
+					   "Error adding an extra RFC822 name "
+					   "to return list");
 		    hx509_free_octet_string_list(list);
 		    free_GeneralNames(&sa);
 		    return ret;
@@ -1618,7 +1704,7 @@ hx509_cert_get_subject(hx509_cert p, hx509_name *name)
 
 /**
  * Return the name of the base subject of the hx509 certificate. If
- * the certiicate is a verified proxy certificate, the this function
+ * the certificate is a verified proxy certificate, the this function
  * return the base certificate (root of the proxy chain). If the proxy
  * certificate is not verified with the base certificate
  * HX509_PROXY_CERTIFICATE_NOT_CANONICALIZED is returned.
@@ -1786,7 +1872,7 @@ hx509_cert_get_SPKI(hx509_context context, hx509_cert p, SubjectPublicKeyInfo *s
  * @param p a hx509 certificate object.
  * @param alg AlgorithmIdentifier, should be freed with
  *            free_AlgorithmIdentifier(). The algorithmidentifier is
- *            typicly rsaEncryption, or id-ecPublicKey, or some other
+ *            typically rsaEncryption, or id-ecPublicKey, or some other
  *            public key mechanism.
  *
  * @return An hx509 error code, see hx509_get_error_string().
@@ -1848,7 +1934,7 @@ hx509_cert_get_issuer_unique_id(hx509_context context, hx509_cert p, heim_bit_st
 }
 
 /**
- * Get a copy of the Subect Unique ID
+ * Get a copy of the Subject Unique ID
  *
  * @param context a hx509_context
  * @param p a hx509 certificate
@@ -1867,6 +1953,87 @@ hx509_cert_get_subject_unique_id(hx509_context context, hx509_cert p, heim_bit_s
     return get_x_unique_id(context, "subject", p->data->tbsCertificate.subjectUniqueID, subject);
 }
 
+/**
+ * @brief get the (SKI) Subject Key Identifier from a certificate
+ *
+ * @param[in]  context hx509 context
+ * @param[in]  cert    hx509 certificate
+ * @param[out] ski     subject key identifier
+ *
+ * @return An hx509 error code, see hx509_get_error_string().
+ *
+ * @note ski should be freed with a call to free_SubjectKeyIdentifier
+ */
+HX509_LIB_FUNCTION int HX509_LIB_CALL
+hx509_cert_get_subject_key_identifier(hx509_context context,
+                                      hx509_cert cert,
+                                      SubjectKeyIdentifier *ski)
+{
+    size_t i = 0;
+    size_t size = 0;
+    const Extension *ext = NULL;
+    int ret = 0;
+
+    ext = find_extension(cert->data,
+			 &asn1_oid_id_x509_ce_subjectKeyIdentifier,
+			 &i);
+    if (ext == NULL) {
+	return HX509_EXTENSION_NOT_FOUND;
+    }
+    ret = decode_SubjectKeyIdentifier(ext->extnValue.data,
+				      ext->extnValue.length,
+				      ski,
+				      &size);
+    return ret;
+}
+
+/**
+ * Get a copy of the Object SID
+ *
+ * @param p a hx509 certificate
+ * @param sid the object SID returned, free with der_free_octet_string()
+ *
+ * @return An hx509 error code, see hx509_get_error_string(). The
+ * error code HX509_EXTENSION_NOT_FOUND is returned if the certificate
+ * doesn't have an object SID
+ *
+ * @ingroup hx509_cert
+ */
+
+HX509_LIB_FUNCTION int HX509_LIB_CALL
+hx509_cert_get_object_sid(hx509_cert p,
+			  ObjectSid *sid)
+{
+    SidExtension sid_ext;
+    int ret;
+
+    ret = find_extension_ntds_security_extension(p->data, &sid_ext);
+    if (ret) {
+	return ret;
+    }
+
+    if (sid_ext.len != 1) {
+	return HX509_CMS_INVALID_DATA;
+    }
+
+    if (sid_ext.val[0].element != choice_GeneralName_otherName) {
+	return HX509_CMS_INVALID_DATA;
+    }
+
+    if (sid_ext.val[0].u.otherName._ioschoice_value.element !=
+	choice_OtherName_iosnum_szOID_NTDS_OBJECTSID)
+    {
+	return HX509_CMS_INVALID_DATA;
+    }
+
+    if (!sid_ext.val[0].u.otherName._ioschoice_value.u.on_ntds_objectsid) {
+	return HX509_CMS_INVALID_DATA;
+    }
+
+    return der_copy_octet_string(
+	sid_ext.val[0].u.otherName._ioschoice_value.u.on_ntds_objectsid,
+	sid);
+}
 
 HX509_LIB_FUNCTION hx509_private_key HX509_LIB_CALL
 _hx509_cert_private_key(hx509_cert p)

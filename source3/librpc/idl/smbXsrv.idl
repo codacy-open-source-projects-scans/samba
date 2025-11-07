@@ -164,6 +164,7 @@ interface smbXsrv
 		NTTIME					xconn_connect_time;
 		server_id				dst_server_id;
 		NTTIME					client_connect_time;
+		uint8					transport_type;
 		DATA_BLOB 				negotiate_request;
 	} smbXsrv_connection_pass0;
 
@@ -208,7 +209,7 @@ interface smbXsrv
 		SMBXSRV_ENCRYPTION_DESIRED		= 0x02,
 		SMBXSRV_PROCESSED_ENCRYPTED_PACKET	= 0x04,
 		SMBXSRV_PROCESSED_UNENCRYPTED_PACKET	= 0x08
-	} smbXsrv_encrpytion_flags;
+	} smbXsrv_encryption_flags;
 
 	typedef [public,bitmap8bit] bitmap {
 		SMBXSRV_SIGNING_REQUIRED		= 0x01,
@@ -229,6 +230,7 @@ interface smbXsrv
 		[ignore] smbXsrv_connection		*connection;
 		uint16					signing_algo;
 		uint16					encryption_cipher;
+		uint8					transport_type;
 	} smbXsrv_channel_global0;
 
 	typedef struct {
@@ -248,7 +250,7 @@ interface smbXsrv
 		GUID					client_guid;
 		smbXsrv_signing_flags			signing_flags;
 		uint16					signing_algo;
-		smbXsrv_encrpytion_flags		encryption_flags;
+		smbXsrv_encryption_flags		encryption_flags;
 		uint16					encryption_cipher;
 		[noprint] DATA_BLOB			signing_key_blob;
 		[ignore] smb2_signing_key		*signing_key;
@@ -359,7 +361,7 @@ interface smbXsrv
 		server_id				server_id;
 		NTTIME					creation_time;
 		[charset(UTF8),string] char		share_name[];
-		smbXsrv_encrpytion_flags		encryption_flags;
+		smbXsrv_encryption_flags		encryption_flags;
 		/*
 		 * for SMB1 this is the session that the tcon was opened on
 		 */
@@ -420,6 +422,8 @@ interface smbXsrv
 
 	typedef struct {
 		server_id				server_id;
+		hyper					session_global_id;
+		uint32					tcon_global_id;
 		uint32					open_global_id;
 		hyper					open_persistent_id;
 		hyper					open_volatile_id;
@@ -428,6 +432,7 @@ interface smbXsrv
 		GUID					create_guid;
 		GUID					client_guid;
 		GUID					app_instance_id;
+		uint32					create_action;
 		/*
 		 * TODO: for durable/resilient/persistent handles we need more
 		 *       things here. See [MS-SMB2] 3.3.1.10 Per Open
@@ -471,11 +476,12 @@ interface smbXsrv
 		[ignore] smbXsrv_open_table		*table;
 		uint32					local_id;
 		[ref] smbXsrv_open_global0		*global;
+		smbXsrv_session				*session;
+		smbXsrv_tcon				*tcon;
 		NTSTATUS				status;
 		NTTIME					idle_time;
 		[ignore] files_struct			*compat;
 		smbXsrv_open_flags			flags;
-		uint32					create_action;
 		hyper					request_count;
 		hyper					pre_request_count;
 	} smbXsrv_open;
@@ -491,10 +497,13 @@ interface smbXsrv
 		[switch_is(version)] smbXsrv_openU	info;
 	} smbXsrv_openB;
 
-	const uint32 SMBXSRV_OPEN_REPLAY_CACHE_FIXED_SIZE = 28;
+	const uint32 SMBXSRV_OPEN_REPLAY_CACHE_KEY_FIXED_SIZE = 32;
 	typedef [public] struct {
-		GUID					holder_req_guid;
-		NTTIME					idle_time;
-		uint32					local_id;
+		GUID					client_guid;
+		GUID					create_guid;
+	} smbXsrv_open_replay_cache_key;
+
+	typedef [public] struct {
+		DATA_BLOB				open_global_key;
 	} smbXsrv_open_replay_cache;
 }

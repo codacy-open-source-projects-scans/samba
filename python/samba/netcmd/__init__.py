@@ -30,6 +30,7 @@ from samba.getopt import Option, OptionParser
 from samba.logger import get_samba_logger
 from samba.samdb import SamDB
 from samba.dcerpc.security import SDDLValueError
+from samba import getopt as options
 
 from .encoders import JSONEncoder
 
@@ -245,6 +246,9 @@ class Command(object):
             elif ldb_ecode == ERR_INSUFFICIENT_ACCESS_RIGHTS:
                 self._print_error("User has insufficient access rights")
                 force_traceback = False
+            elif ldb_emsg == "Operation unavailable without authentication":
+                self._print_error(ldb_emsg)
+                force_traceback = False
             else:
                 self._print_error(message, ldb_emsg, 'ldb')
 
@@ -278,10 +282,16 @@ class Command(object):
             option_class=Option)
         parser.add_options(self.takes_options)
         optiongroups = {}
+
+        # let samba-tool subcommands process --version
+        if "versionopts" not in self.takes_optiongroups:
+            self.takes_optiongroups["_versionopts"] = options.VersionOptions
+
         for name in sorted(self.takes_optiongroups.keys()):
             optiongroup = self.takes_optiongroups[name]
             optiongroups[name] = optiongroup(parser)
             parser.add_option_group(optiongroups[name])
+
         if self.use_colour:
             parser.add_option("--color",
                               help="use colour if available (default: auto)",
@@ -290,8 +300,9 @@ class Command(object):
 
         return parser, optiongroups
 
-    def message(self, text):
-        self.outf.write(text + "\n")
+    def message(self, *text):
+        for t in text:
+            print(t, file=self.outf)
 
     def _resolve(self, path, *argv, outf=None, errf=None):
         """This is a leaf node, the command that will actually run."""
@@ -310,12 +321,36 @@ class Command(object):
             return -1
 
         # Filter out options from option groups
+        #
+        # run() methods on subclasses receive all direct options as
+        # keyword arguments, but options that come from OptionGroups
+        # (for example, --configfile from SambaOpts group) are removed
+        # from the direct keyword arguments list, and the option group
+        # itself becomes a keyword argument. The option can be
+        # accessed as an attribute of that (e.g. sambaopts.configfile).
+        #
+        # This allows for option groups to grow without needing to
+        # change the signature for all samba-tool tools.
+        #
+        # _versionopts special case.
+        # ==========================
+        #
+        # The _versionopts group was added automatically, and is
+        # removed here. It only has the -V/--version option, and that
+        # will have triggered already if given (as will --help, and
+        # errors on unknown options).
+        #
+        # Some subclasses take 'versionopts' which they expect to
+        # receive but never use.
+
         kwargs = dict(opts.__dict__)
-        for option_group in parser.option_groups:
+
+        for og_name, option_group in optiongroups.items():
             for option in option_group.option_list:
                 if option.dest is not None and option.dest in kwargs:
                     del kwargs[option.dest]
-        kwargs.update(optiongroups)
+            if og_name != '_versionopts':
+                kwargs[og_name] = option_group
 
         if kwargs.get('output_format') == 'json':
             self.preferred_output_format = 'json'
@@ -412,7 +447,10 @@ class SuperCommand(Command):
                 sub = self.subcommands[a]
                 return sub._resolve(sub_path, *sub_args, outf=outf, errf=errf)
 
-            elif a in ['--help', 'help', None, '-h', '-V', '--version']:
+            if a in ['-V', '--version']:
+                return (self, [a])
+
+            if a in ['--help', 'help', None, '-h']:
                 # we pass these to the leaf node.
                 if a == 'help':
                     a = '--help'
@@ -423,8 +461,9 @@ class SuperCommand(Command):
             print("%s: no such subcommand: %s\n" % (path, a), file=self.outf)
             return (self, [])
 
-        # We didn't find a subcommand, but maybe we found e.g. --version
-        print("%s: missing subcommand\n" % (path), file=self.outf)
+        # We didn't find a subcommand, but maybe we found e.g. --help
+        if not deferred_args:
+            print("%s: missing subcommand\n" % (path), file=self.outf)
         return (self, deferred_args)
 
     def _run(self, *argv):
@@ -462,3 +501,39 @@ class CommandError(Exception):
 
     def __repr__(self):
         return "CommandError(%s)" % self.message
+
+
+def exception_to_command_error(*exceptions, verbose=False):
+    """If you think all instances of a particular exceptions can be
+    turning to a CommandError, do this:
+
+    @exception_to_command_error(ValueError, LdbError):
+    def run(self, username, ...):
+        # continue as normal
+
+    Add the verbose=True flag during development if it is doing your
+    head in.
+    """
+    def wrap2(f):
+        def wrap(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except exceptions as e:
+                if verbose:
+                    print(colour.c_DARK_RED("↓" * 20 + "DEBUG" + "↓" * 20),
+                          file=sys.stderr)
+                    print(f"converting «e» raised in {f} "
+                          "to CommandError\n",
+                          file=sys.stderr)
+                    traceback.print_exc()
+                    print("\nThis message is here because "
+                          "exception_to_command_error() has the verbose=True"
+                          " debugging option set.",
+                          file=sys.stderr)
+                    print("Below this is what you would normally see:",
+                          file=sys.stderr)
+                    print(colour.c_DARK_RED("↑" * 20 + "DEBUG" + "↑" * 20),
+                          file=sys.stderr)
+                raise CommandError(e)
+        return wrap
+    return wrap2

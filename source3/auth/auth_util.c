@@ -1399,16 +1399,9 @@ static NTSTATUS make_new_session_info_guest(TALLOC_CTX *mem_ctx,
 	struct auth_serversupplied_info *server_info = NULL;
 	const char *guest_account = lp_guest_account();
 	const char *domain = lp_netbios_name();
-	struct netr_SamInfo3 info3;
-	TALLOC_CTX *tmp_ctx;
+	struct netr_SamInfo3 info3 = {};
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	NTSTATUS status;
-
-	tmp_ctx = talloc_stackframe();
-	if (tmp_ctx == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	ZERO_STRUCT(info3);
 
 	status = get_guest_info3(tmp_ctx, &info3);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1746,22 +1739,6 @@ static struct auth_serversupplied_info *copy_session_info_serverinfo_guest(TALLO
 
 	dst->cached_session_info = src;
 	return dst;
-}
-
-/*
- * Set a new session key. Used in the rpc server where we have to override the
- * SMB level session key with SystemLibraryDTC
- */
-
-bool session_info_set_session_key(struct auth_session_info *info,
-				 DATA_BLOB session_key)
-{
-	TALLOC_FREE(info->session_key.data);
-
-	info->session_key = data_blob_talloc(
-		info, session_key.data, session_key.length);
-
-	return (info->session_key.data != NULL);
 }
 
 static struct auth_session_info *guest_info = NULL;

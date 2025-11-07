@@ -262,6 +262,7 @@ static void print_status(const char *component,
 			 int result,
 			 struct ctdb_event_reply_status *status)
 {
+	struct timeval prev = { .tv_sec = 0, };
 	int i;
 
 	if (result != 0) {
@@ -281,7 +282,28 @@ static void print_status(const char *component,
 	}
 
 	for (i=0; i<status->script_list->num_scripts; i++) {
-		print_status_one(&status->script_list->script[i]);
+		struct ctdb_event_script *s = &status->script_list->script[i];
+		int ret = 0;
+
+		/*
+		 * Occurs when a new script is enabled, it hasn't
+		 * been previously run, and a previous script fails
+		 */
+		if (s->result == -ENODATA) {
+			continue;
+		}
+
+		/*
+		 * Occurs when data for s is from a previous run, so
+		 * it was run before the previous script
+		 */
+		ret = tevent_timeval_compare(&s->begin, &prev);
+		if (ret == -1) {
+			break;
+		}
+
+		print_status_one(s);
+		prev = s->begin;
 	}
 }
 
@@ -363,6 +385,7 @@ static int event_command_script_list(TALLOC_CTX *mem_ctx,
 	char *data_dir = NULL;
 	char *etc_dir = NULL;
 	char *t = NULL;
+	char *real_data_dir = NULL;
 	struct event_script_list *data_list = NULL;
 	struct event_script_list *etc_list = NULL;
 	unsigned int i, j, matched;
@@ -388,14 +411,18 @@ static int event_command_script_list(TALLOC_CTX *mem_ctx,
 		return ENOMEM;
 	}
 
-	data_dir = realpath(data_dir, t);
-	if (data_dir == NULL) {
+	real_data_dir = realpath(data_dir, t);
+	if (real_data_dir == NULL) {
 		if (errno != ENOENT) {
 			return errno;
 		}
-		D_ERR("Command script list finished with result=%d\n", ENOENT);
+		D_ERR("Unable to find event script installation directory: %s\n",
+		      data_dir);
 		return ENOENT;
 	}
+	/* Some static analysers don't understand talloc */
+	TALLOC_FREE(data_dir);
+	data_dir = real_data_dir;
 
 	etc_dir = path_etcdir_append(mem_ctx, subdir);
 	if (etc_dir == NULL) {

@@ -741,8 +741,7 @@ bool init_smb1_request(struct smb_request *req,
 
 	/* Ensure we have at least smb_size bytes. */
 	if (req_size < smb_size) {
-		DEBUG(0,("init_smb1_request: invalid request size %u\n",
-			(unsigned int)req_size ));
+		DBG_ERR("invalid request size %zu\n", req_size);
 		return false;
 	}
 
@@ -771,23 +770,27 @@ bool init_smb1_request(struct smb_request *req,
 		if (NT_STATUS_IS_OK(status)) {
 			req->conn = tcon->compat;
 		}
+
+#if defined(WITH_SMB1SERVER)
+		req->posix_pathnames = (xconn->smb1.unix_info.client_cap_low &
+					CIFS_UNIX_POSIX_PATHNAMES_CAP) != 0;
+#endif
 	}
-	req->posix_pathnames = lp_posix_pathnames();
 
 	/* Ensure we have at least wct words and 2 bytes of bcc. */
 	if (smb_size + req->wct*2 > req_size) {
-		DEBUG(0,("init_smb1_request: invalid wct number %u (size %u)\n",
-			(unsigned int)req->wct,
-			(unsigned int)req_size));
+		DBG_ERR("invalid wct number %" PRIu8 " (size %zu)\n",
+			req->wct,
+			req_size);
 		return false;
 	}
 	/* Ensure bcc is correct. */
 	if (((const uint8_t *)smb_buf_const(inbuf)) + req->buflen > inbuf + req_size) {
-		DEBUG(0,("init_smb1_request: invalid bcc number %u "
-			"(wct = %u, size %u)\n",
-			(unsigned int)req->buflen,
-			(unsigned int)req->wct,
-			(unsigned int)req_size));
+		DBG_ERR("invalid bcc number %" PRIu16 " "
+			"(wct = %" PRIu8 ", size %zu)\n",
+			req->buflen,
+			req->wct,
+			req_size);
 		return false;
 	}
 
@@ -935,8 +938,9 @@ static void smbd_smb2_server_connection_read_handler(
 		xconn->client->sconn->trans_num++;
 		xconn->client->sconn->num_requests++;
 		return;
+	}
 
-	} else if (!smbd_is_smb2_header(buffer, bufferlen)) {
+	if (!smbd_is_smb2_header(buffer, bufferlen)) {
 		exit_server_cleanly("Invalid initial SMB2 packet");
 		return;
 	}
@@ -1210,6 +1214,7 @@ static int smbXsrv_connection_destructor(struct smbXsrv_connection *xconn)
 }
 
 NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
+			     enum smb_transport_type transport_type,
 			     NTTIME now, struct smbXsrv_connection **_xconn)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -1248,6 +1253,7 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 	}
 
 	xconn->transport.sock = sock_fd;
+	xconn->transport.type = transport_type;
 #if defined(WITH_SMB1SERVER)
 	smbd_echo_init(xconn);
 #endif
@@ -1738,6 +1744,7 @@ static void smbd_id_cache_kill(struct messaging_context *msg_ctx,
 struct smbd_tevent_trace_state {
 	struct tevent_context *ev;
 	TALLOC_CTX *frame;
+	struct smbd_server_connection *sconn;
 	SMBPROFILE_BASIC_ASYNC_STATE(profile_idle);
 	struct timeval before_wait_tv;
 	struct timeval after_wait_tv;
@@ -1844,7 +1851,7 @@ static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 			 *
 			 * Instead we want to sleep as long as nothing happens.
 			 */
-			smbprofile_dump_setup(NULL);
+			smbprofile_dump_setup(NULL, NULL);
 		}
 		SMBPROFILE_BASIC_ASYNC_START(idle, profile_p, state->profile_idle);
 		break;
@@ -1856,12 +1863,12 @@ static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 			 * We need to flush our state after sleeping
 			 * (hopefully a long time).
 			 */
-			smbprofile_dump();
+			smbprofile_dump(state->sconn);
 			/*
 			 * future profiling events should trigger timers
 			 * on our main event context.
 			 */
-			smbprofile_dump_setup(state->ev);
+			smbprofile_dump_setup(state->ev, state->sconn);
 		}
 		break;
 	case TEVENT_TRACE_BEFORE_LOOP_ONCE:
@@ -1882,7 +1889,8 @@ static void smbd_tevent_trace_callback_profile(enum tevent_trace_point point,
 void smbd_process(struct tevent_context *ev_ctx,
 		  struct messaging_context *msg_ctx,
 		  int sock_fd,
-		  bool interactive)
+		  bool interactive,
+		  enum smb_transport_type transport_type)
 {
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
@@ -1923,6 +1931,7 @@ void smbd_process(struct tevent_context *ev_ctx,
 	if (sconn == NULL) {
 		exit_server("failed to create smbd_server_connection");
 	}
+	trace_state.sconn = sconn;
 
 	client->sconn = sconn;
 	sconn->client = client;
@@ -1941,7 +1950,11 @@ void smbd_process(struct tevent_context *ev_ctx,
 		smbd_setup_sig_hup_handler(sconn);
 	}
 
-	status = smbd_add_connection(client, sock_fd, now, &xconn);
+	status = smbd_add_connection(client,
+				     sock_fd,
+				     transport_type,
+				     now,
+				     &xconn);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_NETWORK_ACCESS_DENIED)) {
 		/*
 		 * send a negative session response "not listening on calling
@@ -2087,6 +2100,8 @@ void smbd_process(struct tevent_context *ev_ctx,
 
 	messaging_deregister(sconn->msg_ctx, MSG_SMB_TELL_NUM_CHILDREN, NULL);
 
+	messaging_deregister(sconn->msg_ctx, MSG_RELOAD_TLS_CERTIFICATES, NULL);
+
 	/*
 	 * Use the default MSG_DEBUG handler to avoid rebroadcasting
 	 * MSGs to all child processes
@@ -2138,7 +2153,7 @@ void smbd_process(struct tevent_context *ev_ctx,
 		exit(1);
 	}
 
-	smbprofile_dump_setup(ev_ctx);
+	smbprofile_dump_setup(ev_ctx, sconn);
 
 	if (!init_dptrs(sconn)) {
 		exit_server("init_dptrs() failed");

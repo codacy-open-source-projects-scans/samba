@@ -70,7 +70,8 @@
 #include "system/filesys.h"
 #include "client/client_proto.h"
 #include "client/clitar_proto.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "lib/util/util_file.h"
 
 #ifdef HAVE_LIBARCHIVE
@@ -230,7 +231,7 @@ struct tar *tar_get_ctx(void)
  * Read a size from the client command line and update the current
  * blocksize.
  */
-int cmd_block(void)
+int cmd_block(TALLOC_CTX *mem_ctx)
 {
 	/* XXX: from client.c */
 	const extern char *cmd_ptr;
@@ -269,7 +270,7 @@ out:
  * Read one or more modes from the client command line and update the
  * current tar mode.
  */
-int cmd_tarmode(void)
+int cmd_tarmode(TALLOC_CTX *mem_ctx)
 {
 	const extern char *cmd_ptr;
 	char *buf;
@@ -326,7 +327,7 @@ int cmd_tarmode(void)
  *
  * Check presence of argument, parse them and handle the request.
  */
-int cmd_tar(void)
+int cmd_tar(TALLOC_CTX *mem_ctx)
 {
 	const extern char *cmd_ptr;
 	const char *flag;
@@ -1867,19 +1868,19 @@ static NTSTATUS path_base_name(TALLOC_CTX *ctx, const char *path, char **_base)
 
 #define NOT_IMPLEMENTED DEBUG(0, ("tar mode not compiled. build used --without-libarchive\n"))
 
-int cmd_block(void)
+int cmd_block(TALLOC_CTX *mem_ctx)
 {
 	NOT_IMPLEMENTED;
 	return 1;
 }
 
-int cmd_tarmode(void)
+int cmd_tarmode(TALLOC_CTX *mem_ctx)
 {
 	NOT_IMPLEMENTED;
 	return 1;
 }
 
-int cmd_tar(void)
+int cmd_tar(TALLOC_CTX *mem_ctx)
 {
 	NOT_IMPLEMENTED;
 	return 1;

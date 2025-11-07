@@ -319,12 +319,10 @@ static void add_interface(const struct iface_struct *ifs)
 		return;
 	}
 
-	iface = SMB_MALLOC_P(struct interface);
+	iface = SMB_CALLOC_ARRAY(struct interface, 1);
 	if (!iface) {
 		return;
 	}
-
-	ZERO_STRUCTPN(iface);
 
 	iface->name = SMB_STRDUP(ifs->name);
 	if (!iface->name) {
@@ -624,8 +622,11 @@ static void interpret_interface(char *token)
 				}
 				add_interface(&probed_ifaces[i]);
 				probed_ifaces[i].netmask = saved_mask;
-				return;
+				added = true;
 			}
+		}
+		if (added) {
+			return;
 		}
 		DEBUG(2,("interpret_interface: Can't determine ip for "
 			"broadcast address %s\n",

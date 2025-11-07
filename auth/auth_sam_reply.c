@@ -29,6 +29,14 @@
 static bool is_base_sid(const struct auth_SidAttr *sid,
 			const struct dom_sid *domain_sid)
 {
+	if (sid->origin == AUTH_SID_ORIGIN_BASE) {
+		goto check_domain;
+	}
+
+	if (sid->origin != AUTH_SID_ORIGIN_UNKNOWN) {
+		return false;
+	}
+
 	if (sid->attrs & SE_GROUP_RESOURCE) {
 		/*
 		 * Resource groups don't belong in the base
@@ -37,6 +45,7 @@ static bool is_base_sid(const struct auth_SidAttr *sid,
 		return false;
 	}
 
+check_domain:
 	/*
 	 * This SID belongs in the base structure only if it's in the account's
 	 * domain.
@@ -145,6 +154,13 @@ static NTSTATUS store_sid(struct netr_SidAttr *sids,
 			  const uint32_t allocated_resource_groups,
 			  const enum auth_group_inclusion group_inclusion)
 {
+	if (sid->origin == AUTH_SID_ORIGIN_BASE) {
+		return NT_STATUS_OK;
+	}
+	if (sid->origin == AUTH_SID_ORIGIN_EXTRA) {
+		goto store_in_extra;
+	}
+
 	/* See if it's a resource SID. */
 	if (sid->attrs & SE_GROUP_RESOURCE) {
 		/*
@@ -176,7 +192,7 @@ static NTSTATUS store_sid(struct netr_SidAttr *sids,
 			return NT_STATUS_INVALID_PARAMETER;
 		}
 	}
-
+store_in_extra:
 	/* Just store the SID in Extra SIDs. */
 	return store_extra_sid(sids,
 			       sidcount,
@@ -653,6 +669,7 @@ NTSTATUS make_user_info_dc_netlogon_validation(TALLOC_CTX *mem_ctx,
 	const struct netr_SamBaseInfo *base = NULL;
 	uint32_t sidcount = 0;
 	const struct netr_SidAttr *sids = NULL;
+	struct dom_sid tmpsid = { 0, };
 	const char *dns_domainname = NULL;
 	const char *principal = NULL;
 	uint32_t i;
@@ -686,11 +703,6 @@ NTSTATUS make_user_info_dc_netlogon_validation(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_INVALID_LEVEL;
 	}
 
-	user_info_dc = talloc_zero(mem_ctx, struct auth_user_info_dc);
-	if (user_info_dc == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
 	/*
 	   Here is where we should check the list of
 	   trusted domains, and verify that the SID
@@ -698,34 +710,51 @@ NTSTATUS make_user_info_dc_netlogon_validation(TALLOC_CTX *mem_ctx,
 	*/
 	if (!base->domain_sid) {
 		DEBUG(0, ("Cannot operate on a Netlogon Validation without a domain SID\n"));
-		talloc_free(user_info_dc);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
 	/* The IDL layer would be a better place to check this, but to
 	 * guard the integer addition below, we double-check */
-	if (base->groups.count > 65535) {
-		talloc_free(user_info_dc);
+	if (base->groups.count > UINT16_MAX) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	user_info_dc->num_sids = PRIMARY_SIDS_COUNT;
+	/*
+	 * The IDL layer would be a better place to check this, but to
+	 * guard the integer addition below, we double-check
+	 */
+	if (sidcount > UINT16_MAX) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
 
-	user_info_dc->sids = talloc_array(user_info_dc, struct auth_SidAttr,  user_info_dc->num_sids + base->groups.count);
+	user_info_dc = talloc_zero(mem_ctx, struct auth_user_info_dc);
+	if (user_info_dc == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	user_info_dc->sids = talloc_array(user_info_dc,
+					  struct auth_SidAttr,
+					  PRIMARY_SIDS_COUNT +
+					  base->groups.count +
+					  sidcount);
 	if (user_info_dc->sids == NULL) {
 		talloc_free(user_info_dc);
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	user_info_dc->sids[PRIMARY_USER_SID_INDEX].sid = *base->domain_sid;
-	if (!sid_append_rid(&user_info_dc->sids[PRIMARY_USER_SID_INDEX].sid, base->rid)) {
+	tmpsid = *base->domain_sid;
+	if (!sid_append_rid(&tmpsid, base->rid)) {
 		talloc_free(user_info_dc);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
-	user_info_dc->sids[PRIMARY_USER_SID_INDEX].attrs = SE_GROUP_DEFAULT_FLAGS;
+	user_info_dc->sids[PRIMARY_USER_SID_INDEX] = (struct auth_SidAttr) {
+		.sid = tmpsid,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+		.origin = AUTH_SID_ORIGIN_BASE,
+	};
 
-	user_info_dc->sids[PRIMARY_GROUP_SID_INDEX].sid = *base->domain_sid;
-	if (!sid_append_rid(&user_info_dc->sids[PRIMARY_GROUP_SID_INDEX].sid, base->primary_gid)) {
+	tmpsid = *base->domain_sid;
+	if (!sid_append_rid(&tmpsid, base->primary_gid)) {
 		talloc_free(user_info_dc);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -735,56 +764,43 @@ NTSTATUS make_user_info_dc_netlogon_validation(TALLOC_CTX *mem_ctx,
 	 * group in the first place, and besides, these attributes will never
 	 * make their way into a PAC.
 	 */
-	user_info_dc->sids[PRIMARY_GROUP_SID_INDEX].attrs = SE_GROUP_DEFAULT_FLAGS;
+	user_info_dc->sids[PRIMARY_GROUP_SID_INDEX] = (struct auth_SidAttr) {
+		.sid = tmpsid,
+		.attrs = SE_GROUP_DEFAULT_FLAGS,
+		.origin = AUTH_SID_ORIGIN_BASE,
+	};
+
+	user_info_dc->num_sids = PRIMARY_SIDS_COUNT;
 
 	for (i = 0; i < base->groups.count; i++) {
-		user_info_dc->sids[user_info_dc->num_sids].sid = *base->domain_sid;
-		if (!sid_append_rid(&user_info_dc->sids[user_info_dc->num_sids].sid, base->groups.rids[i].rid)) {
+		struct auth_SidAttr *bgrps = user_info_dc->sids;
+
+		tmpsid = *base->domain_sid;
+		if (!sid_append_rid(&tmpsid, base->groups.rids[i].rid)) {
 			talloc_free(user_info_dc);
 			return NT_STATUS_INVALID_PARAMETER;
 		}
-		user_info_dc->sids[user_info_dc->num_sids].attrs = base->groups.rids[i].attributes;
+		bgrps[user_info_dc->num_sids] = (struct auth_SidAttr) {
+			.sid = tmpsid,
+			.attrs = base->groups.rids[i].attributes,
+			.origin = AUTH_SID_ORIGIN_BASE,
+		};
 		user_info_dc->num_sids++;
 	}
 
-	/* Copy 'other' sids.  We need to do sid filtering here to
-	   prevent possible elevation of privileges.  See:
-
-           http://www.microsoft.com/windows2000/techinfo/administration/security/sidfilter.asp
-         */
-
-	/*
-	 * The IDL layer would be a better place to check this, but to
-	 * guard the integer addition below, we double-check
-	 */
-	if (sidcount > UINT16_MAX) {
-		talloc_free(user_info_dc);
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	if (sidcount > 0) {
+	for (i = 0; i < sidcount; i++) {
 		struct auth_SidAttr *dgrps = user_info_dc->sids;
-		size_t dgrps_count;
 
-		dgrps_count = user_info_dc->num_sids + sidcount;
-		dgrps = talloc_realloc(user_info_dc, dgrps, struct auth_SidAttr,
-				       dgrps_count);
-		if (dgrps == NULL) {
-			talloc_free(user_info_dc);
-			return NT_STATUS_NO_MEMORY;
+		if (sids[i].sid == NULL) {
+			continue;
 		}
 
-		for (i = 0; i < sidcount; i++) {
-			if (sids[i].sid) {
-				dgrps[user_info_dc->num_sids].sid = *sids[i].sid;
-				dgrps[user_info_dc->num_sids].attrs = sids[i].attributes;
-				user_info_dc->num_sids++;
-			}
-		}
-
-		user_info_dc->sids = dgrps;
-
-		/* Where are the 'global' sids?... */
+		dgrps[user_info_dc->num_sids] = (struct auth_SidAttr) {
+			.sid = *sids[i].sid,
+			.attrs = sids[i].attributes,
+			.origin = AUTH_SID_ORIGIN_EXTRA,
+		};
+		user_info_dc->num_sids++;
 	}
 
 	status = make_user_info_SamBaseInfo(user_info_dc, account_name, base, authenticated, &user_info_dc->info);
@@ -912,16 +928,21 @@ NTSTATUS make_user_info_dc_pac(TALLOC_CTX *mem_ctx,
 		}
 
 		for (i = 0; i < rg->groups.count; i++) {
+			struct auth_SidAttr *rgrps = user_info_dc->sids;
+			struct dom_sid tmpsid = { 0, };
 			bool ok;
 
-			user_info_dc->sids[user_info_dc->num_sids].sid = *rg->domain_sid;
-			ok = sid_append_rid(&user_info_dc->sids[user_info_dc->num_sids].sid,
-					    rg->groups.rids[i].rid);
+			tmpsid = *rg->domain_sid;
+			ok = sid_append_rid(&tmpsid, rg->groups.rids[i].rid);
 			if (!ok) {
 				talloc_free(user_info_dc);
 				return NT_STATUS_INVALID_PARAMETER;
 			}
-			user_info_dc->sids[user_info_dc->num_sids].attrs = rg->groups.rids[i].attributes;
+			rgrps[user_info_dc->num_sids] = (struct auth_SidAttr) {
+				.sid = tmpsid,
+				.attrs = rg->groups.rids[i].attributes,
+				.origin = AUTH_SID_ORIGIN_RESOURCE,
+			};
 			user_info_dc->num_sids++;
 		}
 	}
@@ -947,6 +968,40 @@ NTSTATUS make_user_info_dc_pac(TALLOC_CTX *mem_ctx,
 
 		if (pac_upn_dns_info->flags & PAC_UPN_DNS_FLAG_CONSTRUCTED) {
 			user_info_dc->info->user_principal_constructed = true;
+		}
+
+		if (pac_upn_dns_info->flags & PAC_UPN_DNS_FLAG_HAS_SAM_NAME_AND_SID) {
+			const struct PAC_UPN_DNS_INFO_SAM_NAME_AND_SID *ei =
+				&pac_upn_dns_info->ex.sam_name_and_sid;
+			const struct auth_SidAttr *psid =
+				&user_info_dc->sids[PRIMARY_USER_SID_INDEX];
+			bool match = true;
+
+			if (ei->objectsid != NULL) {
+				match = dom_sid_equal(ei->objectsid, &psid->sid);
+			}
+			if (!match) {
+				struct dom_sid_buf sb1 = {};
+				struct dom_sid_buf sb2 = {};
+
+				DBG_WARNING("Mismatching PAC_UPN_DNS "
+					    "objectSid[%s] LOGON_INFO[%s]\n",
+					    dom_sid_str_buf(ei->objectsid, &sb1),
+					    dom_sid_str_buf(&psid->sid, &sb2));
+				talloc_free(user_info_dc);
+				return NT_STATUS_INVALID_TOKEN;
+			}
+
+			match = strequal(ei->samaccountname,
+					 user_info_dc->info->account_name);
+			if (!match) {
+				DBG_WARNING("Mismatching PAC_UPN_DNS "
+					    "sAMAccountName[%s] LOGON_INFO[%s]\n",
+					    ei->samaccountname,
+					    user_info_dc->info->account_name);
+				talloc_free(user_info_dc);
+				return NT_STATUS_INVALID_TOKEN;
+			}
 		}
 	}
 

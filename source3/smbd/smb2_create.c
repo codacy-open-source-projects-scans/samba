@@ -658,9 +658,10 @@ static NTSTATUS smbd_smb2_create_durable_lease_check(struct smb_request *smb1req
 	}
 
 	if (!strequal(fsp->fsp_name->base_name, smb_fname->base_name)) {
-		DEBUG(10, ("Lease requested for file %s, reopened file "
-			   "is named %s\n", smb_fname->base_name,
-			   fsp->fsp_name->base_name));
+		DBG_DEBUG("Lease requested for file %s, reopened file "
+			  "is named %s\n",
+			  smb_fname->base_name,
+			  fsp_str_dbg(fsp));
 		TALLOC_FREE(smb_fname);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -682,6 +683,7 @@ struct smbd_smb2_create_state {
 	struct deferred_open_record *open_rec;
 	files_struct *result;
 	bool replay_operation;
+	bool replay_reconnect;
 	uint8_t in_oplock_level;
 	uint32_t in_create_disposition;
 	uint32_t in_create_options;
@@ -1078,11 +1080,12 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 	 * there is nothing else to do), durable_reconnect or
 	 * new open.
 	 */
-	if (state->replay_operation) {
+	if (state->replay_operation && !state->replay_reconnect) {
+		SMB_ASSERT(state->op != NULL);
 		state->result = state->op->compat;
 		state->result->op = state->op;
 		state->update_open = false;
-		state->info = state->op->create_action;
+		state->info = state->op->global->create_action;
 
 		smbd_smb2_create_after_exec(req);
 		if (!tevent_req_is_in_progress(req)) {
@@ -1093,14 +1096,26 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 		return req;
 	}
 
-	if (state->do_durable_reconnect) {
+	if (state->do_durable_reconnect || state->replay_reconnect) {
 		DATA_BLOB new_cookie = data_blob_null;
 		NTTIME now = timeval_to_nttime(&smb2req->request_time);
+		const struct smb2_lease_key *lease_key = NULL;
 
+		/*
+		 * Assert a replay on a multichannel connection doesn't end up
+		 * here.
+		 */
+		SMB_ASSERT(state->op == NULL);
+
+		if (state->lease_ptr != NULL) {
+			lease_key = &state->lease_ptr->lease_key;
+		}
 		status = smb2srv_open_recreate(smb2req->xconn,
-					       smb1req->conn->session_info,
+					       smb2req->session,
+					       smb2req->tcon,
 					       state->persistent_id,
 					       state->create_guid,
+					       lease_key,
 					       now,
 					       &state->op);
 		if (tevent_req_nterror(req, status)) {
@@ -1135,6 +1150,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 				   nt_errstr(status),
 				   nt_errstr(return_status));
 
+			TALLOC_FREE(state->op);
 			tevent_req_nterror(req, return_status);
 			return tevent_req_post(req, state->ev);
 		}
@@ -1161,7 +1177,11 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 
 		state->update_open = true;
 
-		state->info = FILE_WAS_OPENED;
+		if (!state->replay_reconnect) {
+			state->info = FILE_WAS_OPENED;
+		} else {
+			state->info = state->op->global->create_action;
+		}
 
 		smbd_smb2_create_after_exec(req);
 		if (!tevent_req_is_in_progress(req)) {
@@ -1310,13 +1330,20 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 	}
 	if (!NT_STATUS_IS_OK(status)) {
 		if (open_was_deferred(smb1req->xconn, smb1req->mid)) {
-			SMBPROFILE_IOBYTES_ASYNC_SET_IDLE(smb2req->profile);
+			SMBPROFILE_IOBYTES_ASYNC_SET_IDLE_X(smb2req->profile,
+							    smb2req->profile_x);
 			return req;
 		}
 		tevent_req_nterror(req, status);
 		return tevent_req_post(req, state->ev);
 	}
 	state->op = state->result->op;
+
+	if ((state->in_create_disposition == FILE_SUPERSEDE) &&
+	    (state->info == FILE_WAS_OVERWRITTEN))
+	{
+		state->info = FILE_WAS_SUPERSEDED;
+	}
 
 	smbd_smb2_create_after_exec(req);
 	if (!tevent_req_is_in_progress(req)) {
@@ -1350,6 +1377,135 @@ static void smbd_smb2_create_purge_replay_cache(struct tevent_req *req,
 	}
 
 	state->purge_create_guid = NULL;
+}
+
+static void smbd_smb2_cc_before_exec_dhc2q(struct tevent_req *req)
+{
+	struct smbd_smb2_create_state *state = tevent_req_data(
+		req, struct smbd_smb2_create_state);
+	struct smbd_smb2_request *smb2req = state->smb2req;
+	const uint8_t *p = state->dh2q->data.data;
+	NTTIME now = timeval_to_nttime(&smb2req->request_time);
+	uint32_t durable_v2_timeout = 0;
+	DATA_BLOB create_guid_blob;
+	const uint8_t *hdr = NULL;
+	uint32_t flags;
+	NTSTATUS status;
+
+	if (state->dh2q->data.length != 32) {
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return;
+	}
+
+	if (state->dhnq != NULL) {
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return;
+	}
+
+	durable_v2_timeout = IVAL(p, 0);
+	create_guid_blob = data_blob_const(p + 16, 16);
+
+	status = GUID_from_ndr_blob(&create_guid_blob,
+				    &state->_create_guid);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	state->create_guid = &state->_create_guid;
+
+	/*
+	 * we need to store the create_guid later
+	 */
+	state->update_open = true;
+
+	/*
+	 * And we need to create a cache for replaying the
+	 * create.
+	 */
+	state->need_replay_cache = true;
+
+	/*
+	 * durable handle v2 request processed below
+	 */
+	state->durable_requested = true;
+	state->durable_timeout_msec = MIN(durable_v2_timeout, 300*1000);
+	if (state->durable_timeout_msec == 0) {
+		/*
+		 * Set the timeout to 1 min as default.
+		 *
+		 * This matches Windows 2012.
+		 */
+		state->durable_timeout_msec = (60*1000);
+	}
+
+	/*
+	 * Check for replay operation.
+	 * Only consider it when we have dh2q.
+	 * If we do not have a replay operation, verify that
+	 * the create_guid is not cached for replay.
+	 */
+	hdr = SMBD_SMB2_IN_HDR_PTR(smb2req);
+	flags = IVAL(hdr, SMB2_HDR_FLAGS);
+	state->replay_operation = flags & SMB2_HDR_FLAG_REPLAY_OPERATION;
+
+	if (state->open_was_deferred) {
+		/*
+		 * When processing a redispatched deferred open, we have the
+		 * following state:
+		 * - no OPEN record
+		 * - RC record with global_file_id=0 (pending open state)
+		 *
+		 * We just skip calling smb2srv_open_lookup_replay_cache() as
+		 * - we already have a RC record
+		 * - it would fail with NT_STATUS_FILE_NOT_AVAILABLE which is
+		 *   not what we want in this "internal replay" case
+		 *
+		 * So we just set replay_operation to false and move on.
+		 */
+		state->replay_operation = false;
+		return;
+	}
+
+	status = smb2srv_open_lookup_replay_cache(smb2req->xconn,
+						  smb2req->session,
+						  *state->create_guid,
+						  state->fname,
+						  now,
+						  &state->persistent_id,
+						  &state->op);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_FWP_RESERVED)) {
+		/*
+		 * We've reserved the replay_cache record
+		 * for ourself, indicating we're still
+		 * in progress.
+		 *
+		 * It means the smbd_smb2_create_cleanup()
+		 * may need to call smbXsrv_open_purge_replay_cache()
+		 * in order to cleanup.
+		 */
+		SMB_ASSERT(state->op == NULL);
+		state->_purge_create_guid = state->_create_guid;
+		state->purge_create_guid = &state->_purge_create_guid;
+		state->replay_operation = false;
+	} else if (NT_STATUS_EQUAL(status, NT_STATUS_FILE_NOT_AVAILABLE)) {
+		tevent_req_nterror(req, status);
+		return;
+	} else if (NT_STATUS_EQUAL(status, NT_STATUS_HANDLE_NO_LONGER_VALID)) {
+		state->replay_reconnect = true;
+	} else if (tevent_req_nterror(req, status)) {
+		DBG_WARNING("smb2srv_open_lookup_replay_cache "
+			    "failed: %s\n", nt_errstr(status));
+		return;
+	} else if (!state->replay_operation) {
+		/*
+		 * If a create without replay operation flag
+		 * is sent but with a create_guid that is
+		 * currently in the replay cache -- fail.
+		 */
+		(void)tevent_req_nterror(req, NT_STATUS_DUPLICATE_OBJECTID);
+		return;
+	}
+
+	return;
 }
 
 static void smbd_smb2_create_before_exec(struct tevent_req *req)
@@ -1437,105 +1593,8 @@ static void smbd_smb2_create_before_exec(struct tevent_req *req)
 	}
 
 	if (state->dh2q != NULL) {
-		const uint8_t *p = state->dh2q->data.data;
-		NTTIME now = timeval_to_nttime(&smb2req->request_time);
-		uint32_t durable_v2_timeout = 0;
-		DATA_BLOB create_guid_blob;
-		const uint8_t *hdr;
-		uint32_t flags;
-
-		if (state->dh2q->data.length != 32) {
-			tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
-			return;
-		}
-
-		if (state->dhnq != NULL) {
-			tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
-			return;
-		}
-
-		durable_v2_timeout = IVAL(p, 0);
-		create_guid_blob = data_blob_const(p + 16, 16);
-
-		status = GUID_from_ndr_blob(&create_guid_blob,
-					    &state->_create_guid);
-		if (tevent_req_nterror(req, status)) {
-			return;
-		}
-		state->create_guid = &state->_create_guid;
-
-		/*
-		 * we need to store the create_guid later
-		 */
-		state->update_open = true;
-
-		/*
-		 * And we need to create a cache for replaying the
-		 * create.
-		 */
-		state->need_replay_cache = true;
-
-		/*
-		 * durable handle v2 request processed below
-		 */
-		state->durable_requested = true;
-		state->durable_timeout_msec = MIN(durable_v2_timeout, 300*1000);
-		if (state->durable_timeout_msec == 0) {
-			/*
-			 * Set the timeout to 1 min as default.
-			 *
-			 * This matches Windows 2012.
-			 */
-			state->durable_timeout_msec = (60*1000);
-		}
-
-		/*
-		 * Check for replay operation.
-		 * Only consider it when we have dh2q.
-		 * If we do not have a replay operation, verify that
-		 * the create_guid is not cached for replay.
-		 */
-		hdr = SMBD_SMB2_IN_HDR_PTR(smb2req);
-		flags = IVAL(hdr, SMB2_HDR_FLAGS);
-		state->replay_operation =
-			flags & SMB2_HDR_FLAG_REPLAY_OPERATION;
-
-		status = smb2srv_open_lookup_replay_cache(smb2req->xconn,
-							  state->req_guid,
-							  *state->create_guid,
-							  state->fname,
-							  now,
-							  &state->op);
-		if (NT_STATUS_EQUAL(status, NT_STATUS_FWP_RESERVED)) {
-			/*
-			 * We've reserved the replay_cache record
-			 * for ourself, indicating we're still
-			 * in progress.
-			 *
-			 * It means the smbd_smb2_create_cleanup()
-			 * may need to call smbXsrv_open_purge_replay_cache()
-			 * in order to cleanup.
-			 */
-			SMB_ASSERT(state->op == NULL);
-			state->_purge_create_guid = state->_create_guid;
-			state->purge_create_guid = &state->_purge_create_guid;
-			status = NT_STATUS_OK;
-			state->replay_operation = false;
-		} else if (NT_STATUS_EQUAL(status, NT_STATUS_FILE_NOT_AVAILABLE)) {
-			tevent_req_nterror(req, status);
-			return;
-		} else if (tevent_req_nterror(req, status)) {
-			DBG_WARNING("smb2srv_open_lookup_replay_cache "
-				    "failed: %s\n", nt_errstr(status));
-			return;
-		} else if (!state->replay_operation) {
-			/*
-			 * If a create without replay operation flag
-			 * is sent but with a create_guid that is
-			 * currently in the replay cache -- fail.
-			 */
-			status = NT_STATUS_DUPLICATE_OBJECTID;
-			(void)tevent_req_nterror(req, status);
+		smbd_smb2_cc_before_exec_dhc2q(req);
+		if (!tevent_req_is_in_progress(req)) {
 			return;
 		}
 	}
@@ -1622,7 +1681,7 @@ static void smbd_smb2_create_before_exec(struct tevent_req *req)
 		 * established open carries a lease with the
 		 * same lease key.
 		 */
-		if (state->replay_operation) {
+		if (state->replay_operation && !state->replay_reconnect) {
 			struct smb2_lease *op_ls =
 				&state->op->compat->lease->lease;
 			int op_oplock = state->op->compat->oplock_type;
@@ -1666,6 +1725,9 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 	 */
 
 	DBG_DEBUG("response construction phase\n");
+
+	state->op->global->create_action = state->info;
+	state->out_create_action = state->info;
 
 	state->out_file_attributes = fdos_mode(state->result);
 
@@ -1948,20 +2010,11 @@ static void smbd_smb2_create_finish(struct tevent_req *req)
 		state->out_oplock_level	= map_samba_oplock_levels_to_smb2(result->oplock_type);
 	}
 
-	if ((state->in_create_disposition == FILE_SUPERSEDE)
-	    && (state->info == FILE_WAS_OVERWRITTEN)) {
-		state->out_create_action = FILE_WAS_SUPERSEDED;
-	} else {
-		state->out_create_action = state->info;
-	}
-	result->op->create_action = state->out_create_action;
-
 	state->out_creation_ts = get_create_timespec(smb1req->conn,
 					result, result->fsp_name);
 	state->out_last_access_ts = result->fsp_name->st.st_ex_atime;
 	state->out_last_write_ts = result->fsp_name->st.st_ex_mtime;
-	state->out_change_ts = get_change_timespec(smb1req->conn,
-					result, result->fsp_name);
+	state->out_change_ts = result->fsp_name->st.st_ex_ctime;
 
 	if (lp_dos_filetime_resolution(SNUM(smb2req->tcon->compat))) {
 		dos_filetime_timespec(&state->out_creation_ts);

@@ -23,7 +23,8 @@
 */
 
 #include "includes.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmbclient.h"
 #include "libsmb_internal.h"
 #include "../libcli/smb/smbXcli_base.h"
@@ -51,17 +52,19 @@ SMBC_open_ctx(SMBCCTX *context,
 	uint16_t fd;
 	uint16_t port = 0;
 	NTSTATUS status = NT_STATUS_OBJECT_PATH_INVALID;
+	struct cli_credentials *creds = NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
+	bool smb311_posix_saved;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;  /* Best I can think of ... */
 		TALLOC_FREE(frame);
+		errno = EINVAL; /* Best I can think of ... */
 		return NULL;
 	}
 
 	if (!fname) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return NULL;
 	}
 
@@ -76,16 +79,16 @@ SMBC_open_ctx(SMBCCTX *context,
                             &user,
                             &password,
                             NULL)) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return NULL;
         }
 
 	if (!user || user[0] == (char)0) {
 		user = talloc_strdup(frame, smbc_getUser(context));
 		if (!user) {
-                	errno = ENOMEM;
 			TALLOC_FREE(frame);
+			errno = ENOMEM;
 			return NULL;
 		}
 	}
@@ -93,110 +96,20 @@ SMBC_open_ctx(SMBCCTX *context,
 	srv = SMBC_server(frame, context, True,
                           server, port, share, &workgroup, &user, &password);
 	if (!srv) {
-		if (errno == EPERM) errno = EACCES;
+		int err = errno;
+
 		TALLOC_FREE(frame);
+
+		errno = err;
+		if (errno == EPERM) {
+			errno = EACCES;
+		}
 		return NULL;  /* SMBC_server sets errno */
 	}
 
 	/* Hmmm, the test for a directory is suspect here ... FIXME */
 
 	if (strlen(path) > 0 && path[strlen(path) - 1] == '\\') {
-		status = NT_STATUS_OBJECT_PATH_INVALID;
-	} else {
-		struct cli_credentials *creds = NULL;
-
-		file = SMB_MALLOC_P(SMBCFILE);
-		if (!file) {
-			errno = ENOMEM;
-			TALLOC_FREE(frame);
-			return NULL;
-		}
-
-		ZERO_STRUCTP(file);
-
-		creds = context->internal->creds;
-		/*d_printf(">>>open: resolving %s\n", path);*/
-		status = cli_resolve_path(
-			frame, "",
-			creds,
-			srv->cli, path, &targetcli, &targetpath);
-		if (!NT_STATUS_IS_OK(status)) {
-			d_printf("Could not resolve %s\n", path);
-                        errno = ENOENT;
-			SAFE_FREE(file);
-			TALLOC_FREE(frame);
-			return NULL;
-		}
-		/*d_printf(">>>open: resolved %s as %s\n", path, targetpath);*/
-
-		status = cli_open(targetcli, targetpath, flags,
-                                   context->internal->share_mode, &fd);
-		if (!NT_STATUS_IS_OK(status)) {
-
-			/* Handle the error ... */
-
-			SAFE_FREE(file);
-			TALLOC_FREE(frame);
-			errno = cli_status_to_errno(status);
-			return NULL;
-		}
-
-		/* Fill in file struct */
-
-		file->cli_fd  = fd;
-		file->fname   = SMB_STRDUP(fname);
-		file->srv     = srv;
-		file->offset  = 0;
-		file->file    = True;
-		/*
-		 * targetcli is either equal to srv->cli or
-		 * is a subsidiary DFS connection. Either way
-		 * file->cli_fd belongs to it so we must cache
-		 * it for read/write/close, not re-resolve each time.
-		 * Re-resolving is both slow and incorrect.
-		 */
-		file->targetcli = targetcli;
-
-		DLIST_ADD(context->internal->files, file);
-
-                /*
-                 * If the file was opened in O_APPEND mode, all write
-                 * operations should be appended to the file.  To do that,
-                 * though, using this protocol, would require a getattrE()
-                 * call for each and every write, to determine where the end
-                 * of the file is. (There does not appear to be an append flag
-                 * in the protocol.)  Rather than add all of that overhead of
-                 * retrieving the current end-of-file offset prior to each
-                 * write operation, we'll assume that most append operations
-                 * will continuously write, so we'll just set the offset to
-                 * the end of the file now and hope that's adequate.
-                 *
-                 * Note to self: If this proves inadequate, and O_APPEND
-                 * should, in some cases, be forced for each write, add a
-                 * field in the context options structure, for
-                 * "strict_append_mode" which would select between the current
-                 * behavior (if FALSE) or issuing a getattrE() prior to each
-                 * write and forcing the write to the end of the file (if
-                 * TRUE).  Adding that capability will likely require adding
-                 * an "append" flag into the _SMBCFILE structure to track
-                 * whether a file was opened in O_APPEND mode.  -- djl
-                 */
-                if (flags & O_APPEND) {
-                        if (SMBC_lseek_ctx(context, file, 0, SEEK_END) < 0) {
-                                (void) SMBC_close_ctx(context, file);
-                                errno = ENXIO;
-				TALLOC_FREE(frame);
-                                return NULL;
-                        }
-                }
-
-		TALLOC_FREE(frame);
-		return file;
-	}
-
-	/* Check if opendir needed ... */
-
-	if (!NT_STATUS_IS_OK(status)) {
 		file = smbc_getFunctionOpendir(context)(context, fname);
 		TALLOC_FREE(frame);
 		if (file == NULL) {
@@ -205,9 +118,141 @@ SMBC_open_ctx(SMBCCTX *context,
 		return file;
 	}
 
-	errno = EINVAL; /* FIXME, correct errno ? */
+	file = SMB_CALLOC_ARRAY(SMBCFILE, 1);
+	if (!file) {
+		TALLOC_FREE(frame);
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	creds = context->internal->creds;
+	/*d_printf(">>>open: resolving %s\n", path);*/
+	status = cli_resolve_path(
+		context->internal->mem_ctx,
+		"",
+		creds,
+		srv->cli, path, &targetcli, &targetpath);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("Could not resolve %s\n", path);
+		SAFE_FREE(file);
+		TALLOC_FREE(frame);
+		errno = ENOENT;
+		return NULL;
+	}
+	/*d_printf(">>>open: resolved %s as %s\n", path, targetpath);*/
+
+	/*
+	 * Indicate to cli_smb2_create_fnum_send() that we want file
+	 * handles with posix extensions.
+	 */
+
+	smb311_posix_saved = targetcli->smb2.client_smb311_posix;
+	targetcli->smb2.client_smb311_posix =
+		smbc_getOptionPosixExtensions(context) &&
+		(smbXcli_conn_protocol(targetcli->conn) >= PROTOCOL_SMB3_11) &&
+		smbXcli_conn_have_posix(targetcli->conn);
+
+	/*
+	 * Random error that the O_PATH if-block will never return
+	 */
+	status = NT_STATUS_LDAP(0);
+
+#ifdef O_PATH
+	if (flags & O_PATH) {
+		if ((flags & ~O_PATH) != 0) {
+			SAFE_FREE(file);
+			TALLOC_FREE(frame);
+			errno = EINVAL;
+			return NULL;
+		}
+		status = cli_ntcreate(
+			targetcli,  /* cli */
+			targetpath, /* fname */
+			0,	    /* CreateFlags */
+			SEC_FILE_READ_ATTRIBUTE | SEC_FILE_READ_EA |
+			SEC_STD_READ_CONTROL, /* DesiredAccess
+					       */
+			0, /* FileAttributes */
+			FILE_SHARE_READ | FILE_SHARE_WRITE |
+			FILE_SHARE_DELETE, /* ShareAccess */
+			FILE_OPEN, /* CreateDisposition */
+			0x0,	   /* CreateOptions */
+			0x0,	   /* SecurityFlags */
+			&fd,	   /* pfid */
+			NULL);	   /* cr */
+	}
+#endif
+	if (NT_STATUS_EQUAL(status, NT_STATUS_LDAP(0))) {
+		status = cli_open(targetcli,
+				  targetpath,
+				  flags,
+				  context->internal->share_mode,
+				  &fd);
+	}
+
+	targetcli->smb2.client_smb311_posix = smb311_posix_saved;
+
+	if (!NT_STATUS_IS_OK(status)) {
+
+		/* Handle the error ... */
+
+		SAFE_FREE(file);
+		TALLOC_FREE(frame);
+		errno = cli_status_to_errno(status);
+		return NULL;
+	}
+
+	/* Fill in file struct */
+
+	file->cli_fd  = fd;
+	file->fname   = SMB_STRDUP(fname);
+	file->srv     = srv;
+	file->offset  = 0;
+	file->file    = True;
+	/*
+	 * targetcli is either equal to srv->cli or
+	 * is a subsidiary DFS connection. Either way
+	 * file->cli_fd belongs to it so we must cache
+	 * it for read/write/close, not re-resolve each time.
+	 * Re-resolving is both slow and incorrect.
+	 */
+	file->targetcli = targetcli;
+
+	DLIST_ADD(context->internal->files, file);
+
+	/*
+	 * If the file was opened in O_APPEND mode, all write
+	 * operations should be appended to the file.  To do that,
+	 * though, using this protocol, would require a getattrE()
+	 * call for each and every write, to determine where the end
+	 * of the file is. (There does not appear to be an append flag
+	 * in the protocol.)  Rather than add all of that overhead of
+	 * retrieving the current end-of-file offset prior to each
+	 * write operation, we'll assume that most append operations
+	 * will continuously write, so we'll just set the offset to
+	 * the end of the file now and hope that's adequate.
+	 *
+	 * Note to self: If this proves inadequate, and O_APPEND
+	 * should, in some cases, be forced for each write, add a
+	 * field in the context options structure, for
+	 * "strict_append_mode" which would select between the current
+	 * behavior (if FALSE) or issuing a getattrE() prior to each
+	 * write and forcing the write to the end of the file (if
+	 * TRUE).  Adding that capability will likely require adding
+	 * an "append" flag into the _SMBCFILE structure to track
+	 * whether a file was opened in O_APPEND mode.  -- djl
+	 */
+	if (flags & O_APPEND) {
+		if (SMBC_lseek_ctx(context, file, 0, SEEK_END) < 0) {
+			(void) SMBC_close_ctx(context, file);
+			errno = ENXIO;
+			TALLOC_FREE(frame);
+			return NULL;
+		}
+	}
+
 	TALLOC_FREE(frame);
-	return NULL;
+	return file;
 }
 
 /*
@@ -219,11 +264,6 @@ SMBC_creat_ctx(SMBCCTX *context,
                const char *path,
                mode_t mode)
 {
-	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
-		return NULL;
-	}
-
 	return SMBC_open_ctx(context, path,
                              O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
@@ -254,16 +294,16 @@ SMBC_read_ctx(SMBCCTX *context,
         off_t offset;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	DEBUG(4, ("smbc_read(%p, %zu)\n", file, count));
 
 	if (!SMBC_dlist_contains(context->internal->files, file)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
@@ -272,8 +312,8 @@ SMBC_read_ctx(SMBCCTX *context,
 	/* Check that the buffer exists ... */
 
 	if (buf == NULL) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -306,20 +346,20 @@ SMBC_splice_ctx(SMBCCTX *context,
 	NTSTATUS status;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, srcfile)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, dstfile)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
@@ -357,22 +397,22 @@ SMBC_write_ctx(SMBCCTX *context,
 	/* First check all pointers before dereferencing them */
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, file)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
 	/* Check that the buffer exists ... */
 
 	if (buf == NULL) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
@@ -381,8 +421,8 @@ SMBC_write_ctx(SMBCCTX *context,
 	status = cli_writeall(file->targetcli, file->cli_fd,
 			      0, (const uint8_t *)buf, offset, count, NULL);
 	if (!NT_STATUS_IS_OK(status)) {
-		errno = map_errno_from_nt_status(status);
 		TALLOC_FREE(frame);
+		errno = map_errno_from_nt_status(status);
 		return -1;
 	}
 
@@ -404,14 +444,14 @@ SMBC_close_ctx(SMBCCTX *context,
 	NTSTATUS status;
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, file)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
@@ -497,7 +537,8 @@ SMBC_getatr(SMBCCTX * context,
 
 	creds = context->internal->creds;
 
-	status = cli_resolve_path(frame, "",
+	status = cli_resolve_path(context->internal->mem_ctx,
+				  "",
 				  creds,
 				  srv->cli, fixedpath,
 				  &targetcli, &targetpath);
@@ -717,20 +758,20 @@ SMBC_lseek_ctx(SMBCCTX *context,
 	TALLOC_CTX *frame = talloc_stackframe();
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, file)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
 	if (!file->file) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;      /* Can't lseek a dir ... */
 	}
 
@@ -746,8 +787,8 @@ SMBC_lseek_ctx(SMBCCTX *context,
 					     file->targetcli, file->cli_fd, NULL,
 					     &size, NULL, NULL, NULL, NULL,
 					     NULL))) {
-			errno = EINVAL;
 			TALLOC_FREE(frame);
+			errno = EINVAL;
 			return -1;
 		}
 		file->offset = size + offset;
@@ -775,26 +816,26 @@ SMBC_ftruncate_ctx(SMBCCTX *context,
 	TALLOC_CTX *frame = talloc_stackframe();
 
 	if (!context || !context->internal->initialized) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
 	if (!SMBC_dlist_contains(context->internal->files, file)) {
-		errno = EBADF;
 		TALLOC_FREE(frame);
+		errno = EBADF;
 		return -1;
 	}
 
 	if (!file->file) {
-		errno = EINVAL;
 		TALLOC_FREE(frame);
+		errno = EINVAL;
 		return -1;
 	}
 
         if (!NT_STATUS_IS_OK(cli_ftruncate(file->targetcli, file->cli_fd, (uint64_t)size))) {
-                errno = EINVAL;
                 TALLOC_FREE(frame);
+                errno = EINVAL;
                 return -1;
         }
 

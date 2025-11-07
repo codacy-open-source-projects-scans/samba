@@ -129,7 +129,7 @@ static NTSTATUS cli_credentials_set_secrets_lct(struct cli_credentials *cred,
 
 	cli_credentials_set_password_last_changed_time(cred, lct);
 
-	machine_account = ldb_msg_find_attr_as_string(msg, "samAccountName", NULL);
+	machine_account = ldb_msg_find_attr_as_string(msg, "sAMAccountName", NULL);
 
 	if (!machine_account) {
 		machine_account = ldb_msg_find_attr_as_string(msg, "servicePrincipalName", NULL);
@@ -364,7 +364,12 @@ _PUBLIC_ NTSTATUS cli_credentials_set_machine_account_db_ctx(struct cli_credenti
 	} else if (secrets_tdb_lct > cli_credentials_get_password_last_changed_time(cred)) {
 		secrets_tdb_password_more_recent = true;
 	} else if (secrets_tdb_lct == cli_credentials_get_password_last_changed_time(cred)) {
-		secrets_tdb_password_more_recent = strcmp(secrets_tdb_password, cli_credentials_get_password(cred)) != 0;
+		const char *pwd = cli_credentials_get_password(cred);
+		if (pwd == NULL || (strcmp(secrets_tdb_password, pwd) != 0)) {
+			secrets_tdb_password_more_recent = true;
+		} else {
+			secrets_tdb_password_more_recent = false;
+		}
 	} else {
 		secrets_tdb_password_more_recent = false;
 	}

@@ -69,24 +69,37 @@ int kdc_check_pac(krb5_context context,
 
 struct samba_kdc_entry_pac samba_kdc_get_device_pac(const astgs_request_t r)
 {
+	krb5_const_principal device_principal = kdc_request_get_armor_client_principal(r);
 	const hdb_entry *device = kdc_request_get_armor_client(r);
 	struct samba_kdc_entry *device_skdc_entry = NULL;
-	const hdb_entry *device_krbtgt = NULL;
+	const hdb_entry *device_krbtgt = kdc_request_get_armor_server(r);
 	const struct samba_kdc_entry *device_krbtgt_skdc_entry = NULL;
 	const krb5_const_pac device_pac = kdc_request_get_armor_pac(r);
 
+	if (device_pac == NULL) {
+		return samba_kdc_entry_pac(NULL, NULL, NULL, NULL);
+	}
+
+	/*
+	 * If we have a armor_pac we also have armor_server,
+	 * otherwise we can't decrypt the ticket and get to
+	 * the pac.
+	 */
+	device_krbtgt_skdc_entry = talloc_get_type_abort(device_krbtgt->context,
+							 struct samba_kdc_entry);
+
+	/*
+	 * The armor ticket might be from a different
+	 * domain, so we may not have a local db entry
+	 * for the device.
+	 */
 	if (device != NULL) {
 		device_skdc_entry = talloc_get_type_abort(device->context,
 							  struct samba_kdc_entry);
-
-		device_krbtgt = kdc_request_get_armor_server(r);
-		if (device_krbtgt != NULL) {
-			device_krbtgt_skdc_entry = talloc_get_type_abort(device_krbtgt->context,
-									 struct samba_kdc_entry);
-		}
 	}
 
 	return samba_kdc_entry_pac(device_pac,
+				   device_principal,
 				   device_skdc_entry,
-				   samba_kdc_entry_is_trust(device_krbtgt_skdc_entry));
+				   device_krbtgt_skdc_entry);
 }

@@ -57,7 +57,14 @@ planpythontestsuite("none", "samba.tests.source")
 planpythontestsuite("none", "samba.tests.source_chars")
 
 if have_man_pages_support:
-    planpythontestsuite("none", "samba.tests.docs")
+    # This is a unit test which doesn't need any wrappers. We unset LD_PRELOAD
+    # as it is causing issues with Python >= 3.14 passing sockets around if a
+    # task is running concurrently.
+    planpythontestsuite(
+        "none",
+        "samba.tests.docs",
+        environ={'LD_PRELOAD': ''}
+    )
 
 try:
     import testscenarios
@@ -97,6 +104,12 @@ planpythontestsuite("none", "repack",
                     name="ldb.python.repack",
                     extra_path=['lib/ldb/tests/python'],
                     environ={'HAVE_LMDB': str(int(have_lmdb))})
+
+planpythontestsuite("none", "index_transparency",
+                    name="ldb.python.index_transparency",
+                    extra_path=['lib/ldb/tests/python'],
+                    environ={'SKIP_SLOW_TESTS': '1',
+                             'HAVE_LMDB': str(int(have_lmdb))})
 
 # LDB tests for standalone operation, in the tr_TR.UTF-8 to cover
 # dotless i locales, see
@@ -185,6 +198,7 @@ planpythontestsuite("none", "samba.tests.param")
 planpythontestsuite("none", "samba.tests.upgrade")
 planpythontestsuite("none", "samba.tests.core")
 planpythontestsuite("none", "samba.tests.common")
+planpythontestsuite("none", "samba.tests.dsdb_dn")
 planpythontestsuite("none", "samba.tests.provision")
 planpythontestsuite("none", "samba.tests.password_quality")
 planpythontestsuite("none", "samba.tests.strings")
@@ -235,99 +249,99 @@ def cmdline(script, *args):
 
 plantestsuite(
     "samba4.blackbox.demote-saveddb", "none",
-    cmdline('demote-saveddb.sh', '$PREFIX_ABS/demote'))
+    cmdline('demote-saveddb.sh', '$PREFIX/demote'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck.alpha13", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'alpha13'))
 
 # same test as above but skip member link checks
 plantestsuite(
     "samba4.blackbox.dbcheck.alpha13.quick", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'alpha13', '--quick-membership-checks'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-0-0", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-0-0'))
 
 # same test as above but skip member link checks
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-0-0.quick", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-0-0', '--quick-membership-checks'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-1-0rc3", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-1-0rc3'))
 
 # same test as above but skip member link checks
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-1-0rc3.quick", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-1-0rc3', '--quick-membership-checks'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-1-6-partial-object", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-1-6-partial-object'))
 
 # same test as above but skip member link checks
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-1-6-partial-object.quick", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-1-6-partial-object', '--quick-membership-checks'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-5-0-pre1", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-5-0-pre1'))
 
 # same test as above but skip member link checks
 plantestsuite(
     "samba4.blackbox.dbcheck.release-4-5-0-pre1.quick", "none",
-    cmdline('dbcheck-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-oldrelease.sh', '$PREFIX/provision',
             'release-4-5-0-pre1', '--quick-membership-checks'))
 
 plantestsuite(
     "samba4.blackbox.upgradeprovision.alpha13", "none",
-    cmdline('upgradeprovision-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('upgradeprovision-oldrelease.sh', '$PREFIX/provision',
             'alpha13'))
 
 plantestsuite(
     "samba4.blackbox.upgradeprovision.release-4-0-0", "none",
-    cmdline('upgradeprovision-oldrelease.sh', '$PREFIX_ABS/provision',
+    cmdline('upgradeprovision-oldrelease.sh', '$PREFIX/provision',
             'release-4-0-0'))
 
 plantestsuite(
     "samba4.blackbox.tombstones-expunge.release-4-5-0-pre1", "none",
-    cmdline('tombstones-expunge.sh', '$PREFIX_ABS/provision',
+    cmdline('tombstones-expunge.sh', '$PREFIX/provision',
             'release-4-5-0-pre1'))
 
 plantestsuite(
     "samba4.blackbox.dbcheck-links.release-4-5-0-pre1", "none",
-    cmdline('dbcheck-links.sh', '$PREFIX_ABS/provision',
+    cmdline('dbcheck-links.sh', '$PREFIX/provision',
             'release-4-5-0-pre1'))
 
 plantestsuite(
     "samba4.blackbox.runtime-links.release-4-5-0-pre1", "none",
-    cmdline('runtime-links.sh', '$PREFIX_ABS/provision',
+    cmdline('runtime-links.sh', '$PREFIX/provision',
             'release-4-5-0-pre1'))
 
 plantestsuite(
     "samba4.blackbox.schemaupgrade", "none",
-    cmdline('schemaupgrade.sh', '$PREFIX_ABS/provision'))
+    cmdline('schemaupgrade.sh', '$PREFIX/provision'))
 
 plantestsuite(
     "samba4.blackbox.functionalprep", "none",
-    cmdline('functionalprep.sh', '$PREFIX_ABS/provision'))
+    cmdline('functionalprep.sh', '$PREFIX/provision'))
 
 plantestsuite(
     "samba4.blackbox.test_special_group", "none",
-    cmdline('test_special_group.sh', '$PREFIX_ABS/provision'))
+    cmdline('test_special_group.sh', '$PREFIX/provision'))
 
 planpythontestsuite("fileserver", "samba.tests.blackbox.http_content")
 planpythontestsuite("fileserver", "samba.tests.blackbox.http_chunk")
@@ -344,8 +358,12 @@ planpythontestsuite("none", "samba.tests.glue")
 planpythontestsuite("none", "samba.tests.tdb_util")
 planpythontestsuite("none", "samba.tests.samdb")
 planpythontestsuite("none", "samba.tests.samdb_api")
+planpythontestsuite("none", "samba.tests.key_credential_link")
+planpythontestsuite("none", "samba.tests.bcrypt_rsakey_blob")
+planpythontestsuite("none", "samba.tests.tpm20_rsakey_blob")
 planpythontestsuite("none", "samba.tests.ndr.gkdi")
 planpythontestsuite("none", "samba.tests.ndr.gmsa")
+planpythontestsuite("none", "samba.tests.ndr.sd")
 planpythontestsuite("none", "samba.tests.ndr.wbint")
 
 if with_pam:
@@ -615,6 +633,11 @@ plantestsuite("samba.unittests.claim_conversion", "none",
               [os.path.join(bindir(), "test_claim_conversion")])
 plantestsuite("samba.unittests.cmdline", "none",
               [os.path.join(bindir(), "test_cmdline")])
+if have_heimdal_support:
+    plantestsuite("samba.source4.kdc.tests.db_glue", "none",
+                [os.path.join(bindir(), "default/source4/kdc/test_db_glue")])
+    plantestsuite("samba.source4.kdc.tests.sdb_to_hdb", "none",
+                [os.path.join(bindir(), "default/source4/kdc/test_sdb_to_hdb")])
 
 # Run the Rust cargo tests
 planpythontestsuite("none", "samba.tests.rust")

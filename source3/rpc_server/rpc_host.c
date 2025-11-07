@@ -71,6 +71,7 @@
 #include "nsswitch/winbind_client.h"
 #include "libcli/security/dom_sid.h"
 #include "libcli/security/security_token.h"
+#include "source3/lib/substitute.h"
 
 extern bool override_logfile;
 
@@ -265,11 +266,6 @@ static struct tevent_req *rpc_server_get_endpoints_send(
 
 	state->ncalrpc_endpoint = talloc_strdup(state, progname);
 	if (tevent_req_nomem(state->ncalrpc_endpoint, req)) {
-		return tevent_req_post(req, ev);
-	}
-
-	state->argl = talloc_array(state, char *, 4);
-	if (tevent_req_nomem(state->argl, req)) {
 		return tevent_req_post(req, ev);
 	}
 
@@ -2888,6 +2884,8 @@ int main(int argc, const char *argv[])
 	BlockSignals(true, SIGPIPE);
 
 	dump_core_setup(progname, lp_logfile(frame, lp_sub));
+
+	set_remote_machine_name("samba-dcerpcd", false);
 
 	reopen_logs();
 

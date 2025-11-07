@@ -32,6 +32,8 @@
 #undef vfs_ops
 #endif
 
+#include "smbprofile.h"
+
 /*
  * As we're now (thanks Andrew ! :-) using file_structs and connection
  * structs in the vfs - then anyone writing a vfs must include includes.h...
@@ -387,9 +389,14 @@
  * Version 50 - Remove FSP_POSIX_FLAGS_PATHNAMES, remove FSP_POSIX_FLAGS_RENAME
  *              and convert struct files_struct.posix_flags to
  *              struct files_struct.fsp_flags.posix_open
+ * Version 50 - Add struct files_struct.fsp_flags.posix_append
+ * Change to Version 51 - will ship with 4.23
+ * Version 51 - Add ntcreatex_deny_[dos|fcb] and ntcreatex_stream_baseopen
+ * Change to Version 52 - will ship with 4.24
+ * Version 52 - Add rename_stream
  */
 
-#define SMB_VFS_INTERFACE_VERSION 50
+#define SMB_VFS_INTERFACE_VERSION 51
 
 /*
     All intercepted VFS operations must be declared as static functions inside module source
@@ -409,6 +416,7 @@ struct ea_list;
 struct smb_file_time;
 struct smb_filename;
 struct dfs_GetDFSReferral;
+struct pthreadpool_tevent;
 
 typedef union unid_t {
 	uid_t uid;
@@ -442,8 +450,6 @@ typedef struct files_struct {
 		bool is_fsa : 1;     /* See below */
 		bool have_proc_fds : 1;
 		bool kernel_share_modes_taken : 1;
-		bool update_write_time_triggered : 1;
-		bool update_write_time_on_close : 1;
 		bool write_time_forced : 1;
 		bool can_lock : 1;
 		bool can_read : 1;
@@ -461,10 +467,23 @@ typedef struct files_struct {
 		bool lock_failure_seen : 1;
 		bool encryption_required : 1;
 		bool fstat_before_close : 1;
+		/*
+		 * For POSIX clients struct files_struct.fsp_flags.posix_open
+		 * and struct smb_filename.flags SMB_FILENAME_POSIX_PATH will
+		 * always be set to the same value.
+		 *
+		 * For macOS clients vfs_fruit with fruit:posix_open=yes, we
+		 * deliberately set both flags to fsp_flags.posix_open=true
+		 * while SMB_FILENAME_POSIX_PATH will not be set.
+		 */
 		bool posix_open : 1;
+		bool posix_append : 1;
+		bool ntcreatex_deny_dos : 1;
+		bool ntcreatex_deny_fcb : 1;
+		bool ntcreatex_stream_baseopen : 1;
 	} fsp_flags;
 
-	struct tevent_timer *update_write_time_event;
+	/* Only used for SMB1 close with explicit time */
 	struct timespec close_write_time;
 
 	int oplock_type;
@@ -884,6 +903,15 @@ struct smb_filename {
 	struct fsp_smb_fname_link *fsp_link;
 };
 
+/*
+ * For POSIX clients struct files_struct.fsp_flags.posix_open
+ * and struct smb_filename.flags SMB_FILENAME_POSIX_PATH will
+ * always be set to the same value.
+ *
+ * For macOS clients vfs_fruit with fruit:posix_open=yes, we
+ * deliberately set both flags to fsp_flags.posix_open=true
+ * while SMB_FILENAME_POSIX_PATH will not be set.
+ */
 #define SMB_FILENAME_POSIX_PATH		0x01
 
 enum vfs_translate_direction {
@@ -914,6 +942,27 @@ struct vfs_open_how {
 
 struct vfs_rename_how {
 	int flags;
+};
+
+#define VFS_PWRITE_APPEND_OFFSET -1
+
+struct vfs_pthreadpool_job_state {
+	struct tevent_context *ev;
+	struct vfs_handle_struct *handle;
+	files_struct *dir_fsp;
+	const struct smb_filename *smb_fname;
+
+	/*
+	 * The following variables are talloced off "state" which is protected
+	 * by a destructor and thus are guaranteed to be safe to be used in the
+	 * job function in the worker thread.
+	 */
+	char *name;
+	const struct security_unix_token *token;
+
+	struct vfs_aio_state vfs_aio_state;
+	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes);
+	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes_x);
 };
 
 /*
@@ -1029,6 +1078,10 @@ struct vfs_fn_pointers {
 			 struct files_struct *dstdir_fsp,
 			 const struct smb_filename *smb_fname_dst,
 			 const struct vfs_rename_how *how);
+	int (*rename_stream_fn)(struct vfs_handle_struct *handle,
+				struct files_struct *src_fsp,
+				const char *dst_name,
+				bool replace_if_exists);
 	struct tevent_req *(*fsync_send_fn)(struct vfs_handle_struct *handle,
 					    TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
@@ -1508,7 +1561,8 @@ struct tevent_req *smb_vfs_call_pread_send(struct vfs_handle_struct *handle,
 					   struct files_struct *fsp,
 					   void *data,
 					   size_t n, off_t offset);
-ssize_t SMB_VFS_PREAD_RECV(struct tevent_req *req, struct vfs_aio_state *state);
+ssize_t smb_vfs_call_pread_recv(struct tevent_req *req,
+				struct vfs_aio_state *state);
 
 ssize_t smb_vfs_call_pwrite(struct vfs_handle_struct *handle,
 			    struct files_struct *fsp, const void *data,
@@ -1519,7 +1573,8 @@ struct tevent_req *smb_vfs_call_pwrite_send(struct vfs_handle_struct *handle,
 					    struct files_struct *fsp,
 					    const void *data,
 					    size_t n, off_t offset);
-ssize_t SMB_VFS_PWRITE_RECV(struct tevent_req *req, struct vfs_aio_state *state);
+ssize_t smb_vfs_call_pwrite_recv(struct tevent_req *req,
+				 struct vfs_aio_state *state);
 
 off_t smb_vfs_call_lseek(struct vfs_handle_struct *handle,
 			     struct files_struct *fsp, off_t offset,
@@ -1536,12 +1591,17 @@ int smb_vfs_call_renameat(struct vfs_handle_struct *handle,
 			struct files_struct *dstfsp,
 			const struct smb_filename *smb_fname_dst,
 			const struct vfs_rename_how *how);
+int smb_vfs_call_rename_stream(struct vfs_handle_struct *handle,
+			       struct files_struct *src_fsp,
+			       const char *dst_name,
+			       bool replace_if_exists);
 
 struct tevent_req *smb_vfs_call_fsync_send(struct vfs_handle_struct *handle,
 					   TALLOC_CTX *mem_ctx,
 					   struct tevent_context *ev,
 					   struct files_struct *fsp);
-int SMB_VFS_FSYNC_RECV(struct tevent_req *req, struct vfs_aio_state *state);
+int smb_vfs_call_fsync_recv(struct tevent_req *req,
+			    struct vfs_aio_state *state);
 
 int smb_vfs_fsync_sync(files_struct *fsp);
 int smb_vfs_call_stat(struct vfs_handle_struct *handle,
@@ -1844,6 +1904,8 @@ void *vfs_fetch_fsp_extension(vfs_handle_struct *handle, const struct files_stru
 void smb_vfs_assert_all_fns(const struct vfs_fn_pointers* fns,
 			    const char *module);
 
+bool vfswrap_check_async_with_thread_creds(struct pthreadpool_tevent *pool);
+
 /*
  * Helper functions from source3/modules/vfs_not_implemented.c
  */
@@ -1972,6 +2034,10 @@ int vfs_not_implemented_renameat(vfs_handle_struct *handle,
 			       files_struct *dstfsp,
 			       const struct smb_filename *smb_fname_dst,
 			       const struct vfs_rename_how *how);
+int vfs_not_implemented_rename_stream(struct vfs_handle_struct *handle,
+				      struct files_struct *src_fsp,
+				      const char *dst_name,
+				      bool replace_if_exists);
 struct tevent_req *vfs_not_implemented_fsync_send(struct vfs_handle_struct *handle,
 						  TALLOC_CTX *mem_ctx,
 						  struct tevent_context *ev,

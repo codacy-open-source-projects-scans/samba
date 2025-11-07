@@ -1492,6 +1492,63 @@ static bool test_lease_v2_request_parent(struct torture_context *tctx,
 	return ret;
 }
 
+static bool test_dirlease_oplocks(struct torture_context *tctx,
+				  struct smb2_tree *tree)
+{
+	const char *dname = "test_dirlease_leases_dir";
+	struct smb2_create c;
+	struct smb2_handle h = {};
+	uint16_t levels[] = {
+		SMB2_OPLOCK_LEVEL_NONE,
+		SMB2_OPLOCK_LEVEL_II,
+		SMB2_OPLOCK_LEVEL_EXCLUSIVE,
+		SMB2_OPLOCK_LEVEL_BATCH
+	};
+	uint32_t caps;
+	int i;
+	NTSTATUS status;
+	bool ret = true;
+
+	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
+	torture_assert_goto(tctx, caps & SMB2_CAP_LEASING, ret, done, "leases are not supported");
+	torture_assert_goto(tctx, caps & SMB2_CAP_DIRECTORY_LEASING, ret, done,
+		"SMB3 Directory Leases are not supported\n");
+
+	smb2_deltree(tree, dname);
+
+	for (i = 0; i < ARRAY_SIZE(levels); i++) {
+		c = (struct smb2_create) {
+			.in.oplock_level = levels[i],
+			.in.desired_access = SEC_RIGHTS_DIR_READ,
+			.in.create_options = NTCREATEX_OPTIONS_DIRECTORY,
+			.in.file_attributes = FILE_ATTRIBUTE_DIRECTORY,
+			.in.share_access = NTCREATEX_SHARE_ACCESS_MASK,
+			.in.create_disposition = NTCREATEX_DISP_OPEN_IF,
+			.in.fname = dname,
+		};
+
+		status = smb2_create(tree, tree, &c);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h = c.out.file.handle;
+		status = smb2_util_close(tree, h);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_util_close failed\n");
+
+		torture_assert_int_equal_goto(
+			tctx,
+			c.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_NONE,
+			ret, done, "bad level");
+	}
+
+done:
+	smb2_util_close(tree, h);
+	smb2_deltree(tree, dname);
+
+	return ret;
+}
+
 /*
  * Checks server accepts "RWH", "RH" and "R" lease request and grants at most
  * (lease_request & "RH"), so no "W", but "R" without "H" if requested.
@@ -3472,6 +3529,261 @@ done:
 	smb2_util_close(tree2, h3);
 
 	smb2_util_unlink(tree1a, fname);
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+/*
+ * Verifies byterange locks only affect lease state if the lock is actually
+ * "backed" by the file. Eg, if a file has size 0, byterange locks will never
+ * affect lease state.
+ *
+ * Client 1: create file with lease=RWH
+ * Client 1: set brl off=0, size=1
+ * Client 2: open file, expect pending
+ * Server: expect lease break to RH
+ * Client 2: expect open success with lease=RH
+ */
+static bool test_lease_lock2(struct torture_context *tctx,
+			     struct smb2_tree *tree1,
+			     struct smb2_tree *tree2)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io1 = {};
+	struct smb2_create io2 = {};
+	struct smb2_lease ls1 = {};
+	struct smb2_lease ls2 = {};
+	struct smb2_handle h1 = {};
+	struct smb2_handle h2 = {};
+	struct smb2_lock lck = {};
+	struct smb2_lock_element el = {};
+	const char *fname = __FUNCTION__;
+	bool ret = true;
+	NTSTATUS status;
+	uint32_t caps;
+
+	caps = smb2cli_conn_server_capabilities(tree1->session->transport->conn);
+	torture_assert_goto(tctx, caps & SMB2_CAP_LEASING, ret, done, "leases are not supported");
+
+	/* Set up handlers. */
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+	tree2->session->transport->lease.handler = torture_lease_handler;
+	tree2->session->transport->lease.private_data = tree2;
+
+	smb2_util_unlink(tree1, fname);
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	/* Open a handle on tree1. */
+	smb2_lease_create_share(&io1, &ls1, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	status = smb2_create(tree1, mem_ctx, &io1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h1 = io1.out.file.handle;
+	CHECK_CREATED(&io1, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io1, "RWH", true, LEASE1, 0);
+
+	/*
+	 * Try and get get an exclusive byte
+	 * range lock on H1 (LEASE1).
+	 */
+	lck.in.locks		= &el;
+	lck.in.lock_count	= 1;
+	lck.in.lock_sequence	= 1;
+	lck.in.file.handle	= h1;
+	el.offset		= 0;
+	el.length		= 1;
+	el.reserved		= 0;
+	el.flags		= SMB2_LOCK_FLAG_EXCLUSIVE;
+	status = smb2_lock(tree1, &lck);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Open a second handle on tree2. */
+	smb2_lease_create_share(&io2, &ls2, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE2,
+				smb2_util_lease_state("RWH"));
+	status = smb2_create(tree2, mem_ctx, &io2);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h2 = io2.out.file.handle;
+	CHECK_CREATED(&io2, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io2, "RH", true, LEASE2, 0);
+	/* And LEASE1 got broken to RH. */
+	CHECK_BREAK_INFO("RWH", "RH", LEASE1);
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+done:
+	smb2_util_close(tree1, h1);
+	smb2_util_close(tree2, h2);
+
+	smb2_util_unlink(tree1, fname);
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+/*
+ * Verifies a create with overwrite disposition on a file with a byterange lock
+ * can get an RH lease.
+ *
+ * Client 1: create file with lease=RWH
+ * Client 1: write 1 byte to the file
+ * Client 1: set brl off=0, size=1
+ * Client 2: open file with overwrite disposition, expect status pending
+ * Server -> Client 1: Break lease break to none
+ * Client 2: expect open success with lease=RH
+ */
+static bool test_lease_lock3(struct torture_context *tctx,
+			     struct smb2_tree *tree1,
+			     struct smb2_tree *tree2)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io1 = {};
+	struct smb2_create io2 = {};
+	struct smb2_lease ls1 = {};
+	struct smb2_lease ls2 = {};
+	struct smb2_handle h1 = {};
+	struct smb2_handle h2 = {};
+	struct smb2_lock lck = {};
+	struct smb2_lock_element el = {};
+	const char *fname = __FUNCTION__;
+	char c = 'x';
+	bool ret = true;
+	NTSTATUS status;
+	uint32_t caps;
+
+	caps = smb2cli_conn_server_capabilities(tree1->session->transport->conn);
+	torture_assert_goto(tctx, caps & SMB2_CAP_LEASING, ret, done, "leases are not supported");
+
+	/* Set up handlers. */
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+	tree2->session->transport->lease.handler = torture_lease_handler;
+	tree2->session->transport->lease.private_data = tree2;
+
+	smb2_util_unlink(tree1, fname);
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	/* Open a handle on tree1. */
+	smb2_lease_create_share(&io1, &ls1, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	status = smb2_create(tree1, mem_ctx, &io1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h1 = io1.out.file.handle;
+	CHECK_CREATED(&io1, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io1, "RWH", true, LEASE1, 0);
+
+	status = smb2_util_write(tree1, h1, &c, 0, 1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/*
+	 * Try and get an exclusive byte
+	 * range lock on H1 (LEASE1).
+	 */
+	lck.in.locks		= &el;
+	lck.in.lock_count	= 1;
+	lck.in.lock_sequence	= 1;
+	lck.in.file.handle	= h1;
+	el.offset		= 0;
+	el.length		= 1;
+	el.reserved		= 0;
+	el.flags		= SMB2_LOCK_FLAG_EXCLUSIVE;
+	status = smb2_lock(tree1, &lck);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* Open a second handle on tree2. */
+	smb2_lease_create_share(&io2, &ls2, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE2,
+				smb2_util_lease_state("RWH"));
+	io2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+	status = smb2_create(tree2, mem_ctx, &io2);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h2 = io2.out.file.handle;
+	CHECK_LEASE(&io2, "RH", true, LEASE2, 0);
+	/* And LEASE1 got broken to NONE. */
+	CHECK_BREAK_INFO("RWH", "", LEASE1);
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+done:
+	smb2_util_close(tree1, h1);
+	smb2_util_close(tree2, h2);
+
+	smb2_util_unlink(tree1, fname);
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+/*
+ * Verifies an existing RWH lease on a file is only broken to RW when a
+ * contending create fails with STATUS_SHARING_VIOLATION.
+ *
+ * Client 1: open file with lease=RWH sharemode=none
+ * Client 2: open file, expect STATUS_PENDING
+ * Server: send lease break to RW to client 1
+ * Client 2: expect open to fail with STATUS_SHARING_VIOLATION.
+ */
+static bool test_lease_sharing_violation(struct torture_context *tctx,
+					 struct smb2_tree *tree1,
+					 struct smb2_tree *tree2)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io1 = {};
+	struct smb2_create io2 = {};
+	struct smb2_lease ls1 = {};
+	struct smb2_lease ls2 = {};
+	struct smb2_handle h1 = {};
+	struct smb2_handle h2 = {};
+	const char *fname = __FUNCTION__;
+	bool ret = true;
+	NTSTATUS status;
+	uint32_t caps;
+
+	caps = smb2cli_conn_server_capabilities(tree1->session->transport->conn);
+	torture_assert_goto(tctx, caps & SMB2_CAP_LEASING, ret, done, "leases are not supported");
+
+	/* Set up handlers. */
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+	tree2->session->transport->lease.handler = torture_lease_handler;
+	tree2->session->transport->lease.private_data = tree2;
+
+	smb2_util_unlink(tree1, fname);
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	/* Open a handle on tree1. */
+	smb2_lease_create_share(&io1, &ls1, false, fname,
+				smb2_util_share_access(""),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	status = smb2_create(tree1, mem_ctx, &io1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h1 = io1.out.file.handle;
+	CHECK_CREATED(&io1, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io1, "RWH", true, LEASE1, 0);
+
+	/* Open a second handle on tree2. */
+	smb2_lease_create_share(&io2, &ls2, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE2,
+				smb2_util_lease_state("RWH"));
+	io2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+	status = smb2_create(tree2, mem_ctx, &io2);
+	CHECK_STATUS(status, NT_STATUS_SHARING_VIOLATION);
+	/* And LEASE1 got broken to RW. */
+	CHECK_BREAK_INFO("RWH", "RW", LEASE1);
+
+done:
+	smb2_util_close(tree1, h1);
+	smb2_util_close(tree2, h2);
+
+	smb2_util_unlink(tree1, fname);
 	talloc_free(mem_ctx);
 	return ret;
 }
@@ -5778,6 +6090,104 @@ done:
 	return ret;
 }
 
+/*
+ * Verifies the lease epoch is not incremented by the server (returns what the
+ * client sent in the request) if a lease was not granted ie lease_level=NONE.
+ */
+static bool test_lease_epoch(struct torture_context *tctx,
+			     struct smb2_tree *tree)
+{
+	struct smb2_create c;
+	struct smb2_lease ls1;
+	struct smb2_handle h1 = {};
+	struct smb2_write wr;
+	char dat = 'x';
+	DATA_BLOB data = (DATA_BLOB) {.data = (uint8_t *)&dat, .length = 1};
+	struct smb2_lock lck = {0};
+	struct smb2_lock_element el[1];
+	uint64_t lease1 = 1;
+	struct GUID create_guid = GUID_random();
+	char *fname = NULL;
+	NTSTATUS status;
+	bool ret = true;
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	c = (struct smb2_create) {
+		.in.desired_access = SEC_RIGHTS_FILE_ALL,
+		.in.share_access = NTCREATEX_SHARE_ACCESS_MASK,
+		.in.create_disposition = NTCREATEX_DISP_OPEN_IF,
+		.in.fname = fname,
+	};
+
+	status = smb2_create(tree, tctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = c.out.file.handle;
+
+	ZERO_STRUCT(wr);
+	wr.in.file.handle = h1;
+	wr.in.offset      = 0;
+	wr.in.data        = data;
+	status = smb2_write(tree, &wr);
+	torture_assert_ntstatus_ok(tctx, status, "smb2_write failed\n");
+
+	ZERO_ARRAY(el);
+	ZERO_STRUCT(lck);
+	el[0].offset = 0;
+	el[0].length = 1;
+	el[0].flags = SMB2_LOCK_FLAG_EXCLUSIVE|SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+	lck.in.locks = el;
+	lck.in.lock_count = 1;
+	lck.in.file.handle = h1;
+
+	status = smb2_lock(tree, &lck);
+	torture_assert_ntstatus_equal_goto(
+		tctx, status, NT_STATUS_OK,
+		ret, done, "smb2_lock failed\n");
+
+
+	smb2_lease_v2_create_share(&c,
+				   &ls1,
+				   false,
+				   fname,
+				   smb2_util_share_access("RWD"),
+				   lease1,
+				   NULL,
+				   smb2_util_lease_state("R"),
+				   100);
+	c.in.durable_open_v2 = true;
+	c.in.create_guid = create_guid;
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.oplock_level,
+		SMB2_OPLOCK_LEVEL_LEASE,
+		ret, done,
+		"Bad lease level\n");
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.lease_response_v2.lease_state,
+		0,
+		ret, done,
+		"Bad lease level\n");
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.lease_response_v2.lease_epoch,
+		100,
+		ret,
+		done,
+		"Bad lease epoch\n");
+
+done:
+	return ret;
+}
+
 struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite =
@@ -5806,6 +6216,9 @@ struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "breaking5", test_lease_breaking5);
 	torture_suite_add_1smb2_test(suite, "breaking6", test_lease_breaking6);
 	torture_suite_add_2smb2_test(suite, "lock1", test_lease_lock1);
+	torture_suite_add_2smb2_test(suite, "lock2", test_lease_lock2);
+	torture_suite_add_2smb2_test(suite, "lock3", test_lease_lock3);
+	torture_suite_add_2smb2_test(suite, "sharing_violation", test_lease_sharing_violation);
 	torture_suite_add_1smb2_test(suite, "complex1", test_lease_complex1);
 	torture_suite_add_1smb2_test(suite, "v2_flags_breaking", test_lease_v2_flags_breaking);
 	torture_suite_add_1smb2_test(suite, "v2_flags_parentkey", test_lease_v2_flags_parentkey);
@@ -5839,6 +6252,7 @@ struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 				     test_initial_delete_disconnect);
 	torture_suite_add_2smb2_test(suite, "rename_dir_openfile",
 				     torture_rename_dir_openfile);
+	torture_suite_add_1smb2_test(suite, "lease-epoch", test_lease_epoch);
 
 	suite->description = talloc_strdup(suite, "SMB2-LEASE tests");
 
@@ -6625,6 +7039,115 @@ static bool test_rename(struct torture_context *tctx,
 	}
 
 done:
+	return ret;
+}
+
+static bool test_rename_dst_parent(struct torture_context *tctx,
+				   struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	const char *srcdir = "test_rename_dst_parent_src";
+	const char *srcfile = "test_rename_dst_parent_src\\file";
+	const char *dstdir = "test_rename_dst_parent_dst";
+	const char *dstfile = "test_rename_dst_parent_dst\\file";
+	struct smb2_create create_dp;
+	struct smb2_lease lease_dp;
+	struct smb2_handle h1 = {};
+	struct smb2_handle handle_sf = {};
+	struct smb2_handle handle_dp = {};
+	union smb_setfileinfo sfinfo = {};
+	NTSTATUS status;
+	bool ret = true;
+
+	tree->session->transport->lease.handler	= torture_lease_handler;
+	tree->session->transport->lease.private_data = tree;
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	status = torture_smb2_testdir(tree, srcdir, &h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir\n");
+	smb2_util_close(tree, h1);
+
+	status = torture_smb2_testdir(tree, dstdir, &h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir\n");
+	smb2_util_close(tree, h1);
+
+	status = smb2_create_simple_file(tctx, tree, srcfile, &handle_sf);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create_simple_file\n");
+
+	/* Get a RH lease on the destination parent */
+
+	smb2_lease_v2_create_share(&create_dp, &lease_dp, true, dstdir,
+				   smb2_util_share_access("RWD"),
+				   0x01, NULL,
+				   smb2_util_lease_state("RH"), 0);
+	create_dp.in.desired_access = DELETE_ACCESS;
+	status = smb2_create(tree, mem_ctx, &create_dp);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	handle_dp = create_dp.out.file.handle;
+	CHECK_LEASE_V2(&create_dp, "RH", true, 0x01, 0, 0, 1);
+
+	/*
+	 * Rename, expect break on dst parent. As we'll be keeping our
+	 * conflicting open, the rename should fail.
+	 */
+
+	sfinfo.generic.level = RAW_SFILEINFO_RENAME_INFORMATION;
+	sfinfo.generic.in.file.handle = handle_sf;
+	sfinfo.rename_information.in.new_name = dstfile;
+
+	status = smb2_setinfo_file(tree, &sfinfo);
+	torture_assert_ntstatus_equal_goto(
+		tctx, status, NT_STATUS_SHARING_VIOLATION, ret, done,
+		"smb2_setinfo_file\n");
+
+	CHECK_BREAK_INFO_V2(tree->session->transport,
+			    "RH", "R", 0x01, 2);
+
+	/* Upgrade lease to "RH" */
+
+	smb2_lease_v2_create_share(&create_dp, &lease_dp, true, dstdir,
+				   smb2_util_share_access("RWD"),
+				   0x01, NULL,
+				   smb2_util_lease_state("RH"), 0);
+	create_dp.in.desired_access = DELETE_ACCESS;
+	status = smb2_create(tree, mem_ctx, &create_dp);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = create_dp.out.file.handle;
+	smb2_util_close(tree, h1);
+	CHECK_LEASE_V2(&create_dp, "RH", true, 0x01, 0, 0, 3);
+
+	/*
+	 * Rename, expect break on dst parent. Let the break
+	 * handler close the handle so the rename should pass.
+	 */
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	lease_break_info.lease_handle = handle_dp;
+
+	sfinfo.generic.level = RAW_SFILEINFO_RENAME_INFORMATION;
+	sfinfo.generic.in.file.handle = handle_sf;
+	sfinfo.rename_information.in.new_name = dstfile;
+
+	status = smb2_setinfo_file(tree, &sfinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_setinfo_file failed\n");
+
+	CHECK_LEASE_BREAK(&lease_break_info.lease_break, "RH", "R", 0x01);
+
+done:
+	if (!smb2_util_handle_empty(handle_sf)) {
+		smb2_util_close(tree, handle_sf);
+	}
+	if (!smb2_util_handle_empty(handle_dp)) {
+		smb2_util_close(tree, handle_dp);
+	}
+	smb2_deltree(tree, srcdir);
+	smb2_deltree(tree, dstdir);
 	return ret;
 }
 
@@ -7558,6 +8081,7 @@ struct torture_suite *torture_smb2_dirlease_init(TALLOC_CTX *ctx)
 
 	torture_suite_add_1smb2_test(suite, "v2_request_parent", test_lease_v2_request_parent);
 	torture_suite_add_2smb2_test(suite, "v2_request", test_lease_v2_request);
+	torture_suite_add_1smb2_test(suite, "oplocks", test_dirlease_oplocks);
 	torture_suite_add_1smb2_test(suite, "leases", test_dirlease_leases);
 	torture_suite_add_2smb2_test(suite, "seteof", test_dirlease_seteof);
 	torture_suite_add_2smb2_test(suite, "setdos", test_dirlease_setdos);
@@ -7566,6 +8090,7 @@ struct torture_suite *torture_smb2_dirlease_init(TALLOC_CTX *ctx)
 	torture_suite_add_2smb2_test(suite, "setctime", test_dirlease_setctime);
 	torture_suite_add_2smb2_test(suite, "setatime", test_dirlease_setatime);
 	torture_suite_add_1smb2_test(suite, "rename", test_rename);
+	torture_suite_add_1smb2_test(suite, "rename_dst_parent", test_rename_dst_parent);
 	torture_suite_add_2smb2_test(suite, "overwrite", test_overwrite);
 	torture_suite_add_1smb2_test(suite, "hardlink", test_hardlink);
 	torture_suite_add_1smb2_test(suite, "unlink_same_set_and_close", test_unlink_same_set_and_close);

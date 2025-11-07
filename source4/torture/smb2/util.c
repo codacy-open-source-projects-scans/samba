@@ -364,6 +364,7 @@ bool torture_smb2_session_setup(struct torture_context *tctx,
 	struct smb2_session *session;
 
 	session = smb2_session_init(transport,
+				    tctx->lp_ctx,
 				    lpcfg_gensec_settings(tctx, tctx->lp_ctx),
 				    mem_ctx);
 
@@ -422,8 +423,8 @@ bool torture_smb2_connection_ext(struct torture_context *tctx,
 
 	status = smb2_connect_ext(tctx,
 				  host,
-				  lpcfg_smb_ports(tctx->lp_ctx),
 				  share,
+				  tctx->lp_ctx,
 				  lpcfg_resolve_context(tctx->lp_ctx),
 				  samba_cmdline_get_creds(),
 				  NULL, /* existing_conn */
@@ -472,8 +473,8 @@ bool torture_smb2_con_share(struct torture_context *tctx,
 
 	status = smb2_connect(tctx,
 			      host,
-			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
+			      tctx->lp_ctx,
 			      lpcfg_resolve_context(tctx->lp_ctx),
 			      samba_cmdline_get_creds(),
 			      tree,

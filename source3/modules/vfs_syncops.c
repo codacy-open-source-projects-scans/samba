@@ -1,4 +1,4 @@
-/* 
+/*
  * ensure meta data operations are performed synchronously
  *
  * Copyright (C) Andrew Tridgell     2007
@@ -8,12 +8,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *  
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *  
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -31,12 +31,12 @@
   operation is guaranteed to remain in the filesystem after a power
   failure. This is particularly important for some cluster filesystems
   which are participating in a node failover system with clustered
-  Samba
+  Samba.
 
   On those filesystems this module provides a way to perform those
-  operations safely.  
+  operations safely.
 
-  most of the performance loss with this module is in fsync on close(). 
+  Most of the performance loss with this module is in fsync on close().
   You can disable that with
      syncops:onclose = no
   that can be set either globally or per share.
@@ -46,7 +46,7 @@
      syncops:onmeta = no
   This option can be set either globally or per share.
 
-  you can also disable the module completely for a share with
+  You can also disable the module completely for a share with
      syncops:disable = true
 
  */
@@ -141,11 +141,11 @@ static void syncops_smb_fname(connection_struct *conn,
   renameat needs special handling, as we may need to fsync two directories
  */
 static int syncops_renameat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *smb_fname_src,
-			files_struct *dstfsp,
-			const struct smb_filename *smb_fname_dst,
-			const struct vfs_rename_how *how)
+			    files_struct *src_dirfsp,
+			    const struct smb_filename *smb_fname_src,
+			    files_struct *dst_dirfsp,
+			    const struct smb_filename *smb_fname_dst,
+			    const struct vfs_rename_how *how)
 {
 
 	int ret;
@@ -158,11 +158,11 @@ static int syncops_renameat(vfs_handle_struct *handle,
 				return -1);
 
 	ret = SMB_VFS_NEXT_RENAMEAT(handle,
-			srcfsp,
-			smb_fname_src,
-			dstfsp,
-			smb_fname_dst,
-			how);
+				    src_dirfsp,
+				    smb_fname_src,
+				    dst_dirfsp,
+				    smb_fname_dst,
+				    how);
 	if (ret == -1) {
 		return ret;
 	}
@@ -174,14 +174,14 @@ static int syncops_renameat(vfs_handle_struct *handle,
 	}
 
 	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(),
-						      srcfsp,
+						      src_dirfsp,
 						      smb_fname_src);
 	if (full_fname_src == NULL) {
 		errno = ENOMEM;
 		return ret;
 	}
 	full_fname_dst = full_path_from_dirfsp_atname(talloc_tos(),
-						      dstfsp,
+						      dst_dirfsp,
 						      smb_fname_dst);
 	if (full_fname_dst == NULL) {
 		TALLOC_FREE(full_fname_src);
@@ -238,11 +238,11 @@ static int syncops_symlinkat(vfs_handle_struct *handle,
 }
 
 static int syncops_linkat(vfs_handle_struct *handle,
-			files_struct *srcfsp,
-			const struct smb_filename *old_smb_fname,
-			files_struct *dstfsp,
-			const struct smb_filename *new_smb_fname,
-			int flags)
+			  files_struct *src_dirfsp,
+			  const struct smb_filename *old_smb_fname,
+			  files_struct *dst_dirfsp,
+			  const struct smb_filename *new_smb_fname,
+			  int flags)
 {
 	int ret;
 	struct syncops_config_data *config;
@@ -254,11 +254,11 @@ static int syncops_linkat(vfs_handle_struct *handle,
 				return -1);
 
 	ret = SMB_VFS_NEXT_LINKAT(handle,
-			srcfsp,
-			old_smb_fname,
-			dstfsp,
-			new_smb_fname,
-			flags);
+				  src_dirfsp,
+				  old_smb_fname,
+				  dst_dirfsp,
+				  new_smb_fname,
+				  flags);
 
 	if (ret == -1) {
 		return ret;
@@ -271,13 +271,13 @@ static int syncops_linkat(vfs_handle_struct *handle,
 	}
 
 	old_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						      srcfsp,
+						      src_dirfsp,
 						      old_smb_fname);
 	if (old_full_fname == NULL) {
 		return ret;
 	}
 	new_full_fname = full_path_from_dirfsp_atname(talloc_tos(),
-						      dstfsp,
+						      dst_dirfsp,
 						      new_smb_fname);
 	if (new_full_fname == NULL) {
 		TALLOC_FREE(old_full_fname);

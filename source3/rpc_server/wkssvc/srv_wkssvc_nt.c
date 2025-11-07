@@ -315,6 +315,9 @@ WERROR _wkssvc_NetWkstaGetInfo(struct pipes_struct *p,
 			return WERR_NOT_ENOUGH_MEMORY;
 		}
 		break;
+	case 502:
+		return WERR_ACCESS_DENIED;
+		break;
 	default:
 		return WERR_INVALID_LEVEL;
 	}
@@ -447,6 +450,14 @@ WERROR _wkssvc_NetWkstaEnumUsers(struct pipes_struct *p,
 	struct dcesrv_call_state *dce_call = p->dce_call;
 	struct auth_session_info *session_info =
 		dcesrv_call_session_info(dce_call);
+
+	if (IS_AD_DC) {
+		/*
+		 * source4/rpc_server/wkssvc returns RNG_ERROR here
+		 */
+		p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
+		return WERR_NOT_SUPPORTED;
+	}
 
 	/* This with any level should only be allowed from a domain administrator */
 	if (!nt_token_check_sid(&global_sid_Builtin_Administrators,

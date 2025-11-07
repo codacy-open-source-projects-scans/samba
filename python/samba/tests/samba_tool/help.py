@@ -17,11 +17,14 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import os
 import re
 from samba.tests.samba_tool.base import SambaToolCmdTest
-from samba.tests import BlackboxProcessError
+from samba.tests import BlackboxProcessError, BINDIR
 from samba.tests import check_help_consistency
 from samba.common import get_string
+from samba import version
+from pathlib import Path
 
 
 class HelpTestCase(SambaToolCmdTest):
@@ -39,10 +42,15 @@ class HelpTestCase(SambaToolCmdTest):
         # self.runcmd() or self.runsubcmd().
         known_commands = [[]]
         failed_commands = []
+        undocumented = []
+        with open(Path(BINDIR) / '../docs-xml/manpages/samba-tool.8.xml') as f:
+            man = f.read()
 
         for i in range(4):
             new_commands = []
             for c in known_commands:
+                if ' '.join(c) not in man:
+                    undocumented.append(c)
                 line = ' '.join(['samba-tool'] + c + ['--help'])
                 try:
                     output = self.check_output(line)
@@ -80,6 +88,31 @@ class HelpTestCase(SambaToolCmdTest):
 
         self.assertEqual(failed_commands, [])
 
+        if undocumented:
+            print("-=" * 36)
+            print("\nPlease update `man samba-tool`!\n")
+            print("Some samba-tool subcommands seem to missing from the man-page!")
+            print("To help fix this, below are Docbook-like snippets based on the ")
+            print("--help text. Please modify these to be correct (both as XML and")
+            print("as content) and add them to docs-xml/manpages/samba-tool.8.xml")
+            print("Remember, you can explain things more deeply in a man-page,")
+            print("but you can also trim off common options that have already been")
+            print("explained.")
+            print()
+            env = dict(os.environ)
+            env['SAMBATOOL_HELP_IS_XML'] = '1'
+            for c in undocumented:
+                line = ' '.join(['samba-tool'] + c + ['--help'])
+                print(f" <!-- SAMBATOOL_HELP_IS_XML=1 {line} -->")
+                try:
+                    output = self.check_output(line, env=env)
+                except BlackboxProcessError as e:
+                    print(f"<!-- {e} ->")
+                print(output.decode())
+                print()
+            print("-=" * 36)
+            self.fail("Some commands are undocumented. See test output for help")
+
     def test_bad_password_option(self):
         """Do we get a warning with an invalid --pass option?"""
         (result, out, err) = self.run_command(["samba-tool",
@@ -88,3 +121,33 @@ class HelpTestCase(SambaToolCmdTest):
                                                "pleeease"])
         self.assertIn("if '--pass-the-salt-please' is not misspelt", err)
         self.assertIn("the appropriate list in is_password_option", err)
+
+    def test_version(self):
+        """Does --version work?"""
+        (result, out, err) = self.run_command(["samba-tool", "--version"])
+        self.assertEqual(version, out.strip())
+
+    def test_sub_command_version(self):
+        """Does --version work in a sub-command?"""
+        (result, out, err) = self.run_command(["samba-tool", "spn", "--version"])
+        self.assertEqual(version, out.strip())
+
+    def test_leaf_command_version(self):
+        """Does --version work in a leaf command?"""
+        (result, out, err) = self.run_command(["samba-tool", "contact", "edit",
+                                               "--version"])
+        self.assertEqual(version, out.strip())
+
+    def test_help_version(self):
+        """Is version mentioned in --help?"""
+        (result, out, err) = self.run_command(["samba-tool", "spn", "--help"])
+        self.assertIn(version, out)
+
+    def test_version_beats_help(self):
+        """Does samba-tool --help --version print version?"""
+        (result, out, err) = self.run_command(["samba-tool", "spn", "--help", "-V"])
+        self.assertEqual(version, out.strip())
+        (result, out, err) = self.run_command(["samba-tool", "--help", "-V"])
+        self.assertEqual(version, out.strip())
+        (result, out, err) = self.run_command(["samba-tool", "dns", "-V", "--help"])
+        self.assertEqual(version, out.strip())

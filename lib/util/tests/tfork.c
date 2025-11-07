@@ -373,14 +373,16 @@ static bool test_tfork_twice(struct torture_context *tctx)
 	}
 	child = tfork_child_pid(t);
 	if (child == 0) {
+		struct tfork *t1 = NULL;
+
 		close(up[0]);
 
-		t = tfork_create();
-		if (t == NULL) {
+		t1 = tfork_create();
+		if (t1 == NULL) {
 			torture_fail(tctx, "tfork failed\n");
 			return false;
 		}
-		child = tfork_child_pid(t);
+		child = tfork_child_pid(t1);
 		if (child == 0) {
 			sleep(1);
 			pid = getpid();
@@ -393,13 +395,15 @@ static bool test_tfork_twice(struct torture_context *tctx)
 			_exit(1);
 		}
 
+		status = tfork_status(&t1, true);
+		torture_assert_goto(tctx, status != -1, ok, done, "tfork_status failed\n");
 		_exit(0);
 	}
 
 	close(up[1]);
 
 	ret = read(up[0], &pid, sizeof(pid_t));
-	torture_assert(tctx, ret == sizeof(pid_t), "read failed\n");
+	torture_assert_goto(tctx, ret == sizeof(pid_t), ok, done, "read failed\n");
 
 	status = tfork_status(&t, true);
 	torture_assert_goto(tctx, status != -1, ok, done, "tfork_status failed\n");
@@ -409,6 +413,10 @@ static bool test_tfork_twice(struct torture_context *tctx)
 	torture_assert_goto(tctx, WEXITSTATUS(status) == 0, ok, done,
 			    "tfork failed\n");
 done:
+	if (t != NULL) {
+		kill(child, SIGKILL);
+		free(t);
+	}
 	return ok;
 }
 

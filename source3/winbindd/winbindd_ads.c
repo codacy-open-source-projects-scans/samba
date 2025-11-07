@@ -568,6 +568,20 @@ static NTSTATUS rids_to_names(struct winbindd_domain *domain,
 					   domain_name, names, types);
 }
 
+static NTSTATUS winbindd_domain_verify_sid(struct winbindd_domain *domain,
+					   const struct dom_sid *extra_sid)
+{
+	bool ret;
+
+	ret = sid_check_is_in_builtin(extra_sid);
+	if (ret) {
+		/* don't allow Builtin groups from ADS */
+		return NT_STATUS_INVALID_SUB_AUTHORITY;
+	}
+
+	return NT_STATUS_OK;
+}
+
 /* Lookup groups a user is a member of - alternate method, for when
    tokenGroups are not available. */
 static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
@@ -637,8 +651,10 @@ static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
 	num_groups = 0;
 
 	/* always add the primary group to the sid array */
-	status = add_sid_to_array(mem_ctx, primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
@@ -653,13 +669,16 @@ static NTSTATUS lookup_usergroups_member(struct winbindd_domain *domain,
 				continue;
 			}
 
-			/* ignore Builtin groups from ADS - Guenther */
-			if (sid_check_is_in_builtin(&group_sid)) {
+			/* filter unexpected sids */
+			status = winbindd_domain_verify_sid(domain, &group_sid);
+			if (!NT_STATUS_IS_OK(status)) {
 				continue;
 			}
 
-			status = add_sid_to_array(mem_ctx, &group_sid,
-						  user_sids, &num_groups);
+			status = add_sid_to_array_unique(mem_ctx,
+							 &group_sid,
+							 user_sids,
+							 &num_groups);
 			if (!NT_STATUS_IS_OK(status)) {
 				goto done;
 			}
@@ -726,8 +745,10 @@ static NTSTATUS lookup_usergroups_memberof(struct winbindd_domain *domain,
 	num_groups = 0;
 
 	/* always add the primary group to the sid array */
-	status = add_sid_to_array(mem_ctx, primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
@@ -764,13 +785,16 @@ static NTSTATUS lookup_usergroups_memberof(struct winbindd_domain *domain,
 
 	for (i=0; i<num_sids; i++) {
 
-		/* ignore Builtin groups from ADS - Guenther */
-		if (sid_check_is_in_builtin(&group_sids[i])) {
+		/* filter unexpected sids */
+		status = winbindd_domain_verify_sid(domain, &group_sids[i]);
+		if (!NT_STATUS_IS_OK(status)) {
 			continue;
 		}
 
-		status = add_sid_to_array(mem_ctx, &group_sids[i], user_sids,
-					  &num_groups);
+		status = add_sid_to_array_unique(mem_ctx,
+						 &group_sids[i],
+						 user_sids,
+						 &num_groups);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
 		}
@@ -915,16 +939,19 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 	*user_sids = NULL;
 	num_groups = 0;
 
-	status = add_sid_to_array(mem_ctx, &primary_group, user_sids,
-				  &num_groups);
+	status = add_sid_to_array_unique(mem_ctx,
+					 &primary_group,
+					 user_sids,
+					 &num_groups);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto done;
 	}
 
 	for (i=0;i<count;i++) {
 
-		/* ignore Builtin groups from ADS - Guenther */
-		if (sid_check_is_in_builtin(&sids[i])) {
+		/* filter unexpected sids */
+		status = winbindd_domain_verify_sid(domain, &sids[i]);
+		if (!NT_STATUS_IS_OK(status)) {
 			continue;
 		}
 
@@ -1506,20 +1533,21 @@ static NTSTATUS trusted_domains(struct winbindd_domain *domain,
 
 /* the ADS backend methods are exposed via this structure */
 struct winbindd_methods ads_methods = {
-	True,
-	query_user_list,
-	enum_dom_groups,
-	enum_local_groups,
-	name_to_sid,
-	sid_to_name,
-	rids_to_names,
-	lookup_usergroups,
-	lookup_useraliases,
-	lookup_groupmem,
-	lookup_aliasmem,
-	lockout_policy,
-	password_policy,
-	trusted_domains,
+	.consistent		= true,
+
+	.query_user_list	= query_user_list,
+	.enum_dom_groups	= enum_dom_groups,
+	.enum_local_groups	= enum_local_groups,
+	.name_to_sid		= name_to_sid,
+	.sid_to_name		= sid_to_name,
+	.rids_to_names		= rids_to_names,
+	.lookup_usergroups	= lookup_usergroups,
+	.lookup_useraliases	= lookup_useraliases,
+	.lookup_groupmem	= lookup_groupmem,
+	.lookup_aliasmem	= lookup_aliasmem,
+	.lockout_policy		= lockout_policy,
+	.password_policy	= password_policy,
+	.trusted_domains	= trusted_domains,
 };
 
 #endif

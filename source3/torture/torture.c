@@ -35,7 +35,8 @@
 #include "dbwrap/dbwrap_open.h"
 #include "dbwrap/dbwrap_rbt.h"
 #include "async_smb.h"
-#include "libsmb/libsmb.h"
+#include "source3/include/client.h"
+#include "source3/libsmb/proto.h"
 #include "libsmb/clirap.h"
 #include "trans2.h"
 #include "libsmb/nmblib.h"
@@ -68,7 +69,6 @@ fstring host, workgroup, share, password, username, myname;
 struct cli_credentials *torture_creds;
 static const char *sockops="TCP_NODELAY";
 int torture_nprocs=1;
-static int port_to_use=0;
 int torture_numops=100;
 int torture_blocksize=1024*1024;
 static int procnum; /* records process count number when forking */
@@ -142,6 +142,9 @@ static struct cli_state *open_nbt_connection(void)
 	struct cli_state *c;
 	NTSTATUS status;
 	int flags = 0;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	if (disable_spnego) {
 		flags |= CLI_FULL_CONNECTION_DONT_SPNEGO;
@@ -162,7 +165,7 @@ static struct cli_state *open_nbt_connection(void)
 	status = cli_connect_nb(NULL,
 				host,
 				NULL,
-				port_to_use,
+				&ts,
 				0x20,
 				myname,
 				signing_state,
@@ -349,6 +352,9 @@ static bool torture_open_connection_share(struct cli_state **c,
 				   const char *sharename,
 				   int flags)
 {
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 	NTSTATUS status;
 
 	status = cli_full_connection_creds(NULL,
@@ -356,14 +362,14 @@ static bool torture_open_connection_share(struct cli_state **c,
 					   myname,
 					   hostname,
 					   NULL, /* dest_ss */
-					   port_to_use,
+					   &ts,
 					   sharename,
 					   "?????",
 					   torture_creds,
 					   flags);
 	if (!NT_STATUS_IS_OK(status)) {
-		printf("failed to open share connection: //%s/%s port:%d - %s\n",
-			hostname, sharename, port_to_use, nt_errstr(status));
+		printf("failed to open share connection: //%s/%s - %s\n",
+			hostname, sharename, nt_errstr(status));
 		return False;
 	}
 
@@ -469,6 +475,111 @@ bool torture_close_connection(struct cli_state *c)
 void torture_conn_set_sockopt(struct cli_state *cli)
 {
 	smbXcli_conn_set_sockopt(cli->conn, sockops);
+}
+
+/****************************************************************************
+  write to a file using a SMBwrite and not bypassing 0 byte writes
+****************************************************************************/
+
+NTSTATUS cli_smbwrite(struct cli_state *cli, uint16_t fnum, char *buf,
+		      off_t offset, size_t size1, size_t *ptotal)
+{
+	uint8_t *bytes;
+	ssize_t total = 0;
+
+	/*
+	 * 3 bytes prefix
+	 */
+
+	bytes = talloc_array(talloc_tos(), uint8_t, 3);
+	if (bytes == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	bytes[0] = 1;
+
+	do {
+		uint32_t usable_space = cli_state_available_size(cli, 48);
+		size_t size = MIN(size1, usable_space);
+		struct tevent_req *req;
+		uint16_t vwv[5];
+		uint16_t *ret_vwv;
+		NTSTATUS status;
+
+		SSVAL(vwv+0, 0, fnum);
+		SSVAL(vwv+1, 0, size);
+		SIVAL(vwv+2, 0, offset);
+		SSVAL(vwv+4, 0, 0);
+
+		bytes = talloc_realloc(talloc_tos(), bytes, uint8_t,
+					     size+3);
+		if (bytes == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		SSVAL(bytes, 1, size);
+		memcpy(bytes + 3, buf + total, size);
+
+		status = cli_smb(talloc_tos(), cli, SMBwrite, 0, 5, vwv,
+				 size+3, bytes, &req, 1, NULL, &ret_vwv,
+				 NULL, NULL);
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(bytes);
+			return status;
+		}
+
+		size = SVAL(ret_vwv+0, 0);
+		TALLOC_FREE(req);
+		if (size == 0) {
+			break;
+		}
+		size1 -= size;
+		total += size;
+		offset += size;
+
+	} while (size1);
+
+	TALLOC_FREE(bytes);
+
+	if (ptotal != NULL) {
+		*ptotal = total;
+	}
+	return NT_STATUS_OK;
+}
+
+NTSTATUS cli_smb(TALLOC_CTX *mem_ctx, struct cli_state *cli,
+		 uint8_t smb_command, uint8_t additional_flags,
+		 uint8_t wct, uint16_t *vwv,
+		 uint32_t num_bytes, const uint8_t *bytes,
+		 struct tevent_req **result_parent,
+		 uint8_t min_wct, uint8_t *pwct, uint16_t **pvwv,
+		 uint32_t *pnum_bytes, uint8_t **pbytes)
+{
+        struct tevent_context *ev;
+        struct tevent_req *req = NULL;
+        NTSTATUS status = NT_STATUS_NO_MEMORY;
+
+        if (smbXcli_conn_has_async_calls(cli->conn)) {
+                return NT_STATUS_INVALID_PARAMETER;
+        }
+        ev = samba_tevent_context_init(mem_ctx);
+        if (ev == NULL) {
+                goto fail;
+        }
+        req = cli_smb_send(mem_ctx, ev, cli, smb_command, additional_flags, 0,
+			   wct, vwv, num_bytes, bytes);
+        if (req == NULL) {
+                goto fail;
+        }
+        if (!tevent_req_poll_ntstatus(req, ev, &status)) {
+                goto fail;
+        }
+        status = cli_smb_recv(req, NULL, NULL, min_wct, pwct, pvwv,
+			      pnum_bytes, pbytes);
+fail:
+        TALLOC_FREE(ev);
+	if (NT_STATUS_IS_OK(status) && (result_parent != NULL)) {
+		*result_parent = req;
+	}
+        return status;
 }
 
 static NTSTATUS torture_delete_fn(struct file_info *finfo,
@@ -677,7 +788,7 @@ NTSTATUS cli_qpathinfo1(struct cli_state *cli,
 			off_t *size,
 			uint32_t *pattr)
 {
-	int timezone = smb1cli_conn_server_time_zone(cli->conn);
+	int tz = smb1cli_conn_server_time_zone(cli->conn);
 	time_t (*date_fn)(const void *buf, int serverzone) = NULL;
 	uint8_t *rdata = NULL;
 	uint32_t num_rdata;
@@ -701,13 +812,13 @@ NTSTATUS cli_qpathinfo1(struct cli_state *cli,
 	}
 
 	if (change_time) {
-		*change_time = date_fn(rdata + 0, timezone);
+		*change_time = date_fn(rdata + 0, tz);
 	}
 	if (access_time) {
-		*access_time = date_fn(rdata + 4, timezone);
+		*access_time = date_fn(rdata + 4, tz);
 	}
 	if (write_time) {
-		*write_time = date_fn(rdata + 8, timezone);
+		*write_time = date_fn(rdata + 8, tz);
 	}
 	if (size) {
 		*size = PULL_LE_U32(rdata, 12);
@@ -1708,6 +1819,9 @@ static bool run_tcon_devtype_test(int dummy)
 {
 	static struct cli_state *cli1 = NULL;
 	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 	NTSTATUS status;
 	bool ret = True;
 
@@ -1716,7 +1830,7 @@ static bool run_tcon_devtype_test(int dummy)
 					   myname,
 					   host,
 					   NULL, /* dest_ss */
-					   port_to_use,
+					   &ts,
 					   NULL, /* service */
 					   NULL, /* service_type */
 					   torture_creds,
@@ -8720,8 +8834,8 @@ static bool run_ea_symlink_test(int dummy)
 	}
 
 	if (num_eas != 0) {
-		printf("cli_get_ea_list_path failed (%s)\n",
-			nt_errstr(status));
+		printf("cli_get_ea_list_path found %zu eas, expected 0\n",
+		       num_eas);
 		goto out;
 	}
 
@@ -10663,6 +10777,9 @@ static bool run_chain2(int dummy)
 	bool done = false;
 	NTSTATUS status;
 	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
+	struct smb_transports ts =
+		smb_transports_parse("client smb transports",
+				     lp_client_smb_transports());
 
 	printf("starting chain2 test\n");
 	status = cli_start_connection(talloc_tos(),
@@ -10670,7 +10787,7 @@ static bool run_chain2(int dummy)
 				      lp_netbios_name(),
 				      host,
 				      NULL,
-				      port_to_use,
+				      &ts,
 				      SMB_SIGNING_DEFAULT,
 				      flags);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -11363,7 +11480,7 @@ static bool run_windows_write(int dummy)
 	kbytes = (double)torture_blocksize * torture_numops;
 	kbytes /= 1024;
 
-	printf("Wrote %d kbytes in %.2f seconds: %d kb/sec\n", (int)kbytes,
+	printf("Wrote %d kbytes in %.2f seconds: %d kB/sec\n", (int)kbytes,
 	       (double)seconds, (int)(kbytes/seconds));
 
 	ret = true;
@@ -14992,6 +15109,11 @@ static bool run_smb1_truncated_sesssetup(int dummy)
 {
 	struct tevent_context *ev;
 	struct tevent_req *req;
+	struct smb_transport tp = {
+		.type = SMB_TRANSPORT_TYPE_TCP,
+		.port = 445,
+	};
+	struct smbXcli_transport *xtp = NULL;
 	struct smbXcli_conn *conn;
 	struct sockaddr_storage ss;
 	NTSTATUS status;
@@ -15013,7 +15135,16 @@ static bool run_smb1_truncated_sesssetup(int dummy)
 		return false;
 	}
 
-	conn = smbXcli_conn_create(talloc_tos(), fd, host, SMB_SIGNING_OFF, 0,
+	xtp = smbXcli_transport_bsd(talloc_tos(),
+				    &fd,
+				    TLS_VERIFY_PEER_NO_CHECK,
+				    &tp);
+	if (xtp == NULL) {
+		d_fprintf(stderr, "smbXcli_transport_bsd failed\n");
+		return false;
+	}
+
+	conn = smbXcli_conn_create(talloc_tos(), &xtp, host, SMB_SIGNING_OFF, 0,
 				   NULL, 0, NULL);
 	if (conn == NULL) {
 		d_fprintf(stderr, "smbXcli_conn_create failed\n");
@@ -15181,6 +15312,11 @@ static bool do_smb1_exit(TALLOC_CTX *mem_ctx,
 static bool run_smb1_negotiate_exit(int dummy)
 {
 	struct tevent_context *ev;
+	struct smb_transport tp = {
+		.type = SMB_TRANSPORT_TYPE_TCP,
+		.port = 445,
+	};
+	struct smbXcli_transport *xtp = NULL;
 	struct smbXcli_conn *conn;
 	struct sockaddr_storage ss;
 	NTSTATUS status;
@@ -15202,7 +15338,16 @@ static bool run_smb1_negotiate_exit(int dummy)
 		return false;
 	}
 
-	conn = smbXcli_conn_create(talloc_tos(), fd, host, SMB_SIGNING_OFF, 0,
+	xtp = smbXcli_transport_bsd(talloc_tos(),
+				    &fd,
+				    TLS_VERIFY_PEER_NO_CHECK,
+				    &tp);
+	if (xtp == NULL) {
+		d_fprintf(stderr, "smbXcli_transport_bsd failed\n");
+		return false;
+	}
+
+	conn = smbXcli_conn_create(talloc_tos(), &xtp, host, SMB_SIGNING_OFF, 0,
 				   NULL, 0, NULL);
 	if (conn == NULL) {
 		d_fprintf(stderr, "smbXcli_conn_create failed\n");
@@ -15292,6 +15437,11 @@ static bool run_ign_bad_negprot(int dummy)
 {
 	struct tevent_context *ev;
 	struct tevent_req *req;
+	struct smb_transport tp = {
+		.type = SMB_TRANSPORT_TYPE_TCP,
+		.port = 445,
+	};
+	struct smbXcli_transport *xtp = NULL;
 	struct smbXcli_conn *conn;
 	struct sockaddr_storage ss;
 	NTSTATUS status;
@@ -15313,7 +15463,16 @@ static bool run_ign_bad_negprot(int dummy)
 		return false;
 	}
 
-	conn = smbXcli_conn_create(talloc_tos(), fd, host, SMB_SIGNING_OFF, 0,
+	xtp = smbXcli_transport_bsd(talloc_tos(),
+				    &fd,
+				    TLS_VERIFY_PEER_NO_CHECK,
+				    &tp);
+	if (xtp == NULL) {
+		d_fprintf(stderr, "smbXcli_transport_bsd failed\n");
+		return false;
+	}
+
+	conn = smbXcli_conn_create(talloc_tos(), &xtp, host, SMB_SIGNING_OFF, 0,
 				   NULL, 0, NULL);
 	if (conn == NULL) {
 		d_fprintf(stderr, "smbXcli_conn_create failed\n");
@@ -16486,7 +16645,7 @@ static void usage(void)
 	       != EOF) {
 		switch (opt) {
 		case 'p':
-			port_to_use = atoi(optarg);
+			lpcfg_set_cmdline(lp_ctx, "client smb transports", optarg);
 			break;
 		case 's':
 			seed = atoi(optarg);

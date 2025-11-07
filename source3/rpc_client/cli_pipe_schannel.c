@@ -25,9 +25,9 @@
 #include "rpc_client/cli_pipe.h"
 #include "librpc/rpc/dcerpc.h"
 #include "passdb.h"
-#include "libsmb/libsmb.h"
 #include "../libcli/smb/smbXcli_base.h"
 #include "libcli/auth/netlogon_creds_cli.h"
+#include "auth/gensec/gensec.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_CLI
@@ -55,6 +55,7 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 	struct netlogon_creds_cli_context *netlogon_creds = NULL;
 	struct netlogon_creds_CredentialState *creds = NULL;
 	uint32_t netlogon_flags;
+	bool authenticate_kerberos;
 
 	status = pdb_get_trust_credentials(domain, NULL,
 					   frame, &cli_creds);
@@ -62,6 +63,10 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 		TALLOC_FREE(frame);
 		return status;
 	}
+
+	cli_credentials_add_gensec_features(cli_creds,
+					    GENSEC_FEATURE_NO_DELEGATION,
+					    CRED_SPECIFIED);
 
 	status = rpccli_create_netlogon_creds_ctx(cli_creds,
 						  remote_name,
@@ -108,9 +113,25 @@ NTSTATUS cli_rpc_pipe_open_schannel(struct cli_state *cli,
 	}
 
 	netlogon_flags = creds->negotiate_flags;
+	authenticate_kerberos = creds->authenticate_kerberos;
 	TALLOC_FREE(creds);
 
-	if (netlogon_flags & NETLOGON_NEG_AUTHENTICATED_RPC) {
+	if (authenticate_kerberos) {
+		status = cli_rpc_pipe_open_with_creds(cli,
+						      table,
+						      transport,
+						      DCERPC_AUTH_TYPE_KRB5,
+						      DCERPC_AUTH_LEVEL_PRIVACY,
+						      "netlogon",
+						      remote_name,
+						      remote_sockaddr,
+						      cli_creds,
+						      &result);
+		if (!NT_STATUS_IS_OK(status)) {
+			TALLOC_FREE(frame);
+			return status;
+		}
+	} else if (netlogon_flags & NETLOGON_NEG_AUTHENTICATED_RPC) {
 		status = cli_rpc_pipe_open_schannel_with_creds(cli, table,
 							       transport,
 							       netlogon_creds,

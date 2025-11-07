@@ -206,6 +206,11 @@ void winbind_msg_domain_online(struct messaging_context *msg_ctx,
 
 void set_domain_offline(struct winbindd_domain *domain);
 void set_domain_online_request(struct winbindd_domain *domain);
+void winbind_add_failed_connection_entry(
+	const struct winbindd_domain *domain,
+	const char *server,
+	NTSTATUS result);
+void winbind_idmap_add_failed_connection_entry(const char *domain_name);
 
 struct cli_credentials;
 NTSTATUS winbindd_get_trust_credentials(struct winbindd_domain *domain,
@@ -372,12 +377,9 @@ void winbindd_msg_reload_services_parent(struct messaging_context *msg,
 NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 				    const char *logfilename);
 struct winbindd_domain *wb_child_domain(void);
-bool add_trusted_domains_dc(void);
+bool update_trusted_domains_dc(void);
 
 /* The following definitions come from winbindd/winbindd_group.c  */
-bool fill_grent(TALLOC_CTX *mem_ctx, struct winbindd_gr *gr,
-		const char *dom_name, const char *gr_name, gid_t unix_gid);
-
 struct db_context;
 NTSTATUS winbindd_print_groupmembers(struct db_context *members,
 				     TALLOC_CTX *mem_ctx,
@@ -479,6 +481,7 @@ NTSTATUS winbindd_pam_auth_pac_verify(struct winbindd_cli_state *state,
 
 NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 			       TALLOC_CTX *mem_ctx,
+			       bool for_netlogon,
 			       bool interactive,
 			       uint32_t logon_parameters,
 			       const char *name_user,
@@ -515,11 +518,13 @@ void winbindd_ping_offline_domains(struct tevent_context *ev,
 bool init_domain_list(void);
 struct winbindd_domain *find_domain_from_name_noinit(const char *domain_name);
 struct winbindd_domain *find_trust_from_name_noinit(const char *domain_name);
+struct winbindd_domain *find_routing_from_namespace_noinit(const char *name_space);
 struct winbindd_domain *find_domain_from_name(const char *domain_name);
 struct winbindd_domain *find_domain_from_sid_noinit(const struct dom_sid *sid);
 struct winbindd_domain *find_trust_from_sid_noinit(const struct dom_sid *sid);
 struct winbindd_domain *find_domain_from_sid(const struct dom_sid *sid);
 struct winbindd_domain *find_our_domain(void);
+struct winbindd_domain *find_local_sam_domain(void);
 struct winbindd_domain *find_default_route_domain(void);
 struct winbindd_domain *find_lookup_domain_from_sid(const struct dom_sid *sid);
 struct winbindd_domain *find_lookup_domain_from_name(const char *domain_name);
@@ -608,6 +613,7 @@ bool parse_sidlist(TALLOC_CTX *mem_ctx, const char *sidstr,
 		   struct dom_sid **sids, uint32_t *num_sids);
 bool parse_xidlist(TALLOC_CTX *mem_ctx, const char *xidstr,
 		   struct unixid **pxids, uint32_t *pnum_xids);
+const char *find_dns_domain_name(const char *domain_name);
 
 /* The following definitions come from winbindd/winbindd_wins.c  */
 

@@ -85,18 +85,21 @@ NTSTATUS cli_tdis(struct cli_state *cli);
 NTSTATUS cli_connect_nb(TALLOC_CTX *mem_ctx,
 			const char *host,
 			const struct sockaddr_storage *dest_ss,
-			uint16_t port,
+			const struct smb_transports *transports,
 			int name_type,
 			const char *myname,
 			enum smb_signing_setting signing_state,
 			int flags,
-			struct cli_state **pcli);
+			struct cli_state **pcli)
+	NONNULL(4) NONNULL(9);
 NTSTATUS cli_start_connection(TALLOC_CTX *mem_ctx,
 			      struct cli_state **output_cli,
 			      const char *my_name,
 			      const char *dest_host,
-			      const struct sockaddr_storage *dest_ss, int port,
-			      enum smb_signing_setting signing_state, int flags);
+			      const struct sockaddr_storage *dest_ss,
+			      const struct smb_transports *transports,
+			      enum smb_signing_setting signing_state, int flags)
+	NONNULL(2) NONNULL(6);
 NTSTATUS cli_smb1_setup_encryption(struct cli_state *cli,
 				   struct cli_credentials *creds);
 
@@ -104,11 +107,13 @@ struct smb2_negotiate_contexts;
 struct tevent_req *cli_full_connection_creds_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	const char *my_name, const char *dest_host,
-	const struct sockaddr_storage *dest_ss, int port,
+	const struct sockaddr_storage *dest_ss,
+	const struct smb_transports *transports,
 	const char *service, const char *service_type,
 	struct cli_credentials *creds,
 	int flags,
-	struct smb2_negotiate_contexts *negotiate_contexts);
+	struct smb2_negotiate_contexts *negotiate_contexts)
+	NONNULL(2) NONNULL(6);
 NTSTATUS cli_full_connection_creds_recv(struct tevent_req *req,
 					TALLOC_CTX *mem_ctx,
 					struct cli_state **output_cli);
@@ -116,10 +121,12 @@ NTSTATUS cli_full_connection_creds(TALLOC_CTX *mem_ctx,
 				   struct cli_state **output_cli,
 				   const char *my_name,
 				   const char *dest_host,
-				   const struct sockaddr_storage *dest_ss, int port,
+				   const struct sockaddr_storage *dest_ss,
+				   const struct smb_transports *transports,
 				   const char *service, const char *service_type,
 				   struct cli_credentials *creds,
-				   int flags);
+				   int flags)
+	NONNULL(2) NONNULL(6);
 NTSTATUS cli_raw_tcon(struct cli_state *cli,
 		      const char *service, const char *pass, const char *dev,
 		      uint16_t *max_xmit, uint16_t *tid);
@@ -136,9 +143,10 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 		     const char *share,
 		     struct cli_credentials *creds,
 		     const struct sockaddr_storage *dest_ss,
-		     int port,
+		     const struct smb_transports *transports,
 		     int name_type,
-		     struct cli_state **pcli);
+		     struct cli_state **pcli)
+	NONNULL(7) NONNULL(9);
 void cli_cm_display(struct cli_state *c);
 struct client_dfs_referral;
 bool cli_dfs_is_already_full_path(struct cli_state *cli, const char *path);
@@ -183,8 +191,9 @@ char *smb1_dfs_share_path(TALLOC_CTX *ctx,
 unsigned int cli_set_timeout(struct cli_state *cli, unsigned int timeout);
 bool cli_set_backup_intent(struct cli_state *cli, bool flag);
 extern struct GUID cli_state_client_guid;
+struct smbXcli_transport;
 struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
-				   int fd,
+				   struct smbXcli_transport **ptransport,
 				   const char *remote_name,
 				   enum smb_signing_setting signing_state,
 				   int flags);
@@ -213,13 +222,6 @@ struct tevent_req *cli_echo_send(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 				 DATA_BLOB data);
 NTSTATUS cli_echo_recv(struct tevent_req *req);
 NTSTATUS cli_echo(struct cli_state *cli, uint16_t num_echos, DATA_BLOB data);
-NTSTATUS cli_smb(TALLOC_CTX *mem_ctx, struct cli_state *cli,
-		 uint8_t smb_command, uint8_t additional_flags,
-		 uint8_t wct, uint16_t *vwv,
-		 uint32_t num_bytes, const uint8_t *bytes,
-		 struct tevent_req **result_parent,
-		 uint8_t min_wct, uint8_t *pwct, uint16_t **pvwv,
-		 uint32_t *pnum_bytes, uint8_t **pbytes);
 
 /* The following definitions come from libsmb/clierror.c  */
 
@@ -908,8 +910,6 @@ NTSTATUS cli_read_recv(struct tevent_req *req, size_t *received);
 NTSTATUS cli_read(struct cli_state *cli, uint16_t fnum,
 		  char *buf, off_t offset, size_t size,
 		  size_t *nread);
-NTSTATUS cli_smbwrite(struct cli_state *cli, uint16_t fnum, char *buf,
-		      off_t offset, size_t size1, size_t *ptotal);
 struct tevent_req *cli_write_andx_create(TALLOC_CTX *mem_ctx,
 					 struct tevent_context *ev,
 					 struct cli_state *cli, uint16_t fnum,

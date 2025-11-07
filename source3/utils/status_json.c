@@ -157,6 +157,7 @@ static const struct mask2txt access_mask[] = {
 	{SEC_STD_DELETE, "DELETE"},
 	{SEC_STD_READ_CONTROL, "READ_CONTROL"},
 	{SEC_STD_WRITE_DAC, "WRITE_DAC"},
+	{SEC_STD_WRITE_OWNER, "WRITE_OWNER"},
 	{SEC_STD_SYNCHRONIZE, "SYNCHRONIZE"},
 	{SEC_FLAG_SYSTEM_SECURITY, "ACCESS_SYSTEM_SECURITY"},
 	{0, NULL}
@@ -184,48 +185,74 @@ static const struct mask2txt lease_mask[] = {
 	{0, NULL}
 };
 
+/* Add nested json key:value entry, up to 4 levels deep */
+static int add_nested_item_to_json(struct json_object *root_json,
+				   const char **subs,
+				   size_t nsubs,
+				   const char *key,
+				   uintmax_t value)
+{
+	struct json_object jobj_sub[4] = {0};
+	struct json_object *jo[5] = {root_json,
+				     &jobj_sub[0],
+				     &jobj_sub[1],
+				     &jobj_sub[2],
+				     &jobj_sub[3]};
+	size_t i = 0;
+	int result = 0;
+
+	if (nsubs > ARRAY_SIZE(jobj_sub)) {
+		return -1;
+	}
+
+	for (i = 0; i < nsubs; ++i) {
+		*(jo[i + 1]) = json_get_object(jo[i], subs[i]);
+		if (json_is_invalid(jo[i + 1])) {
+			goto failure;
+		}
+	}
+
+	result = json_add_int(jo[nsubs], key, value);
+	if (result < 0) {
+		goto failure;
+	}
+
+	for (i = nsubs; i > 0; --i) {
+		result = json_update_object(jo[i - 1], subs[i - 1], jo[i]);
+		if (result < 0) {
+			goto failure;
+		}
+	}
+
+	return 0;
+failure:
+	for (i = 0; i < nsubs; ++i) {
+		json_free(&jobj_sub[i]);
+	}
+	return -1;
+}
+
 int add_profile_item_to_json(struct traverse_state *state,
 			     const char *section,
 			     const char *subsection,
 			     const char *key,
 			     uintmax_t value)
 {
-	struct json_object section_json = {
-		.valid = false,
-	};
-	struct json_object subsection_json = {
-		.valid = false,
-	};
-	int result = 0;
+	const char *subs[] = {section, subsection};
 
-	section_json = json_get_object(&state->root_json, section);
-	if (json_is_invalid(&section_json)) {
-		goto failure;
-	}
-	subsection_json = json_get_object(&section_json, subsection);
-	if (json_is_invalid(&subsection_json)) {
-		goto failure;
-	}
+	return add_nested_item_to_json(&state->root_json, subs, 2, key, value);
+}
 
-	result = json_add_int(&subsection_json, key, value);
-	if (result < 0) {
-		goto failure;
-	}
+int add_profile_persvc_item_to_json(struct traverse_state *state,
+				    const char *section1,
+				    const char *section2,
+				    const char *section3,
+				    const char *key,
+				    uintmax_t value)
+{
+	const char *subs[] = {"Extended Profile", section1, section2, section3};
 
-	result = json_update_object(&section_json, subsection,  &subsection_json);
-	if (result < 0) {
-		goto failure;
-	}
-	result = json_update_object(&state->root_json, section, &section_json);
-	if (result < 0) {
-		goto failure;
-	}
-
-	return 0;
-failure:
-	json_free(&section_json);
-	json_free(&subsection_json);
-	return -1;
+	return add_nested_item_to_json(&state->root_json, subs, 4, key, value);
 }
 
 int add_section_to_json(struct traverse_state *state,
@@ -299,7 +326,34 @@ static int add_channel_to_json(struct json_object *parent_json,
 	struct timeval tv;
 	struct timeval_buf tv_buf;
 	char *time_str = NULL;
+	const char *transport_str = NULL;
+	enum smb_transport_type tt =
+		(enum smb_transport_type)channel->transport_type;
 	int result;
+
+	switch (tt) {
+	case SMB_TRANSPORT_TYPE_UNKNOWN:
+		transport_str = "unknown";
+		break;
+	case SMB_TRANSPORT_TYPE_NBT:
+		transport_str = "nbt";
+		break;
+	case SMB_TRANSPORT_TYPE_TCP:
+		transport_str = "tcp";
+		break;
+	case SMB_TRANSPORT_TYPE_QUIC:
+		transport_str = "quic";
+		break;
+	}
+
+	if (transport_str == NULL) {
+		transport_str = talloc_asprintf(frame,
+						"unknown%u",
+						tt);
+		if (transport_str == NULL) {
+			goto failure;
+		}
+	}
 
 	sub_json = json_new_object();
 	if (json_is_invalid(&sub_json)) {
@@ -328,6 +382,10 @@ static int add_channel_to_json(struct json_object *parent_json,
 		goto failure;
 	}
 	result = json_add_string(&sub_json, "remote_address", channel->remote_address);
+	if (result < 0) {
+		goto failure;
+	}
+	result = json_add_string(&sub_json, "transport", transport_str);
 	if (result < 0) {
 		goto failure;
 	}

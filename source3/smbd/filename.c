@@ -595,12 +595,12 @@ static NTSTATUS filename_convert_normalize_new(
 	return NT_STATUS_OK;
 }
 
-NTSTATUS safe_symlink_target_path(TALLOC_CTX *mem_ctx,
-				  const char *connectpath,
-				  const char *dir,
-				  const char *target,
-				  size_t unparsed,
-				  char **_relative)
+static NTSTATUS safe_symlink_target_path(TALLOC_CTX *mem_ctx,
+					 const char *connectpath,
+					 const char *dir,
+					 const char *target,
+					 size_t unparsed,
+					 char **_relative)
 {
 	char *abs_target = NULL;
 	char *abs_target_canon = NULL;
@@ -694,7 +694,21 @@ filename_convert_dirfsp_nosymlink(TALLOC_CTX *mem_ctx,
 
 	if (is_fake_file_path(name_in)) {
 		const struct timespec omit = make_omit_timespec();
-		smb_fname = synthetic_smb_fname_split(mem_ctx, name_in, posix);
+
+		if (posix) {
+			/*
+			 * No stream name to look for
+			 */
+			smb_fname = synthetic_smb_fname(
+				mem_ctx,
+				name_in,
+				NULL,
+				NULL,
+				0,
+				SMB_FILENAME_POSIX_PATH);
+		} else {
+			smb_fname = synthetic_smb_fname_split(mem_ctx, name_in);
+		}
 		if (smb_fname == NULL) {
 			return NT_STATUS_NO_MEMORY;
 		}
@@ -753,19 +767,9 @@ filename_convert_dirfsp_nosymlink(TALLOC_CTX *mem_ctx,
 	}
 
 	if (dirname[0] == '\0') {
-		smb_dirname = synthetic_smb_fname(
-			mem_ctx,
-			".",
-			NULL,
-			NULL,
-			0,
-			posix ? SMB_FILENAME_POSIX_PATH : 0);
-		if (smb_dirname == NULL) {
-			return NT_STATUS_NO_MEMORY;
-		}
-		status = openat_pathref_fsp_lcomp(basedir,
-						  smb_dirname,
-						  UCF_POSIX_PATHNAMES);
+		status = openat_pathref_fsp_dot(
+			mem_ctx, basedir,
+			posix ? SMB_FILENAME_POSIX_PATH : 0, &smb_dirname);
 	} else {
 		status = normalize_filename_case(conn, dirname, ucf_flags);
 		if (!NT_STATUS_IS_OK(status)) {

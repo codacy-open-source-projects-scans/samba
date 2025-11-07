@@ -29,7 +29,7 @@ from samba.dcerpc import (
     drsuapi,
     misc,
 )
-from samba.samdb import dsdb_Dn
+from samba.samdb import dsdb_dn_guess, BinaryDn
 from samba.ndr import ndr_unpack, ndr_pack
 from collections import Counter
 
@@ -743,10 +743,9 @@ class DirectoryServiceAgent(object):
                 # listed.  For instance DCs normally have 3 hasMasterNCs
                 # listed.
                 for value in res[0][k]:
-                    # Turn dn into a dsdb_Dn so we can use
-                    # its methods to parse a binary DN
-                    dsdn = dsdb_Dn(samdb, value.decode('utf8'))
-                    flags = dsdn.get_binary_integer()
+                    # msDS-HasInstantiatedNCs is a BinaryDN, but the
+                    # others are plain DNs.
+                    dsdn = dsdb_dn_guess(samdb, value)
                     dnstr = str(dsdn.dn)
 
                     if dnstr not in tmp_table:
@@ -756,7 +755,15 @@ class DirectoryServiceAgent(object):
                         rep = tmp_table[dnstr]
 
                     if k == "msDS-HasInstantiatedNCs":
-                        rep.set_instantiated_flags(flags)
+                        # msDS-HasInstantiatedNCs should only be DN+Binary
+                        # (MS-ADTS 6.1.1.2.2.1.2.1.1 and 6.1.2.3.1)
+                        # but sometimes we see it as a plain DN.
+                        if isinstance(dsdn, BinaryDn):
+                            flags = dsdn.get_binary_integer()
+                            rep.set_instantiated_flags(flags)
+                        else:
+                            print("msDS-HasInstantiatedNCsis not a BinaryDn '{dsdn}'",
+                                  file=sys.stderr)
                         continue
 
                     rep.identify_by_dsa_attr(samdb, k)
@@ -991,7 +998,7 @@ class NTDSConnection(object):
                            "for (%s)" % (self.dnstr))
 
         if "transportType" in msg:
-            dsdn = dsdb_Dn(samdb, msg["transportType"][0].decode('utf8'))
+            dsdn = dsdb_dn_guess(samdb, msg["transportType"][0])
             self.load_connection_transport(samdb, str(dsdn.dn))
 
         if "schedule" in msg:
@@ -1001,7 +1008,7 @@ class NTDSConnection(object):
             self.whenCreated = ldb.string_to_time(str(msg["whenCreated"][0]))
 
         if "fromServer" in msg:
-            dsdn = dsdb_Dn(samdb, msg["fromServer"][0].decode('utf8'))
+            dsdn = dsdb_dn_guess(samdb, msg["fromServer"][0])
             self.from_dnstr = str(dsdn.dn)
             assert self.from_dnstr is not None
 
@@ -1368,7 +1375,7 @@ class Partition(NamingContext):
                 continue
 
             for value in msg[k]:
-                dsdn = dsdb_Dn(samdb, value.decode('utf8'))
+                dsdn = dsdb_dn_guess(samdb, value)
                 dnstr = str(dsdn.dn)
 
                 if k == "nCName":
@@ -1928,7 +1935,7 @@ class Transport(object):
 
         if "bridgeheadServerListBL" in msg:
             for value in msg["bridgeheadServerListBL"]:
-                dsdn = dsdb_Dn(samdb, value.decode('utf8'))
+                dsdn = dsdb_dn_guess(samdb, value)
                 dnstr = str(dsdn.dn)
                 if dnstr not in self.bridgehead_list:
                     self.bridgehead_list.append(dnstr)
@@ -2188,7 +2195,7 @@ class SiteLink(object):
 
         if "siteList" in msg:
             for value in msg["siteList"]:
-                dsdn = dsdb_Dn(samdb, value.decode('utf8'))
+                dsdn = dsdb_dn_guess(samdb, value)
                 guid = misc.GUID(dsdn.dn.get_extended_component('GUID'))
                 dnstr = str(dsdn.dn)
                 if (guid, dnstr) not in self.site_list:

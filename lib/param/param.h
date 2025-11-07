@@ -1,24 +1,24 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Generic parameter parsing interface
    Copyright (C) Jelmer Vernooij					  2005
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #ifndef _PARAM_H /* _PARAM_H */
-#define _PARAM_H 
+#define _PARAM_H
 
 #include <talloc.h>
 
@@ -41,11 +41,13 @@ struct param_context;
 struct smbsrv_connection;
 
 #define Auto (2)
+#define LP_ENUM_Default (-2)
 
 struct loadparm_context;
 struct loadparm_service;
 struct smbcli_options;
 struct smbcli_session_options;
+struct smb_transport;
 struct gensec_settings;
 struct bitmap;
 struct file_lists;
@@ -185,7 +187,6 @@ void lpcfg_smbcli_options(struct loadparm_context *lp_ctx,
 			 struct smbcli_options *options);
 void lpcfg_smbcli_session_options(struct loadparm_context *lp_ctx,
 				 struct smbcli_session_options *options);
-const char **lpcfg_smb_ports(struct loadparm_context *);
 const char *lpcfg_socket_options(struct loadparm_context *);
 struct dcerpc_server_info *lpcfg_dcerpc_server_info(TALLOC_CTX *mem_ctx, struct loadparm_context *lp_ctx);
 struct gensec_settings *lpcfg_gensec_settings(TALLOC_CTX *, struct loadparm_context *);
@@ -204,7 +205,7 @@ bool lpcfg_is_my_domain_or_realm(struct loadparm_context *lp_ctx,
 			      const char *domain);
 
 /**
-  see if a string matches either our primary or one of our secondary 
+  see if a string matches either our primary or one of our secondary
   netbios aliases. do a case insensitive match
 */
 bool lpcfg_is_myname(struct loadparm_context *lp_ctx, const char *name);
@@ -252,10 +253,10 @@ char *lpcfg_private_db_path(TALLOC_CTX *mem_ctx,
 
 /**
   return a path in the smbd.tmp directory, where all temporary file
-  for smbd go. If NULL is passed for name then return the directory 
+  for smbd go. If NULL is passed for name then return the directory
   path itself
 */
-char *smbd_tmp_path(TALLOC_CTX *mem_ctx, 
+char *smbd_tmp_path(TALLOC_CTX *mem_ctx,
 			     struct loadparm_context *lp_ctx,
 			     const char *name);
 

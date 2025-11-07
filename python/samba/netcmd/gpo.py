@@ -24,6 +24,7 @@ import samba.getopt as options
 import ldb
 import re
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 import shutil
 import tempfile
 
@@ -342,7 +343,8 @@ def copy_directory_remote_to_local(conn, remotedir, localdir):
                 os.mkdir(l_name)
             else:
                 data = conn.loadfile(r_name)
-                open(l_name, 'wb').write(data)
+                with open(l_name, 'wb') as f:
+                    f.write(data)
 
 
 def copy_directory_local_to_remote(conn, localdir, remotedir,
@@ -378,8 +380,8 @@ def copy_directory_local_to_remote(conn, localdir, remotedir,
                     except NTSTATUSError:
                         pass
 
-                data = open(l_name, 'rb').read()
-                conn.savefile(r_name, data)
+                with open(l_name, 'rb') as f:
+                    conn.savefile(r_name, f.read())
 
 
 class GPOCommand(Command):
@@ -1322,9 +1324,11 @@ class cmd_backup(GPOCommand):
             self.outf.write('\nAttempting to generalize XML entities:\n')
             entities = cmd_backup.generalize_xml_entities(self.outf, gpodir,
                                                           gpodir)
-            import operator
-            ents = "".join('<!ENTITY {} "{}\n">'.format(ent[1].strip('&;'), ent[0]) \
-                             for ent in sorted(entities.items(), key=operator.itemgetter(1)))
+
+            ent_list = [(v, k) for k, v in entities.items()]
+            ent_list.sort()
+            ents = "".join(f'<!ENTITY {ent.strip("&;")} "{val}">\n'
+                           for ent, val in ent_list)
 
             if ent_file:
                 with open(ent_file, 'w') as f:
@@ -1459,7 +1463,8 @@ class cmd_create(GPOCommand):
             os.mkdir(os.path.join(gpodir, "Machine"))
             os.mkdir(os.path.join(gpodir, "User"))
             gpt_contents = "[General]\r\nVersion=0\r\n"
-            open(os.path.join(gpodir, "GPT.INI"), "w").write(gpt_contents)
+            with open(os.path.join(gpodir, "GPT.INI"), "w") as f:
+                f.write(gpt_contents)
         except Exception as e:
             raise CommandError("Error Creating GPO files", e)
 
@@ -1503,8 +1508,7 @@ class cmd_create(GPOCommand):
 
             # Create a file system security descriptor
             domain_sid = security.dom_sid(self.samdb.get_domain_sid())
-            sddl = dsacl2fsacl(ds_sd, domain_sid)
-            fs_sd = security.descriptor.from_sddl(sddl, domain_sid)
+            fs_sd = dsacl2fsacl(ds_sd, domain_sid, as_sddl=False)
 
             # Copy GPO directory
             create_directory_hier(conn, sharepath)
@@ -1630,35 +1634,45 @@ class cmd_restore(cmd_create):
                             self.outf.write('WARNING: Error during parsing for %s\n' % l_name)
                             self.outf.write('WARNING: Falling back to simple copy-restore.\n')
 
+    @staticmethod
+    def generate_dtd_header(entities):
+        # The entities file is a list of XML entities in the form
+        #  <!ENTITY entity "value">
+        #  <!ENTITY entity2 "another value">
+        #
+        # which go within a <!DOCTYPE x [...]> block.
+        #
+        # We check that they are valid in this context using the
+        # Python standard library expat parser.
+        if entities is None:
+            return ""
+
+        try:
+            with open(entities) as f:
+                contents = f.read().strip()
+        except:
+            raise CommandError(f"Could not open entities file: '{entities}'")
+
+        dtd_header = f'<!DOCTYPE foobar [\n{contents}\n]>\n'
+
+        p = expat.ParserCreate()
+        try:
+            p.Parse(dtd_header + '<dummy/>', True)
+        except expat.ExpatError as e:
+            raise CommandError("Entities file does not appear to "
+                               "conform to format\n"
+                               'e.g. <!ENTITY entity "value">\n'
+                               f'Expat error message: {e}')
+
+        return dtd_header
+
     def run(self, displayname, backup, H=None, tmpdir=None, entities=None, sambaopts=None, credopts=None,
             versionopts=None, restore_metadata=None):
-
-        dtd_header = ''
 
         if not os.path.exists(backup):
             raise CommandError("Backup directory does not exist %s" % backup)
 
-        if entities is not None:
-            # DOCTYPE name is meant to match root element, but ElementTree does
-            # not seem to care, so this seems to be enough.
-
-            dtd_header = '<!DOCTYPE foobar [\n'
-
-            if not os.path.exists(entities):
-                raise CommandError("Entities file does not exist %s" %
-                                   entities)
-            with open(entities, 'r') as entities_file:
-                entities_content = entities_file.read()
-
-                # Do a basic regex test of the entities file format
-                if re.match(r'(\s*<!ENTITY\s*[a-zA-Z0-9_]+\s*.*?>)+\s*\Z',
-                            entities_content, flags=re.MULTILINE) is None:
-                    raise CommandError("Entities file does not appear to "
-                                       "conform to format\n"
-                                       'e.g. <!ENTITY entity "value">')
-                dtd_header += entities_content.strip()
-
-            dtd_header += '\n]>\n'
+        dtd_header = self.generate_dtd_header(entities)
 
         super().run(displayname, H, tmpdir, sambaopts, credopts, versionopts)
 
@@ -3088,7 +3102,8 @@ samba-tool gpo manage files add {31B2F340-016D-11D2-945F-00C04FB984F9} ./source.
         out = BytesIO()
         xml_data.write(out, encoding='UTF-8', xml_declaration=True)
         out.seek(0)
-        source_data = open(source, 'rb').read()
+        with open(source, 'rb') as f:
+            source_data = f.read()
         sysvol_source = '\\'.join([vgp_dir, os.path.basename(source)])
         try:
             create_directory_hier(conn, vgp_dir)
@@ -3556,7 +3571,8 @@ samba-tool gpo manage scripts startup add {31B2F340-016D-11D2-945F-00C04FB984F9}
             else:
                 raise
 
-        script_data = open(script, 'rb').read()
+        with open(script, 'rb') as f:
+            script_data = f.read()
         listelement = ET.SubElement(data, 'listelement')
         script_elm = ET.SubElement(listelement, 'script')
         script_elm.text = os.path.basename(script)
@@ -3808,7 +3824,9 @@ samba-tool gpo manage motd set {31B2F340-016D-11D2-945F-00C04FB984F9} "Message f
             return
 
         try:
-            xml_data = ET.fromstring(conn.loadfile(vgp_xml))
+            xml_data = ET.ElementTree(ET.fromstring(conn.loadfile(vgp_xml)))
+            policysetting = xml_data.getroot().find('policysetting')
+            data = policysetting.find('data')
         except NTSTATUSError as e:
             if e.args[0] in [NT_STATUS_OBJECT_NAME_INVALID,
                              NT_STATUS_OBJECT_NAME_NOT_FOUND,
@@ -3834,7 +3852,9 @@ samba-tool gpo manage motd set {31B2F340-016D-11D2-945F-00C04FB984F9} "Message f
             else:
                 raise
 
-        text = ET.SubElement(data, 'text')
+        text = data.find('text')
+        if text is None:
+            text = ET.SubElement(data, 'text')
         text.text = value
 
         out = BytesIO()

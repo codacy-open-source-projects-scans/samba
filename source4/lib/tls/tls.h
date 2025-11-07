@@ -1,20 +1,20 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    transport layer security handling code
 
    Copyright (C) Andrew Tridgell 2005
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -28,6 +28,7 @@ struct loadparm_context;
 
 void tls_cert_generate(TALLOC_CTX *mem_ctx,
 		       const char *hostname,
+		       const char * const *additional_hostnames,
 		       const char *keyfile, const char *certfile,
 		       const char *cafile);
 
@@ -71,8 +72,11 @@ NTSTATUS tstream_tls_params_client_lpcfg(TALLOC_CTX *mem_ctx,
 					 const char *peer_name,
 					 struct tstream_tls_params **tlsp);
 
+NTSTATUS tstream_tls_params_quic_prepare(struct tstream_tls_params *tlsp);
+
 NTSTATUS tstream_tls_params_server(TALLOC_CTX *mem_ctx,
 				   const char *dns_host_name,
+				   const char * const *additional_dns_hostnames,
 				   bool enabled,
 				   const char *key_file,
 				   const char *cert_file,
@@ -81,8 +85,15 @@ NTSTATUS tstream_tls_params_server(TALLOC_CTX *mem_ctx,
 				   const char *dhp_file,
 				   const char *tls_priority,
 				   struct tstream_tls_params **_params);
+NTSTATUS tstream_tls_params_server_lpcfg(TALLOC_CTX *mem_ctx,
+					 struct loadparm_context *lp_ctx,
+					 struct tstream_tls_params **_params);
 
 bool tstream_tls_params_enabled(struct tstream_tls_params *params);
+bool tstream_tls_params_quic_enabled(struct tstream_tls_params *params);
+enum tls_verify_peer_state tstream_tls_params_verify_peer(
+	struct tstream_tls_params *tls_params);
+bool tstream_tls_verify_peer_trusted(enum tls_verify_peer_state verify_peer);
 const char *tstream_tls_params_peer_name(
 	const struct tstream_tls_params *params);
 
@@ -131,5 +142,36 @@ NTSTATUS tstream_tls_sync_setup(struct tstream_tls_params *_tls_params,
 				struct tstream_tls_sync **_tlsss);
 
 const DATA_BLOB *tstream_tls_sync_channel_bindings(struct tstream_tls_sync *tlsss);
+
+struct tevent_req *tstream_tls_quic_handshake_send(TALLOC_CTX *mem_ctx,
+						   struct tevent_context *ev,
+						   struct tstream_tls_params *tlsp,
+						   bool is_server,
+						   uint32_t timeout_msec,
+						   const char *alpn,
+						   int sockfd);
+NTSTATUS tstream_tls_quic_handshake_recv(struct tevent_req *req);
+NTSTATUS tstream_tls_quic_handshake(struct tstream_tls_params *tlsp,
+				    bool is_server,
+				    uint32_t timeout_msec,
+				    const char *alpn,
+				    int sockfd);
+
+#define tstream_tls_ngtcp2_connect_send(mem_ctx, ev, tls_params, \
+					timeout_msec, alpn, sockfd) \
+	_tstream_tls_ngtcp2_connect_send(mem_ctx, ev, tls_params, \
+					 timeout_msec, alpn, sockfd, \
+					 __location__)
+struct tevent_req *_tstream_tls_ngtcp2_connect_send(TALLOC_CTX *mem_ctx,
+						    struct tevent_context *ev,
+						    struct tstream_tls_params *tlsp,
+						    uint32_t timeout_msec,
+						    const char *alpn,
+						    int *sockfd,
+						    const char *location);
+int tstream_tls_ngtcp2_connect_recv(struct tevent_req *req,
+				    int *perrno,
+				    TALLOC_CTX *mem_ctx,
+				    struct tstream_context **quic_stream);
 
 #endif /* _TLS_H_ */
