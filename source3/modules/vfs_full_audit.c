@@ -166,7 +166,6 @@ typedef enum _vfs_op_type {
 	SMB_VFS_OP_FSTREAMINFO,
 	SMB_VFS_OP_GET_REAL_FILENAME,
 	SMB_VFS_OP_GET_REAL_FILENAME_AT,
-	SMB_VFS_OP_CONNECTPATH,
 	SMB_VFS_OP_BRL_LOCK_WINDOWS,
 	SMB_VFS_OP_BRL_UNLOCK_WINDOWS,
 	SMB_VFS_OP_STRICT_LOCK_CHECK,
@@ -193,7 +192,6 @@ typedef enum _vfs_op_type {
 
 	SMB_VFS_OP_FGET_NT_ACL,
 	SMB_VFS_OP_FSET_NT_ACL,
-	SMB_VFS_OP_AUDIT_FILE,
 
 	/* POSIX ACL operations. */
 
@@ -302,7 +300,6 @@ static struct {
 	{ SMB_VFS_OP_FSTREAMINFO,	"fstreaminfo" },
 	{ SMB_VFS_OP_GET_REAL_FILENAME, "get_real_filename" },
 	{ SMB_VFS_OP_GET_REAL_FILENAME_AT, "get_real_filename_at" },
-	{ SMB_VFS_OP_CONNECTPATH,	"connectpath" },
 	{ SMB_VFS_OP_BRL_LOCK_WINDOWS,  "brl_lock_windows" },
 	{ SMB_VFS_OP_BRL_UNLOCK_WINDOWS, "brl_unlock_windows" },
 	{ SMB_VFS_OP_STRICT_LOCK_CHECK, "strict_lock_check" },
@@ -324,7 +321,6 @@ static struct {
 	{ SMB_VFS_OP_FSET_DOS_ATTRIBUTES, "fset_dos_attributes" },
 	{ SMB_VFS_OP_FGET_NT_ACL,	"fget_nt_acl" },
 	{ SMB_VFS_OP_FSET_NT_ACL,	"fset_nt_acl" },
-	{ SMB_VFS_OP_AUDIT_FILE,	"audit_file" },
 	{ SMB_VFS_OP_SYS_ACL_GET_FD,	"sys_acl_get_fd" },
 	{ SMB_VFS_OP_SYS_ACL_BLOB_GET_FD,	"sys_acl_blob_get_fd" },
 	{ SMB_VFS_OP_SYS_ACL_SET_FD,	"sys_acl_set_fd" },
@@ -2119,24 +2115,6 @@ static NTSTATUS smb_full_audit_get_real_filename_at(
 	return result;
 }
 
-static const char *smb_full_audit_connectpath(
-	vfs_handle_struct *handle,
-	const struct files_struct *dirfsp,
-	const struct smb_filename *smb_fname)
-{
-	const char *result;
-
-	result = SMB_VFS_NEXT_CONNECTPATH(handle, dirfsp, smb_fname);
-
-	do_log(SMB_VFS_OP_CONNECTPATH,
-	       result != NULL,
-	       handle,
-	       "%s",
-	       smb_fname_str_do_log(handle->conn, smb_fname));
-
-	return result;
-}
-
 static NTSTATUS smb_full_audit_brl_lock_windows(struct vfs_handle_struct *handle,
 					        struct byte_range_lock *br_lck,
 					        struct lock_struct *plock)
@@ -2218,7 +2196,7 @@ static NTSTATUS smb_full_audit_parent_pathname(struct vfs_handle_struct *handle,
 					      smb_fname_in,
 					      parent_dir_out,
 					      atname_out);
-	do_log(SMB_VFS_OP_CONNECTPATH,
+	do_log(SMB_VFS_OP_PARENT_PATHNAME,
 	       NT_STATUS_IS_OK(result),
 	       handle,
 	       "%s",
@@ -2578,27 +2556,6 @@ static NTSTATUS smb_full_audit_fset_nt_acl(vfs_handle_struct *handle, files_stru
 	       "%s [%s]", fsp_str_do_log(fsp), sd ? sd : "");
 
 	TALLOC_FREE(sd);
-
-	return result;
-}
-
-static NTSTATUS smb_full_audit_audit_file(struct vfs_handle_struct *handle,
-				struct smb_filename *file,
-				struct security_acl *sacl,
-				uint32_t access_requested,
-				uint32_t access_denied)
-{
-	NTSTATUS result;
-
-	result = SMB_VFS_NEXT_AUDIT_FILE(handle,
-					file,
-					sacl,
-					access_requested,
-					access_denied);
-
-	do_log(SMB_VFS_OP_AUDIT_FILE, NT_STATUS_IS_OK(result), handle,
-			"%s",
-			smb_fname_str_do_log(handle->conn, file));
 
 	return result;
 }
@@ -3009,7 +2966,6 @@ static struct vfs_fn_pointers vfs_full_audit_fns = {
 	.snap_delete_fn = smb_full_audit_snap_delete,
 	.fstreaminfo_fn = smb_full_audit_fstreaminfo,
 	.get_real_filename_at_fn = smb_full_audit_get_real_filename_at,
-	.connectpath_fn = smb_full_audit_connectpath,
 	.brl_lock_windows_fn = smb_full_audit_brl_lock_windows,
 	.brl_unlock_windows_fn = smb_full_audit_brl_unlock_windows,
 	.strict_lock_check_fn = smb_full_audit_strict_lock_check,
@@ -3022,7 +2978,6 @@ static struct vfs_fn_pointers vfs_full_audit_fns = {
 	.fset_dos_attributes_fn = smb_full_audit_fset_dos_attributes,
 	.fget_nt_acl_fn = smb_full_audit_fget_nt_acl,
 	.fset_nt_acl_fn = smb_full_audit_fset_nt_acl,
-	.audit_file_fn = smb_full_audit_audit_file,
 	.sys_acl_get_fd_fn = smb_full_audit_sys_acl_get_fd,
 	.sys_acl_blob_get_fd_fn = smb_full_audit_sys_acl_blob_get_fd,
 	.sys_acl_set_fd_fn = smb_full_audit_sys_acl_set_fd,

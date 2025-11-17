@@ -1,4 +1,4 @@
-/* 
+/*
  * Skeleton VFS module.  Implements passthrough operation of all VFS
  * calls to disk functions.
  *
@@ -11,12 +11,12 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 3 of the License, or
  * (at your option) any later version.
- *  
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *  
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
@@ -25,7 +25,7 @@
 #include "lib/util/tevent_unix.h"
 #include "lib/util/tevent_ntstatus.h"
 
-/* PLEASE,PLEASE READ THE VFS MODULES CHAPTER OF THE 
+/* PLEASE,PLEASE READ THE VFS MODULES CHAPTER OF THE
    SAMBA DEVELOPERS GUIDE!!!!!!
  */
 
@@ -887,14 +887,6 @@ static NTSTATUS skel_get_real_filename_at(struct vfs_handle_struct *handle,
 		handle, dirfsp, name, mem_ctx, found_name);
 }
 
-static const char *skel_connectpath(
-	struct vfs_handle_struct *handle,
-	const struct files_struct *dirfsp,
-	const struct smb_filename *smb_fname)
-{
-	return SMB_VFS_NEXT_CONNECTPATH(handle, dirfsp, smb_fname);
-}
-
 static NTSTATUS skel_brl_lock_windows(struct vfs_handle_struct *handle,
 				      struct byte_range_lock *br_lck,
 				      struct lock_struct *plock)
@@ -1227,19 +1219,6 @@ static bool skel_aio_force(struct vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_AIO_FORCE(handle, fsp);
 }
 
-static NTSTATUS skel_audit_file(struct vfs_handle_struct *handle,
-				struct smb_filename *file,
-				struct security_acl *sacl,
-				uint32_t access_requested,
-				uint32_t access_denied)
-{
-	return SMB_VFS_NEXT_AUDIT_FILE(handle,
-				       file,
-				       sacl,
-				       access_requested,
-				       access_denied);
-}
-
 static NTSTATUS skel_durable_cookie(struct vfs_handle_struct *handle,
 				    struct files_struct *fsp,
 				    TALLOC_CTX *mem_ctx,
@@ -1363,7 +1342,6 @@ static struct vfs_fn_pointers skel_transparent_fns = {
 
 	.fstreaminfo_fn = skel_fstreaminfo,
 	.get_real_filename_at_fn = skel_get_real_filename_at,
-	.connectpath_fn = skel_connectpath,
 	.brl_lock_windows_fn = skel_brl_lock_windows,
 	.brl_unlock_windows_fn = skel_brl_unlock_windows,
 	.strict_lock_check_fn = skel_strict_lock_check,
@@ -1371,7 +1349,6 @@ static struct vfs_fn_pointers skel_transparent_fns = {
 	.parent_pathname_fn = skel_parent_pathname,
 	.fsctl_fn = skel_fsctl,
 	.freaddir_attr_fn = skel_freaddir_attr,
-	.audit_file_fn = skel_audit_file,
 
 	/* DOS attributes. */
 	.get_dos_attributes_send_fn = skel_get_dos_attributes_send,

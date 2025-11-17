@@ -64,14 +64,55 @@ class ModelTests(SambaToolCmdTest):
 
     def test_query_filter_enum(self):
         """Tests filtering by an EnumField."""
-        robots_vs_humans = User.query(self.samdb).count
-        robots = User.query(self.samdb,
-                            account_type=AccountType.WORKSTATION_TRUST).count
-        humans = User.query(self.samdb,
-                            account_type=AccountType.NORMAL_ACCOUNT).count
+        all_users = list(User.query(self.samdb))
+        robots_vs_humans = len(all_users)
+
+        robots_list = list(
+            User.query(self.samdb, account_type=AccountType.WORKSTATION_TRUST)
+        )
+        robots = len(robots_list)
+
+        humans_list = list(
+            User.query(self.samdb, account_type=AccountType.NORMAL_ACCOUNT)
+        )
+        humans = len(humans_list)
+        trusts_list = list(
+            User.query(self.samdb, account_type=AccountType.INTERDOMAIN_TRUST)
+        )
+        trusts = len(trusts_list)
+
+        # Debug output
+        print("\n=== Debug Output for test_query_filter_enum ===")
+        print(f"Total users: {robots_vs_humans}")
+        print(f"Robots (WORKSTATION_TRUST): {robots}")
+        print(f"Humans (NORMAL_ACCOUNT): {humans}")
+        print(f"Trusts (INTERDOMAIN_TRUST): {trusts}")
+        print(f"Sum (robots + humans + trusts): {robots + humans + trusts}")
+        print(f"Difference: {robots_vs_humans - (robots + humans + trusts)}")
+
+        # Find users that are neither robots nor humans
+        robots_dns = {str(user.dn) for user in robots_list}
+        humans_dns = {str(user.dn) for user in humans_list}
+        trust_dns = {str(user.dn) for user in trusts_list}
+        all_dns = {str(user.dn) for user in all_users}
+        other_dns = all_dns - robots_dns - humans_dns - trust_dns
+
+        if other_dns:
+            print(f"\nUsers that are neither WORKSTATION_TRUST nor "
+                  f"NORMAL_ACCOUNT nor INTERDOMAIN_TRUST ({len(other_dns)}):")
+            for user in all_users:
+                if str(user.dn) in other_dns:
+                    account_type_value = user.account_type
+                    print(f"  - {user.account_name}: "
+                          f"account_type={account_type_value}")
+
+        print("=== End Debug Output ===\n")
+
         self.assertNotEqual(robots, 0)
         self.assertNotEqual(humans, 0)
-        self.assertEqual(robots + humans, robots_vs_humans)
+        # If we have domain trusts or not, depends if we have setup
+        # environments with domain trusts before.
+        self.assertEqual(robots + humans + trusts, robots_vs_humans)
 
     def test_as_dict(self):
         """Test the as_dict method for serializing to dict then JSON."""

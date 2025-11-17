@@ -404,11 +404,6 @@
 		(mem_ctx), \
 		(found_name))
 
-#define SMB_VFS_CONNECTPATH(conn, dirfsp, smb_fname)			\
-	smb_vfs_call_connectpath((conn)->vfs_handles, (dirfsp), (smb_fname))
-#define SMB_VFS_NEXT_CONNECTPATH(conn, dirfsp, smb_fname)	\
-	smb_vfs_call_connectpath((conn)->next, (dirfsp), (smb_fname))
-
 #define SMB_VFS_BRL_LOCK_WINDOWS(conn, br_lck, plock) \
 	smb_vfs_call_brl_lock_windows((conn)->vfs_handles, (br_lck), (plock))
 #define SMB_VFS_NEXT_BRL_LOCK_WINDOWS(handle, br_lck, plock) \
@@ -514,11 +509,6 @@
 	smb_vfs_call_fget_nt_acl((fsp)->conn->vfs_handles, (fsp), (security_info), (mem_ctx), (ppdesc))
 #define SMB_VFS_NEXT_FGET_NT_ACL(handle, fsp, security_info, mem_ctx, ppdesc) \
 	smb_vfs_call_fget_nt_acl((handle)->next, (fsp), (security_info), (mem_ctx), (ppdesc))
-
-#define SMB_VFS_AUDIT_FILE(conn, name, sacl, access_requested, access_denied) \
-	smb_vfs_call_audit_file((conn)->vfs_handles, (name), (sacl), (access_requested), (access_denied))
-#define SMB_VFS_NEXT_AUDIT_FILE(handle, name, sacl, access_requested, access_denied) \
-	smb_vfs_call_audit_file((handle)->next, (name), (sacl), (access_requested), (access_denied))
 
 #define SMB_VFS_FSET_NT_ACL(fsp, security_info_sent, psd) \
 	smb_vfs_call_fset_nt_acl((fsp)->conn->vfs_handles, (fsp), (security_info_sent), (psd))

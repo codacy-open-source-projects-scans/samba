@@ -170,12 +170,7 @@ NTSTATUS file_new(struct smb_request *req, connection_struct *conn,
 	 * few NULL checks, so make sure it's initialized with something. to
 	 * be safe until an audit can be done.
 	 */
-	fsp->fsp_name = synthetic_smb_fname(fsp,
-					    "",
-					    NULL,
-					    NULL,
-					    0,
-					    0);
+	fsp->fsp_name = cp_smb_basename(fsp, "");
 	if (fsp->fsp_name == NULL) {
 		file_free(NULL, fsp);
 		return NT_STATUS_NO_MEMORY;
@@ -2444,63 +2439,6 @@ void file_free(struct smb_request *req, files_struct *fsp)
 		 sconn->num_files);
 }
 
-/****************************************************************************
- Get an fsp from a packet given a 16 bit fnum.
-****************************************************************************/
-
-files_struct *file_fsp(struct smb_request *req, uint16_t fid)
-{
-	struct smbXsrv_open *op;
-	NTSTATUS status;
-	NTTIME now = 0;
-	files_struct *fsp;
-
-	if (req == NULL) {
-		/*
-		 * We should never get here. req==NULL could in theory
-		 * only happen from internal opens with a non-zero
-		 * root_dir_fid. Internal opens just don't do that, at
-		 * least they are not supposed to do so. And if they
-		 * start to do so, they better fake up a smb_request
-		 * from which we get the right smbd_server_conn. While
-		 * this should never happen, let's return NULL here.
-		 */
-		return NULL;
-	}
-
-	if (req->chain_fsp != NULL) {
-		if (req->chain_fsp->fsp_flags.closing) {
-			return NULL;
-		}
-		return req->chain_fsp;
-	}
-
-	if (req->xconn == NULL) {
-		return NULL;
-	}
-
-	now = timeval_to_nttime(&req->request_time);
-
-	status = smb1srv_open_lookup(req->xconn,
-				     fid, now, &op);
-	if (!NT_STATUS_IS_OK(status)) {
-		return NULL;
-	}
-
-	fsp = op->compat;
-	if (fsp == NULL) {
-		return NULL;
-	}
-
-	if (fsp->fsp_flags.closing) {
-		return NULL;
-	}
-
-	req->chain_fsp = fsp;
-	fsp->fsp_name->st.cached_dos_attributes = FILE_ATTRIBUTE_INVALID;
-	return fsp;
-}
-
 struct files_struct *file_fsp_get(struct smbd_smb2_request *smb2req,
 				  uint64_t persistent_id,
 				  uint64_t volatile_id)
@@ -2577,13 +2515,14 @@ struct files_struct *file_fsp_smb2(struct smbd_smb2_request *smb2req,
  * Return a jenkins hash of a pathname on a connection.
  */
 
-NTSTATUS file_name_hash(connection_struct *conn,
-			const char *name, uint32_t *p_name_hash)
+static NTSTATUS file_name_hash(connection_struct *conn,
+			       const char *name,
+			       uint32_t *p_name_hash)
 {
 	char tmpbuf[PATH_MAX];
-	char *fullpath, *to_free;
+	char *fullpath = NULL, *to_free = NULL;
 	ssize_t len;
-	TDB_DATA key;
+	TDB_DATA key = {.dptr = NULL};
 
 	/* Set the hash of the full pathname. */
 
@@ -2591,7 +2530,6 @@ NTSTATUS file_name_hash(connection_struct *conn,
 		strlcpy(tmpbuf, name, sizeof(tmpbuf));
 		fullpath = tmpbuf;
 		len = strlen(fullpath);
-		to_free = NULL;
 	} else {
 		len = full_path_tos(conn->connectpath,
 				    name,
@@ -2606,9 +2544,7 @@ NTSTATUS file_name_hash(connection_struct *conn,
 	key = (TDB_DATA) { .dptr = (uint8_t *)fullpath, .dsize = len+1 };
 	*p_name_hash = tdb_jenkins_hash(&key);
 
-	DEBUG(10,("file_name_hash: %s hash 0x%x\n",
-		  fullpath,
-		(unsigned int)*p_name_hash ));
+	DBG_DEBUG("%s hash 0x%" PRIx32 "\n", fullpath, *p_name_hash);
 
 	TALLOC_FREE(to_free);
 	return NT_STATUS_OK;

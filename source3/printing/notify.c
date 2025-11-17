@@ -112,7 +112,7 @@ again:
 				msg->len, msg->notify.data);
 
 	if (buflen != len) {
-		buf = (uint8_t *)TALLOC_REALLOC(send_ctx, buf, len);
+		buf = talloc_realloc(send_ctx, buf, uint8_t, len);
 		if (!buf)
 			return False;
 		buflen = len;
@@ -156,7 +156,7 @@ static void print_notify_send_messages_to_printer(struct messaging_context *msg_
 	}
 	offset += 4; /* For count. */
 
-	buf = (char *)TALLOC(send_ctx, offset);
+	buf = talloc_array(send_ctx, char, offset);
 	if (!buf) {
 		DEBUG(0,("print_notify_send_messages: Out of memory\n"));
 		talloc_free_children(send_ctx);

@@ -304,11 +304,6 @@ uint32_t filename_create_ucf_flags(struct smb_request *req,
 NTSTATUS canonicalize_snapshot_path(struct smb_filename *smb_fname,
 				    uint32_t ucf_flags,
 				    NTTIME twrp);
-NTSTATUS get_real_filename_full_scan_at(struct files_struct *dirfsp,
-					const char *name,
-					bool mangled,
-					TALLOC_CTX *mem_ctx,
-					char **found_name);
 char *get_original_lcomp(TALLOC_CTX *ctx,
 			connection_struct *conn,
 			const char *filename_in,
@@ -349,15 +344,12 @@ struct files_struct *file_find_one_fsp_from_lease_key(
 bool file_find_subpath(files_struct *dir_fsp);
 void fsp_unbind_smb(struct smb_request *req, files_struct *fsp);
 void file_free(struct smb_request *req, files_struct *fsp);
-files_struct *file_fsp(struct smb_request *req, uint16_t fid);
 struct files_struct *file_fsp_get(struct smbd_smb2_request *smb2req,
 				  uint64_t persistent_id,
 				  uint64_t volatile_id);
 struct files_struct *file_fsp_smb2(struct smbd_smb2_request *smb2req,
 				   uint64_t persistent_id,
 				   uint64_t volatile_id);
-NTSTATUS file_name_hash(connection_struct *conn,
-			const char *name, uint32_t *p_name_hash);
 NTSTATUS fsp_set_smb_fname(struct files_struct *fsp,
 			   const struct smb_filename *smb_fname_in);
 size_t fsp_fullbasepath(struct files_struct *fsp, char *buf, size_t buflen);

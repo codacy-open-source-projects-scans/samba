@@ -43,12 +43,61 @@
 #include "source3/printing/rap_jobid.h"
 #include "source3/lib/substitute.h"
 
+#define CACHE_LAST_SCAN_TIME "CACHE"
+#define MSG_PENDING_TIME "MSG_PENDING"
+
 extern userdom_struct current_user_info;
 
 /* Current printer interface */
 static bool remove_from_jobs_added(const char* sharename, uint32_t jobid);
 
 static int get_queue_status(const char* sharename, print_status_struct *);
+
+static int fetch_share_cache_time(const char *key_name,
+				  const char *sharename,
+				  struct tdb_context *tdb,
+				  time_t *curr_time)
+{
+	char *key = NULL;
+
+	key = talloc_asprintf(NULL, "%s/%s", key_name, sharename);
+	if (key == NULL) {
+		DBG_ERR("Failed to format key\n");
+		return -1;
+	}
+
+	if (tdb_fetch_int64(tdb, key, curr_time) != 0) {
+		DBG_ERR("No timing record found for[%s]!\n", sharename);
+		TALLOC_FREE(key);
+		return -1;
+	}
+
+	TALLOC_FREE(key);
+	return 0;
+}
+
+static int update_share_cache_time(const char *key_name,
+				   const char *sharename,
+				   struct tdb_context *tdb,
+				   time_t curr_time)
+{
+	char *key = NULL;
+
+	key = talloc_asprintf(NULL, "%s/%s", key_name, sharename);
+	if (key == NULL) {
+		DBG_ERR("Failed to format key.\n");
+		return -1;
+	}
+
+	if (tdb_store_int64(tdb, key, (int64_t)curr_time) != 0) {
+		DBG_ERR("Unable to update print cache for %s\n", sharename);
+		TALLOC_FREE(key);
+		return -1;
+	}
+
+	TALLOC_FREE(key);
+	return 0;
+}
 
 /****************************************************************************
  Initialise the printing backend. Called once at startup before the fork().
@@ -250,14 +299,15 @@ static int unpack_pjob(TALLOC_CTX *mem_ctx, uint8_t *buf, int buflen,
 {
 	int	len = 0;
 	int	used;
-	uint32_t pjpid, pjjobid, pjsysjob, pjfd, pjstarttime, pjstatus;
+	uint32_t pjpid, pjjobid, pjsysjob, pjfd, pjstatus;
 	uint32_t pjsize, pjpage_count, pjspooled, pjsmbjob;
+	time_t pjstarttime;
 
 	if (!buf || !pjob) {
 		return -1;
 	}
 
-	len += tdb_unpack(buf+len, buflen-len, "ddddddddddfffff",
+	len += tdb_unpack(buf+len, buflen-len, "ddddDdddddfffff",
 				&pjpid,
 				&pjjobid,
 				&pjsysjob,
@@ -674,12 +724,12 @@ static bool pjob_store(struct tevent_context *ev,
 	do {
 		len = 0;
 		buflen = newlen;
-		len += tdb_pack(buf+len, buflen-len, "ddddddddddfffff",
+		len += tdb_pack(buf+len, buflen-len, "ddddDdddddfffff",
 				(uint32_t)pjob->pid,
 				(uint32_t)pjob->jobid,
 				(uint32_t)pjob->sysjob,
 				(uint32_t)pjob->fd,
-				(uint32_t)pjob->starttime,
+				(int64_t)pjob->starttime,
 				(uint32_t)pjob->status,
 				(uint32_t)pjob->size,
 				(uint32_t)pjob->page_count,
@@ -1001,13 +1051,12 @@ static int traverse_fn_delete(TDB_CONTEXT *t, TDB_DATA key, TDB_DATA data, void 
 
 static void print_cache_flush(const char *sharename)
 {
-	fstring key;
 	struct tdb_print_db *pdb = get_print_db_byname(sharename);
 
 	if (!pdb)
 		return;
-	slprintf(key, sizeof(key)-1, "CACHE/%s", sharename);
-	tdb_store_int32(pdb->tdb, key, -1);
+
+	update_share_cache_time(CACHE_LAST_SCAN_TIME, sharename, pdb->tdb, -1);
 	release_print_db(pdb);
 }
 
@@ -1131,13 +1180,13 @@ static void store_queue_struct(struct tdb_print_db *pdb, struct traverse_struct 
 			continue;
 
 		qcount++;
-		data.dsize += tdb_pack(NULL, 0, "ddddddff",
+		data.dsize += tdb_pack(NULL, 0, "dddddDff",
 				(uint32_t)queue[i].sysjob,
 				(uint32_t)queue[i].size,
 				(uint32_t)queue[i].page_count,
 				(uint32_t)queue[i].status,
 				(uint32_t)queue[i].priority,
-				(uint32_t)queue[i].time,
+				(int64_t)queue[i].time,
 				queue[i].fs_user,
 				queue[i].fs_file);
 	}
@@ -1151,13 +1200,13 @@ static void store_queue_struct(struct tdb_print_db *pdb, struct traverse_struct 
 		if ( queue[i].status == LPQ_DELETED )
 			continue;
 
-		len += tdb_pack(data.dptr + len, data.dsize - len, "ddddddff",
+		len += tdb_pack(data.dptr + len, data.dsize - len, "dddddDff",
 				(uint32_t)queue[i].sysjob,
 				(uint32_t)queue[i].size,
 				(uint32_t)queue[i].page_count,
 				(uint32_t)queue[i].status,
 				(uint32_t)queue[i].priority,
-				(uint32_t)queue[i].time,
+				(int64_t)queue[i].time,
 				queue[i].fs_user,
 				queue[i].fs_file);
 	}
@@ -1203,7 +1252,6 @@ static void check_job_added(const char *sharename, TDB_DATA data, uint32_t jobid
 
 static bool print_cache_expired(const char *sharename, bool check_pending)
 {
-	fstring key;
 	time_t last_qscan_time, time_now = time(NULL);
 	struct tdb_print_db *pdb = get_print_db_byname(sharename);
 	bool result = False;
@@ -1211,8 +1259,11 @@ static bool print_cache_expired(const char *sharename, bool check_pending)
 	if (!pdb)
 		return False;
 
-	snprintf(key, sizeof(key), "CACHE/%s", sharename);
-	last_qscan_time = (time_t)tdb_fetch_int32(pdb->tdb, key);
+	if (fetch_share_cache_time(CACHE_LAST_SCAN_TIME, sharename,
+				   pdb->tdb, &last_qscan_time) != 0) {
+		DBG_ERR("Unable to get last scan timing for %s\n", sharename);
+		goto done;
+	}
 
 	/*
 	 * Invalidate the queue for 3 reasons.
@@ -1228,7 +1279,7 @@ static bool print_cache_expired(const char *sharename, bool check_pending)
 		|| (time_now - last_qscan_time) >= lp_lpq_cache_time()
 		|| last_qscan_time > (time_now + MAX_CACHE_VALID_TIME))
 	{
-		uint32_t u;
+		time_t u;
 		time_t msg_pending_time;
 
 		DBG_INFO("cache expired for queue %s "
@@ -1244,16 +1295,20 @@ static bool print_cache_expired(const char *sharename, bool check_pending)
 		   then send another message anyways.  Make sure to check for
 		   clocks that have been run forward and then back again. */
 
-		snprintf(key, sizeof(key), "MSG_PENDING/%s", sharename);
+		if (fetch_share_cache_time(MSG_PENDING_TIME, sharename, pdb->tdb, &u) != 0) {
+			DBG_ERR("Unable to get updated scan time for %s\n", sharename);
+			goto done;
+		}
 
+		msg_pending_time = u;
 		if ( check_pending
-			&& tdb_fetch_uint32( pdb->tdb, key, &u )
-			&& (msg_pending_time=u) > 0
+			&& u
+			&& msg_pending_time > 0
 			&& msg_pending_time <= time_now
 			&& (time_now - msg_pending_time) < 60 )
 		{
-			DEBUG(4,("print_cache_expired: message already pending for %s.  Accepting cache\n",
-				sharename));
+			DBG_INFO("Message already pending for %s.  Accepting cache\n",
+				sharename);
 			goto done;
 		}
 
@@ -1283,7 +1338,7 @@ static void print_queue_update_internal(struct tevent_context *ev,
 	struct traverse_struct tstruct;
 	TDB_DATA data, key;
 	TDB_DATA jcdata;
-	fstring keystr, cachestr;
+	fstring keystr;
 	struct tdb_print_db *pdb = get_print_db_byname(sharename);
 	TALLOC_CTX *tmp_ctx = talloc_new(ev);
 
@@ -1300,8 +1355,12 @@ static void print_queue_update_internal(struct tevent_context *ev,
 	 * if the lpq takes a long time.
 	 */
 
-	slprintf(cachestr, sizeof(cachestr)-1, "CACHE/%s", sharename);
-	tdb_store_int32(pdb->tdb, cachestr, (int)time(NULL));
+	if (update_share_cache_time(CACHE_LAST_SCAN_TIME, sharename, pdb->tdb,
+				    time(NULL)) != 0) {
+		DBG_ERR("Unable to update timing cache for %s\n", sharename);
+		talloc_free(tmp_ctx);
+		return;
+	}
 
         /* get the current queue using the appropriate interface */
 	ZERO_STRUCT(status);
@@ -1416,19 +1475,18 @@ static void print_queue_update_internal(struct tevent_context *ev,
 	 * Update the cache time again. We want to do this call
 	 * as little as possible...
 	 */
-
-	slprintf(keystr, sizeof(keystr)-1, "CACHE/%s", sharename);
-	tdb_store_int32(pdb->tdb, keystr, (int32_t)time(NULL));
+	if (update_share_cache_time(CACHE_LAST_SCAN_TIME, sharename, pdb->tdb,
+				    time(NULL)) != 0) {
+		DBG_ERR("Unable to update timing cache for %s\n", sharename);
+		return;
+	}
 
 	/* clear the msg pending record for this queue */
-
-	snprintf(keystr, sizeof(keystr), "MSG_PENDING/%s", sharename);
-
-	if ( !tdb_store_uint32( pdb->tdb, keystr, 0 ) ) {
+	if (update_share_cache_time(MSG_PENDING_TIME, sharename, pdb->tdb, 0) != 0) {
 		/* log a message but continue on */
 
-		DEBUG(0,("print_queue_update: failed to store MSG_PENDING flag for [%s]!\n",
-			sharename));
+		DBG_ERR("Failed to store MSG_PENDING flag for [%s]!\n",
+			sharename);
 	}
 
 	release_print_db( pdb );
@@ -1565,7 +1623,6 @@ update the internal database from the system print queue for a queue
 static void print_queue_update(struct messaging_context *msg_ctx,
 			       int snum, bool force)
 {
-	char key[268];
 	fstring sharename;
 	char *lpqcommand = NULL;
 	char *lprmcommand = NULL;
@@ -1673,13 +1730,11 @@ static void print_queue_update(struct messaging_context *msg_ctx,
 		return;
 	}
 
-	snprintf(key, sizeof(key), "MSG_PENDING/%s", sharename);
-
-	if ( !tdb_store_uint32( pdb->tdb, key, time(NULL) ) ) {
+	if (update_share_cache_time(MSG_PENDING_TIME, sharename, pdb->tdb, time(NULL)) != 0) {
 		/* log a message but continue on */
 
-		DEBUG(0,("print_queue_update: failed to store MSG_PENDING flag for [%s]!\n",
-			sharename));
+		DBG_ERR("Failed to store MSG_PENDING flag for [%s]!\n",
+			sharename);
 	}
 
 	release_print_db( pdb );
@@ -2957,8 +3012,9 @@ static bool get_stored_queue_info(struct messaging_context *msg_ctx,
 	/* Retrieve the linearised queue data. */
 
 	for(i = 0; i < qcount; i++) {
-		uint32_t qjob, qsize, qpage_count, qstatus, qpriority, qtime;
-		len += tdb_unpack(data.dptr + len, data.dsize - len, "ddddddff",
+		uint32_t qjob, qsize, qpage_count, qstatus, qpriority;
+		time_t qtime;
+		len += tdb_unpack(data.dptr + len, data.dsize - len, "dddddDff",
 				&qjob,
 				&qsize,
 				&qpage_count,

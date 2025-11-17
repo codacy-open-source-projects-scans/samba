@@ -39,14 +39,12 @@
 
 	<simplelist>
 	<member>aio_force</member>
-	<member>audit_file</member>
 	<member>brl_lock_windows</member>
 	<member>brl_unlock_windows</member>
 	<member>chdir</member>
 	<member>close</member>
 	<member>closedir</member>
 	<member>connect</member>
-	<member>connectpath</member>
 	<member>create_dfs_pathat</member>
 	<member>create_file</member>
 	<member>disconnect</member>

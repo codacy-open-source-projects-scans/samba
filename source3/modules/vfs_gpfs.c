@@ -300,7 +300,6 @@ static NTSTATUS vfs_gpfs_get_real_filename_at(struct vfs_handle_struct *handle,
 	char real_pathname[PATH_MAX+1], tmpbuf[PATH_MAX];
 	size_t full_path_len;
 	int buflen;
-	bool mangled;
 	struct gpfs_config_data *config;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config,
@@ -308,12 +307,6 @@ static NTSTATUS vfs_gpfs_get_real_filename_at(struct vfs_handle_struct *handle,
 				return NT_STATUS_INTERNAL_ERROR);
 
 	if (!config->getrealfilename) {
-		return SMB_VFS_NEXT_GET_REAL_FILENAME_AT(
-			handle, dirfsp, name, mem_ctx, found_name);
-	}
-
-	mangled = mangle_is_mangled(name, handle->conn->params);
-	if (mangled) {
 		return SMB_VFS_NEXT_GET_REAL_FILENAME_AT(
 			handle, dirfsp, name, mem_ctx, found_name);
 	}
@@ -755,7 +748,7 @@ static struct gpfs_acl *vfs_gpfs_smbacl2gpfsacl(TALLOC_CTX *mem_ctx,
 	gacl_len = offsetof(gpfs_acl_t, ace_v4) + sizeof(unsigned int)
 		+ smb_get_naces(smbacl) * sizeof(gpfs_ace_v4_t);
 
-	gacl = (struct gpfs_acl *)TALLOC_SIZE(mem_ctx, gacl_len);
+	gacl = (struct gpfs_acl *)talloc_size(mem_ctx, gacl_len);
 	if (gacl == NULL) {
 		DEBUG(0, ("talloc failed\n"));
 		errno = ENOMEM;

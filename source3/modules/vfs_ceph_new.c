@@ -3436,7 +3436,7 @@ static struct smb_filename *vfs_ceph_getwd(struct vfs_handle_struct *handle,
 	cwd = config->ceph_getcwd_fn(config->mount);
 	DBG_DEBUG("[CEPH] getwd: handle=%p cwd=%s\n", handle, cwd);
 	END_PROFILE_X(syscall_getwd);
-	return synthetic_smb_fname(ctx, cwd, NULL, NULL, 0, 0);
+	return cp_smb_basename(ctx, cwd);
 }
 
 static int strict_allocate_ftruncate(struct vfs_handle_struct *handle,
@@ -3816,7 +3816,7 @@ static struct smb_filename *vfs_ceph_realpath(struct vfs_handle_struct *handle,
 	}
 
 	DBG_DEBUG("[CEPH] realpath(%p, %s) = %s\n", handle, path, result);
-	result_fname = synthetic_smb_fname(ctx, result, NULL, NULL, 0, 0);
+	result_fname = cp_smb_basename(ctx, result);
 	TALLOC_FREE(result);
 out:
 	END_PROFILE_X(syscall_realpath);
@@ -3835,14 +3835,6 @@ static NTSTATUS vfs_ceph_get_real_filename_at(
 	 * between a full directory scan and an actual case-insensitive stat.
 	 */
 	return NT_STATUS_NOT_SUPPORTED;
-}
-
-static const char *vfs_ceph_connectpath(
-	struct vfs_handle_struct *handle,
-	const struct files_struct *dirfsp,
-	const struct smb_filename *smb_fname)
-{
-	return handle->conn->connectpath;
 }
 
 static NTSTATUS vfs_ceph_fget_dos_attributes(struct vfs_handle_struct *handle,
@@ -4295,7 +4287,6 @@ static struct vfs_fn_pointers ceph_new_fns = {
 	.realpath_fn = vfs_ceph_realpath,
 	.fchflags_fn = vfs_not_implemented_fchflags,
 	.get_real_filename_at_fn = vfs_ceph_get_real_filename_at,
-	.connectpath_fn = vfs_ceph_connectpath,
 	.fget_dos_attributes_fn = vfs_ceph_fget_dos_attributes,
 	.fset_dos_attributes_fn = vfs_ceph_fset_dos_attributes,
 

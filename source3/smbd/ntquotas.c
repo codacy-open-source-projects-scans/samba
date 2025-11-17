@@ -84,12 +84,7 @@ NTSTATUS vfs_get_ntquota(files_struct *fsp, enum SMB_QUOTA_TYPE qtype,
 		return NT_STATUS_NO_SUCH_USER;
 	}
 
-	smb_fname_cwd = synthetic_smb_fname(talloc_tos(),
-				".",
-				NULL,
-				NULL,
-				0,
-				0);
+	smb_fname_cwd = cp_smb_basename(talloc_tos(), ".");
 	if (smb_fname_cwd == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -216,14 +211,14 @@ int vfs_get_user_ntquota_list(files_struct *fsp, SMB_NTQUOTA_LIST **qt_list)
 		if ((tmp_list_ent=talloc_zero(mem_ctx,SMB_NTQUOTA_LIST))==NULL) {
 			DEBUG(0,("TALLOC_ZERO() failed\n"));
 			*qt_list = NULL;
-			talloc_destroy(mem_ctx);
+			TALLOC_FREE(mem_ctx);
 			return (-1);
 		}
 
 		if ((tmp_list_ent->quotas=talloc_zero(mem_ctx,SMB_NTQUOTA_STRUCT))==NULL) {
 			DEBUG(0,("TALLOC_ZERO() failed\n"));
 			*qt_list = NULL;
-			talloc_destroy(mem_ctx);
+			TALLOC_FREE(mem_ctx);
 			return (-1);
 		}
 

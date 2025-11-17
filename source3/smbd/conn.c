@@ -90,60 +90,37 @@ bool conn_using_smb2(struct smbd_server_connection *sconn)
 	return (proto >= PROTOCOL_SMB2_02);
 }
 
-/****************************************************************************
- Find first available connection slot, starting from a random position.
- The randomisation stops problems with the server dying and clients
- thinking the server is still available.
-****************************************************************************/
-
 connection_struct *conn_new(struct smbd_server_connection *sconn)
 {
 	connection_struct *conn = NULL;
 
 	conn = talloc_zero(NULL, connection_struct);
 	if (conn == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		return NULL;
+		goto nomem;
 	}
 	conn->params = talloc(conn, struct share_params);
 	if (conn->params == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
 	conn->vuid_cache = talloc_zero(conn, struct vuid_cache);
 	if (conn->vuid_cache == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
 	conn->connectpath = talloc_strdup(conn, "");
 	if (conn->connectpath == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
 	conn->cwd_fsp = talloc_zero(conn, struct files_struct);
 	if (conn->cwd_fsp == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
-	conn->cwd_fsp->fsp_name = synthetic_smb_fname(conn->cwd_fsp,
-						      ".",
-						      NULL,
-						      NULL,
-						      0,
-						      0);
+	conn->cwd_fsp->fsp_name = cp_smb_basename(conn->cwd_fsp, ".");
 	if (conn->cwd_fsp->fsp_name == NULL) {
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
 	conn->cwd_fsp->fh = fd_handle_create(conn->cwd_fsp);
 	if (conn->cwd_fsp->fh == NULL) {
-		DBG_ERR("talloc_zero failed\n");
-		TALLOC_FREE(conn);
-		return NULL;
+		goto nomem;
 	}
 	conn->sconn = sconn;
 	conn->force_group_gid = (gid_t)-1;
@@ -160,6 +137,11 @@ connection_struct *conn_new(struct smbd_server_connection *sconn)
 	 */
 	talloc_set_destructor(conn, conn_struct_destructor);
 	return conn;
+
+nomem:
+	DBG_ERR("talloc failed");
+	TALLOC_FREE(conn);
+	return NULL;
 }
 
 /****************************************************************************

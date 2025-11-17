@@ -157,7 +157,7 @@ static void fileid_load_mount_entries(struct fileid_handle_data *data)
 	}
 	endmntent(f);
 	return;
-	
+
 nomem:
 	if (f) endmntent(f);
 
@@ -187,7 +187,7 @@ static struct fileid_mount_entry *fileid_find_mount_entry(struct fileid_handle_d
 		if (data->mount_entries[i].device == dev) {
 			return &data->mount_entries[i];
 		}
-	}	
+	}
 	return NULL;
 }
 
@@ -432,15 +432,11 @@ static int get_connectpath_ino(struct vfs_handle_struct *handle,
 		}
 	}
 
-	fname = synthetic_smb_fname(frame,
-				    fullpath,
-				    NULL,
-				    NULL,
-				    0,
-				    0);
+	fname = cp_smb_basename(frame, fullpath);
 	if (fname == NULL) {
-		DBG_ERR("synthetic_smb_fname(%s) failed - %s\n",
-			fullpath, strerror(errno));
+		DBG_ERR("cp_smb_basename(%s) failed - %s\n",
+			fullpath,
+			strerror(errno));
 		TALLOC_FREE(frame);
 		return -1;
 	}

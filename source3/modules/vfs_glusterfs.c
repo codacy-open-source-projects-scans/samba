@@ -1700,12 +1700,7 @@ static struct smb_filename *vfs_gluster_getwd(struct vfs_handle_struct *handle,
 	if (ret == NULL) {
 		return NULL;
 	}
-	smb_fname = synthetic_smb_fname(ctx,
-					ret,
-					NULL,
-					NULL,
-					0,
-					0);
+	smb_fname = cp_smb_basename(ctx, ret);
 	return smb_fname;
 }
 
@@ -1854,12 +1849,7 @@ static struct smb_filename *vfs_gluster_realpath(struct vfs_handle_struct *handl
 			smb_fname->base_name,
 			resolved_path);
 	if (result != NULL) {
-		result_fname = synthetic_smb_fname(ctx,
-						   result,
-						   NULL,
-						   NULL,
-						   0,
-						   0);
+		result_fname = cp_smb_basename(ctx, result);
 	}
 
 	SAFE_FREE(resolved_path);
@@ -2253,14 +2243,6 @@ static NTSTATUS vfs_gluster_get_real_filename_at(
 	return NT_STATUS_OK;
 }
 
-static const char *vfs_gluster_connectpath(
-	struct vfs_handle_struct *handle,
-	const struct files_struct *dirfsp,
-	const struct smb_filename *smb_fname)
-{
-	return handle->conn->connectpath;
-}
-
 /* EA Operations */
 
 static ssize_t vfs_gluster_fgetxattr(struct vfs_handle_struct *handle,
@@ -2637,7 +2619,6 @@ static struct vfs_fn_pointers glusterfs_fns = {
 	.file_id_create_fn = NULL,
 	.fstreaminfo_fn = NULL,
 	.get_real_filename_at_fn = vfs_gluster_get_real_filename_at,
-	.connectpath_fn = vfs_gluster_connectpath,
 	.create_dfs_pathat_fn = vfs_gluster_create_dfs_pathat,
 	.read_dfs_pathat_fn = vfs_gluster_read_dfs_pathat,
 
@@ -2650,7 +2631,6 @@ static struct vfs_fn_pointers glusterfs_fns = {
 	/* NT ACL Operations */
 	.fget_nt_acl_fn = NULL,
 	.fset_nt_acl_fn = NULL,
-	.audit_file_fn = NULL,
 
 	/* Posix ACL Operations */
 	.sys_acl_get_fd_fn = posixacl_xattr_acl_get_fd,

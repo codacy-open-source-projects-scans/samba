@@ -82,7 +82,7 @@ NTSTATUS smb_register_vfs(int version, const char *name,
 		DEBUG(0, ("Failed to register vfs module.\n"
 		          "The module was compiled against SMB_VFS_INTERFACE_VERSION %d,\n"
 		          "current SMB_VFS_INTERFACE_VERSION is %d.\n"
-		          "Please recompile against the current Samba Version!\n",  
+		          "Please recompile against the current Samba Version!\n",
 			  version, SMB_VFS_INTERFACE_VERSION));
 		return NT_STATUS_OBJECT_TYPE_MISMATCH;
   	}
@@ -1036,12 +1036,7 @@ struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 		goto nocache;
 	}
 
-	smb_fname_dot = synthetic_smb_fname(ctx,
-					    ".",
-					    NULL,
-					    NULL,
-					    0,
-					    0);
+	smb_fname_dot = cp_smb_basename(ctx, ".");
 	if (smb_fname_dot == NULL) {
 		errno = ENOMEM;
 		goto out;
@@ -1296,7 +1291,7 @@ NTSTATUS vfs_at_fspcwd(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	fsp->fsp_name = synthetic_smb_fname(fsp, ".", NULL, NULL, 0, 0);
+	fsp->fsp_name = cp_smb_basename(fsp, ".");
 	if (fsp->fsp_name == NULL) {
 		TALLOC_FREE(fsp);
 		return NT_STATUS_NO_MEMORY;
@@ -1323,20 +1318,14 @@ uint32_t vfs_get_fs_capabilities(struct connection_struct *conn,
 		loadparm_s3_global_substitution();
 	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
 	struct smb_filename *smb_fname_cpath = NULL;
-	struct vfs_statvfs_struct statbuf;
+	struct vfs_statvfs_struct statbuf = {};
 	int ret;
 
-	smb_fname_cpath = synthetic_smb_fname(talloc_tos(),
-					      conn->connectpath,
-					      NULL,
-					      NULL,
-					      0,
-					      0);
+	smb_fname_cpath = cp_smb_basename(talloc_tos(), conn->connectpath);
 	if (smb_fname_cpath == NULL) {
 		return caps;
 	}
 
-	ZERO_STRUCT(statbuf);
 	ret = SMB_VFS_STATVFS(conn, smb_fname_cpath, &statbuf);
 	if (ret == 0) {
 		caps = statbuf.FsCapabilities;
@@ -1479,7 +1468,7 @@ int smb_vfs_call_get_shadow_copy_data(struct vfs_handle_struct *handle,
 				      bool labels)
 {
 	VFS_FIND(get_shadow_copy_data);
-	return handle->fns->get_shadow_copy_data_fn(handle, fsp, 
+	return handle->fns->get_shadow_copy_data_fn(handle, fsp,
 						    shadow_copy_data,
 						    labels);
 }
@@ -2194,14 +2183,6 @@ NTSTATUS smb_vfs_call_get_real_filename_at(struct vfs_handle_struct *handle,
 		handle, dirfsp, name, mem_ctx, found_name);
 }
 
-const char *smb_vfs_call_connectpath(struct vfs_handle_struct *handle,
-				 const struct files_struct *dirfsp,
-				 const struct smb_filename *smb_fname)
-{
-	VFS_FIND(connectpath);
-	return handle->fns->connectpath_fn(handle, dirfsp, smb_fname);
-}
-
 bool smb_vfs_call_strict_lock_check(struct vfs_handle_struct *handle,
 				    struct files_struct *fsp,
 				    struct lock_struct *plock)
@@ -2489,22 +2470,8 @@ NTSTATUS smb_vfs_call_fset_nt_acl(struct vfs_handle_struct *handle,
 				  const struct security_descriptor *psd)
 {
 	VFS_FIND(fset_nt_acl);
-	return handle->fns->fset_nt_acl_fn(handle, fsp, security_info_sent, 
+	return handle->fns->fset_nt_acl_fn(handle, fsp, security_info_sent,
 					   psd);
-}
-
-NTSTATUS smb_vfs_call_audit_file(struct vfs_handle_struct *handle,
-				 struct smb_filename *file,
-				 struct security_acl *sacl,
-				 uint32_t access_requested,
-				 uint32_t access_denied)
-{
-	VFS_FIND(audit_file);
-	return handle->fns->audit_file_fn(handle, 
-					  file, 
-					  sacl, 
-					  access_requested, 
-					  access_denied);
 }
 
 SMB_ACL_T smb_vfs_call_sys_acl_get_fd(struct vfs_handle_struct *handle,
@@ -2518,7 +2485,7 @@ SMB_ACL_T smb_vfs_call_sys_acl_get_fd(struct vfs_handle_struct *handle,
 
 int smb_vfs_call_sys_acl_blob_get_fd(struct vfs_handle_struct *handle,
 				     struct files_struct *fsp,
-				     TALLOC_CTX *mem_ctx, 
+				     TALLOC_CTX *mem_ctx,
 				     char **blob_description,
 				     DATA_BLOB *blob)
 {

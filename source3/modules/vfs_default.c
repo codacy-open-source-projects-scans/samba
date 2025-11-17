@@ -210,18 +210,16 @@ static NTSTATUS vfswrap_get_dfs_referrals(struct vfs_handle_struct *handle,
 				   handle->conn->sconn->remote_address,
 				   handle->conn->sconn->local_address,
 				   junction, &consumedcnt, &self_referral);
-	if (!NT_STATUS_IS_OK(status)) {
-		struct smb_filename connectpath_fname = {
-			.base_name = handle->conn->connectpath
-		};
-		vfs_ChDir(handle->conn, &connectpath_fname);
-		return status;
-	}
+
 	{
 		struct smb_filename connectpath_fname = {
 			.base_name = handle->conn->connectpath
 		};
 		vfs_ChDir(handle->conn, &connectpath_fname);
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
 	}
 
 	if (!self_referral) {
@@ -2842,12 +2840,7 @@ static struct smb_filename *vfswrap_getwd(vfs_handle_struct *handle,
 	if (result == NULL) {
 		return NULL;
 	}
-	smb_fname = synthetic_smb_fname(ctx,
-				result,
-				NULL,
-				NULL,
-				0,
-				0);
+	smb_fname = cp_smb_basename(ctx, result);
 	/*
 	 * sys_getwd() *always* returns malloced memory.
 	 * We must free here to avoid leaks:
@@ -3309,12 +3302,7 @@ static struct smb_filename *vfswrap_realpath(vfs_handle_struct *handle,
 	result = sys_realpath(smb_fname->base_name);
 	END_PROFILE_X(syscall_realpath);
 	if (result) {
-		result_fname = synthetic_smb_fname(ctx,
-						   result,
-						   NULL,
-						   NULL,
-						   0,
-						   0);
+		result_fname = cp_smb_basename(ctx, result);
 		SAFE_FREE(result);
 	}
 	return result_fname;
@@ -3450,13 +3438,6 @@ static NTSTATUS vfswrap_get_real_filename_at(
 	return NT_STATUS_NOT_SUPPORTED;
 }
 
-static const char *vfswrap_connectpath(struct vfs_handle_struct *handle,
-				   const struct files_struct *dirfsp,
-				   const struct smb_filename *smb_fname)
-{
-	return handle->conn->connectpath;
-}
-
 static NTSTATUS vfswrap_brl_lock_windows(struct vfs_handle_struct *handle,
 					 struct byte_range_lock *br_lck,
 					 struct lock_struct *plock)
@@ -3517,15 +3498,6 @@ static NTSTATUS vfswrap_fset_nt_acl(vfs_handle_struct *handle, files_struct *fsp
 	result = set_nt_acl(fsp, security_info_sent, psd);
 	END_PROFILE_X(fset_nt_acl);
 	return result;
-}
-
-static NTSTATUS vfswrap_audit_file(struct vfs_handle_struct *handle,
-				   struct smb_filename *file,
-				   struct security_acl *sacl,
-				   uint32_t access_requested,
-				   uint32_t access_denied)
-{
-	return NT_STATUS_OK; /* Nothing to do here ... */
 }
 
 static SMB_ACL_T vfswrap_sys_acl_get_fd(vfs_handle_struct *handle,
@@ -4105,7 +4077,6 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.fs_file_id_fn = vfswrap_fs_file_id,
 	.fstreaminfo_fn = vfswrap_fstreaminfo,
 	.get_real_filename_at_fn = vfswrap_get_real_filename_at,
-	.connectpath_fn = vfswrap_connectpath,
 	.brl_lock_windows_fn = vfswrap_brl_lock_windows,
 	.brl_unlock_windows_fn = vfswrap_brl_unlock_windows,
 	.strict_lock_check_fn = vfswrap_strict_lock_check,
@@ -4127,7 +4098,6 @@ static struct vfs_fn_pointers vfs_default_fns = {
 
 	.fget_nt_acl_fn = vfswrap_fget_nt_acl,
 	.fset_nt_acl_fn = vfswrap_fset_nt_acl,
-	.audit_file_fn = vfswrap_audit_file,
 
 	/* POSIX ACL operations. */
 
