@@ -396,9 +396,10 @@
  * Version 52 - Add rename_stream
  * Version 52 - Remove connectpath
  * Version 52 - Remove audit_file
+ * Version 52 - Add VFS_OPEN_HOW_RESOLVE_NO_XDEV for SMB_VFS_OPENAT()
  */
 
-#define SMB_VFS_INTERFACE_VERSION 51
+#define SMB_VFS_INTERFACE_VERSION 52
 
 /*
     All intercepted VFS operations must be declared as static functions inside module source
@@ -933,6 +934,7 @@ struct vfs_aio_state {
 
 #define VFS_OPEN_HOW_RESOLVE_NO_SYMLINKS 1
 #define VFS_OPEN_HOW_WITH_BACKUP_INTENT 2
+#define VFS_OPEN_HOW_RESOLVE_NO_XDEV 4
 
 struct vfs_open_how {
 	int flags;

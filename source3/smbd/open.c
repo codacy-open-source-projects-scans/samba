@@ -475,7 +475,7 @@ NTSTATUS fd_openat(const struct files_struct *dirfsp,
 	struct files_struct *dirfsp_conv = NULL;
 	struct smb_filename *smb_fname_conv = NULL;
 	struct smb_filename *smb_fname_rel = NULL;
-	struct files_struct *root_fsp = NULL;
+	struct smb_filename *rootdir = NULL;
 	const char *name_in = smb_fname->base_name;
 	int fd;
 
@@ -532,11 +532,13 @@ NTSTATUS fd_openat(const struct files_struct *dirfsp,
 		 * paths, make this relative to "/"
 		 */
 		name_in += 1;
-		status = open_rootdir_pathref_fsp(conn, &root_fsp);
+		status = openat_pathref_fsp_rootdir(talloc_tos(),
+						    conn,
+						    &rootdir);
 		if (!NT_STATUS_IS_OK(status)) {
 			return status;
 		}
-		dirfsp = root_fsp;
+		dirfsp = rootdir->fsp;
 	}
 
 	if (ISDOT(name_in)) {
@@ -558,11 +560,7 @@ NTSTATUS fd_openat(const struct files_struct *dirfsp,
 		&smb_fname_rel);
 
 	dirfsp = NULL;
-	if (root_fsp != NULL) {
-		fd_close(root_fsp);
-		file_free(NULL, root_fsp);
-		root_fsp = NULL;
-	}
+	TALLOC_FREE(rootdir);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_DEBUG("filename_convert_dirfsp_rel returned %s\n",
@@ -847,82 +845,18 @@ static NTSTATUS fd_open_atomic(struct files_struct *dirfsp,
 	return status;
 }
 
-NTSTATUS reopen_from_fsp(struct files_struct *dirfsp,
-			 struct smb_filename *smb_fname,
-			 struct files_struct *fsp,
-			 const struct vfs_open_how *how,
-			 bool *p_file_created)
+/*
+ * Close the existing pathref fd and set the fsp flag
+ * is_pathref to false so we get a "normal" fd this time.
+ */
+static NTSTATUS reopen_from_fsp_namebased(struct files_struct *dirfsp,
+					  struct smb_filename *smb_fname,
+					  struct files_struct *fsp,
+					  const struct vfs_open_how *how,
+					  bool *p_file_created)
 {
 	NTSTATUS status;
-	int old_fd;
 
-	if (fsp->fsp_flags.have_proc_fds &&
-	    ((old_fd = fsp_get_pathref_fd(fsp)) != -1)) {
-
-		struct sys_proc_fd_path_buf buf;
-		struct smb_filename proc_fname = {
-			.base_name = sys_proc_fd_path(old_fd, &buf),
-		};
-		mode_t mode = fsp->fsp_name->st.st_ex_mode;
-		int new_fd;
-
-		if (S_ISLNK(mode)) {
-			return NT_STATUS_STOPPED_ON_SYMLINK;
-		}
-		if (!(S_ISREG(mode) || S_ISDIR(mode))) {
-			return NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
-		}
-
-		fsp->fsp_flags.is_pathref = false;
-
-		new_fd = SMB_VFS_OPENAT(fsp->conn,
-					fsp->conn->cwd_fsp,
-					&proc_fname,
-					fsp,
-					how);
-		if (new_fd == -1) {
-#if defined(HAVE_FSTATFS) && defined(HAVE_LINUX_MAGIC_H)
-			if (S_ISDIR(fsp->fsp_name->st.st_ex_mode) &&
-			    (errno == ENOENT)) {
-				struct statfs sbuf = {};
-				int ret = fstatfs(old_fd, &sbuf);
-				if (ret == -1) {
-					DBG_ERR("fstatfs failed: %s\n",
-						strerror(errno));
-				} else if (sbuf.f_type == AUTOFS_SUPER_MAGIC) {
-					/*
-					 * When reopening an as-yet
-					 * unmounted autofs mount
-					 * point we get ENOENT. We
-					 * have to retry pathbased.
-					 */
-					goto namebased_open;
-				}
-				/* restore ENOENT if changed in the meantime */
-				errno = ENOENT;
-			}
-#endif
-			status = map_nt_error_from_unix(errno);
-			fd_close(fsp);
-			return status;
-		}
-
-		status = fd_close(fsp);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
-
-		fsp_set_fd(fsp, new_fd);
-		return NT_STATUS_OK;
-	}
-
-#if defined(HAVE_FSTATFS) && defined(HAVE_LINUX_MAGIC_H)
-namebased_open:
-#endif
-	/*
-	 * Close the existing pathref fd and set the fsp flag
-	 * is_pathref to false so we get a "normal" fd this time.
-	 */
 	status = fd_close(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -930,8 +864,185 @@ namebased_open:
 
 	fsp->fsp_flags.is_pathref = false;
 
-	status = fd_open_atomic(dirfsp, smb_fname, fsp, how, p_file_created);
+	status = fd_open_atomic(dirfsp,
+				smb_fname,
+				fsp,
+				how,
+				p_file_created);
 	return status;
+}
+
+static bool fsp_is_automount_mountpoint(struct files_struct *fsp, int old_fd)
+{
+#if defined(HAVE_FSTATFS) && defined(HAVE_LINUX_MAGIC_H)
+	struct statfs sbuf = {};
+	int ret;
+
+	if (!S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
+		return false;
+	}
+
+	ret = fstatfs(old_fd, &sbuf);
+	if (ret == -1) {
+		DBG_ERR("fstatfs failed: %s\n",	strerror(errno));
+		return false;
+	}
+	if (sbuf.f_type == AUTOFS_SUPER_MAGIC) {
+		return true;
+	}
+	return false;
+#else
+	return false;
+#endif
+}
+
+static NTSTATUS reopen_from_fsp_pathref_based(
+	struct files_struct *dirfsp,
+	struct smb_filename *smb_fname,
+	struct files_struct *fsp,
+	const struct vfs_open_how *how,
+	bool *p_file_created)
+{
+	NTSTATUS status;
+	struct sys_proc_fd_path_buf buf;
+	int pathref_fd = fsp_get_pathref_fd(fsp);
+	struct smb_filename proc_fname = {
+		.base_name = sys_proc_fd_path(pathref_fd, &buf),
+	};
+	mode_t mode = fsp->fsp_name->st.st_ex_mode;
+	int new_fd;
+	struct vfs_open_how pathref_how = *how;
+
+	if (S_ISLNK(mode)) {
+		return NT_STATUS_STOPPED_ON_SYMLINK;
+	}
+	if (!(S_ISREG(mode) || S_ISDIR(mode))) {
+		return NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+	}
+
+	fsp->fsp_flags.is_pathref = false;
+
+#if defined(HAVE_FSTATFS) && defined(HAVE_LINUX_MAGIC_H)
+	/*
+	 * There is no point in setting RESOLVE_NO_XDEV if we can't
+	 * check with fstatfs later in fsp_is_automount_mountpoint
+	 */
+	if (S_ISDIR(fsp->fsp_name->st.st_ex_mode) &&
+	    fsp->conn->open_how_resolve & VFS_OPEN_HOW_RESOLVE_NO_XDEV) {
+		/*
+		 * If the *at cwd_fsp is a pathref (opened with O_PATH)
+		 * and old_fd refers to an automounter mount point not
+		 * yet mounted, we will get a fd referring to the
+		 * mount point without actually triggering the mount
+		 * (man 2 openat). To detect this situation set the
+		 * RESOLVE_NO_XDEV flag so openat2 will return an
+		 * error when crossing mount points. Then check
+		 * with fstatfs if it is an autofs mount point or not,
+		 * falling back to name-based openat or retry without
+		 * RESOLVE_NO_XDEV otherwise (could be a bind mount,
+		 * other type of mount of an automounter mount point
+		 * already mounted).
+		 */
+		pathref_how.resolve |= VFS_OPEN_HOW_RESOLVE_NO_XDEV;
+	}
+#endif
+
+retry:
+	new_fd = SMB_VFS_OPENAT(fsp->conn,
+				fsp->conn->cwd_fsp,
+				&proc_fname,
+				fsp,
+				&pathref_how);
+	if (new_fd == -1) {
+		int saved_errno = errno;
+		if (saved_errno == ENOENT &&
+		    fsp_is_automount_mountpoint(fsp, pathref_fd))
+		{
+			/*
+			 * This is a not yet triggered indirect automount
+			 * detected by openat(pathref_fd). Retry name-based.
+			 */
+			return reopen_from_fsp_namebased(dirfsp,
+							 smb_fname,
+							 fsp,
+							 how,
+							 p_file_created);
+		} else if (saved_errno == EXDEV &&
+		    pathref_how.resolve & VFS_OPEN_HOW_RESOLVE_NO_XDEV &&
+		    fsp_is_automount_mountpoint(fsp, pathref_fd))
+		{
+			/*
+			 * This is a not yet triggered direct or indirect
+			 * automount, detected by
+			 * openat2(pathref_fd, .., RESOLVE_NO_XDEV).
+			 * Retry name-based.
+			 */
+			return reopen_from_fsp_namebased(dirfsp,
+							 smb_fname,
+							 fsp,
+							 how,
+							 p_file_created);
+		} else if (saved_errno == ENOSYS &&
+		    pathref_how.resolve & VFS_OPEN_HOW_RESOLVE_NO_XDEV)
+		{
+			/*
+			 * The kernel doesn't support openat2() yet, or any
+			 * VFS module rejected the flag. Notify to the user
+			 * and retry without RESOLVE_NO_XDEV.
+			 */
+			DBG_WARNING("Failed to open directory disallowing the "
+				    "traversal of mount points during path "
+				    "resolution. Retrying allowing traversal, "
+				    "but automounts won't be triggered.\n");
+			pathref_how.resolve &= ~VFS_OPEN_HOW_RESOLVE_NO_XDEV;
+			goto retry;
+		} else if (saved_errno == EXDEV &&
+		    pathref_how.resolve & VFS_OPEN_HOW_RESOLVE_NO_XDEV)
+		{
+			/*
+			 * Just crossing a mount. Retry allowing traversals.
+			 */
+			pathref_how.resolve &= ~VFS_OPEN_HOW_RESOLVE_NO_XDEV;
+			goto retry;
+		}
+
+		status = map_nt_error_from_unix(saved_errno);
+		fd_close(fsp);
+		return status;
+	}
+
+	status = fd_close(fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	fsp_set_fd(fsp, new_fd);
+	return NT_STATUS_OK;
+}
+
+NTSTATUS reopen_from_fsp(struct files_struct *dirfsp,
+			 struct smb_filename *smb_fname,
+			 struct files_struct *fsp,
+			 const struct vfs_open_how *how,
+			 bool *p_file_created)
+{
+	int old_fd;
+
+	if (fsp->fsp_flags.have_proc_fds &&
+	    ((old_fd = fsp_get_pathref_fd(fsp)) != -1))
+	{
+		return reopen_from_fsp_pathref_based(dirfsp,
+						     smb_fname,
+						     fsp,
+						     how,
+						     p_file_created);
+	}
+
+	return reopen_from_fsp_namebased(dirfsp,
+					 smb_fname,
+					 fsp,
+					 how,
+					 p_file_created);
 }
 
 /****************************************************************************
@@ -5326,7 +5437,8 @@ void msg_file_was_renamed(struct messaging_context *msg_ctx,
 
 	if (strcmp(fsp->conn->connectpath, msg->servicepath) == 0) {
 		SMB_STRUCT_STAT fsp_orig_sbuf;
-		NTSTATUS status;
+		bool ok;
+
 		DBG_DEBUG("renaming file %s from %s -> %s\n",
 			  fsp_fnum_dbg(fsp),
 			  fsp_str_dbg(fsp),
@@ -5349,10 +5461,9 @@ void msg_file_was_renamed(struct messaging_context *msg_ctx,
 		 * any of this metadata to the client anyway.
 		 */
 		fsp_orig_sbuf = fsp->fsp_name->st;
-		status = fsp_set_smb_fname(fsp, smb_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			DBG_DEBUG("fsp_set_smb_fname failed: %s\n",
-				  nt_errstr(status));
+		ok = fsp_set_smb_fname(fsp, smb_fname);
+		if (!ok) {
+			DBG_DEBUG("fsp_set_smb_fname failed\n");
 		}
 		fsp->fsp_name->st = fsp_orig_sbuf;
 	} else {
@@ -6377,6 +6488,8 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 			file_free(NULL, tmp_base_fsp);
 		}
 	} else {
+		bool ok;
+
 		/*
 		 * No fsp passed in that we can use, create one
 		 */
@@ -6386,9 +6499,9 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 		}
 		free_fsp_on_error = true;
 
-		status = fsp_set_smb_fname(fsp, smb_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
+		ok = fsp_set_smb_fname(fsp, smb_fname);
+		if (!ok) {
+			goto nomem;
 		}
 	}
 
@@ -6415,6 +6528,8 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 			goto fail;
 		}
 	} else {
+		bool ok;
+
 		/*
 		 * Get a pathref on the parent. We can re-use this for
 		 * multiple calls to check parent ACLs etc. to avoid
@@ -6430,9 +6545,9 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 		}
 
 		dirfsp = parent_dir_fname->fsp;
-		status = fsp_set_smb_fname(dirfsp, parent_dir_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
+		ok = fsp_set_smb_fname(dirfsp, parent_dir_fname);
+		if (!ok) {
+			goto nomem;
 		}
 	}
 
@@ -6612,7 +6727,9 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
 
 	return NT_STATUS_OK;
 
- fail:
+nomem:
+	status = NT_STATUS_NO_MEMORY;
+fail:
 	DEBUG(10, ("create_file_unixpath: %s\n", nt_errstr(status)));
 
 	if (fsp != NULL) {

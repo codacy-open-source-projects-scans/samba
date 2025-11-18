@@ -1763,7 +1763,9 @@ static int fruit_openat(vfs_handle_struct *handle,
 		return fd;
 	}
 
-	if ((how->resolve & ~VFS_OPEN_HOW_WITH_BACKUP_INTENT) != 0) {
+	if ((how->resolve & ~(VFS_OPEN_HOW_WITH_BACKUP_INTENT |
+			      VFS_OPEN_HOW_RESOLVE_NO_XDEV)) != 0)
+	{
 		errno = ENOSYS;
 		return -1;
 	}
@@ -4662,7 +4664,7 @@ static NTSTATUS fruit_fset_nt_acl(vfs_handle_struct *handle,
 
 	DBG_DEBUG("%s\n", fsp_str_dbg(fsp));
 
-	if (config->ignore_zero_aces && (psd->dacl->num_aces == 0)) {
+	if (config->ignore_zero_aces && (orig_num_aces == 0)) {
 		/*
 		 * Just ignore Set-ACL requests with zero ACEs.
 		 */

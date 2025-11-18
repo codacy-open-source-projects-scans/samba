@@ -315,9 +315,8 @@ NTSTATUS get_real_filename_at(struct files_struct *dirfsp,
 
 /* The following definitions come from smbd/files.c  */
 
-NTSTATUS fsp_new(struct connection_struct *conn, TALLOC_CTX *mem_ctx,
-		 files_struct **result);
-void fsp_set_gen_id(files_struct *fsp);
+struct files_struct *fsp_new(TALLOC_CTX *mem_ctx,
+			     struct connection_struct *conn);
 NTSTATUS file_new(struct smb_request *req, connection_struct *conn,
 		  files_struct **result);
 NTSTATUS fsp_bind_smb(struct files_struct *fsp, struct smb_request *req);
@@ -350,8 +349,8 @@ struct files_struct *file_fsp_get(struct smbd_smb2_request *smb2req,
 struct files_struct *file_fsp_smb2(struct smbd_smb2_request *smb2req,
 				   uint64_t persistent_id,
 				   uint64_t volatile_id);
-NTSTATUS fsp_set_smb_fname(struct files_struct *fsp,
-			   const struct smb_filename *smb_fname_in);
+bool fsp_set_smb_fname(struct files_struct *fsp,
+		       const struct smb_filename *smb_fname_in);
 size_t fsp_fullbasepath(struct files_struct *fsp, char *buf, size_t buflen);
 void fsp_set_base_fsp(struct files_struct *fsp, struct files_struct *base_fsp);
 bool fsp_is_alternate_stream(const struct files_struct *fsp);
@@ -371,8 +370,9 @@ NTSTATUS open_internal_dirfsp(connection_struct *conn,
 			      int open_flags,
 			      struct files_struct **_fsp);
 
-NTSTATUS open_rootdir_pathref_fsp(connection_struct *conn,
-				  struct files_struct **_fsp);
+NTSTATUS openat_pathref_fsp_rootdir(TALLOC_CTX *mem_ctx,
+				    struct connection_struct *conn,
+				    struct smb_filename **_root);
 NTSTATUS openat_pathref_fsp(const struct files_struct *dirfsp,
 			    struct smb_filename *smb_fname);
 NTSTATUS open_stream_pathref_fsp(
