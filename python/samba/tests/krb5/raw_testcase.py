@@ -129,6 +129,7 @@ from samba.tests.krb5.rfc4120_constants import (
     PADATA_PW_SALT,
     PADATA_REQ_ENC_PA_REP,
     PADATA_SUPPORTED_ETYPES,
+    TD_CMS_DIGEST_ALGORITHMS,
 )
 import samba.tests.krb5.kcrypto as kcrypto
 
@@ -2519,6 +2520,14 @@ class RawKerberosTest(TestCase):
             pk_as_req_obj['encryptionCert'] = encryption_cert
 
         return self.der_encode(pk_as_req_obj, asn1Spec=asn1_spec())
+
+    def Attribute_create(self,
+                         attr_type,
+                         attr_values):
+        return {
+            'type': attr_type,
+            'values': attr_values,
+        }
 
     def SignerInfo_create(self,
                           signer_id,
@@ -5378,7 +5387,6 @@ class RawKerberosTest(TestCase):
                 require_strict.add(PADATA_ENCRYPTED_CHALLENGE)
 
             got_patypes = tuple(pa['padata-type'] for pa in rep_padata)
-            TD_CMS_DIGEST_ALGORITHMS = 111
             self.assertSequenceElementsEqual(expected_patypes, got_patypes,
                                              require_strict=require_strict,
                                              unchecked={PADATA_PW_SALT,TD_CMS_DIGEST_ALGORITHMS})
