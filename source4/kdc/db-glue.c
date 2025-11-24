@@ -1155,7 +1155,7 @@ static krb5_error_code samba_kdc_get_entry_principal(
 			 * and TGS-REQ.  We only change the principal in the
 			 * AS-REQ case.
 			 *
-			 * The SDB_F_FORCE_CANON if for new MIT KDC code that
+			 * The SDB_F_FORCE_CANON is for new MIT KDC code that
 			 * wants the canonical name in all lookups, and takes
 			 * care to canonicalize only when appropriate.
 			 */
@@ -3386,7 +3386,8 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 						const char **attrs,
 						const uint32_t dsdb_flags,
 						struct ldb_dn **realm_dn,
-						struct ldb_message **msg)
+						struct ldb_message **msg,
+						unsigned sdb_flags)
 {
 	NTSTATUS nt_status;
 	char *principal_string = NULL;
@@ -3418,90 +3419,139 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 	nt_status = sam_get_results_principal(kdc_db_ctx->samdb,
 					      mem_ctx, principal_string, attrs, dsdb_flags,
 					      realm_dn, msg);
+
 	if (NT_STATUS_EQUAL(nt_status, NT_STATUS_NO_SUCH_USER)) {
+		/* we will try again with a '$' appended */
+		krb5_principal temp_principal = NULL;
 		krb5_principal fallback_principal = NULL;
 		unsigned int num_comp;
 		char *fallback_realm = NULL;
 		char *fallback_account = NULL;
+		char *with_dollar = NULL;
+		char *fallback_string = NULL;
 		krb5_error_code ret;
+		size_t len;
 
 		ret = krb5_parse_name(context, principal_string,
-				      &fallback_principal);
+				      &temp_principal);
 		TALLOC_FREE(principal_string);
 		if (ret != 0) {
 			return ret;
 		}
 
-		num_comp = krb5_princ_size(context, fallback_principal);
+		num_comp = krb5_princ_size(context, temp_principal);
+		if (num_comp != 1) {
+			krb5_free_principal(context, temp_principal);
+			return SDB_ERR_NOENTRY;
+		}
+
+		ret = smb_krb5_principal_get_comp_string(mem_ctx,
+							 context, temp_principal, 0, &fallback_account);
+		if (ret != 0) {
+			krb5_free_principal(context, temp_principal);
+			return ret;
+		}
+
+		if (! (sdb_flags & SDB_F_CANON)) {
+			/*
+			 * The client has not requested canonicalisation,
+			 * and the principal has not been found.
+			 *
+			 * At this point the only thing we are going
+			 * to do is search for the account with a
+			 * trailing '$', which we don't want to do if
+			 * smb.conf has
+			 *
+			 *  kdc name match implicit dollar without canonicalization = no
+			 *
+			 * in which case we can just return early.
+			 *
+			 * Note, you might have expected a check
+			 * against
+			 *
+			 *   sdb_flags & (SDB_F_CANON|SDB_F_FORCE_CANON)
+			 *
+			 * but that is incorrect here. The
+			 * SDB_F_FORCE_CANON is telling us to
+			 * canonicalise as we choose for the MIT kdc;
+			 * that server will decide whether to use the
+			 * canonicalized name or the original. All we
+			 * are doing here is ruling out appending '$'
+			 * as a matching strategy when the client has
+			 * not requested canonicalization.
+			 *
+			 * If the MIT server wants to indicate the
+			 * client has requested canonicalization, it
+			 * sets the KRB5_KDB_FLAG_REFERRAL_OK flag,
+			 * which we have converted into SDB_F_CANON
+			 * (in mit_samba.c).
+			 */
+			bool implicit_dollar_fallback = \
+				lpcfg_kdc_name_match_implicit_dollar_without_canonicalization(
+					kdc_db_ctx->lp_ctx);
+			if (! implicit_dollar_fallback) {
+				DBG_ERR("NOT falling back to %s$\n",
+					fallback_account);
+				TALLOC_FREE(fallback_account);
+				krb5_free_principal(context, temp_principal);
+				return SDB_ERR_NOENTRY;
+			}
+		}
+
+		len = strlen(fallback_account);
+		if (len == 0 || fallback_account[len - 1] == '$') {
+			/* there is already a $, so no fallback */
+			TALLOC_FREE(fallback_account);
+			krb5_free_principal(context, temp_principal);
+			return SDB_ERR_NOENTRY;
+		}
+
 		fallback_realm = smb_krb5_principal_get_realm(
-			mem_ctx, context, fallback_principal);
+			mem_ctx, context, temp_principal);
 		if (fallback_realm == NULL) {
-			krb5_free_principal(context, fallback_principal);
+			TALLOC_FREE(fallback_account);
+			krb5_free_principal(context, temp_principal);
+			return ENOMEM;
+		}
+		krb5_free_principal(context, temp_principal);
+		temp_principal = NULL;
+
+		with_dollar = talloc_asprintf(mem_ctx, "%s$",
+					      fallback_account);
+		TALLOC_FREE(fallback_account);
+		if (with_dollar == NULL) {
+			TALLOC_FREE(fallback_realm);
 			return ENOMEM;
 		}
 
-		if (num_comp == 1) {
-			size_t len;
-
-			ret = smb_krb5_principal_get_comp_string(mem_ctx,
-								 context, fallback_principal, 0, &fallback_account);
-			if (ret) {
-				krb5_free_principal(context, fallback_principal);
-				TALLOC_FREE(fallback_realm);
-				return ret;
-			}
-
-			len = strlen(fallback_account);
-			if (len >= 2 && fallback_account[len - 1] == '$') {
-				TALLOC_FREE(fallback_account);
-			}
-		}
-		krb5_free_principal(context, fallback_principal);
-		fallback_principal = NULL;
-
-		if (fallback_account != NULL) {
-			char *with_dollar;
-
-			with_dollar = talloc_asprintf(mem_ctx, "%s$",
-						     fallback_account);
-			if (with_dollar == NULL) {
-				TALLOC_FREE(fallback_realm);
-				return ENOMEM;
-			}
-			TALLOC_FREE(fallback_account);
-
-			ret = smb_krb5_make_principal(context,
-						      &fallback_principal,
-						      fallback_realm,
-						      with_dollar, NULL);
-			TALLOC_FREE(with_dollar);
-			if (ret != 0) {
-				TALLOC_FREE(fallback_realm);
-				return ret;
-			}
-		}
+		ret = smb_krb5_make_principal(context,
+					      &fallback_principal,
+					      fallback_realm,
+					      with_dollar, NULL);
+		TALLOC_FREE(with_dollar);
 		TALLOC_FREE(fallback_realm);
-
-		if (fallback_principal != NULL) {
-			char *fallback_string = NULL;
-
-			ret = krb5_unparse_name(context,
-						fallback_principal,
-						&fallback_string);
-			if (ret != 0) {
-				krb5_free_principal(context, fallback_principal);
-				return ret;
-			}
-
-			nt_status = sam_get_results_principal(kdc_db_ctx->samdb,
-							      mem_ctx,
-							      fallback_string,
-							      attrs, dsdb_flags,
-							      realm_dn, msg);
-			SAFE_FREE(fallback_string);
+		if (ret != 0) {
+			return ret;
 		}
+		if (fallback_principal == NULL) {
+			return ENOMEM;
+		}
+
+		ret = krb5_unparse_name(context,
+					fallback_principal,
+					&fallback_string);
 		krb5_free_principal(context, fallback_principal);
 		fallback_principal = NULL;
+		if (ret != 0) {
+			return ret;
+		}
+
+		nt_status = sam_get_results_principal(kdc_db_ctx->samdb,
+						      mem_ctx,
+						      fallback_string,
+						      attrs, dsdb_flags,
+						      realm_dn, msg);
+		SAFE_FREE(fallback_string);
 	}
 	TALLOC_FREE(principal_string);
 
@@ -3616,7 +3666,7 @@ static krb5_error_code samba_kdc_fetch_client(krb5_context context,
 		 */
 		ret = samba_kdc_lookup_client(context, kdc_db_ctx,
 					      mem_ctx, principal, user_attrs, DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
-					      &realm_dn, &msg);
+					      &realm_dn, &msg, flags);
 		if (ret != 0) {
 			return ret;
 		}
@@ -3970,7 +4020,7 @@ static krb5_error_code samba_kdc_lookup_server(krb5_context context,
 		 */
 		return samba_kdc_lookup_client(context, kdc_db_ctx,
 					       mem_ctx, principal, server_attrs, DSDB_SEARCH_UPDATE_MANAGED_PASSWORDS,
-					       realm_dn, msg);
+					       realm_dn, msg, flags);
 	} else {
 		/*
 		 * This case is for:
@@ -4703,7 +4753,8 @@ samba_kdc_check_pkinit_ms_upn_match(krb5_context context,
 
 	ret = samba_kdc_lookup_client(context, kdc_db_ctx,
 				      mem_ctx, certificate_principal,
-				      ms_upn_check_attrs, 0, &realm_dn, &msg);
+				      ms_upn_check_attrs, 0, &realm_dn, &msg,
+				      SDB_F_CANON);
 
 	if (ret != 0) {
 		talloc_free(mem_ctx);

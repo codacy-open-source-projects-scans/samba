@@ -130,6 +130,7 @@ from samba.tests.krb5.rfc4120_constants import (
     PADATA_REQ_ENC_PA_REP,
     PADATA_SUPPORTED_ETYPES,
     TD_CMS_DIGEST_ALGORITHMS,
+    errmap
 )
 import samba.tests.krb5.kcrypto as kcrypto
 
@@ -863,6 +864,9 @@ class RawKerberosTest(TestCase):
             padata_checking = '1'
         cls.padata_checking = bool(int(padata_checking))
 
+        cls.uncanonicalized_implicit_dollar = cls.get_server_param(
+            "kdc name match implicit dollar without canonicalization", True)
+
         using_embedded_heimdal = samba.tests.env_get_var_value(
             'USING_EMBEDDED_HEIMDAL',
             allow_missing=True)
@@ -874,16 +878,9 @@ class RawKerberosTest(TestCase):
         # Always generating the PAC is currently only supported by
         # the Embedded heimdal
         if using_embedded_heimdal:
-            # get_loadparm loads the client smb.conf
-            # we need to load the server smb.conf to get the server
-            # settings.
-            server_conf = samba.tests.env_get_var_value('SERVERCONFFILE')
-            lp = LoadParm(filename_for_non_global_lp=server_conf)
-            always_include = lp.get("kdc always include pac")
-            if always_include is None:
-                always_include = "True"
-
-            cls.always_include_pac = bool(always_include)
+            cls.always_include_pac = cls.get_server_param(
+                "kdc always include pac",
+                True)
 
         kadmin_is_tgs = samba.tests.env_get_var_value('KADMIN_IS_TGS',
                                                       allow_missing=True)
@@ -5080,7 +5077,9 @@ class RawKerberosTest(TestCase):
         self.assertElementEqual(rep, 'pvno', 5)
         self.assertElementEqual(rep, 'msg-type', KRB_ERROR)
         error_code = self.getElementValue(rep, 'error-code')
-        self.assertIn(error_code, expected_error_mode)
+        self.assertIn(error_code, expected_error_mode,
+                      f"{errmap.get(error_code)} not in "
+                      f"{[errmap.get(e) for e in expected_error_mode]}")
         if self.strict_checking:
             self.assertElementMissing(rep, 'ctime')
             self.assertElementMissing(rep, 'cusec')
