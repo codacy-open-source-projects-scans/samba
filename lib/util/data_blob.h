@@ -33,6 +33,14 @@
 #include <talloc.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "lib/util/talloc_keep_secret.h"
+
+/**
+ * @defgroup data_blob The data_blob API
+ * @brief The defines the data_blob API and provides function working with it.
+ *
+ * @{
+ */
 
 /* used to hold an arbitrary blob of data */
 typedef struct datablob {
@@ -44,27 +52,110 @@ typedef struct datablob {
    a fair bit of code */
 #define ldb_val datablob
 
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using a new top level TALLOC_CTX.
+ *        You can pass NULL for ptr and get a blank data blob.
+ *        Blob must be freed with data_blob_free().
+ */
+DATA_BLOB data_blob(const void *ptr, size_t size);
+#else
 #define data_blob(ptr, size) data_blob_named(ptr, size, "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        You can pass NULL for ptr and get a blank data blob.
+ */
+DATA_BLOB data_blob_talloc(TALLOC_CTX *mem_ctx, const void *ptr, size_t size);
+#else
 #define data_blob_talloc(ctx, ptr, size) data_blob_talloc_named(ctx, ptr, size, "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        Data is initialized using provided blob.
+ */
+DATA_BLOB data_blob_dup_talloc(TALLOC_CTX *mem_ctx, DATA_BLOB blob);
+#else
 #define data_blob_dup_talloc(ctx, blob) data_blob_talloc_named(ctx, (blob).data, (blob).length, "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using a new top level TALLOC_CTX.
+ *        You can pass NULL for ptr and get a blank data blob.
+ *        Blob must be freed with data_blob_free().
+ */
+DATA_BLOB data_blob_named(const void *ptr, size_t size, const char *name);
+#else
+#define data_blob_named(ptr, size, name) \
+	data_blob_talloc_named(NULL, (ptr), (size), name)
+#endif
 
 /**
- construct a data blob, must be freed with data_blob_free()
- you can pass NULL for p and get a blank data blob
-**/
-_PUBLIC_ DATA_BLOB data_blob_named(const void *p, size_t length, const char *name);
-
+ * @brief Construct a data blob using supplied TALLOC_CTX and using data
+ * supplied via ptr and length and give it an explicit talloc chunk name.
+ */
 /**
- construct a data blob, using supplied TALLOC_CTX
-**/
+ * @brief Construct a data blob, using data supplied pointer and length
+ *
+ * @param mem_ctx  memory context, if NULL a new top level context is used
+ * @param p        pointer to input data, you can pass NULL and get a blank data
+ * blob
+ * @param length   data length
+ * @param name     talloc chunk name
+ * @return         the blob
+ */
 _PUBLIC_ DATA_BLOB data_blob_talloc_named(TALLOC_CTX *mem_ctx, const void *p, size_t length, const char *name);
 
+#ifdef DOXYGEN
 /**
- construct a zero data blob, using supplied TALLOC_CTX.
- use this sparingly as it initialises data - better to initialise
- yourself if you want specific data in the blob
-**/
-_PUBLIC_ DATA_BLOB data_blob_talloc_zero(TALLOC_CTX *mem_ctx, size_t length);
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        Data is initialized with zeros.
+ */
+DATA_BLOB data_blob_talloc_zero(TALLOC_CTX *mem_ctx, size_t size);
+#else
+#define data_blob_talloc_zero(ctx, size) \
+	_data_blob_talloc_zero((ctx), (size), "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        Data is initialized with zeros and zeroed out when freed.
+ */
+DATA_BLOB data_blob_talloc_zero_s(TALLOC_CTX *mem_ctx, size_t size);
+#else
+#define data_blob_talloc_zero_s(ctx, size) \
+	_data_blob_talloc_zero_s((ctx), (size), "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        You can pass NULL for ptr and get a blank data blob.
+ *        Data is zeroed out when freed.
+ */
+DATA_BLOB data_blob_talloc_s(TALLOC_CTX *mem_ctx, const void *ptr, size_t size);
+#else
+#define data_blob_talloc_s(ctx, ptr, size) \
+	_data_blob_talloc_s((ctx), (ptr), (size), "DATA_BLOB: " __location__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Construct a data blob using supplied TALLOC_CTX.
+ *        Data is initialized using provided blob.
+ *        Data is zeroed out when freed.
+ */
+DATA_BLOB data_blob_dup_talloc_s(TALLOC_CTX *mem_ctx, DATA_BLOB blob);
+#else
+#define data_blob_dup_talloc_s(ctx, blob) \
+	_data_blob_dup_talloc_s((ctx), (blob), "DATA_BLOB: " __location__)
+#endif
 
 /**
 free a data blob
@@ -80,6 +171,52 @@ _PUBLIC_ void data_blob_clear(DATA_BLOB *d);
 free a data blob and clear its contents
 **/
 _PUBLIC_ void data_blob_clear_free(DATA_BLOB *d);
+
+static inline DATA_BLOB _data_blob_talloc_zero(TALLOC_CTX *ctx,
+					       size_t size,
+					       const char *name)
+{
+	DATA_BLOB b = data_blob_talloc_named(ctx, 0, size, name);
+	if (b.data != NULL) {
+		data_blob_clear(&b);
+	}
+	return b;
+}
+
+static inline DATA_BLOB _data_blob_talloc_s(TALLOC_CTX *ctx,
+					    const void *p,
+					    size_t size,
+					    const char *name)
+{
+	DATA_BLOB b = data_blob_talloc_named(ctx, p, size, name);
+	if (b.data != NULL) {
+		talloc_keep_secret(b.data);
+	}
+	return b;
+}
+
+static inline DATA_BLOB _data_blob_talloc_zero_s(TALLOC_CTX *ctx,
+						 size_t size,
+						 const char *name)
+{
+	DATA_BLOB b = data_blob_talloc_named(ctx, 0, size, name);
+	if (b.data != NULL) {
+		data_blob_clear(&b);
+		talloc_keep_secret(b.data);
+	}
+	return b;
+}
+
+static inline DATA_BLOB _data_blob_dup_talloc_s(TALLOC_CTX *ctx,
+						DATA_BLOB blob,
+						const char *name)
+{
+	DATA_BLOB b = data_blob_talloc_named(ctx, blob.data, blob.length, name);
+	if (b.data != NULL) {
+		talloc_keep_secret(b.data);
+	}
+	return b;
+}
 
 /**
 check if two data blobs are equal
@@ -140,5 +277,7 @@ _PUBLIC_ bool data_blob_pad(TALLOC_CTX *mem_ctx, DATA_BLOB *blob,
 			    size_t pad);
 
 extern const DATA_BLOB data_blob_null;
+
+/** @} */ /* data_blob */
 
 #endif /* _SAMBA_DATABLOB_H_ */

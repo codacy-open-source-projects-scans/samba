@@ -1,20 +1,20 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
    data blob testing
 
    Copyright (C) Jelmer Vernooij <jelmer@samba.org> 2008
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -25,7 +25,7 @@
 
 static bool test_string(struct torture_context *tctx)
 {
-	DATA_BLOB blob = data_blob_string_const("bla");	
+	DATA_BLOB blob = data_blob_string_const("bla");
 
 	torture_assert_int_equal(tctx, blob.length, 3, "blob length");
 	torture_assert_str_equal(tctx, (char *)blob.data, "bla", "blob data");
@@ -35,7 +35,7 @@ static bool test_string(struct torture_context *tctx)
 
 static bool test_string_null(struct torture_context *tctx)
 {
-	DATA_BLOB blob = data_blob_string_const_null("bla");	
+	DATA_BLOB blob = data_blob_string_const_null("bla");
 
 	torture_assert_int_equal(tctx, blob.length, 4, "blob length");
 	torture_assert_str_equal(tctx, (char *)blob.data, "bla", "blob data");
@@ -54,6 +54,58 @@ static bool test_zero(struct torture_context *tctx)
 	return true;
 }
 
+static bool test_zero_s(struct torture_context *tctx)
+{
+	DATA_BLOB z = data_blob_talloc_zero_s(tctx, 4);
+	int i;
+	uint8_t *p;
+
+	torture_assert_int_equal(tctx, z.length, 4, "length");
+	for (i = 0; i < z.length; i++)
+		torture_assert_int_equal(tctx, z.data[i], 0, "contents");
+	z.data[0] = 'a';
+	p = z.data; /* store pointer that will be freed */
+	torture_assert_int_equal(tctx, *p, 'a', "contents");
+	data_blob_free(&z);
+	/* coverity[use_after_free] */
+	torture_assert_int_equal(tctx, *p, 0, "contents");
+	return true;
+}
+
+static bool test_talloc_s(struct torture_context *tctx)
+{
+	DATA_BLOB z = data_blob_talloc_s(tctx, "hello", 5);
+	int i;
+	uint8_t *p;
+
+	torture_assert_int_equal(tctx, z.length, 5, "length");
+	for (i = 0; i < z.length; i++)
+		torture_assert_int_not_equal(tctx, z.data[i], 0, "data");
+	p = z.data; /* store pointer that will be freed */
+	data_blob_free(&z);
+	for (i = 0; i < 5; i++)
+		/* coverity[use_after_free] */
+		torture_assert_int_equal(tctx, p[i], 0, "data");
+	return true;
+}
+
+static bool test_dup_talloc_s(struct torture_context *tctx)
+{
+	DATA_BLOB b = data_blob_string_const("abcd");
+	DATA_BLOB z = data_blob_dup_talloc_s(tctx, b);
+	int i;
+	uint8_t *p;
+
+	torture_assert_int_equal(tctx, z.length, 4, "length");
+	for (i = 0; i < b.length; i++)
+		torture_assert_int_equal(tctx, z.data[i], b.data[i], "data");
+	p = z.data; /* store pointer that will be freed */
+	data_blob_free(&z);
+	for (i = 0; i < b.length; i++)
+		/* coverity[use_after_free] */
+		torture_assert_int_equal(tctx, p[i], 0, "data");
+	return true;
+}
 
 static bool test_clear(struct torture_context *tctx)
 {
@@ -160,7 +212,10 @@ struct torture_suite *torture_local_util_data_blob(TALLOC_CTX *mem_ctx)
 
 	torture_suite_add_simple_test(suite, "string", test_string);
 	torture_suite_add_simple_test(suite, "string_null", test_string_null);
-	torture_suite_add_simple_test(suite, "zero", test_zero);;
+	torture_suite_add_simple_test(suite, "zero", test_zero);
+	torture_suite_add_simple_test(suite, "zero_s", test_zero_s);
+	torture_suite_add_simple_test(suite, "talloc_s", test_talloc_s);
+	torture_suite_add_simple_test(suite, "dup_s", test_dup_talloc_s);
 	torture_suite_add_simple_test(suite, "clear", test_clear);
 	torture_suite_add_simple_test(suite, "cmp", test_cmp);
 	torture_suite_add_simple_test(suite, "equal_const_time", test_equal_const_time);

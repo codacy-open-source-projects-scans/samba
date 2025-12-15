@@ -28,9 +28,10 @@ from selftesthelpers import bindir, srcdir, scriptdir, binpath
 from selftesthelpers import plantestsuite, samba3srcdir
 from selftesthelpers import planpythontestsuite
 from selftesthelpers import smbtorture3, configuration, smbclient3, smbtorture4
-from selftesthelpers import net, wbinfo, dbwrap_tool, rpcclient, python
-from selftesthelpers import smbget, smbcacls, smbcquotas, ntlm_auth3
-from selftesthelpers import valgrindify, smbtorture4_testsuites
+from selftesthelpers import net, wbinfo, dbwrap_tool, rpcclient
+from selftesthelpers import read_config_h
+from selftesthelpers import smbget, smbcacls, smbcquotas
+from selftesthelpers import smbtorture4_testsuites
 from selftesthelpers import smbtorture4_options
 from selftesthelpers import smbcontrol
 from selftesthelpers import smbstatus
@@ -71,25 +72,11 @@ def compare_versions(version1, version2):
             return -1
     return 0
 
-# find config.h
-try:
-    config_h = os.environ["CONFIG_H"]
-except KeyError:
-    samba4bindir = bindir()
-    config_h = os.path.join(samba4bindir, "default/include/config.h")
 
 bbdir = os.path.join(srcdir(), "testprogs/blackbox")
 
 # check available features
-config_hash = dict()
-f = open(config_h, 'r')
-try:
-    lines = f.readlines()
-    config_hash = dict((x[0], ' '.join(x[1:]))
-                       for x in map(lambda line: line.strip().split(' ')[1:],
-                                    filter(lambda line: (line[0:7] == '#define') and (len(line.split(' ')) > 2), lines)))
-finally:
-    f.close()
+config_hash = read_config_h()
 
 linux_kernel_version = None
 if platform.system() == 'Linux':
@@ -731,6 +718,10 @@ plantestsuite("samba3.winbind_call_depth_trace", env,
               [os.path.join(srcdir(),
                             "source3/script/tests/test_winbind_call_depth_trace.sh"),
                smbcontrol, configuration, '$PREFIX', env])
+plantestsuite("samba3.winbind_cache_sanity", env,
+              [os.path.join(srcdir(),
+                            "source3/script/tests/test_winbind_cache_sanity.sh"),
+               '$DOMAIN', '$LOCK_DIR/winbindd_cache.tdb'])
 
 env = "fl2008r2dc:local"
 plantestsuite("samba3.wbinfo_user_info", env,
