@@ -967,10 +967,12 @@ static DATA_BLOB dcerpc_floor_pack_lhs_data(TALLOC_CTX *mem_ctx, const struct nd
 
 	ndr_err = ndr_push_GUID(ndr, NDR_SCALARS | NDR_BUFFERS, &syntax->uuid);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		TALLOC_FREE(ndr);
 		return data_blob_null;
 	}
 	ndr_err = ndr_push_uint16(ndr, NDR_SCALARS, syntax->if_version);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		TALLOC_FREE(ndr);
 		return data_blob_null;
 	}
 
@@ -1467,9 +1469,9 @@ _PUBLIC_ NTSTATUS dcerpc_binding_build_tower(TALLOC_CTX *mem_ctx,
 
 	/* Floor 2 to num_protocols */
 	for (i = 0; i < num_protocols; i++) {
-		tower->floors[2 + i].lhs.protocol = protseq[i];
-		tower->floors[2 + i].lhs.lhs_data = data_blob_null;
-		ZERO_STRUCT(tower->floors[2 + i].rhs);
+		tower->floors[2 + i] = (struct epm_floor) {
+			.lhs.protocol = protseq[i],
+		};
 		status = dcerpc_floor_set_rhs_data(tower->floors,
 						   &tower->floors[2 + i],
 						   NULL);

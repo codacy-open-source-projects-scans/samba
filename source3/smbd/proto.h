@@ -157,7 +157,6 @@ bool conn_using_smb2(struct smbd_server_connection *sconn);
 connection_struct *conn_new(struct smbd_server_connection *sconn);
 bool conn_idle_all(struct smbd_server_connection *sconn, time_t t);
 void conn_clear_vuid_caches(struct smbd_server_connection *sconn, uint64_t vuid);
-void conn_free(connection_struct *conn);
 void conn_setup_case_options(connection_struct *conn);
 void conn_force_tdis(
 	struct smbd_server_connection *sconn,
@@ -798,11 +797,6 @@ NTSTATUS set_unix_posix_default_acl(connection_struct *conn,
 NTSTATUS set_unix_posix_acl(connection_struct *conn, files_struct *fsp,
 				uint16_t num_acls,
 				const char *pdata);
-int posix_sys_acl_blob_get_file(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				TALLOC_CTX *mem_ctx,
-				char **blob_description,
-				DATA_BLOB *blob);
 int posix_sys_acl_blob_get_fd(vfs_handle_struct *handle,
 			      files_struct *fsp,
 			      TALLOC_CTX *mem_ctx,

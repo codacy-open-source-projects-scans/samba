@@ -133,18 +133,18 @@ struct pai_val {
  Return a uint32_t of the pai_entry principal.
 ************************************************************************/
 
-static uint32_t get_pai_entry_val(struct pai_entry *paie)
+static uint32_t get_pai_entry_val(const struct pai_entry *paie)
 {
 	switch (paie->owner_type) {
 		case UID_ACE:
-			DEBUG(10,("get_pai_entry_val: uid = %u\n", (unsigned int)paie->unix_ug.id ));
+			DBG_DEBUG("uid = %" PRIu32 "\n", paie->unix_ug.id);
 			return (uint32_t)paie->unix_ug.id;
 		case GID_ACE:
-			DEBUG(10,("get_pai_entry_val: gid = %u\n", (unsigned int)paie->unix_ug.id ));
+			DBG_DEBUG("gid = %" PRIu32 "\n", paie->unix_ug.id);
 			return (uint32_t)paie->unix_ug.id;
 		case WORLD_ACE:
 		default:
-			DEBUG(10,("get_pai_entry_val: world ace\n"));
+			DBG_DEBUG("world ace\n");
 			return (uint32_t)-1;
 	}
 }
@@ -157,14 +157,16 @@ static uint32_t get_entry_val(canon_ace *ace_entry)
 {
 	switch (ace_entry->owner_type) {
 		case UID_ACE:
-			DEBUG(10,("get_entry_val: uid = %u\n", (unsigned int)ace_entry->unix_ug.id ));
+			DBG_DEBUG("uid = %" PRIu32 "\n",
+				  ace_entry->unix_ug.id);
 			return (uint32_t)ace_entry->unix_ug.id;
 		case GID_ACE:
-			DEBUG(10,("get_entry_val: gid = %u\n", (unsigned int)ace_entry->unix_ug.id ));
+			DBG_DEBUG("gid = %" PRIu32 "\n",
+				  ace_entry->unix_ug.id);
 			return (uint32_t)ace_entry->unix_ug.id;
 		case WORLD_ACE:
 		default:
-			DEBUG(10,("get_entry_val: world ace\n"));
+			DBG_DEBUG("world ace\n");
 			return (uint32_t)-1;
 	}
 }
@@ -193,7 +195,9 @@ static char *create_pai_buf_v2(canon_ace *file_ace_list,
 		num_def_entries++;
 	}
 
-	DEBUG(10,("create_pai_buf_v2: num_entries = %u, num_def_entries = %u\n", num_entries, num_def_entries ));
+	DBG_DEBUG("num_entries = %u, num_def_entries = %u\n",
+		  num_entries,
+		  num_def_entries);
 
 	*store_size = PAI_V2_ENTRIES_BASE +
 		((num_entries + num_def_entries)*PAI_V2_ENTRY_LENGTH);
@@ -210,8 +214,7 @@ static char *create_pai_buf_v2(canon_ace *file_ace_list,
 	SSVAL(pai_buf,PAI_V2_NUM_ENTRIES_OFFSET,num_entries);
 	SSVAL(pai_buf,PAI_V2_NUM_DEFAULT_ENTRIES_OFFSET,num_def_entries);
 
-	DEBUG(10,("create_pai_buf_v2: sd_type = 0x%x\n",
-			(unsigned int)sd_type ));
+	DBG_DEBUG("sd_type = 0x%" PRIx16 "\n", sd_type);
 
 	entry_offset = pai_buf + PAI_V2_ENTRIES_BASE;
 
@@ -223,11 +226,12 @@ static char *create_pai_buf_v2(canon_ace *file_ace_list,
 		SCVAL(entry_offset,0,ace_list->ace_flags);
 		SCVAL(entry_offset,1,type_val);
 		SIVAL(entry_offset,2,entry_val);
-		DEBUG(10,("create_pai_buf_v2: entry %u [0x%x] [0x%x] [0x%x]\n",
-			i,
-			(unsigned int)ace_list->ace_flags,
-			(unsigned int)type_val,
-			(unsigned int)entry_val ));
+		DBG_DEBUG("entry %u [0x%" PRIx8 "] [0x%" PRIx8 "] [0x%" PRIx32
+			  "]\n",
+			  i,
+			  ace_list->ace_flags,
+			  type_val,
+			  entry_val);
 		i++;
 		entry_offset += PAI_V2_ENTRY_LENGTH;
 	}
@@ -239,11 +243,12 @@ static char *create_pai_buf_v2(canon_ace *file_ace_list,
 		SCVAL(entry_offset,0,ace_list->ace_flags);
 		SCVAL(entry_offset,1,type_val);
 		SIVAL(entry_offset,2,entry_val);
-		DEBUG(10,("create_pai_buf_v2: entry %u [0x%x] [0x%x] [0x%x]\n",
-			i,
-			(unsigned int)ace_list->ace_flags,
-			(unsigned int)type_val,
-			(unsigned int)entry_val ));
+		DBG_DEBUG("entry %u [0x%" PRIx8 "] [0x%" PRIx8 "] [0x%" PRIx32
+			  "]\n",
+			  i,
+			  ace_list->ace_flags,
+			  type_val,
+			  entry_val);
 		i++;
 		entry_offset += PAI_V2_ENTRY_LENGTH;
 	}
@@ -276,12 +281,12 @@ static void store_inheritance_attributes(files_struct *fsp,
 
 	TALLOC_FREE(pai_buf);
 
-	DEBUG(10,("store_inheritance_attribute: type 0x%x for file %s\n",
-		(unsigned int)sd_type,
-		fsp_str_dbg(fsp)));
+	DBG_DEBUG("type 0x%" PRIx16 " for file %s\n",
+		  sd_type,
+		  fsp_str_dbg(fsp));
 
 	if (ret == -1 && !no_acl_syscall_error(errno)) {
-		DEBUG(1,("store_inheritance_attribute: Error %s\n", strerror(errno) ));
+		DBG_WARNING("Error %s\n", strerror(errno));
 	}
 }
 
@@ -401,23 +406,21 @@ static bool get_pai_owner_type(struct pai_entry *paie, const char *entry_offset)
 		case UID_ACE:
 			paie->unix_ug.type = ID_TYPE_UID;
 			paie->unix_ug.id = (uid_t)IVAL(entry_offset,1);
-			DEBUG(10,("get_pai_owner_type: uid = %u\n",
-				(unsigned int)paie->unix_ug.id ));
+			DBG_DEBUG("uid = %" PRIu32 "\n", paie->unix_ug.id);
 			break;
 		case GID_ACE:
 			paie->unix_ug.type = ID_TYPE_GID;
 			paie->unix_ug.id = (gid_t)IVAL(entry_offset,1);
-			DEBUG(10,("get_pai_owner_type: gid = %u\n",
-				(unsigned int)paie->unix_ug.id ));
+			DBG_DEBUG("gid = %" PRIu32 "\n", paie->unix_ug.id);
 			break;
 		case WORLD_ACE:
 			paie->unix_ug.type = ID_TYPE_NOT_SPECIFIED;
 			paie->unix_ug.id = -1;
-			DEBUG(10,("get_pai_owner_type: world ace\n"));
+			DBG_DEBUG("world ace\n");
 			break;
 		default:
-			DEBUG(10,("get_pai_owner_type: unknown type %u\n",
-				(unsigned int)paie->owner_type ));
+			DBG_DEBUG("unknown type %u\n",
+				  (unsigned int)paie->owner_type);
 			return false;
 	}
 	return true;
@@ -473,18 +476,22 @@ static struct pai_val *create_pai_val_v1(const char *buf, size_t size)
 		return NULL;
 	}
 
-	memset(paiv, '\0', sizeof(struct pai_val));
+	*paiv = (struct pai_val){
+		.sd_type = (PULL_LE_U8(buf, PAI_V1_FLAG_OFFSET) ==
+			    PAI_V1_ACL_FLAG_PROTECTED)
+				   ? SEC_DESC_DACL_PROTECTED
+				   : 0,
 
-	paiv->sd_type = (CVAL(buf,PAI_V1_FLAG_OFFSET) == PAI_V1_ACL_FLAG_PROTECTED) ?
-			SEC_DESC_DACL_PROTECTED : 0;
-
-	paiv->num_entries = SVAL(buf,PAI_V1_NUM_ENTRIES_OFFSET);
-	paiv->num_def_entries = SVAL(buf,PAI_V1_NUM_DEFAULT_ENTRIES_OFFSET);
+		.num_entries = PULL_LE_U32(buf, PAI_V1_NUM_ENTRIES_OFFSET),
+		.num_def_entries = PULL_LE_U32(
+			buf, PAI_V1_NUM_DEFAULT_ENTRIES_OFFSET),
+	};
 
 	entry_offset = buf + PAI_V1_ENTRIES_BASE;
 
-	DEBUG(10,("create_pai_val: num_entries = %u, num_def_entries = %u\n",
-			paiv->num_entries, paiv->num_def_entries ));
+	DBG_DEBUG("num_entries = %u, num_def_entries = %u\n",
+		  paiv->num_entries,
+		  paiv->num_def_entries);
 
 	entry_offset = create_pai_v1_entries(paiv, entry_offset, false);
 	if (entry_offset == NULL) {
@@ -995,9 +1002,9 @@ uint32_t map_canon_ace_perms(int snum,
 
 	if (lp_acl_map_full_control(snum) && ((perms & ALL_ACE_PERMS) == ALL_ACE_PERMS)) {
 		if (directory_ace) {
-			nt_mask = UNIX_DIRECTORY_ACCESS_RWX;
+			nt_mask = FILE_GENERIC_ALL;
 		} else {
-			nt_mask = (UNIX_ACCESS_RWX & ~DELETE_ACCESS);
+			nt_mask = (FILE_GENERIC_ALL & ~DELETE_ACCESS);
 		}
 	} else if ((perms & ALL_ACE_PERMS) == (mode_t)0) {
 		/*
@@ -1012,13 +1019,18 @@ uint32_t map_canon_ace_perms(int snum,
 		nt_mask = 0;
 	} else {
 		if (directory_ace) {
-			nt_mask |= ((perms & S_IRUSR) ? UNIX_DIRECTORY_ACCESS_R : 0 );
-			nt_mask |= ((perms & S_IWUSR) ? UNIX_DIRECTORY_ACCESS_W : 0 );
-			nt_mask |= ((perms & S_IXUSR) ? UNIX_DIRECTORY_ACCESS_X : 0 );
+			nt_mask |= ((perms & S_IRUSR) ? FILE_GENERIC_READ : 0);
+			nt_mask |= ((perms & S_IWUSR) ? (FILE_GENERIC_WRITE |
+							 FILE_DELETE_CHILD)
+						      : 0);
+			nt_mask |= ((perms & S_IXUSR) ? FILE_GENERIC_EXECUTE
+						      : 0);
 		} else {
-			nt_mask |= ((perms & S_IRUSR) ? UNIX_ACCESS_R : 0 );
-			nt_mask |= ((perms & S_IWUSR) ? UNIX_ACCESS_W : 0 );
-			nt_mask |= ((perms & S_IXUSR) ? UNIX_ACCESS_X : 0 );
+			nt_mask |= ((perms & S_IRUSR) ? FILE_GENERIC_READ : 0);
+			nt_mask |= ((perms & S_IWUSR) ? FILE_GENERIC_WRITE
+						      : 0);
+			nt_mask |= ((perms & S_IXUSR) ? FILE_GENERIC_EXECUTE
+						      : 0);
 		}
 	}
 
@@ -1036,40 +1048,42 @@ uint32_t map_canon_ace_perms(int snum,
  Map NT perms to a UNIX mode_t.
 ****************************************************************************/
 
-#define FILE_SPECIFIC_READ_BITS (FILE_READ_DATA|FILE_READ_EA)
-#define FILE_SPECIFIC_WRITE_BITS (FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA)
-#define FILE_SPECIFIC_EXECUTE_BITS (FILE_EXECUTE)
-
-static mode_t map_nt_perms( uint32_t *mask, int type)
+static mode_t map_nt_perms(uint32_t mask, int type)
 {
 	mode_t mode = 0;
+	bool have_all = (mask & GENERIC_ALL_ACCESS);
+	bool have_r = (mask &
+		       (GENERIC_READ_ACCESS | FILE_READ_DATA | FILE_READ_EA));
+	bool have_w = (mask & (GENERIC_WRITE_ACCESS | FILE_WRITE_DATA |
+			       FILE_APPEND_DATA | FILE_WRITE_EA));
+	bool have_x = (mask & (GENERIC_EXECUTE_ACCESS | FILE_EXECUTE));
 
 	switch(type) {
 	case S_IRUSR:
-		if((*mask) & GENERIC_ALL_ACCESS)
-			mode = S_IRUSR|S_IWUSR|S_IXUSR;
-		else {
-			mode |= ((*mask) & (GENERIC_READ_ACCESS|FILE_SPECIFIC_READ_BITS)) ? S_IRUSR : 0;
-			mode |= ((*mask) & (GENERIC_WRITE_ACCESS|FILE_SPECIFIC_WRITE_BITS)) ? S_IWUSR : 0;
-			mode |= ((*mask) & (GENERIC_EXECUTE_ACCESS|FILE_SPECIFIC_EXECUTE_BITS)) ? S_IXUSR : 0;
+		if (have_all) {
+			mode = S_IRWXU;
+		} else {
+			mode |= have_r ? S_IRUSR : 0;
+			mode |= have_w ? S_IWUSR : 0;
+			mode |= have_x ? S_IXUSR : 0;
 		}
 		break;
 	case S_IRGRP:
-		if((*mask) & GENERIC_ALL_ACCESS)
-			mode = S_IRGRP|S_IWGRP|S_IXGRP;
-		else {
-			mode |= ((*mask) & (GENERIC_READ_ACCESS|FILE_SPECIFIC_READ_BITS)) ? S_IRGRP : 0;
-			mode |= ((*mask) & (GENERIC_WRITE_ACCESS|FILE_SPECIFIC_WRITE_BITS)) ? S_IWGRP : 0;
-			mode |= ((*mask) & (GENERIC_EXECUTE_ACCESS|FILE_SPECIFIC_EXECUTE_BITS)) ? S_IXGRP : 0;
+		if (mask & GENERIC_ALL_ACCESS) {
+			mode = S_IRWXG;
+		} else {
+			mode |= have_r ? S_IRGRP : 0;
+			mode |= have_w ? S_IWGRP : 0;
+			mode |= have_x ? S_IXGRP : 0;
 		}
 		break;
 	case S_IROTH:
-		if((*mask) & GENERIC_ALL_ACCESS)
-			mode = S_IROTH|S_IWOTH|S_IXOTH;
-		else {
-			mode |= ((*mask) & (GENERIC_READ_ACCESS|FILE_SPECIFIC_READ_BITS)) ? S_IROTH : 0;
-			mode |= ((*mask) & (GENERIC_WRITE_ACCESS|FILE_SPECIFIC_WRITE_BITS)) ? S_IWOTH : 0;
-			mode |= ((*mask) & (GENERIC_EXECUTE_ACCESS|FILE_SPECIFIC_EXECUTE_BITS)) ? S_IXOTH : 0;
+		if (mask & GENERIC_ALL_ACCESS) {
+			mode = S_IRWXO;
+		} else {
+			mode |= have_r ? S_IROTH : 0;
+			mode |= have_w ? S_IWOTH : 0;
+			mode |= have_x ? S_IXOTH : 0;
 		}
 		break;
 	}
@@ -1605,7 +1619,7 @@ static bool add_current_ace_to_acl(files_struct *fsp, struct security_ace *psa,
 	 * S_I(R|W|X)USR bits.
 	 */
 
-	current_ace->perms |= map_nt_perms( &psa->access_mask, S_IRUSR);
+	current_ace->perms |= map_nt_perms(psa->access_mask, S_IRUSR);
 	current_ace->attr = (psa->type == SEC_ACE_TYPE_ACCESS_ALLOWED) ? ALLOW_ACE : DENY_ACE;
 
 	/* Store the ace_flag. */
@@ -4486,55 +4500,6 @@ NTSTATUS set_unix_posix_acl(connection_struct *conn,
 
 	TALLOC_FREE(file_acl);
 	return NT_STATUS_OK;
-}
-
-int posix_sys_acl_blob_get_file(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname_in,
-				TALLOC_CTX *mem_ctx,
-				char **blob_description,
-				DATA_BLOB *blob)
-{
-	int ret;
-	TALLOC_CTX *frame = talloc_stackframe();
-	/* Initialise this to zero, in a portable way */
-	struct smb_acl_wrapper acl_wrapper = {
-		0
-	};
-	struct smb_filename *smb_fname = cp_smb_filename_nostream(frame,
-						smb_fname_in);
-	if (smb_fname == NULL) {
-		TALLOC_FREE(frame);
-		errno = ENOMEM;
-		return -1;
-	}
-
-	ret = smb_vfs_call_stat(handle, smb_fname);
-	if (ret == -1) {
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	acl_wrapper.owner = smb_fname->st.st_ex_uid;
-	acl_wrapper.group = smb_fname->st.st_ex_gid;
-	acl_wrapper.mode = smb_fname->st.st_ex_mode;
-
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_push_struct_blob(blob, mem_ctx,
-							  &acl_wrapper,
-							  (ndr_push_flags_fn_t)ndr_push_smb_acl_wrapper))) {
-		errno = EINVAL;
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	*blob_description = talloc_strdup(mem_ctx, "posix_acl");
-	if (!*blob_description) {
-		errno = EINVAL;
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	TALLOC_FREE(frame);
-	return 0;
 }
 
 int posix_sys_acl_blob_get_fd(vfs_handle_struct *handle,

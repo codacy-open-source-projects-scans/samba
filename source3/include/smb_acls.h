@@ -1,18 +1,18 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Portable SMB ACL interface
    Copyright (C) Jeremy Allison 2000
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -50,14 +50,12 @@ void *sys_acl_get_qualifier(SMB_ACL_ENTRY_T entry_d);
 int sys_acl_clear_perms(SMB_ACL_PERMSET_T permset_d);
 int sys_acl_add_perm(SMB_ACL_PERMSET_T permset_d, SMB_ACL_PERM_T perm);
 int sys_acl_get_perm(SMB_ACL_PERMSET_T permset_d, SMB_ACL_PERM_T perm);
-char *sys_acl_to_text(const struct smb_acl_t *acl_d, ssize_t *len_p);
+char *sys_acl_to_text(TALLOC_CTX *mem_ctx, const struct smb_acl_t *acl_d);
 SMB_ACL_T sys_acl_init(TALLOC_CTX *mem_ctx);
 int sys_acl_create_entry(SMB_ACL_T *acl_p, SMB_ACL_ENTRY_T *entry_p);
 int sys_acl_set_tag_type(SMB_ACL_ENTRY_T entry_d, SMB_ACL_TAG_T tag_type);
 int sys_acl_set_qualifier(SMB_ACL_ENTRY_T entry_d, void *qual_p);
 int sys_acl_set_permset(SMB_ACL_ENTRY_T entry_d, SMB_ACL_PERMSET_T permset_d);
-int sys_acl_free_text(char *text);
-int sys_acl_valid(SMB_ACL_T acl_d);
 SMB_ACL_T sys_acl_get_fd(struct vfs_handle_struct *handle,
 			 struct files_struct *fsp,
 			 SMB_ACL_TYPE_T type,

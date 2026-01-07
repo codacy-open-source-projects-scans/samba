@@ -1,24 +1,24 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    SMB parameters and setup, plus a whole lot more.
-   
+
    Copyright (C) Andrew Tridgell              1992-2000
    Copyright (C) John H Terpstra              1996-2002
    Copyright (C) Luke Kenneth Casson Leighton 1996-2000
    Copyright (C) Paul Ashton                  1998-2000
    Copyright (C) Simo Sorce                   2001-2002
    Copyright (C) Martin Pool		      2002
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
@@ -306,33 +306,6 @@ struct interface {
 
 /* the desired access to use when opening a pipe */
 #define DESIRED_ACCESS_PIPE 0x2019f
- 
-/* Mapping of access rights to UNIX perms. */
-#define UNIX_ACCESS_RWX		FILE_GENERIC_ALL
-#define UNIX_ACCESS_R 		FILE_GENERIC_READ
-#define UNIX_ACCESS_W		FILE_GENERIC_WRITE
-#define UNIX_ACCESS_X		FILE_GENERIC_EXECUTE
-
-/* Mapping of access rights to UNIX perms. for a UNIX directory. */
-#define UNIX_DIRECTORY_ACCESS_RWX		FILE_GENERIC_ALL
-#define UNIX_DIRECTORY_ACCESS_R 		FILE_GENERIC_READ
-#define UNIX_DIRECTORY_ACCESS_W			(FILE_GENERIC_WRITE|FILE_DELETE_CHILD)
-#define UNIX_DIRECTORY_ACCESS_X			FILE_GENERIC_EXECUTE
-
-#if 0
-/*
- * This is the old mapping we used to use. To get W2KSP2 profiles
- * working we need to map to the canonical file perms.
- */
-#define UNIX_ACCESS_RWX (UNIX_ACCESS_R|UNIX_ACCESS_W|UNIX_ACCESS_X)
-#define UNIX_ACCESS_R (READ_CONTROL_ACCESS|SYNCHRONIZE_ACCESS|\
-			FILE_READ_ATTRIBUTES|FILE_READ_EA|FILE_READ_DATA)
-#define UNIX_ACCESS_W (READ_CONTROL_ACCESS|SYNCHRONIZE_ACCESS|\
-			FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA|\
-			FILE_APPEND_DATA|FILE_WRITE_DATA)
-#define UNIX_ACCESS_X (READ_CONTROL_ACCESS|SYNCHRONIZE_ACCESS|\
-			FILE_EXECUTE|FILE_READ_ATTRIBUTES)
-#endif
 
 #define UNIX_ACCESS_NONE (WRITE_OWNER_ACCESS)
 
@@ -355,51 +328,6 @@ struct interface {
 
 /* Private flag for streams support */
 #define NTCREATEX_FLAG_STREAM_BASEOPEN		0x0010
-
-/* Flag for NT transact rename call. */
-#define RENAME_REPLACE_IF_EXISTS 1
-
-/* flags for SMBntrename call (from Samba4) */
-#define RENAME_FLAG_MOVE_CLUSTER_INFORMATION 0x102 /* ???? */
-#define RENAME_FLAG_HARD_LINK                0x103
-#define RENAME_FLAG_RENAME                   0x104
-#define RENAME_FLAG_COPY                     0x105
-
-/* ChangeNotify flags. */
-#define FILE_NOTIFY_CHANGE_FILE_NAME   0x001
-#define FILE_NOTIFY_CHANGE_DIR_NAME    0x002
-#define FILE_NOTIFY_CHANGE_ATTRIBUTES  0x004
-#define FILE_NOTIFY_CHANGE_SIZE        0x008
-#define FILE_NOTIFY_CHANGE_LAST_WRITE  0x010
-#define FILE_NOTIFY_CHANGE_LAST_ACCESS 0x020
-#define FILE_NOTIFY_CHANGE_CREATION    0x040
-#define FILE_NOTIFY_CHANGE_EA          0x080
-#define FILE_NOTIFY_CHANGE_SECURITY    0x100
-#define FILE_NOTIFY_CHANGE_STREAM_NAME	0x00000200
-#define FILE_NOTIFY_CHANGE_STREAM_SIZE	0x00000400
-#define FILE_NOTIFY_CHANGE_STREAM_WRITE	0x00000800
-
-#define FILE_NOTIFY_CHANGE_NAME \
-	(FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_DIR_NAME)
-
-#define FILE_NOTIFY_CHANGE_ALL \
-	(FILE_NOTIFY_CHANGE_FILE_NAME   | FILE_NOTIFY_CHANGE_DIR_NAME | \
-	 FILE_NOTIFY_CHANGE_ATTRIBUTES  | FILE_NOTIFY_CHANGE_SIZE | \
-	 FILE_NOTIFY_CHANGE_LAST_WRITE  | FILE_NOTIFY_CHANGE_LAST_ACCESS | \
-	 FILE_NOTIFY_CHANGE_CREATION    | FILE_NOTIFY_CHANGE_EA | \
-	 FILE_NOTIFY_CHANGE_SECURITY	| FILE_NOTIFY_CHANGE_STREAM_NAME | \
-	 FILE_NOTIFY_CHANGE_STREAM_SIZE | FILE_NOTIFY_CHANGE_STREAM_WRITE)
-
-/* change notify action results */
-#define NOTIFY_ACTION_ADDED 1
-#define NOTIFY_ACTION_REMOVED 2
-#define NOTIFY_ACTION_MODIFIED 3
-#define NOTIFY_ACTION_OLD_NAME 4
-#define NOTIFY_ACTION_NEW_NAME 5
-#define NOTIFY_ACTION_ADDED_STREAM 6
-#define NOTIFY_ACTION_REMOVED_STREAM 7
-#define NOTIFY_ACTION_MODIFIED_STREAM 8
-#define NOTIFY_ACTION_DIRLEASE_BREAK 256 /* Flag ORed to the above actions */
 
 /* where to find the base of the SMB packet proper */
 #define smb_base(buf) (((const char *)(buf))+4)
@@ -429,7 +357,7 @@ struct interface {
  *               it to 6.1 to mimic Win2K8R2.
  *
  */
- 
+
 #define SAMBA_MAJOR_NBT_ANNOUNCE_VERSION 0x06
 #define SAMBA_MINOR_NBT_ANNOUNCE_VERSION 0x01
 

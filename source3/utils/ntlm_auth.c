@@ -1456,7 +1456,7 @@ static void manage_gensec_request(enum stdio_helper_mode stdio_helper_mode,
 				  char *buf, int length, void **private1)
 {
 	DATA_BLOB in;
-	DATA_BLOB out = data_blob(NULL, 0);
+	DATA_BLOB out = {};
 	char *out_base64 = NULL;
 	const char *reply_arg = NULL;
 	struct gensec_ntlm_state {
@@ -2007,11 +2007,8 @@ static void manage_ntlm_server_1_request(enum stdio_helper_mode stdio_helper_mod
 		}
 		/* clear out the state */
 		data_blob_free(&challenge);
-		challenge = data_blob_null;
 		data_blob_free(&nt_response);
-		nt_response = data_blob_null;
 		data_blob_free(&lm_response);
-		lm_response = data_blob_null;
 		SAFE_FREE(full_username);
 		SAFE_FREE(username);
 		SAFE_FREE(domain);

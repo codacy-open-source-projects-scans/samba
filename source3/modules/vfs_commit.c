@@ -69,8 +69,8 @@ enum eof_mode
 struct commit_info
 {
         /* For chunk-based commits */
-        off_t dbytes;	/* Dirty (uncommitted) bytes */
-        off_t dthresh;	/* Dirty data threshold */
+        size_t dbytes;	/* Dirty (uncommitted) bytes */
+        size_t dthresh;	/* Dirty data threshold */
         /* For commits on EOF */
         enum eof_mode on_eof;
         off_t eof;		/* Expected file size */
@@ -83,8 +83,8 @@ static int commit_do(
         int result;
 
 	DEBUG(module_debug,
-		("%s: flushing %lu dirty bytes\n",
-		 MODULE, (unsigned long)c->dbytes));
+		("%s: flushing %zu dirty bytes\n",
+		 MODULE, c->dbytes));
 
 #if defined(HAVE_FDATASYNC)
         result = fdatasync(fd);
@@ -105,18 +105,17 @@ static int commit_all(
         struct vfs_handle_struct *	handle,
         files_struct *		        fsp)
 {
-        struct commit_info *c;
+	struct commit_info *c = VFS_FETCH_FSP_EXTENSION(handle, fsp);
 
-        if ((c = (struct commit_info *)VFS_FETCH_FSP_EXTENSION(handle, fsp))) {
-                if (c->dbytes) {
-                        DEBUG(module_debug,
-                                ("%s: flushing %lu dirty bytes\n",
-                                 MODULE, (unsigned long)c->dbytes));
+	if ((c == NULL) || (c->dbytes == 0)) {
+		return 0;
+	}
 
-                        return commit_do(c, fsp_get_io_fd(fsp));
-                }
-        }
-        return 0;
+	DEBUG(module_debug,
+	      ("%s: flushing %zu dirty bytes\n",
+	       MODULE, c->dbytes));
+
+	return commit_do(c, fsp_get_io_fd(fsp));
 }
 
 static int commit(
@@ -125,10 +124,10 @@ static int commit(
 	off_t			offset,
         ssize_t			        last_write)
 {
-        struct commit_info *c;
+	struct commit_info *c = VFS_FETCH_FSP_EXTENSION(handle, fsp);
+	int ret;
 
-        if ((c = (struct commit_info *)VFS_FETCH_FSP_EXTENSION(handle, fsp))
-	    == NULL) {
+	if (c == NULL) {
 		return 0;
 	}
 
@@ -145,21 +144,26 @@ static int commit(
 		return 0;
 	}
 
-	/* This write hit or went past our cache the file size. */
-	if ((offset + last_write) >= c->eof) {
-		if (commit_do(c, fsp_get_io_fd(fsp)) == -1) {
-			return -1;
-		}
-
-		/* Hinted mode only commits the first time we hit EOF. */
-		if (c->on_eof == EOF_HINTED) {
-		    c->eof = -1;
-		} else if (c->on_eof == EOF_GROWTH) {
-		    c->eof = offset + last_write;
-		}
+	if ((offset + last_write) < c->eof) {
+		return 0;
 	}
 
-        return 0;
+	/* This write hit or went past our cache the file size. */
+
+	ret = commit_do(c, fsp_get_io_fd(fsp));
+
+	if (ret == -1) {
+		return -1;
+	}
+
+	/* Hinted mode only commits the first time we hit EOF. */
+	if (c->on_eof == EOF_HINTED) {
+		c->eof = -1;
+	} else if (c->on_eof == EOF_GROWTH) {
+		c->eof = offset + last_write;
+	}
+
+	return 0;
 }
 
 static int commit_connect(
@@ -212,7 +216,7 @@ static int commit_openat(struct vfs_handle_struct *handle,
                         c->dthresh = dthresh;
                         c->dbytes = 0;
                         c->on_eof = EOF_NONE;
-                        c->eof = 0;
+			c->eof = -2; /* uninitialized */
                 }
         }
         /* Process eof_mode tunable */
@@ -230,25 +234,6 @@ static int commit_openat(struct vfs_handle_struct *handle,
 		return fd;
 	}
 
-        /* EOF commit modes require us to know the initial file size. */
-        if (c && (c->on_eof != EOF_NONE)) {
-                SMB_STRUCT_STAT st;
-		/*
-		 * Setting the fd of the FSP is a hack
-		 * but also practiced elsewhere -
-		 * needed for calling the VFS.
-		 */
-		fsp_set_fd(fsp, fd);
-		if (SMB_VFS_FSTAT(fsp, &st) == -1) {
-			int saved_errno = errno;
-			SMB_VFS_CLOSE(fsp);
-			fsp_set_fd(fsp, -1);
-			errno = saved_errno;
-                        return -1;
-                }
-		c->eof = st.st_ex_size;
-        }
-
         return fd;
 }
 
@@ -259,9 +244,18 @@ static ssize_t commit_pwrite(
         size_t              count,
 	off_t	    offset)
 {
-        ssize_t ret;
+	struct commit_info *c = VFS_FETCH_FSP_EXTENSION(handle, fsp);
+	ssize_t ret;
 
-        ret = SMB_VFS_NEXT_PWRITE(handle, fsp, data, count, offset);
+	if ((c != NULL) && (c->on_eof != EOF_NONE) && (c->eof == -2)) {
+		struct stat_ex st = {};
+		int statret = SMB_VFS_NEXT_FSTAT(handle, fsp, &st);
+		if (statret == 0) {
+			c->eof = st.st_ex_size;
+		}
+	}
+
+	ret = SMB_VFS_NEXT_PWRITE(handle, fsp, data, count, offset);
         if (ret > 0) {
                 if (commit(handle, fsp, offset, ret) == -1) {
                         return -1;
@@ -287,6 +281,7 @@ static struct tevent_req *commit_pwrite_send(struct vfs_handle_struct *handle,
 					     const void *data,
 					     size_t n, off_t offset)
 {
+	struct commit_info *c = VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	struct tevent_req *req, *subreq;
 	struct commit_pwrite_state *state;
 
@@ -296,6 +291,14 @@ static struct tevent_req *commit_pwrite_send(struct vfs_handle_struct *handle,
 	}
 	state->handle = handle;
 	state->fsp = fsp;
+
+	if ((c != NULL) && (c->on_eof != EOF_NONE) && (c->eof == -2)) {
+		struct stat_ex st = {};
+		int ret = SMB_VFS_NEXT_FSTAT(handle, fsp, &st);
+		if (ret == 0) {
+			c->eof = st.st_ex_size;
+		}
+	}
 
 	subreq = SMB_VFS_NEXT_PWRITE_SEND(state, ev, handle, fsp, data,
 					  n, offset);
