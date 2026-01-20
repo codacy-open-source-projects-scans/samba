@@ -47,6 +47,7 @@ from samba.tests.krb5.rfc4120_constants import (
     NT_ENTERPRISE_PRINCIPAL,
     NT_PRINCIPAL,
     NT_SRV_INST,
+    KDC_ERR_C_PRINCIPAL_UNKNOWN,
 )
 
 global_asn1_print = False
@@ -124,7 +125,7 @@ class TestData:
     def __repr__(self):
         rep = "Test Data: "
         rep += "options = '" + "{:08b}".format(self.options) + "'"
-        rep += "user name = '" + self.user_name + "'"
+        rep += ", user name = '" + self.user_name + "'"
         rep += ", realm = '" + self.realm + "'"
         rep += ", cname = '" + str(self.cname) + "'"
         rep += ", sname = '" + str(self.sname) + "'"
@@ -308,6 +309,27 @@ class KerberosASCanonicalizationTests(KDCBaseTest):
 
         self.assertEqual(
             rep['msg-type'], KRB_ERROR, "Data {0}".format(str(data)))
+
+        if (not self.uncanonicalized_implicit_dollar and
+            not data.canonicalize and
+            TestOptions.RemoveDollar.is_set(data.options) and
+            user_creds.get_username().endswith('$')):
+            # We expect the principal not to be found because
+            # a) smb.conf asked for foo -> foo$ to only match with canonicalization
+            # b) we as client are not requesting canonicalization
+            # c) we have removed a '$' from the true name
+            #
+            # These are the tests that combine "MachineCredentials"
+            # with "RemoveDollar" but not "Canonicalize".
+            self.check_error_rep(rep, KDC_ERR_C_PRINCIPAL_UNKNOWN)
+            return (None, None)
+
+        if self.require_canonicalization and not data.canonicalize:
+            self.check_error_rep(rep, KDC_ERR_C_PRINCIPAL_UNKNOWN)
+            # by returning None for the preauth rep, we avoid further
+            # checks of the as_rep (second argument), which we don't
+            # have.
+            return (None, None)
 
         self.assertEqual(
             rep['error-code'],

@@ -563,148 +563,98 @@ char *sys_getwd(void)
 
 #if defined(HAVE_POSIX_CAPABILITIES)
 
-/**************************************************************************
- Try and abstract process capabilities (for systems that have them).
-****************************************************************************/
-
-/* Set the POSIX capabilities needed for the given purpose into the effective
- * capability set of the current process. Make sure they are always removed
- * from the inheritable set, because there is no circumstance in which our
- * children should inherit our elevated privileges.
- */
-static bool set_process_capability(enum smbd_capability capability,
-				   bool enable)
+static bool set_one_cap(cap_value_t val, bool enable)
 {
-	/* "5" is the number of "num_cap_vals++" below */
-	cap_value_t cap_vals[5] = {0};
-	size_t num_cap_vals = 0;
-
 	cap_t cap;
-
-#if defined(HAVE_PRCTL) && defined(PR_GET_KEEPCAPS) && defined(PR_SET_KEEPCAPS)
-	/* On Linux, make sure that any capabilities we grab are sticky
-	 * across UID changes. We expect that this would allow us to keep both
-	 * the effective and permitted capability sets, but as of circa 2.6.16,
-	 * only the permitted set is kept. It is a bug (which we work around)
-	 * that the effective set is lost, but we still require the effective
-	 * set to be kept.
-	 */
-	if (!prctl(PR_GET_KEEPCAPS)) {
-		prctl(PR_SET_KEEPCAPS, 1);
-	}
-#endif
+	cap_flag_value_t flag = enable ? CAP_SET : CAP_CLEAR;
+	int ret;
 
 	cap = cap_get_proc();
 	if (cap == NULL) {
-		DEBUG(0,("set_process_capability: cap_get_proc failed: %s\n",
-			strerror(errno)));
-		return False;
+		DBG_ERR("cap_get_proc failed: %s\n", strerror(errno));
+		return false;
 	}
 
-	switch (capability) {
-		/*
-		 * WARNING: If you add any #ifdef for a fresh
-		 * capability, bump up the array size in the
-		 * declaration of cap_vals[] above just to be
-		 * trivially safe to never overwrite cap_vals[].
-		 */
-		case KERNEL_OPLOCK_CAPABILITY:
-#ifdef CAP_NETWORK_MGT
-			/* IRIX has CAP_NETWORK_MGT for oplocks. */
-			cap_vals[num_cap_vals++] = CAP_NETWORK_MGT;
-#endif
-			break;
-		case DMAPI_ACCESS_CAPABILITY:
-#ifdef CAP_DEVICE_MGT
-			/* IRIX has CAP_DEVICE_MGT for DMAPI access. */
-			cap_vals[num_cap_vals++] = CAP_DEVICE_MGT;
-#elif CAP_MKNOD
-			/* Linux has CAP_MKNOD for DMAPI access. */
-			cap_vals[num_cap_vals++] = CAP_MKNOD;
-#endif
-			break;
-		case LEASE_CAPABILITY:
-#ifdef CAP_LEASE
-			cap_vals[num_cap_vals++] = CAP_LEASE;
-#endif
-			break;
-		case DAC_OVERRIDE_CAPABILITY:
-#ifdef CAP_DAC_OVERRIDE
-			cap_vals[num_cap_vals++] = CAP_DAC_OVERRIDE;
-#endif
-	}
-
-	if (num_cap_vals == 0) {
-		cap_free(cap);
-		return True;
-	}
-
-	cap_set_flag(cap, CAP_EFFECTIVE, num_cap_vals, cap_vals,
-		enable ? CAP_SET : CAP_CLEAR);
-
-	/* We never want to pass capabilities down to our children, so make
-	 * sure they are not inherited.
-	 */
-	cap_set_flag(cap, CAP_INHERITABLE, num_cap_vals, cap_vals, CAP_CLEAR);
-
-	if (cap_set_proc(cap) == -1) {
-		DBG_ERR("%s capability %d: cap_set_proc failed: %s\n",
-			enable ? "adding" : "dropping",
-			capability, strerror(errno));
-		cap_free(cap);
-		return False;
-	}
-	DBG_INFO("%s capability %d\n",
-		 enable ? "added" : "dropped", capability);
-
-	cap_free(cap);
-	return True;
-}
-
-#endif /* HAVE_POSIX_CAPABILITIES */
-
-/****************************************************************************
- Gain the oplock capability from the kernel if possible.
-****************************************************************************/
-
-#if defined(HAVE_POSIX_CAPABILITIES) && defined(CAP_DAC_OVERRIDE)
-static bool have_cap_dac_override = true;
-#else
-static bool have_cap_dac_override = false;
-#endif
-
-void set_effective_capability(enum smbd_capability capability)
-{
-	bool ret = false;
-
-	if (capability != DAC_OVERRIDE_CAPABILITY || have_cap_dac_override) {
-#if defined(HAVE_POSIX_CAPABILITIES)
-		ret = set_process_capability(capability, True);
-#endif /* HAVE_POSIX_CAPABILITIES */
-	}
+	ret = cap_set_flag(cap, CAP_EFFECTIVE, 1, &val, flag);
+	SMB_ASSERT(ret == 0);
 
 	/*
-	 * Fallback to become_root() if CAP_DAC_OVERRIDE is not
-	 * available.
+	 * We never want to pass capabilities down to our children, so
+	 * make sure they are not inherited.
 	 */
-	if (capability == DAC_OVERRIDE_CAPABILITY) {
-		if (!ret) {
-			have_cap_dac_override = false;
-		}
-		if (!have_cap_dac_override) {
-			become_root();
-		}
+	ret = cap_set_flag(cap, CAP_INHERITABLE, 1, &val, CAP_CLEAR);
+	SMB_ASSERT(ret == 0);
+
+	ret = cap_set_proc(cap);
+	if (ret == -1) {
+		int err = errno;
+
+		DBG_ERR("%s capability %jd: cap_set_proc failed: %s\n",
+			enable ? "adding" : "dropping",
+			(intmax_t)val,
+			strerror(errno));
+
+		cap_free(cap);
+		errno = err;
+		return false;
 	}
+
+	DBG_INFO("%s capability %jd\n",
+		 enable ? "added" : "dropped",
+		 (intmax_t)val);
+
+	cap_free(cap);
+	return true;
 }
 
-void drop_effective_capability(enum smbd_capability capability)
-{
-	if (capability != DAC_OVERRIDE_CAPABILITY || have_cap_dac_override) {
-#if defined(HAVE_POSIX_CAPABILITIES)
-		set_process_capability(capability, False);
 #endif /* HAVE_POSIX_CAPABILITIES */
-	} else {
-		unbecome_root();
+
+void set_dmapi_capability(bool enable)
+{
+#if defined(HAVE_POSIX_CAPABILITIES) && defined(CAP_MKNOD)
+	/*
+	 * Ignore result, we'll get EACCES/EPERM later
+	 */
+	(void)set_one_cap(CAP_MKNOD, enable);
+#endif
+	return;
+}
+
+void set_dac_override_capability(bool enable)
+{
+#if !defined(HAVE_POSIX_CAPABILITIES) || !defined(CAP_DAC_OVERRIDE)
+
+/*
+ * Use [un]become_root()
+ */
+#define have_cap_dac_override false
+
+#else
+	/*
+	 * Only try this once
+	 */
+	static bool have_cap_dac_override = true;
+	if (have_cap_dac_override) {
+		have_cap_dac_override = set_one_cap(CAP_DAC_OVERRIDE, enable);
+
+		if (!enable) {
+			/*
+			 * Dropping caps again must always work.
+			 */
+			SMB_ASSERT(have_cap_dac_override);
+		}
+	}
+#endif
+
+	if (!have_cap_dac_override) {
+		/*
+		 * Fallback if CAP_DAC_OVERRIDE is not available
+		 */
+		if (enable) {
+			become_root();
+		} else {
+			unbecome_root();
+		}
 	}
 }
 

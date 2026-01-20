@@ -1023,6 +1023,10 @@ plantestsuite(
 if with_pthreadpool and have_ldwrap:
     plantestsuite("samba3.pthreadpool_cmocka", "none",
                   [os.path.join(bindir(), "pthreadpooltest_cmocka")])
+    plantestsuite("samba3.pthreadpool_unit_test_cmocka", "none",
+                  [os.path.join(bindir(), "pthreadpool_unit_test_cmocka")])
+    plantestsuite("samba3.pthreadpool_tevent_cmocka_unit_test", "none",
+                  [os.path.join(bindir(), "pthreadpool_tevent_cmocka_unit_test")])
 
 if with_pthreadpool:
     plantestsuite("samba3.libwbclient_threads",
@@ -1681,6 +1685,15 @@ plantestsuite("samba3.blackbox.aio-outstanding", "simpleserver:local",
                os.path.join(bindir(), "smbclient"),
                '$SERVER_IP',
                "aio_delay_inject"])
+
+plantestsuite("samba3.blackbox.aio_ratelimit", "simpleserver:local",
+              [os.path.join(samba3srcdir,
+                            "script/tests/test_aio_ratelimit.sh"),
+               configuration,
+               os.path.join(bindir(), "smbclient"),
+               '$SERVER_IP',
+               '$LOCAL_PATH',
+               "aio_ratelimit"])
 
 plantestsuite("samba3.blackbox.deadtime", "simpleserver:local",
               [os.path.join(samba3srcdir, "script/tests/test_deadtime.sh"),

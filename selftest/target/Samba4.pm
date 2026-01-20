@@ -1888,6 +1888,7 @@ sub provision_fl2008r2dc($$$)
 	server reject aes schannel:torturepacwksta\$ = no
 
 	kdc always include pac = no
+	krb5 acceptor report canonical client name = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
 	my $ret = $self->provision($prefix,
@@ -3125,7 +3126,8 @@ sub setup_schema_dc
 					 "SCHEMADOMAIN",
 					 "schema.samba.example.com",
 					 undef,
-					 "drs: max link sync = 2",
+					 "drs: max link sync = 2\n" .
+					 "kdc require canonicalization = yes",
 					 $provision_args,
 					 "2008_R2");
 	unless ($env) {

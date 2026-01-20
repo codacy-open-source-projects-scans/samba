@@ -33,6 +33,7 @@
  */
 
 #include "includes.h"
+#include "ldb.h"
 #include "ldb_errors.h"
 #include "ldb_module.h"
 #include "libcli/auth/libcli_auth.h"
@@ -94,7 +95,7 @@
  *
  * Attention: There is a difference between "modify" and "reset" operations
  * (see MS-ADTS 3.1.1.3.1.5). If the client sends a "add" and "remove"
- * operation for a password attribute we thread this as a "modify"; if it sends
+ * operation for a password attribute we treat this as a "modify"; if it sends
  * only a "replace" one we have an (administrative) reset.
  *
  * Finally, if the administrator has requested that a password history
@@ -128,6 +129,7 @@ struct ph_context {
 	const char **gpg_key_ids;
 
 	bool pwd_reset;
+	bool policy_hints_reset_is_change;
 	bool change_status;
 	bool hash_values;
 	bool userPassword;
@@ -2962,9 +2964,12 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 
 	/* Password minimum age: yes, this is a minus. The ages are in negative 100nsec units! */
 	if ((io->u.pwdLastSet - io->ac->status->domain_data.minPwdAge > io->g.last_set) &&
-	    !io->ac->pwd_reset)
-	{
-		ret = LDB_ERR_CONSTRAINT_VIOLATION;
+	    (!io->ac->pwd_reset || io->ac->policy_hints_reset_is_change)) {
+		if (io->ac->pwd_reset) {
+			ret = LDB_ERR_UNWILLING_TO_PERFORM;
+		} else {
+			ret = LDB_ERR_CONSTRAINT_VIOLATION;
+		}
 		*werror = WERR_PASSWORD_RESTRICTION;
 		ldb_asprintf_errstring(ldb,
 			"%08X: %s - check_password_restrictions: "
@@ -2994,7 +2999,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 			break;
 
 		case SAMR_VALIDATION_STATUS_PWD_TOO_SHORT:
-			ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			if (io->ac->pwd_reset) {
+				ret = LDB_ERR_UNWILLING_TO_PERFORM;
+			} else {
+				ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			}
 			*werror = WERR_PASSWORD_RESTRICTION;
 			ldb_asprintf_errstring(ldb,
 				"%08X: %s - check_password_restrictions: "
@@ -3006,7 +3015,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 			return ret;
 
 		case SAMR_VALIDATION_STATUS_NOT_COMPLEX_ENOUGH:
-			ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			if (io->ac->pwd_reset) {
+				ret = LDB_ERR_UNWILLING_TO_PERFORM;
+			} else {
+				ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			}
 			*werror = WERR_PASSWORD_RESTRICTION;
 			ldb_asprintf_errstring(ldb,
 				"%08X: %s - check_password_restrictions: "
@@ -3017,7 +3030,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 			return ret;
 
 		default:
-			ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			if (io->ac->pwd_reset) {
+				ret = LDB_ERR_UNWILLING_TO_PERFORM;
+			} else {
+				ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			}
 			*werror = WERR_PASSWORD_RESTRICTION;
 			ldb_asprintf_errstring(ldb,
 				"%08X: %s - check_password_restrictions: "
@@ -3028,7 +3045,7 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 		}
 	}
 
-	if (io->ac->pwd_reset) {
+	if (io->ac->pwd_reset  && ! io->ac->policy_hints_reset_is_change) {
 		*werror = WERR_OK;
 		return LDB_SUCCESS;
 	}
@@ -3047,7 +3064,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 		bool equal = data_blob_equal_const_time(&io->g.aes_256,
 							&io->o.aes_256);
 		if (equal) {
-			ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			if (io->ac->pwd_reset) {
+				ret = LDB_ERR_UNWILLING_TO_PERFORM;
+			} else {
+				ret = LDB_ERR_CONSTRAINT_VIOLATION;
+			}
 			*werror = WERR_PASSWORD_RESTRICTION;
 			ldb_asprintf_errstring(ldb,
 					       "%08X: %s - check_password_restrictions: "
@@ -3067,7 +3088,11 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 		for (i = 0; i < io->o.nt_history_len; i++) {
 			bool pw_cmp = mem_equal_const_time(io->n.nt_hash, io->o.nt_history[i].hash, 16);
 			if (pw_cmp) {
-				ret = LDB_ERR_CONSTRAINT_VIOLATION;
+				if (io->ac->pwd_reset) {
+					ret = LDB_ERR_UNWILLING_TO_PERFORM;
+				} else {
+					ret = LDB_ERR_CONSTRAINT_VIOLATION;
+				}
 				*werror = WERR_PASSWORD_RESTRICTION;
 				ldb_asprintf_errstring(ldb,
 					"%08X: %s - check_password_restrictions: "
@@ -3163,6 +3188,14 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 			io->ac->status->reject_reason = SAM_PWD_CHANGE_PWD_IN_HISTORY;
 			return ret;
 		}
+	}
+	if (io->ac->pwd_reset) {
+		/*
+		 * We would have returned before the password history
+		 * check, but the policy hints OID said no.
+		 */
+		*werror = WERR_OK;
+		return LDB_SUCCESS;
 	}
 
 	/* are all password changes disallowed? */
@@ -3492,6 +3525,7 @@ static int setup_io(struct ph_context *ac,
 	const struct ldb_message *info_msg = NULL;
 	struct dom_sid *account_sid = NULL;
 	int rodc_krbtgt = 0;
+	struct ldb_control *hints_ctrl = NULL;
 
 	*io = (struct setup_password_fields_io) {};
 
@@ -3900,6 +3934,47 @@ static int setup_io(struct ph_context *ac,
 			"setup_io: "
 			"it's only allowed to provide the old cleartext password as 'unicodePwd' or as 'userPassword' or as 'clearTextPassword'");
 		return LDB_ERR_UNWILLING_TO_PERFORM;
+	}
+	/*
+	 * Check if a POLICY_HINTS OID (or its DEPRECATED twin) is
+	 * set, with a value of 1, which means something along the
+	 * lines that a reset needs to be treated as a change with
+	 * respect to password history.
+	 */
+	hints_ctrl = ldb_request_get_control(
+		ac->req,
+		LDB_CONTROL_POLICY_HINTS_OID);
+
+	if (hints_ctrl == NULL) {
+		/* This other one works just the same */
+		hints_ctrl = ldb_request_get_control(
+			ac->req,
+			LDB_CONTROL_POLICY_HINTS_DEPRECATED_OID);
+	}
+
+	if (hints_ctrl != NULL) {
+		int *valp = NULL;
+		valp = talloc_get_type_abort(hints_ctrl->data, int);
+		DBG_INFO("policy hints control value %d\n", *valp);
+		if (valp != NULL && *valp == 1) {
+			ac->policy_hints_reset_is_change = true;
+		} else if (valp == NULL) {
+			ldb_asprintf_errstring(
+				ldb,
+				"policy hints oid %s value is NULL\n",
+				hints_ctrl->oid);
+			return LDB_ERR_UNWILLING_TO_PERFORM;
+		} else {
+			/*
+			 * MS-ADTS 3.1.1.3.4.1.27 says:
+			 * If it is 0x1, then that constraint will be
+			 * enforced. Otherwise, the constraint is not
+			 * enforced.
+			 *
+			 * so we just ignore this case.
+			 */
+		}
+		hints_ctrl->critical = false;
 	}
 
 	/* Decides if we have a password modify or password reset operation */
@@ -5150,10 +5225,39 @@ static int password_hash_mod_do_mod(struct ph_context *ac)
 	return ldb_next_request(ac->module, mod_req);
 }
 
+static int password_hash_module_init(struct ldb_module *module)
+{
+	struct ldb_context *ldb;
+	int ret;
+
+	ldb = ldb_module_get_ctx(module);
+
+	ret = ldb_mod_register_control(module, LDB_CONTROL_POLICY_HINTS_OID);
+	if (ret != LDB_SUCCESS) {
+		ldb_debug(ldb, LDB_DEBUG_ERROR,
+			  "password_hash: "
+			  "Unable to register policy hints oid\n");
+		return ldb_operr(ldb);
+	}
+	ret = ldb_mod_register_control(module,
+				       LDB_CONTROL_POLICY_HINTS_DEPRECATED_OID);
+	if (ret != LDB_SUCCESS) {
+		ldb_debug(ldb, LDB_DEBUG_ERROR,
+			  "password_hash: "
+			  "Unable to register policy hints deprecated oid\n");
+		return ldb_operr(ldb);
+	}
+
+	return ldb_next_init(module);
+}
+
+
 static const struct ldb_module_ops ldb_password_hash_module_ops = {
 	.name          = "password_hash",
 	.add           = password_hash_add,
-	.modify        = password_hash_modify
+	.modify        = password_hash_modify,
+	.init_context  = password_hash_module_init
+
 };
 
 int ldb_password_hash_module_init(const char *version)

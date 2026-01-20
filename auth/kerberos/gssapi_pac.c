@@ -195,7 +195,7 @@ NTSTATUS gssapi_obtain_pac_blob(TALLOC_CTX *mem_ctx,
 
 NTSTATUS gssapi_get_session_key(TALLOC_CTX *mem_ctx,
 				gss_ctx_id_t gssapi_context,
-				DATA_BLOB *session_key, 
+				DATA_BLOB *session_key,
 				uint32_t *keytype)
 {
 	OM_uint32 gss_min, gss_maj;
@@ -226,8 +226,13 @@ NTSTATUS gssapi_get_session_key(TALLOC_CTX *mem_ctx,
 			return NT_STATUS_NO_USER_SESSION_KEY;
 		}
 		if (session_key) {
-			*session_key = data_blob_talloc(mem_ctx,
-							KRB5_KEY_DATA(subkey), KRB5_KEY_LENGTH(subkey));
+			*session_key = data_blob_talloc_s(mem_ctx,
+							  KRB5_KEY_DATA(subkey),
+							  KRB5_KEY_LENGTH(
+								  subkey));
+			if (session_key->data == NULL) {
+				return NT_STATUS_NO_MEMORY;
+			}
 		}
 		if (keytype) {
 			*keytype = KRB5_KEY_TYPE(subkey);
@@ -241,8 +246,12 @@ NTSTATUS gssapi_get_session_key(TALLOC_CTX *mem_ctx,
 	}
 
 	if (session_key) {
-		*session_key = data_blob_talloc(mem_ctx, set->elements[0].value,
-						set->elements[0].length);
+		*session_key = data_blob_talloc_s(mem_ctx,
+						  set->elements[0].value,
+						  set->elements[0].length);
+		if (session_key->data == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
 	}
 
 	if (keytype) {
@@ -263,7 +272,7 @@ NTSTATUS gssapi_get_session_key(TALLOC_CTX *mem_ctx,
 			}
 #endif
 			gss_release_buffer_set(&gss_min, &set);
-	
+
 			return NT_STATUS_OK;
 
 		} else if (memcmp(set->elements[1].value,

@@ -193,8 +193,8 @@ DIR *sys_fdopendir(int fd);
 int sys_mknod(const char *path, mode_t mode, SMB_DEV_T dev);
 int sys_mknodat(int dirfd, const char *path, mode_t mode, SMB_DEV_T dev);
 char *sys_getwd(void);
-void set_effective_capability(enum smbd_capability capability);
-void drop_effective_capability(enum smbd_capability capability);
+void set_dmapi_capability(bool enable);
+void set_dac_override_capability(bool enable);
 long sys_random(void);
 void sys_srandom(unsigned int seed);
 int getgroups_max(void);
@@ -497,7 +497,10 @@ struct tevent_req *open_socket_out_send(TALLOC_CTX *mem_ctx,
 					int protocol,
 					const struct sockaddr_storage *pss,
 					uint16_t port,
-					int timeout);
+					int timeout,
+					void (*before_connect)(int fd, void *private_data),
+					void (*after_connect)(int fd, void *private_data),
+					void *private_data);
 NTSTATUS open_socket_out_recv(struct tevent_req *req, int *pfd);
 const char *get_peer_addr(int fd, char *addr, size_t addr_len);
 
@@ -573,7 +576,7 @@ unsigned wins_srv_count_tag(const char *tag);
 
 /* The following definitions come from libsmb/conncache.c  */
 
-NTSTATUS check_negative_conn_cache( const char *domain, const char *server);
+bool has_negative_conn_cache_entry( const char *domain, const char *server);
 void add_failed_connection_entry(const char *domain, const char *server, NTSTATUS result) ;
 void flush_negative_conn_cache_for_domain(const char *domain);
 

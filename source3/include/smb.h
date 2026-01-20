@@ -470,17 +470,6 @@ Offset  Data                  length.
 #define OPLOCKLEVEL_NONE 0
 #define OPLOCKLEVEL_II 1
 
-/*
- * Capabilities abstracted for different systems.
- */
-
-enum smbd_capability {
-    KERNEL_OPLOCK_CAPABILITY,
-    DMAPI_ACCESS_CAPABILITY,
-    LEASE_CAPABILITY,
-    DAC_OVERRIDE_CAPABILITY
-};
-
 struct kernel_oplocks_ops;
 struct kernel_oplocks {
 	const struct kernel_oplocks_ops *ops;
