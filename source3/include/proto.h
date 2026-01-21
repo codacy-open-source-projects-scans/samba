@@ -366,8 +366,6 @@ bool split_domain_user(TALLOC_CTX *mem_ctx,
 		       char **user);
 const char *strip_hostname(const char *s);
 bool any_nt_status_not_ok(NTSTATUS err1, NTSTATUS err2, NTSTATUS *result);
-int timeval_to_msec(struct timeval t);
-char *valid_share_pathname(TALLOC_CTX *ctx, const char *dos_pathname);
 bool is_executable(const char *fname);
 bool map_open_params_to_ntcreate(const char *smb_base_fname,
 				 int deny_mode, int open_func,
@@ -542,7 +540,6 @@ bool strlower_m(char *s);
 bool strupper_m(char *s);
 int fstr_sprintf(fstring s, const char *fmt, ...);
 
-uint64_t STR_TO_SMB_BIG_UINT(const char *nptr, const char **entptr);
 uint64_t conv_str_size(const char * str);
 char *talloc_asprintf_strupper_m(TALLOC_CTX *t, const char *fmt, ...)
 				 PRINTF_ATTRIBUTE(2,3);

@@ -249,11 +249,13 @@ static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 		loadparm_s3_global_substitution();
 	const char *get_quota_command = NULL;
 	char **lines = NULL;
+	char *line = NULL;
 	const char *p = NULL;
 	char *p2 = NULL;
 	int _id = -1;
 	int error = 0;
 	char **argl = NULL;
+	int ret;
 
 	get_quota_command = lp_get_quota_command(talloc_tos(), lp_sub);
 	if ((get_quota_command == NULL) || (get_quota_command[0] == '\0')) {
@@ -271,7 +273,7 @@ static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 		_id = id.gid;
 		break;
 	default:
-		DEBUG(0,("invalid quota type.\n"));
+		DBG_ERR("invalid quota type.\n");
 		return -1;
 	}
 
@@ -293,120 +295,55 @@ static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 	lines = file_lines_ploadv(talloc_tos(), argl, NULL);
 	TALLOC_FREE(argl);
 
-	if (lines) {
-		char *line = lines[0];
-
-		DEBUG (3, ("Read output from get_quota, \"%s\"\n", line));
-
-		/* we need to deal with long long unsigned here, if supported */
-
-		dp->qflags = smb_strtoul(line,
-					 &p2,
-					 10,
-					 &error,
-					 SMB_STR_STANDARD);
-		if (error != 0) {
-			goto invalid_param;
-		}
-
-		p = p2;
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->curblocks = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->softlimit = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->hardlimit = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->curinodes = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->isoftlimit = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->ihardlimit = STR_TO_SMB_BIG_UINT(p, &p);
-		} else {
-			goto invalid_param;
-		}
-
-		while (p && *p && isspace(*p)) {
-			p++;
-		}
-
-		if (p && *p) {
-			dp->bsize = STR_TO_SMB_BIG_UINT(p, NULL);
-		} else {
-			dp->bsize = 1024;
-		}
-
+	if ((lines == NULL) || (lines[0] == NULL)) {
+		DBG_ERR("get_quota_command failed!\n");
 		TALLOC_FREE(lines);
-		lines = NULL;
-
-		DBG_INFO("Parsed output of get_quota, ...\n"
-			 "qflags:%" PRIu32 " curblocks:%" PRIu64
-			 " softlimit:%" PRIu64 " hardlimit:%" PRIu64
-			 "\n"
-			 "curinodes:%" PRIu64 " isoftlimit:%" PRIu64
-			 " ihardlimit:%" PRIu64 " bsize:%" PRIu64 "\n",
-			 dp->qflags,
-			 dp->curblocks,
-			 dp->softlimit,
-			 dp->hardlimit,
-			 dp->curinodes,
-			 dp->isoftlimit,
-			 dp->ihardlimit,
-			 dp->bsize);
-		return 0;
+		return -1;
 	}
 
-	DEBUG (0, ("get_quota_command failed!\n"));
-	return -1;
+	line = lines[0];
 
-invalid_param:
+	DBG_NOTICE("Read output from get_quota, \"%s\"\n", line);
+
+	dp->bsize = 1024;
+
+	ret = sscanf(line,
+		     "%" SCNu32 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+		     " %" SCNu64 " %" SCNu64 " %" SCNu64,
+		     &dp->qflags,
+		     &dp->curblocks,
+		     &dp->softlimit,
+		     &dp->hardlimit,
+		     &dp->curinodes,
+		     &dp->isoftlimit,
+		     &dp->ihardlimit,
+		     &dp->bsize);
 
 	TALLOC_FREE(lines);
-	DEBUG(0,("The output of get_quota_command is invalid!\n"));
+
+	if (ret != 7) {
+		DBG_ERR("The output of get_quota_command is invalid!\n");
+		return -1;
+	}
+
+	DBG_INFO("Parsed output of get_quota, ...\n"
+		 "qflags:%" PRIu32 " curblocks:%" PRIu64 " softlimit:%" PRIu64
+		 " hardlimit:%" PRIu64 "\n"
+		 "curinodes:%" PRIu64 " isoftlimit:%" PRIu64
+		 " ihardlimit:%" PRIu64 " bsize:%" PRIu64 "\n",
+		 dp->qflags,
+		 dp->curblocks,
+		 dp->softlimit,
+		 dp->hardlimit,
+		 dp->curinodes,
+		 dp->isoftlimit,
+		 dp->ihardlimit,
+		 dp->bsize);
+	return 0;
+
+invalid_param:
+	TALLOC_FREE(lines);
+	DBG_ERR("The output of get_quota_command is invalid!\n");
 	return -1;
 }
 

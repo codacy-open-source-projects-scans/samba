@@ -4936,8 +4936,8 @@ static void fruit_offload_write_done(struct tevent_req *subreq)
 	unsigned int num_streams = 0;
 	struct stream_struct *streams = NULL;
 	unsigned int i;
-	struct smb_filename *src_fname_tmp = NULL;
-	struct smb_filename *dst_fname_tmp = NULL;
+	struct smb_filename *src_fname = NULL;
+	struct smb_filename *dst_fname = NULL;
 
 	status = SMB_VFS_NEXT_OFFLOAD_WRITE_RECV(state->handle,
 					      subreq,
@@ -4969,18 +4969,26 @@ static void fruit_offload_write_done(struct tevent_req *subreq)
 		return;
 	}
 
-	for (i = 0; i < num_streams; i++) {
-		DEBUG(10, ("%s: stream: '%s'/%zu\n",
-			  __func__, streams[i].name, (size_t)streams[i].size));
+	src_fname = state->src_fsp->fsp_name;
+	dst_fname = state->dst_fsp->fsp_name;
 
-		src_fname_tmp = synthetic_smb_fname(
-			req,
-			state->src_fsp->fsp_name->base_name,
-			streams[i].name,
-			NULL,
-			state->src_fsp->fsp_name->twrp,
-			state->src_fsp->fsp_name->flags);
+	for (i = 0; i < num_streams; i++) {
+		struct smb_filename *src_fname_tmp = NULL;
+		struct smb_filename *dst_fname_tmp = NULL;
+		const char *stream = streams[i].name;
+
+		DBG_DEBUG("stream: '%s'/%zu\n",
+			  stream,
+			  (size_t)streams[i].size);
+
+		src_fname_tmp = synthetic_smb_fname(streams,
+						    src_fname->base_name,
+						    stream,
+						    NULL,
+						    src_fname->twrp,
+						    src_fname->flags);
 		if (tevent_req_nomem(src_fname_tmp, req)) {
+			TALLOC_FREE(streams);
 			return;
 		}
 
@@ -4989,30 +4997,28 @@ static void fruit_offload_write_done(struct tevent_req *subreq)
 			continue;
 		}
 
-		dst_fname_tmp = synthetic_smb_fname(
-			req,
-			state->dst_fsp->fsp_name->base_name,
-			streams[i].name,
-			NULL,
-			state->dst_fsp->fsp_name->twrp,
-			state->dst_fsp->fsp_name->flags);
+		dst_fname_tmp = synthetic_smb_fname(streams,
+						    dst_fname->base_name,
+						    stream,
+						    NULL,
+						    dst_fname->twrp,
+						    dst_fname->flags);
 		if (tevent_req_nomem(dst_fname_tmp, req)) {
-			TALLOC_FREE(src_fname_tmp);
+			TALLOC_FREE(streams);
 			return;
 		}
 
-		status = copy_file(req,
+		status = copy_file(streams,
 				   state->handle->conn,
 				   src_fname_tmp,
 				   dst_fname_tmp,
 				   FILE_CREATE);
 		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("%s: copy %s to %s failed: %s\n", __func__,
-				  smb_fname_str_dbg(src_fname_tmp),
-				  smb_fname_str_dbg(dst_fname_tmp),
-				  nt_errstr(status)));
-			TALLOC_FREE(src_fname_tmp);
-			TALLOC_FREE(dst_fname_tmp);
+			DBG_WARNING("copy %s to %s failed: %s\n",
+				    smb_fname_str_dbg(src_fname_tmp),
+				    smb_fname_str_dbg(dst_fname_tmp),
+				    nt_errstr(status));
+			TALLOC_FREE(streams);
 			tevent_req_nterror(req, status);
 			return;
 		}
@@ -5022,8 +5028,6 @@ static void fruit_offload_write_done(struct tevent_req *subreq)
 	}
 
 	TALLOC_FREE(streams);
-	TALLOC_FREE(src_fname_tmp);
-	TALLOC_FREE(dst_fname_tmp);
 	tevent_req_done(req);
 }
 

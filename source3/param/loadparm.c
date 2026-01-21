@@ -1539,7 +1539,6 @@ static void free_service_byindex(int idx)
 static int add_a_service(const struct loadparm_service *pservice, const char *name)
 {
 	int i;
-	struct loadparm_service **tsp = NULL;
 
 	/* it might already exist */
 	if (name) {
@@ -1556,13 +1555,14 @@ static int add_a_service(const struct loadparm_service *pservice, const char *na
 		}
 	}
 	if (i == iNumServices) {
+		struct loadparm_service **tsp = NULL;
+
 		/* if not, then create one */
 		tsp = talloc_realloc(NULL, ServicePtrs,
 				     struct loadparm_service *,
 				     iNumServices + 1);
 		if (tsp == NULL) {
-			DEBUG(0, ("add_a_service: failed to enlarge "
-				  "ServicePtrs!\n"));
+			DBG_ERR("failed to enlarge ServicePtrs!\n");
 			return (-1);
 		}
 		ServicePtrs = tsp;
@@ -1570,7 +1570,7 @@ static int add_a_service(const struct loadparm_service *pservice, const char *na
 	}
 	ServicePtrs[i] = talloc_zero(ServicePtrs, struct loadparm_service);
 	if (!ServicePtrs[i]) {
-		DEBUG(0,("add_a_service: out of memory!\n"));
+		DBG_ERR("out of memory!\n");
 		return (-1);
 	}
 
@@ -1581,8 +1581,7 @@ static int add_a_service(const struct loadparm_service *pservice, const char *na
 		lpcfg_string_set(ServicePtrs[i], &ServicePtrs[i]->szService,
 				 name);
 
-	DEBUG(8,("add_a_service: Creating snum = %d for %s\n",
-		i, ServicePtrs[i]->szService));
+	DBG_DEBUG("Creating snum = %d for %s\n", i, ServicePtrs[i]->szService);
 
 	if (!hash_a_service(ServicePtrs[i]->szService, i)) {
 		return (-1);
@@ -1600,17 +1599,12 @@ char *canonicalize_servicename(TALLOC_CTX *ctx, const char *src)
 	char *result;
 
 	if ( !src ) {
-		DEBUG(0,("canonicalize_servicename: NULL source name!\n"));
+		DBG_ERR("NULL source name!\n");
 		return NULL;
 	}
 
-	result = talloc_strdup(ctx, src);
+	result = strlower_talloc(ctx, src);
 	SMB_ASSERT(result != NULL);
-
-	if (!strlower_m(result)) {
-		TALLOC_FREE(result);
-		return NULL;
-	}
 	return result;
 }
 

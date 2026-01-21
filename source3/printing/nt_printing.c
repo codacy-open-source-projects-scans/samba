@@ -36,28 +36,20 @@
 #include "rpc_client/cli_winreg_spoolss.h"
 #include "lib/util/string_wrappers.h"
 #include "lib/global_contexts.h"
+#include "lib/util/time_basic.h"
 
 /* Map generic permissions to printer object specific permissions */
 
-const struct generic_mapping printer_generic_mapping = {
+static const struct generic_mapping printer_generic_mapping = {
 	PRINTER_READ,
 	PRINTER_WRITE,
 	PRINTER_EXECUTE,
 	PRINTER_ALL_ACCESS
 };
 
-/* Map generic permissions to print server object specific permissions */
-
-const struct generic_mapping printserver_generic_mapping = {
-	SERVER_READ,
-	SERVER_WRITE,
-	SERVER_EXECUTE,
-	SERVER_ALL_ACCESS
-};
-
 /* Map generic permissions to job object specific permissions */
 
-const struct generic_mapping job_generic_mapping = {
+static const struct generic_mapping job_generic_mapping = {
 	JOB_READ,
 	JOB_WRITE,
 	JOB_EXECUTE,
@@ -252,7 +244,7 @@ static NTSTATUS driver_unix_convert(connection_struct *conn,
 	if (!name) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	unix_format(name);
+	string_replace(name, '\\', '/');
 	name = unix_clean_name(ctx, name);
 	if (!name) {
 		return NT_STATUS_NO_MEMORY;
@@ -266,11 +258,7 @@ static NTSTATUS driver_unix_convert(connection_struct *conn,
 					 0, /* twrp */
 					 pdirfsp,
 					 psmb_fname);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-
-	return NT_STATUS_OK;
+	return status;
 }
 
 /****************************************************************************
@@ -356,11 +344,11 @@ static ssize_t printing_pread_data(files_struct *fsp,
 ****************************************************************************/
 
 static int handle_pe_file(files_struct *fsp,
-				off_t in_pos,
-				char *fname,
-				char *buf,
-				uint32_t *major,
-				uint32_t *minor)
+			  off_t in_pos,
+			  const char *fname,
+			  char *buf,
+			  uint32_t *major,
+			  uint32_t *minor)
 {
 	unsigned int i;
 	unsigned int num_sections;
@@ -534,11 +522,11 @@ static int handle_pe_file(files_struct *fsp,
 ****************************************************************************/
 
 static int handle_ne_file(files_struct *fsp,
-				off_t in_pos,
-				char *fname,
-				char *buf,
-				uint32_t *major,
-				uint32_t *minor)
+			  off_t in_pos,
+			  const char *fname,
+			  char *buf,
+			  uint32_t *major,
+			  uint32_t *minor)
 {
 	unsigned int i;
 	ssize_t byte_count;
@@ -698,9 +686,9 @@ static int handle_ne_file(files_struct *fsp,
 ****************************************************************************/
 
 static int get_file_version(files_struct *fsp,
-				char *fname,
-				uint32_t *major,
-				uint32_t *minor)
+			    const char *fname,
+			    uint32_t *major,
+			    uint32_t *minor)
 {
 	char    *buf = NULL;
 	ssize_t byte_count;
@@ -799,35 +787,34 @@ missing the version info structure, compare the creation date (on Unix use
 the modification date). Otherwise chose the numerically larger version number.
 ****************************************************************************/
 
-static int file_version_is_newer(connection_struct *conn, fstring new_file, fstring old_file)
+static int file_version_is_newer(connection_struct *conn,
+				 const char *new_file,
+				 const char *old_file)
 {
 	bool use_version = true;
 
 	uint32_t new_major;
 	uint32_t new_minor;
-	time_t new_create_time;
+	struct stat_ex new_stat = {};
 
 	uint32_t old_major;
 	uint32_t old_minor;
-	time_t old_create_time;
+	struct stat_ex old_stat = {};
 
 	struct smb_filename *smb_fname = NULL;
 	files_struct    *fsp = NULL;
 	struct files_struct *dirfsp = NULL;
-	SMB_STRUCT_STAT st;
 
 	NTSTATUS status;
 	int ret;
-
-	SET_STAT_INVALID(st);
-	new_create_time = (time_t)0;
-	old_create_time = (time_t)0;
 
 	/* Get file version info (if available) for previous file (if it exists) */
 	status = driver_unix_convert(conn, old_file, &dirfsp, &smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto error_exit;
 	}
+
+	old_stat = smb_fname->st;
 
 	status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
@@ -851,9 +838,9 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 
 	if (!NT_STATUS_IS_OK(status)) {
 		/* Old file not found, so by definition new file is in fact newer */
-		DEBUG(10,("file_version_is_newer: Can't open old file [%s], "
-			  "errno = %d\n", smb_fname_str_dbg(smb_fname),
-			  errno));
+		DBG_DEBUG("Can't open old file [%s], errno = %d\n",
+			  smb_fname_str_dbg(smb_fname),
+			  errno);
 		ret = 1;
 		goto done;
 
@@ -865,16 +852,13 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 	}
 
 	if (!ret) {
-		DEBUG(6,("file_version_is_newer: Version info not found [%s], "
-			 "use mod time\n",
-			 old_file));
+		struct timeval_buf buf;
+		DBG_NOTICE("Version info not found [%s], use mod time = %s\n",
+			   old_file,
+			   timespec_string_buf(&old_stat.st_ex_mtime,
+					       true,
+					       &buf));
 		use_version = false;
-		if (SMB_VFS_FSTAT(fsp, &st) == -1) {
-			goto error_exit;
-		}
-		old_create_time = convert_timespec_to_time_t(st.st_ex_mtime);
-		DEBUGADD(6,("file_version_is_newer: mod time = %ld sec\n",
-			    (long)old_create_time));
 	}
 
 	close_file_free(NULL, &fsp, NORMAL_CLOSE);
@@ -884,6 +868,8 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 	if (!NT_STATUS_IS_OK(status)) {
 		goto error_exit;
 	}
+
+	new_stat = smb_fname->st;
 
 	status = SMB_VFS_CREATE_FILE(
 		conn,					/* conn */
@@ -907,8 +893,9 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 
 	if (!NT_STATUS_IS_OK(status)) {
 		/* New file not found, this shouldn't occur if the caller did its job */
-		DEBUG(3,("file_version_is_newer: Can't open new file [%s], "
-			 "errno = %d\n", smb_fname_str_dbg(smb_fname), errno));
+		DBG_NOTICE("Can't open new file [%s], errno = %d\n",
+			   smb_fname_str_dbg(smb_fname),
+			   errno);
 		goto error_exit;
 
 	}
@@ -919,16 +906,13 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 	}
 
 	if (!ret) {
-		DEBUG(6,("file_version_is_newer: Version info not found [%s], "
-			 "use mod time\n",
-			 new_file));
+		struct timeval_buf buf;
+		DBG_INFO("Version info not found [%s], use mod time = %s\n",
+			 new_file,
+			 timespec_string_buf(&new_stat.st_ex_mtime,
+					     true,
+					     &buf));
 		use_version = false;
-		if (SMB_VFS_FSTAT(fsp, &st) == -1) {
-			goto error_exit;
-		}
-		new_create_time = convert_timespec_to_time_t(st.st_ex_mtime);
-		DEBUGADD(6,("file_version_is_newer: mod time = %ld sec\n",
-			    (long)new_create_time));
 	}
 
 	close_file_free(NULL, &fsp, NORMAL_CLOSE);
@@ -938,25 +922,30 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 		if (new_major > old_major ||
 			(new_major == old_major && new_minor > old_minor)) {
 
-			DEBUG(6,("file_version_is_newer: Replacing [%s] with [%s]\n", old_file, new_file));
+			DBG_INFO("Replacing [%s] with [%s]\n",
+				 old_file,
+				 new_file);
 			ret = 1;
 			goto done;
 		}
 		else {
-			DEBUG(6,("file_version_is_newer: Leaving [%s] unchanged\n", old_file));
+			DBG_INFO("Leaving [%s] unchanged\n", old_file);
 			ret = 0;
 			goto done;
 		}
 
 	} else {
-		/* Compare modification time/dates and choose the newest time/date */
-		if (new_create_time > old_create_time) {
-			DEBUG(6,("file_version_is_newer: Replacing [%s] with [%s]\n", old_file, new_file));
+		int cmp = timespec_compare(&old_stat.st_ex_mtime,
+					   &new_stat.st_ex_mtime);
+		if (cmp == -1) {
+			DBG_INFO("Replacing [%s] with [%s]\n",
+				 old_file,
+				 new_file);
 			ret = 1;
 			goto done;
 		}
 		else {
-			DEBUG(6,("file_version_is_newer: Leaving [%s] unchanged\n", old_file));
+			DBG_INFO("Leaving [%s] unchanged\n", old_file);
 			ret = 0;
 			goto done;
 		}
@@ -1391,6 +1380,7 @@ static WERROR move_driver_file_to_download_area(TALLOC_CTX *mem_ctx,
 						uint32_t version,
 						const char *driver_directory)
 {
+	struct files_struct *dirfsp = NULL;
 	struct smb_filename *smb_fname_old = NULL;
 	struct smb_filename *smb_fname_new = NULL;
 	char *old_name = NULL;
@@ -1421,44 +1411,50 @@ static WERROR move_driver_file_to_download_area(TALLOC_CTX *mem_ctx,
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
-	if (version != -1 && (version = file_version_is_newer(conn, old_name, new_name)) > 0) {
-		struct files_struct *dirfsp = NULL;
-
-		status = driver_unix_convert(conn,
-					     old_name,
-					     &dirfsp,
-					     &smb_fname_old);
-		if (!NT_STATUS_IS_OK(status)) {
-			ret = WERR_NOT_ENOUGH_MEMORY;
-			goto out;
-		}
-
-		/* Setup a synthetic smb_filename struct */
-		smb_fname_new = talloc_zero(mem_ctx, struct smb_filename);
-		if (!smb_fname_new) {
-			ret = WERR_NOT_ENOUGH_MEMORY;
-			goto out;
-		}
-
-		smb_fname_new->base_name = new_name;
-
-		DEBUG(10,("move_driver_file_to_download_area: copying '%s' to "
-			  "'%s'\n", smb_fname_old->base_name,
-			  smb_fname_new->base_name));
-
-		status = copy_file(mem_ctx, conn, smb_fname_old, smb_fname_new,
-				   FILE_OVERWRITE_IF);
-
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(0,("move_driver_file_to_download_area: Unable "
-				 "to rename [%s] to [%s]: %s\n",
-				 smb_fname_old->base_name, new_name,
-				 nt_errstr(status)));
-			ret = WERR_APP_INIT_FAILURE;
-			goto out;
-		}
+	if (version == -1) {
+		goto done;
 	}
 
+	version = file_version_is_newer(conn, old_name, new_name);
+	if (version <= 0) {
+		goto done;
+	}
+
+	status = driver_unix_convert(conn, old_name, &dirfsp, &smb_fname_old);
+	if (!NT_STATUS_IS_OK(status)) {
+		ret = WERR_NOT_ENOUGH_MEMORY;
+		goto out;
+	}
+
+	/* Setup a synthetic smb_filename struct */
+	smb_fname_new = talloc_zero(mem_ctx, struct smb_filename);
+	if (!smb_fname_new) {
+		ret = WERR_NOT_ENOUGH_MEMORY;
+		goto out;
+	}
+
+	smb_fname_new->base_name = new_name;
+
+	DBG_DEBUG("copying '%s' to '%s'\n",
+		  smb_fname_old->base_name,
+		  smb_fname_new->base_name);
+
+	status = copy_file(mem_ctx,
+			   conn,
+			   smb_fname_old,
+			   smb_fname_new,
+			   FILE_OVERWRITE_IF);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Unable to rename [%s] to [%s]: %s\n",
+			smb_fname_old->base_name,
+			new_name,
+			nt_errstr(status));
+		ret = WERR_APP_INIT_FAILURE;
+		goto out;
+	}
+
+done:
 	ret = WERR_OK;
  out:
 	TALLOC_FREE(smb_fname_old);
@@ -1593,8 +1589,8 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 
 	DEBUG(5,("Moving files now !\n"));
 
-	if (driver->driver_path && strlen(driver->driver_path)) {
-
+	if ((driver->driver_path != NULL) && (driver->driver_path[0] != '\0'))
+	{
 		err = move_driver_file_to_download_area(frame,
 							conn,
 							driver->driver_path,
@@ -1607,7 +1603,7 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 		}
 	}
 
-	if (driver->data_file && strlen(driver->data_file)) {
+	if ((driver->data_file != NULL) && (driver->data_file[0] != '\0')) {
 		if (!strequal(driver->data_file, driver->driver_path)) {
 
 			err = move_driver_file_to_download_area(frame,
@@ -1623,7 +1619,8 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 		}
 	}
 
-	if (driver->config_file && strlen(driver->config_file)) {
+	if ((driver->config_file != NULL) && (driver->config_file[0] != '\0'))
+	{
 		if (!strequal(driver->config_file, driver->driver_path) &&
 		    !strequal(driver->config_file, driver->data_file)) {
 
@@ -1640,7 +1637,7 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 		}
 	}
 
-	if (driver->help_file && strlen(driver->help_file)) {
+	if ((driver->help_file != NULL) && (driver->help_file[0] != '\0')) {
 		if (!strequal(driver->help_file, driver->driver_path) &&
 		    !strequal(driver->help_file, driver->data_file) &&
 		    !strequal(driver->help_file, driver->config_file)) {
@@ -2188,31 +2185,6 @@ jfm: I should use this comment for the text file to explain
 
 */
 
-/* Convert generic access rights to printer object specific access rights.
-   It turns out that NT4 security descriptors use generic access rights and
-   NT5 the object specific ones. */
-
-void map_printer_permissions(struct security_descriptor *sd)
-{
-	uint32_t i;
-
-	for (i = 0; sd->dacl && i < sd->dacl->num_aces; i++) {
-		se_map_generic(&sd->dacl->aces[i].access_mask,
-			       &printer_generic_mapping);
-	}
-}
-
-void map_job_permissions(struct security_descriptor *sd)
-{
-	uint32_t i;
-
-	for (i = 0; sd->dacl && i < sd->dacl->num_aces; i++) {
-		se_map_generic(&sd->dacl->aces[i].access_mask,
-			       &job_generic_mapping);
-	}
-}
-
-
 /****************************************************************************
  Check a user has permissions to perform the given operation.  We use the
  permission constants defined in include/rpc_spoolss.h to check the various
@@ -2302,9 +2274,10 @@ WERROR print_access_check(const struct auth_session_info *session_info,
 			return ntstatus_to_werror(status);
 		}
 
-		map_job_permissions(secdesc);
+		security_acl_map_generic(secdesc->dacl, &job_generic_mapping);
 	} else {
-		map_printer_permissions(secdesc);
+		security_acl_map_generic(secdesc->dacl,
+					 &printer_generic_mapping);
 	}
 
 	/* Check access */

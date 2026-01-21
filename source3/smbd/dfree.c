@@ -51,21 +51,90 @@ static void disk_norm(uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
  Return number of 1K blocks available on a path and total number.
 ****************************************************************************/
 
+static bool handle_dfree_command(connection_struct *conn,
+				 struct smb_filename *fname,
+				 uint64_t *bsize,
+				 uint64_t *dfree,
+				 uint64_t *dsize)
+{
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *dfree_command = NULL;
+	char *path = fname->base_name;
+	char **lines = NULL;
+	char **argl = NULL;
+	char *line = NULL;
+	int ret;
+
+	dfree_command = lp_dfree_command(talloc_tos(), lp_sub, SNUM(conn));
+	if (!dfree_command || !*dfree_command) {
+		return false;
+	}
+
+	argl = str_list_make_empty(talloc_tos());
+	str_list_add_printf(&argl, "%s", dfree_command);
+	str_list_add_printf(&argl, "%s", path);
+	if (argl == NULL) {
+		return false;
+	}
+
+	DBG_NOTICE("Running command '%s %s'\n",
+		dfree_command,
+		path);
+
+	lines = file_lines_ploadv(talloc_tos(), argl, NULL);
+
+	TALLOC_FREE(argl);
+
+	if ((lines == NULL) || (lines[0] == NULL)) {
+		DBG_ERR("file_lines_ploadv() failed for "
+			"command '%s %s'. Error was : %s\n",
+			dfree_command, path, strerror(errno));
+		TALLOC_FREE(lines);
+		return false;
+	}
+
+	line = lines[0];
+
+	DBG_NOTICE("Read input from dfree, \"%s\"\n", line);
+
+	ret = sscanf(
+		line, "%" SCNu64 " %" SCNu64 " %" SCNu64, dsize, dfree, bsize);
+
+	TALLOC_FREE(lines);
+
+	if (ret < 3) {
+		*bsize = 1024;
+	}
+	if (ret < 2) {
+		*dfree = 1024;
+	}
+	if (ret < 1) {
+		*dsize = 2048;
+	}
+
+	DBG_NOTICE("Parsed output of dfree, ret=%d, dsize=%" PRIu64 ", "
+		   "dfree=%" PRIu64 ", bsize=%" PRIu64 "\n",
+		   ret,
+		   *dsize,
+		   *dfree,
+		   *bsize);
+
+	return true;
+}
+
 static uint64_t sys_disk_free(connection_struct *conn,
 			      struct smb_filename *fname,
 			      uint64_t *bsize,
 			      uint64_t *dfree,
 			      uint64_t *dsize)
 {
-	const struct loadparm_substitution *lp_sub =
-		loadparm_s3_global_substitution();
 	uint64_t dfree_retval;
 	uint64_t dfree_q = 0;
 	uint64_t bsize_q = 0;
 	uint64_t dsize_q = 0;
-	const char *dfree_command;
 	static bool dfree_broken = false;
-	char *path = fname->base_name;
+	bool ok;
 
 	(*dfree) = (*dsize) = 0;
 	(*bsize) = 512;
@@ -73,60 +142,9 @@ static uint64_t sys_disk_free(connection_struct *conn,
 	/*
 	 * If external disk calculation specified, use it.
 	 */
-
-	dfree_command = lp_dfree_command(talloc_tos(), lp_sub, SNUM(conn));
-	if (dfree_command && *dfree_command) {
-		const char *p;
-		char **lines = NULL;
-		char **argl = NULL;
-
-		argl = str_list_make_empty(talloc_tos());
-		str_list_add_printf(&argl, "%s", dfree_command);
-		str_list_add_printf(&argl, "%s", path);
-		if (argl == NULL) {
-			return (uint64_t)-1;
-		}
-
-		DBG_NOTICE("Running command '%s %s'\n",
-			dfree_command,
-			path);
-
-		lines = file_lines_ploadv(talloc_tos(), argl, NULL);
-
-		TALLOC_FREE(argl);
-
-		if (lines != NULL) {
-			char *line = lines[0];
-
-			DBG_NOTICE("Read input from dfree, \"%s\"\n", line);
-
-			*dsize = STR_TO_SMB_BIG_UINT(line, &p);
-			while (p && *p && isspace(*p))
-				p++;
-			if (p && *p)
-				*dfree = STR_TO_SMB_BIG_UINT(p, &p);
-			while (p && *p && isspace(*p))
-				p++;
-			if (p && *p)
-				*bsize = STR_TO_SMB_BIG_UINT(p, NULL);
-			else
-				*bsize = 1024;
-			TALLOC_FREE(lines);
-
-			DBG_NOTICE("Parsed output of dfree, dsize=%"PRIu64", "
-				   "dfree=%"PRIu64", bsize=%"PRIu64"\n",
-				   *dsize, *dfree, *bsize);
-
-			if (!*dsize)
-				*dsize = 2048;
-			if (!*dfree)
-				*dfree = 1024;
-
-			goto dfree_done;
-		}
-		DBG_ERR("file_lines_load() failed for "
-			   "command '%s %s'. Error was : %s\n",
-			   dfree_command, path, strerror(errno));
+	ok = handle_dfree_command(conn, fname, bsize, dfree, dsize);
+	if (ok) {
+		goto dfree_done;
 	}
 
 	if (SMB_VFS_DISK_FREE(conn, fname, bsize, dfree, dsize) ==
