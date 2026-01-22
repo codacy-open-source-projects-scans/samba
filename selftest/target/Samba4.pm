@@ -1202,7 +1202,8 @@ sub provision($$$$$$$$$$$)
 	    $force_fips_mode,
 	    $extra_smbconf_options,
 	    $extra_smbconf_shares,
-	    $extra_provision_options) = @_;
+	    $extra_provision_options,
+	    $extra_krb5_conf_options) = @_;
 
 	my $samsid = Samba::random_domain_sid();
 
@@ -1323,6 +1324,8 @@ sub provision($$$$$$$$$$$)
 
 $extra_smbconf_shares
 ";
+
+	$ctx->{krb5_conf_extra_options} = $extra_krb5_conf_options if defined($extra_krb5_conf_options);
 
 	my $ret = $self->provision_raw_step1($ctx);
 	unless (defined $ret) {
@@ -1515,6 +1518,7 @@ sub provision_promoted_dc($$$)
         ntlm auth = ntlmv2-only
 
 	kdc force enable rc4 weak session keys = yes
+	kdc name match implicit dollar without canonicalization = no
 
 [sysvol]
 	path = $ctx->{statedir}/sysvol
@@ -1891,6 +1895,9 @@ sub provision_fl2008r2dc($$$)
 	krb5 acceptor report canonical client name = no
 ";
 	my $extra_provision_options = ["--base-schema=2008_R2"];
+	my $extra_krb5_conf_options = "
+ report_canonical_client_name = no
+";
 	my $ret = $self->provision($prefix,
 				   "domain controller",
 				   "dc7",
@@ -1903,7 +1910,8 @@ sub provision_fl2008r2dc($$$)
 				   undef,
 				   $extra_conf_options,
 				   "",
-				   $extra_provision_options);
+				   $extra_provision_options,
+				   $extra_krb5_conf_options);
 	unless (defined $ret) {
 		return undef;
 	}
@@ -3781,10 +3789,6 @@ sub setup_customdc
 	if (not defined($self->check_or_start($env))) {
 	    return undef;
 	}
-
-	# if this was a backup-rename, then we may need to setup namespaces
-	my $upn_array = ["$env->{REALM}.upn"];
-	my $spn_array = ["$env->{REALM}.spn"];
 
 	return $env;
 }

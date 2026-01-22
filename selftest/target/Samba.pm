@@ -336,6 +336,18 @@ sub mk_krb5_conf($$)
 	print KRB5CONF "
 #Generated krb5.conf for $ctx->{realm}
 
+";
+
+	if (defined($ctx->{krb5_conf_extra_options})) {
+		# These come first so that they override any later options in the file.
+		print KRB5CONF "
+[libdefaults]
+$ctx->{krb5_conf_extra_options}
+
+";
+	}
+
+	print KRB5CONF "
 [libdefaults]
  default_realm = $ctx->{realm}
  dns_lookup_realm = false
@@ -358,6 +370,9 @@ sub mk_krb5_conf($$)
  clockskew = 5
  # To allow the FL 2000 DC to still work for now
  allow_rc4 = yes
+
+ # Report the canonical client name by default
+ report_canonical_client_name = yes
     ";
 	}
 

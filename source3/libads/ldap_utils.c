@@ -1,7 +1,7 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
 
-   Some Helpful wrappers on LDAP 
+   Some Helpful wrappers on LDAP
 
    Copyright (C) Andrew Tridgell 2001
    Copyright (C) Guenther Deschner 2006,2007
@@ -53,10 +53,32 @@ static ADS_STATUS ads_ranged_search_internal(ADS_STRUCT *ads,
 					     bool *more_values);
 
 /*
+ * Do not reduce the page size in case of immediate timeouts. E.g. kernel
+ * detected broken connection but samba hasn't tried to use the socket yet.
+ * time() uses resolution in seconds, so it is avoided for timeouts < 1s and
+ * might be avoided for timeouts < 2s.
+ */
+static inline void adjust_ldap_page_size(ADS_STRUCT *ads,
+					 time_t start,
+					 time_t end)
+{
+	if (ads->config.ldap_page_size >= (lp_ldap_page_size() / 4) &&
+	    lp_ldap_page_size() > 4 && end - start > 1)
+	{
+		int new_page_size = (ads->config.ldap_page_size / 2);
+		DBG_WARNING("Reducing LDAP page size from %d to %d due to "
+			    "IO_TIMEOUT\n",
+			    ads->config.ldap_page_size,
+			    new_page_size);
+		ads->config.ldap_page_size = new_page_size;
+	}
+}
+
+/*
   a wrapper around ldap_search_s that retries depending on the error code
   this is supposed to catch dropped connections and auto-reconnect
 */
-static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind_path, int scope, 
+static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind_path, int scope,
 					       const char *expr,
 					       const char **attrs, void *args,
 					       LDAPMessage **res)
@@ -64,6 +86,7 @@ static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind
 	ADS_STATUS status;
 	int count = 3;
 	char *bp;
+	time_t search_start, search_end;
 
 	*res = NULL;
 
@@ -83,6 +106,7 @@ static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind
 	/* when binding anonymously, we cannot use the paged search LDAP
 	 * control - Guenther */
 
+	search_start = time(NULL);
 	if (ads->auth.flags & ADS_AUTH_ANON_BIND) {
 		status = ads_do_search(ads, bp, scope, expr, attrs, res);
 	} else {
@@ -100,16 +124,13 @@ static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind
 		char *cred_name = NULL;
 		NTSTATUS ntstatus;
 
-		if (NT_STATUS_EQUAL(ads_ntstatus(status), NT_STATUS_IO_TIMEOUT) &&
-		    ads->config.ldap_page_size >= (lp_ldap_page_size() / 4) &&
-		    lp_ldap_page_size() > 4) {
-			int new_page_size = (ads->config.ldap_page_size / 2);
-			DEBUG(1, ("Reducing LDAP page size from %d to %d due to IO_TIMEOUT\n",
-				  ads->config.ldap_page_size, new_page_size));
-			ads->config.ldap_page_size = new_page_size;
+		search_end = time(NULL);
+		if (NT_STATUS_EQUAL(ads_ntstatus(status), NT_STATUS_IO_TIMEOUT))
+		{
+			adjust_ldap_page_size(ads, search_start, search_end);
 		}
 
-		if (*res) 
+		if (*res)
 			ads_msgfree(ads, *res);
 		*res = NULL;
 
@@ -162,6 +183,7 @@ static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind
 		/* when binding anonymously, we cannot use the paged search LDAP
 		 * control - Guenther */
 
+		search_start = time(NULL);
 		if (ads->auth.flags & ADS_AUTH_ANON_BIND) {
 			status = ads_do_search(ads, bp, scope, expr, attrs, res);
 		} else {
@@ -178,7 +200,7 @@ static ADS_STATUS ads_do_search_retry_internal(ADS_STRUCT *ads, const char *bind
         SAFE_FREE(bp);
 
 	if (!ADS_ERR_OK(status)) {
-		DEBUG(1,("ads reopen failed after error %s\n", 
+		DEBUG(1,("ads reopen failed after error %s\n",
 			 ads_errstr(status)));
 	}
 	return status;
@@ -200,24 +222,24 @@ static ADS_STATUS ads_do_search_retry_args(ADS_STRUCT *ads, const char *bind_pat
 }
 
 
- ADS_STATUS ads_search_retry(ADS_STRUCT *ads, LDAPMessage **res, 
+ ADS_STATUS ads_search_retry(ADS_STRUCT *ads, LDAPMessage **res,
 			     const char *expr, const char **attrs)
 {
 	return ads_do_search_retry(ads, ads->config.bind_path, LDAP_SCOPE_SUBTREE,
 				   expr, attrs, res);
 }
 
- ADS_STATUS ads_search_retry_dn(ADS_STRUCT *ads, LDAPMessage **res, 
-				const char *dn, 
+ ADS_STATUS ads_search_retry_dn(ADS_STRUCT *ads, LDAPMessage **res,
+				const char *dn,
 				const char **attrs)
 {
 	return ads_do_search_retry(ads, dn, LDAP_SCOPE_BASE,
 				   "(objectclass=*)", attrs, res);
 }
 
- ADS_STATUS ads_search_retry_dn_sd_flags(ADS_STRUCT *ads, LDAPMessage **res, 
+ ADS_STATUS ads_search_retry_dn_sd_flags(ADS_STRUCT *ads, LDAPMessage **res,
 					 uint32_t sd_flags,
-					 const char *dn, 
+					 const char *dn,
 					 const char **attrs)
 {
 	ads_control args;
@@ -230,8 +252,8 @@ static ADS_STATUS ads_do_search_retry_args(ADS_STRUCT *ads, const char *bind_pat
 					"(objectclass=*)", attrs, &args, res);
 }
 
- ADS_STATUS ads_search_retry_extended_dn_ranged(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, 
-						const char *dn, 
+ ADS_STATUS ads_search_retry_extended_dn_ranged(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx,
+						const char *dn,
 						const char **attrs,
 						enum ads_extended_dn_flags flags,
 						char ***strings,
@@ -248,13 +270,13 @@ static ADS_STATUS ads_do_search_retry_args(ADS_STRUCT *ads, const char *bind_pat
 		return ADS_ERROR_NT(NT_STATUS_INVALID_PARAMETER);
 	}
 
-	return ads_ranged_search(ads, mem_ctx, LDAP_SCOPE_BASE, dn, 
+	return ads_ranged_search(ads, mem_ctx, LDAP_SCOPE_BASE, dn,
 				 "(objectclass=*)", &args, attrs[0],
 				 strings, num_strings);
 
 }
 
- ADS_STATUS ads_search_retry_sid(ADS_STRUCT *ads, LDAPMessage **res, 
+ ADS_STATUS ads_search_retry_sid(ADS_STRUCT *ads, LDAPMessage **res,
 				 const struct dom_sid *sid,
 				 const char **attrs)
 {
@@ -278,7 +300,7 @@ static ADS_STATUS ads_do_search_retry_args(ADS_STRUCT *ads, const char *bind_pat
 	return status;
 }
 
-ADS_STATUS ads_ranged_search(ADS_STRUCT *ads, 
+ADS_STATUS ads_ranged_search(ADS_STRUCT *ads,
 			     TALLOC_CTX *mem_ctx,
 			     int scope,
 			     const char *base,
@@ -308,11 +330,11 @@ ADS_STATUS ads_ranged_search(ADS_STRUCT *ads,
 	ADS_ERROR_HAVE_NO_MEMORY(attrs[1]);
 
 	do {
-		status = ads_ranged_search_internal(ads, mem_ctx, 
-						    scope, base, filter, 
-						    attrs, args, range_attr, 
+		status = ads_ranged_search_internal(ads, mem_ctx,
+						    scope, base, filter,
+						    attrs, args, range_attr,
 						    strings, num_strings,
-						    &first_usn, &num_retries, 
+						    &first_usn, &num_retries,
 						    &more_values);
 
 		if (NT_STATUS_EQUAL(STATUS_MORE_ENTRIES, ads_ntstatus(status))) {
