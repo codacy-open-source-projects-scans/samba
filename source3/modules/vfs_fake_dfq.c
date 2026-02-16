@@ -28,10 +28,10 @@
 #define DBGC_CLASS DBGC_VFS
 
 static int dfq_get_quota(struct vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			enum SMB_QUOTA_TYPE qtype,
-			unid_t id,
-			SMB_DISK_QUOTA *qt);
+			 struct files_struct *fsp,
+			 enum SMB_QUOTA_TYPE qtype,
+			 unid_t id,
+			 SMB_DISK_QUOTA *qt);
 
 static uint64_t dfq_load_param(int snum, const char *path, const char *section,
 			       const char *param, uint64_t def_val)
@@ -53,11 +53,12 @@ static uint64_t dfq_load_param(int snum, const char *path, const char *section,
 }
 
 static uint64_t dfq_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+			      struct files_struct *fsp,
+			      uint64_t *bsize,
+			      uint64_t *dfree,
+			      uint64_t *dsize)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
 	uint64_t free_1k;
 	int snum = SNUM(handle->conn);
 	uint64_t dfq_bsize = 0;
@@ -73,8 +74,8 @@ static uint64_t dfq_disk_free(vfs_handle_struct *handle,
 	}
 	if (dfq_bsize == 0) {
 		TALLOC_FREE(rpath_fname);
-		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname, bsize, dfree,
-					      dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, bsize, dfree, dsize);
 	}
 
 	*bsize = dfq_bsize;
@@ -94,11 +95,12 @@ static uint64_t dfq_disk_free(vfs_handle_struct *handle,
 }
 
 static int dfq_get_quota(struct vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			enum SMB_QUOTA_TYPE qtype,
-			unid_t id,
-			SMB_DISK_QUOTA *qt)
+			 struct files_struct *fsp,
+			 enum SMB_QUOTA_TYPE qtype,
+			 unid_t id,
+			 SMB_DISK_QUOTA *qt)
 {
+	struct smb_filename *smb_fname = fsp->fsp_name;
 	int rc = 0;
 	int save_errno;
 	char *section = NULL;
@@ -177,7 +179,7 @@ static int dfq_get_quota(struct vfs_handle_struct *handle,
 	goto out;
 
 dflt:
-	rc = SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, qt);
+	rc = SMB_VFS_NEXT_GET_QUOTA(handle, fsp, qtype, id, qt);
 
 out:
 	save_errno = errno;

@@ -123,12 +123,13 @@ static bool handle_dfree_command(connection_struct *conn,
 	return true;
 }
 
-static uint64_t sys_disk_free(connection_struct *conn,
-			      struct smb_filename *fname,
+static uint64_t sys_disk_free(struct files_struct *fsp,
 			      uint64_t *bsize,
 			      uint64_t *dfree,
 			      uint64_t *dsize)
 {
+	struct connection_struct *conn = fsp->conn;
+	struct smb_filename *fname = fsp->fsp_name;
 	uint64_t dfree_retval;
 	uint64_t dfree_q = 0;
 	uint64_t bsize_q = 0;
@@ -147,14 +148,14 @@ static uint64_t sys_disk_free(connection_struct *conn,
 		goto dfree_done;
 	}
 
-	if (SMB_VFS_DISK_FREE(conn, fname, bsize, dfree, dsize) ==
-	    (uint64_t)-1) {
+	if (SMB_VFS_DISK_FREE(conn, fsp, bsize, dfree, dsize) == (uint64_t)-1)
+	{
 		DBG_ERR("VFS disk_free failed. Error was : %s\n",
 			strerror(errno));
 		return (uint64_t)-1;
 	}
 
-	if (disk_quotas(conn, fname, &bsize_q, &dfree_q, &dsize_q)) {
+	if (disk_quotas(conn, fsp, &bsize_q, &dfree_q, &dsize_q)) {
 		uint64_t min_bsize = MIN(*bsize, bsize_q);
 
 		(*dfree) = (*dfree) * (*bsize) / min_bsize;
@@ -213,9 +214,13 @@ struct dfree_cached_info {
 	uint64_t dsize;
 };
 
-uint64_t get_dfree_info(connection_struct *conn, struct smb_filename *fname,
-			uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+uint64_t get_dfree_info(struct files_struct *fsp,
+			uint64_t *bsize,
+			uint64_t *dfree,
+			uint64_t *dsize)
 {
+	struct connection_struct *conn = fsp->conn;
+	struct smb_filename *fname = fsp->fsp_name;
 	int dfree_cache_time = lp_dfree_cache_time(SNUM(conn));
 	struct dfree_cached_info *dfc = NULL;
 	struct dfree_cached_info dfc_new = { 0 };
@@ -229,7 +234,7 @@ uint64_t get_dfree_info(connection_struct *conn, struct smb_filename *fname,
 	bool found;
 
 	if (!dfree_cache_time) {
-		return sys_disk_free(conn, fname, bsize, dfree, dsize);
+		return sys_disk_free(fsp, bsize, dfree, dsize);
 	}
 
 	len = full_path_tos(conn->connectpath,
@@ -289,7 +294,7 @@ uint64_t get_dfree_info(connection_struct *conn, struct smb_filename *fname,
 		goto out;
 	}
 
-	dfree_ret = sys_disk_free(conn, fname, bsize, dfree, dsize);
+	dfree_ret = sys_disk_free(fsp, bsize, dfree, dsize);
 
 	if (dfree_ret == (uint64_t)-1) {
 		/* Don't cache bad data. */

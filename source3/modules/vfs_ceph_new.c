@@ -32,6 +32,7 @@
 
 #include "includes.h"
 #include "smbd/smbd.h"
+#include "lib/util/statvfs.h"
 #include "system/filesys.h"
 #include <dirent.h>
 #include <sys/statvfs.h>
@@ -2388,11 +2389,12 @@ out:
 /* Disk operations */
 
 static uint64_t vfs_ceph_disk_free(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+				   struct files_struct *fsp,
+				   uint64_t *bsize,
+				   uint64_t *dfree,
+				   uint64_t *dsize)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
 	struct statvfs statvfs_buf = { 0 };
 	int ret;
 	struct vfs_ceph_config *config = NULL;
@@ -2535,6 +2537,13 @@ static int vfs_ceph_statvfs(struct vfs_handle_struct *handle,
 out:
 	vfs_ceph_iput(handle, &iref);
 	return status_code(ret);
+}
+
+static int vfs_ceph_fstatvfs(struct vfs_handle_struct *handle,
+			     struct files_struct *fsp,
+			     struct vfs_statvfs_struct *statbuf)
+{
+	return vfs_ceph_statvfs(handle, fsp->fsp_name, statbuf);
 }
 
 static uint32_t vfs_ceph_fs_capabilities(
@@ -4613,7 +4622,7 @@ static struct vfs_fn_pointers ceph_new_fns = {
 	.disk_free_fn = vfs_ceph_disk_free,
 	.get_quota_fn = vfs_not_implemented_get_quota,
 	.set_quota_fn = vfs_not_implemented_set_quota,
-	.statvfs_fn = vfs_ceph_statvfs,
+	.fstatvfs_fn = vfs_ceph_fstatvfs,
 	.fs_capabilities_fn = vfs_ceph_fs_capabilities,
 
 	/* Directory operations */

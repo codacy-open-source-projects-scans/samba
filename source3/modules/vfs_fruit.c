@@ -37,6 +37,7 @@
 #include "lib/adouble.h"
 #include "lib/util_macstreams.h"
 #include "source3/smbd/dir.h"
+#include "lib/util/smb_strtox.h"
 
 /*
  * Enhanced OS X and Netatalk compatibility
@@ -5095,9 +5096,8 @@ static bool fruit_get_bandsize_from_line(char *line, size_t *_band_size)
 	static regex_t re;
 	static bool re_initialized = false;
 	regmatch_t matches[2];
-	uint64_t band_size;
 	int ret;
-	bool ok;
+	int error = 0;
 
 	if (!re_initialized) {
 		ret = regcomp(&re,
@@ -5118,12 +5118,12 @@ static bool fruit_get_bandsize_from_line(char *line, size_t *_band_size)
 
 	line[matches[1].rm_eo] = '\0';
 
-	ok = conv_str_u64(&line[matches[1].rm_so], &band_size);
-	if (!ok) {
-		return false;
-	}
-	*_band_size = (size_t)band_size;
-	return true;
+	*_band_size = smb_strtoull(&line[matches[1].rm_so],
+				   NULL,
+				   10,
+				   &error,
+				   SMB_STR_FULL_STR_CONV);
+	return (error == 0);
 }
 
 /*
@@ -5403,11 +5403,12 @@ static bool fruit_tmsize_do_dirent(vfs_handle_struct *handle,
  * - calculate used size of all bands: band_count * band_size
  **/
 static uint64_t fruit_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
+				struct files_struct *fsp,
 				uint64_t *_bsize,
 				uint64_t *_dfree,
 				uint64_t *_dsize)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
 	struct fruit_config_data *config = NULL;
 	struct fruit_disk_free_state state = {0};
 	struct smb_Dir *dir_hnd = NULL;
@@ -5425,11 +5426,8 @@ static uint64_t fruit_disk_free(vfs_handle_struct *handle,
 	if (!config->time_machine ||
 	    config->time_machine_max_size == 0)
 	{
-		return SMB_VFS_NEXT_DISK_FREE(handle,
-					      smb_fname,
-					      _bsize,
-					      _dfree,
-					      _dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, _bsize, _dfree, _dsize);
 	}
 
 	status = OpenDir(talloc_tos(),

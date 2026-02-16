@@ -39,30 +39,34 @@
 #define SMB_VFS_NEXT_DISCONNECT(handle) \
 	smb_vfs_call_disconnect((handle)->next)
 
-#define SMB_VFS_DISK_FREE(conn, smb_fname, bsize, dfree ,dsize) \
-	smb_vfs_call_disk_free((conn)->vfs_handles, (smb_fname), (bsize), (dfree), (dsize))
-#define SMB_VFS_NEXT_DISK_FREE(handle, smb_fname, bsize, dfree ,dsize)\
-	smb_vfs_call_disk_free((handle)->next, (smb_fname), (bsize), (dfree), (dsize))
+#define SMB_VFS_DISK_FREE(conn, fsp, bsize, dfree, dsize) \
+	smb_vfs_call_disk_free(                           \
+		(conn)->vfs_handles, (fsp), (bsize), (dfree), (dsize))
+#define SMB_VFS_NEXT_DISK_FREE(handle, fsp, bsize, dfree, dsize) \
+	smb_vfs_call_disk_free(                                  \
+		(handle)->next, (fsp), (bsize), (dfree), (dsize))
 
-#define SMB_VFS_GET_QUOTA(conn, smb_fname, qtype, id, qt)                           \
-	smb_vfs_call_get_quota((conn)->vfs_handles, (smb_fname), (qtype), (id), (qt))
-#define SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, qt)                    \
-	smb_vfs_call_get_quota((handle)->next, (smb_fname), (qtype), (id), (qt))
+#define SMB_VFS_GET_QUOTA(fsp, qtype, id, qt) \
+	smb_vfs_call_get_quota(               \
+		(fsp)->conn->vfs_handles, (fsp), (qtype), (id), (qt))
+#define SMB_VFS_NEXT_GET_QUOTA(handle, fsp, qtype, id, qt) \
+	smb_vfs_call_get_quota((handle)->next, (fsp), (qtype), (id), (qt))
 
-#define SMB_VFS_SET_QUOTA(conn, qtype, id, qt) \
-	smb_vfs_call_set_quota((conn)->vfs_handles, (qtype), (id), (qt))
-#define SMB_VFS_NEXT_SET_QUOTA(handle, qtype, id, qt) \
-	smb_vfs_call_set_quota((handle)->next, (qtype), (id), (qt))
+#define SMB_VFS_SET_QUOTA(fsp, qtype, id, qt) \
+	smb_vfs_call_set_quota(               \
+		(fsp)->conn->vfs_handles, (fsp), (qtype), (id), (qt))
+#define SMB_VFS_NEXT_SET_QUOTA(handle, fsp, qtype, id, qt) \
+	smb_vfs_call_set_quota((handle)->next, (fsp), (qtype), (id), (qt))
 
 #define SMB_VFS_GET_SHADOW_COPY_DATA(fsp,shadow_copy_data,labels) \
 	smb_vfs_call_get_shadow_copy_data((fsp)->conn->vfs_handles, (fsp), (shadow_copy_data), (labels))
 #define SMB_VFS_NEXT_GET_SHADOW_COPY_DATA(handle, fsp, shadow_copy_data ,labels) \
 	smb_vfs_call_get_shadow_copy_data((handle)->next, (fsp), (shadow_copy_data), (labels))
 
-#define SMB_VFS_STATVFS(conn, smb_fname, statbuf) \
-	smb_vfs_call_statvfs((conn)->vfs_handles, (smb_fname), (statbuf))
-#define SMB_VFS_NEXT_STATVFS(handle, smb_fname, statbuf) \
-	smb_vfs_call_statvfs((handle)->next, (smb_fname), (statbuf))
+#define SMB_VFS_FSTATVFS(conn, fsp, statbuf) \
+	smb_vfs_call_fstatvfs((conn)->vfs_handles, (fsp), (statbuf))
+#define SMB_VFS_NEXT_FSTATVFS(handle, fsp, statbuf) \
+	smb_vfs_call_fstatvfs((handle)->next, (fsp), (statbuf))
 
 #define SMB_VFS_FS_CAPABILITIES(conn, p_ts_res) \
 	smb_vfs_call_fs_capabilities((conn)->vfs_handles, (p_ts_res))

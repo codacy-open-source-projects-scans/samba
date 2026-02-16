@@ -42,10 +42,10 @@ void vfs_not_implemented_disconnect(vfs_handle_struct *handle)
 
 _PUBLIC_
 uint64_t vfs_not_implemented_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+				       struct files_struct *fsp,
+				       uint64_t *bsize,
+				       uint64_t *dfree,
+				       uint64_t *dsize)
 {
 	*bsize = 0;
 	*dfree = 0;
@@ -55,10 +55,10 @@ uint64_t vfs_not_implemented_disk_free(vfs_handle_struct *handle,
 
 _PUBLIC_
 int vfs_not_implemented_get_quota(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *dq)
+				  struct files_struct *fsp,
+				  enum SMB_QUOTA_TYPE qtype,
+				  unid_t id,
+				  SMB_DISK_QUOTA *dq)
 {
 	errno = ENOSYS;
 	return -1;
@@ -66,8 +66,10 @@ int vfs_not_implemented_get_quota(vfs_handle_struct *handle,
 
 _PUBLIC_
 int vfs_not_implemented_set_quota(vfs_handle_struct *handle,
+				  struct files_struct *fsp,
 				  enum SMB_QUOTA_TYPE qtype,
-				  unid_t id, SMB_DISK_QUOTA *dq)
+				  unid_t id,
+				  SMB_DISK_QUOTA *dq)
 {
 	errno = ENOSYS;
 	return -1;
@@ -84,9 +86,9 @@ int vfs_not_implemented_get_shadow_copy_data(vfs_handle_struct *handle,
 }
 
 _PUBLIC_
-int vfs_not_implemented_statvfs(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				struct vfs_statvfs_struct *statbuf)
+int vfs_not_implemented_fstatvfs(struct vfs_handle_struct *handle,
+				 struct files_struct *fsp,
+				 struct vfs_statvfs_struct *statbuf)
 {
 	errno = ENOSYS;
 	return -1;
@@ -1056,7 +1058,7 @@ static struct vfs_fn_pointers vfs_not_implemented_fns = {
 	.get_quota_fn = vfs_not_implemented_get_quota,
 	.set_quota_fn = vfs_not_implemented_set_quota,
 	.get_shadow_copy_data_fn = vfs_not_implemented_get_shadow_copy_data,
-	.statvfs_fn = vfs_not_implemented_statvfs,
+	.fstatvfs_fn = vfs_not_implemented_fstatvfs,
 	.fs_capabilities_fn = vfs_not_implemented_fs_capabilities,
 	.get_dfs_referrals_fn = vfs_not_implemented_get_dfs_referrals,
 	.create_dfs_pathat_fn = vfs_not_implemented_create_dfs_pathat,

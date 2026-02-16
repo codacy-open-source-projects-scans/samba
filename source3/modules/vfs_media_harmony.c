@@ -631,37 +631,60 @@ out:
  * Success: return 0
  * Failure: set errno, return -1
  */
-static int mh_statvfs(struct vfs_handle_struct *handle,
-		const struct smb_filename *smb_fname,
-		struct vfs_statvfs_struct *statbuf)
+static int mh_fstatvfs(struct vfs_handle_struct *handle,
+		       struct files_struct *fsp,
+		       struct vfs_statvfs_struct *statbuf)
 {
-	int status;
+	struct smb_filename *smb_fname = fsp->fsp_name;
+	char *clientPath = NULL;
 	struct smb_filename *clientFname = NULL;
+	NTSTATUS status;
+	int ret;
 
 	DEBUG(MH_INFO_DEBUG, ("Entering with path '%s'\n",
-			smb_fname->base_name));
+			      fsp_str_dbg(fsp)));
 
-	if (!is_in_media_files(smb_fname->base_name))
-	{
-		status = SMB_VFS_NEXT_STATVFS(handle, smb_fname, statbuf);
-		goto out;
+	if (!is_in_media_files(smb_fname->base_name)) {
+		ret = SMB_VFS_NEXT_FSTATVFS(handle, fsp, statbuf);
+		return ret;
 	}
 
-	status = alloc_get_client_smb_fname(handle,
-				talloc_tos(),
-				smb_fname,
-				&clientFname);
-	if (status != 0) {
+	ret = alloc_get_client_path(handle,
+				    talloc_tos(),
+				    smb_fname->base_name,
+				    &clientPath);
+	if (ret != 0) {
 		goto err;
 	}
 
-	status = SMB_VFS_NEXT_STATVFS(handle, clientFname, statbuf);
+	status = synthetic_pathref(talloc_tos(),
+				   handle->conn->cwd_fsp,
+				   clientPath,
+				   smb_fname->stream_name,
+				   NULL,
+				   smb_fname->twrp,
+				   smb_fname->flags,
+				   &clientFname);
+	if (!NT_STATUS_IS_OK(status)) {
+		errno = map_errno_from_nt_status(status);
+		ret = -1;
+		goto err;
+	}
+
+	ret = SMB_VFS_NEXT_FSTATVFS(handle, clientFname->fsp, statbuf);
+
 err:
-	TALLOC_FREE(clientFname);
-out:
-	DEBUG(MH_INFO_DEBUG, ("Leaving with path '%s'\n",
-			smb_fname->base_name));
-	return status;
+	{
+		int err = errno;
+		TALLOC_FREE(clientFname);
+
+		DEBUG(MH_INFO_DEBUG, ("Leaving with path '%s'\n",
+				      fsp_str_dbg(fsp)));
+
+		errno = err;
+	}
+
+	return ret;
 }
 
 static int alloc_set_client_dirinfo(vfs_handle_struct *handle,
@@ -1815,7 +1838,7 @@ err:
 static struct vfs_fn_pointers vfs_mh_fns = {
 	/* Disk operations */
 
-	.statvfs_fn = mh_statvfs,
+	.fstatvfs_fn = mh_fstatvfs,
 
 	/* Directory operations */
 

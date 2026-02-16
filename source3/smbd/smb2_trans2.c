@@ -30,6 +30,7 @@
 #include "version.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "lib/util/statvfs.h"
 #include "../libcli/auth/libcli_auth.h"
 #include "../librpc/gen_ndr/xattr.h"
 #include "../librpc/gen_ndr/ndr_security.h"
@@ -1963,9 +1964,6 @@ static bool fsinfo_unix_valid_level(connection_struct *conn,
 	return false;
 }
 
-/*
- * fsp is only valid for SMB2.
- */
 NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 connection_struct *conn,
 			 TALLOC_CTX *mem_ctx,
@@ -1974,7 +1972,6 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 unsigned int max_data_bytes,
 			 size_t *fixed_portion,
 			 struct files_struct *fsp,
-			 struct smb_filename *fname,
 			 char **ppdata,
 			 int *ret_data_len)
 {
@@ -1986,19 +1983,11 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 	const char *vname = volume_label(talloc_tos(), SNUM(conn));
 	int snum = SNUM(conn);
 	const char *fstype = lp_fstype(SNUM(conn));
-	const char *filename = NULL;
 	uint64_t bytes_per_sector = 512;
-	struct smb_filename smb_fname;
 	SMB_STRUCT_STAT st;
 	NTSTATUS status = NT_STATUS_OK;
 	uint64_t df_ret;
 	uint32_t serial;
-
-	if (fname == NULL || fname->base_name == NULL) {
-		filename = ".";
-	} else {
-		filename = fname->base_name;
-	}
 
 	if (IS_IPC(conn)) {
 		if (info_level != SMB_QUERY_CIFS_UNIX_INFO) {
@@ -2010,19 +1999,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 
 	DBG_NOTICE("level = %d\n", info_level);
 
-	smb_fname = (struct smb_filename) {
-		.base_name = discard_const_p(char, filename),
-		.flags = fname ? fname->flags : 0,
-		.twrp = fname ? fname->twrp : 0,
-	};
-
-	if(info_level != SMB_FS_QUOTA_INFORMATION
-	   && SMB_VFS_STAT(conn, &smb_fname) != 0) {
-		DEBUG(2,("stat of . failed (%s)\n", strerror(errno)));
-		return map_nt_error_from_unix(errno);
-	}
-
-	st = smb_fname.st;
+	st = fsp->fsp_name->st;
 
 	if (max_data_bytes + DIR_ENTRY_SAFETY_MARGIN < max_data_bytes) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -2045,8 +2022,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 		{
 			uint64_t dfree,dsize,bsize,block_size,sectors_per_unit;
 			data_len = 18;
-			df_ret = get_dfree_info(conn, &smb_fname, &bsize,
-						&dfree, &dsize);
+			df_ret = get_dfree_info(fsp, &bsize, &dfree, &dsize);
 			if (df_ret == (uint64_t)-1) {
 				return map_nt_error_from_unix(errno);
 			}
@@ -2206,8 +2182,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 		{
 			uint64_t dfree,dsize,bsize,block_size,sectors_per_unit;
 			data_len = 24;
-			df_ret = get_dfree_info(conn, &smb_fname, &bsize,
-						&dfree, &dsize);
+			df_ret = get_dfree_info(fsp, &bsize, &dfree, &dsize);
 			if (df_ret == (uint64_t)-1) {
 				return map_nt_error_from_unix(errno);
 			}
@@ -2248,8 +2223,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 		{
 			uint64_t dfree,dsize,bsize,block_size,sectors_per_unit;
 			data_len = 32;
-			df_ret = get_dfree_info(conn, &smb_fname, &bsize,
-						&dfree, &dsize);
+			df_ret = get_dfree_info(fsp, &bsize, &dfree, &dsize);
 			if (df_ret == (uint64_t)-1) {
 				return map_nt_error_from_unix(errno);
 			}
@@ -2500,7 +2474,7 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				return NT_STATUS_INVALID_LEVEL;
 			}
 
-			rc = SMB_VFS_STATVFS(conn, &smb_fname, &svfs);
+			rc = SMB_VFS_FSTATVFS(conn, fsp, &svfs);
 
 #ifdef EOPNOTSUPP
 			if (rc == EOPNOTSUPP) {
@@ -4651,11 +4625,9 @@ static NTSTATUS smb_set_file_basic_info(connection_struct *conn,
 					struct smb_filename *smb_fname)
 {
 	/* Patch to do this correctly from Paul Eggert <eggert@twinsun.com>. */
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	uint32_t dosmode = 0;
 	NTSTATUS status = NT_STATUS_OK;
-
-	init_smb_file_time(&ft);
 
 	if (total_data < 36) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -4707,9 +4679,7 @@ static NTSTATUS smb_set_info_standard(connection_struct *conn,
 					struct smb_filename *smb_fname)
 {
 	NTSTATUS status;
-	struct smb_file_time ft;
-
-	init_smb_file_time(&ft);
+	struct smb_file_time ft = smb_file_time_omit();
 
 	if (total_data < 12) {
 		return NT_STATUS_INVALID_PARAMETER;

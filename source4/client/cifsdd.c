@@ -25,6 +25,7 @@
 #include "libcli/resolve/resolve.h"
 #include "libcli/raw/libcliraw.h"
 #include "lib/events/events.h"
+#include "lib/util/smb_strtox.h"
 
 #include "cifsdd.h"
 #include "param/param.h"
@@ -162,6 +163,31 @@ static struct argdef * find_named_arg(const char * arg)
 	return(NULL);
 }
 
+/**
+ * Parse a string containing a boolean value.
+ *
+ * val will be set to the read value.
+ *
+ * @retval true if a boolean value was parsed, false otherwise.
+ */
+static bool conv_str_bool(const char *str, bool *val)
+{
+	char *end = NULL;
+	long lval;
+
+	if (str == NULL || *str == '\0') {
+		return false;
+	}
+
+	lval = strtol(str, &end, 10 /* base */);
+	if (end == NULL || *end != '\0' || end == str) {
+		return set_boolean(str, val);
+	}
+
+	*val = (lval) ? true : false;
+	return true;
+}
+
 int set_arg_argv(const char * argv)
 {
 	struct argdef *	arg;
@@ -190,11 +216,15 @@ int set_arg_argv(const char * argv)
 
 	/* Found a matching name; convert the variable argument. */
 	switch (arg->arg_type) {
-		case ARG_NUMERIC:
-			if (!conv_str_u64(val, &arg->arg_val.nval)) {
-				goto fail;
-			}
-			break;
+	case ARG_NUMERIC: {
+		int error = 0;
+		arg->arg_val.nval = smb_strtoull(
+			val, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
+		if (error != 0) {
+			goto fail;
+		}
+		break;
+	}
 		case ARG_SIZE:
 			if (!conv_str_size_error(val, &arg->arg_val.nval)) {
 				goto fail;

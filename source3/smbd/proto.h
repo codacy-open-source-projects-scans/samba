@@ -182,8 +182,10 @@ bool connections_snum_used(struct smbd_server_connection *unused, int snum);
 
 /* The following definitions come from smbd/dfree.c  */
 
-uint64_t get_dfree_info(connection_struct *conn, struct smb_filename *fname,
-			uint64_t *bsize, uint64_t *dfree, uint64_t *dsize);
+uint64_t get_dfree_info(struct files_struct *fsp,
+			uint64_t *bsize,
+			uint64_t *dfree,
+			uint64_t *dsize);
 void flush_dfree_cache(void);
 
 /* The following definitions come from smbd/dmapi.c  */
@@ -875,8 +877,11 @@ bool init_smb1_request(struct smb_request *req,
 
 /* The following definitions come from smbd/quotas.c  */
 
-bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
-		 uint64_t *bsize, uint64_t *dfree, uint64_t *dsize);
+bool disk_quotas(connection_struct *conn,
+		 struct files_struct *fsp,
+		 uint64_t *bsize,
+		 uint64_t *dfree,
+		 uint64_t *dsize);
 
 /* The following definitions come from smbd/smb2_reply.c  */
 
@@ -1044,10 +1049,6 @@ bool is_share_read_only_for_token(const char *username,
 NTSTATUS srvstr_push_fn(const char *base_ptr, uint16_t smb_flags2, void *dest,
 		      const char *src, int dest_len, int flags, size_t *ret_len);
 
-/* The following definitions come from smbd/statvfs.c  */
-
-int sys_statvfs(const char *path, struct vfs_statvfs_struct *statbuf);
-
 /* The following definitions come from smbd/trans2.c  */
 
 char *store_file_unix_basic(connection_struct *conn,
@@ -1202,7 +1203,7 @@ NTSTATUS vfs_fstreaminfo(struct files_struct *fsp,
 			TALLOC_CTX *mem_ctx,
 			unsigned int *num_streams,
 			struct stream_struct **streams);
-void init_smb_file_time(struct smb_file_time *ft);
+struct smb_file_time smb_file_time_omit(void);
 int vfs_fake_fd(void);
 int vfs_fake_fd_close(int fd);
 uint32_t vfs_get_fs_capabilities(struct connection_struct *conn,

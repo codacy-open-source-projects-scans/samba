@@ -19,9 +19,10 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "includes.h"
+#include "replace.h"
 #include "system/filesys.h"
-#include "smbd/smbd.h"
+#include "libcli/smb/smb_constants.h"
+#include "statvfs.h"
 
 #if defined(DARWINOS)
 #include <sys/attr.h>
@@ -77,6 +78,42 @@ static int darwin_fs_capabilities(const char * path)
 #endif /* DARWINOS */
 
 #if defined(BSD_STYLE_STATVFS)
+
+static void bsd_init_statvfs(const struct statvfs *src,
+			     struct vfs_statvfs_struct *dst)
+{
+	dst->OptimalTransferSize = src->f_iosize;
+	dst->BlockSize = src->f_bsize;
+	dst->TotalBlocks = src->f_blocks;
+	dst->BlocksAvail = src->f_bfree;
+	dst->UserBlocksAvail = src->f_bavail;
+	dst->TotalFileNodes = src->f_files;
+	dst->FreeFileNodes = src->f_ffree;
+	dst->FsIdentifier = (((uint64_t)src->f_fsid.val[0] << 32) &
+			     0xffffffff00000000LL) |
+			    (uint64_t)src->f_fsid.val[1];
+#ifdef DARWINOS
+	dst->FsCapabilities = darwin_fs_capabilities(src->f_mntonname);
+#else
+	/* Try to extrapolate some of the fs flags into the
+	 * capabilities
+	 */
+	dst->FsCapabilities = FILE_CASE_SENSITIVE_SEARCH |
+			      FILE_CASE_PRESERVED_NAMES;
+#ifdef MNT_ACLS
+	if (src->f_flags & MNT_ACLS) {
+		dst->FsCapabilities |= FILE_PERSISTENT_ACLS;
+	}
+#endif
+#endif
+	if (src->f_flags & MNT_QUOTA) {
+		dst->FsCapabilities |= FILE_VOLUME_QUOTAS;
+	}
+	if (src->f_flags & MNT_RDONLY) {
+		dst->FsCapabilities |= FILE_READ_ONLY_VOLUME;
+	}
+}
+
 static int bsd_statvfs(const char *path, struct vfs_statvfs_struct *statbuf)
 {
 	struct statfs sbuf;
@@ -87,37 +124,65 @@ static int bsd_statvfs(const char *path, struct vfs_statvfs_struct *statbuf)
 		return ret;
 	}
 
-	statbuf->OptimalTransferSize = sbuf.f_iosize;
-	statbuf->BlockSize = sbuf.f_bsize;
-	statbuf->TotalBlocks = sbuf.f_blocks;
-	statbuf->BlocksAvail = sbuf.f_bfree;
-	statbuf->UserBlocksAvail = sbuf.f_bavail;
-	statbuf->TotalFileNodes = sbuf.f_files;
-	statbuf->FreeFileNodes = sbuf.f_ffree;
-	statbuf->FsIdentifier =
-		(((uint64_t) sbuf.f_fsid.val[0] << 32) & 0xffffffff00000000LL) |
-		(uint64_t) sbuf.f_fsid.val[1];
-#ifdef DARWINOS
-	statbuf->FsCapabilities = darwin_fs_capabilities(sbuf.f_mntonname);
-#else
-	/* Try to extrapolate some of the fs flags into the
-	 * capabilities
-	 */
-	statbuf->FsCapabilities =
-		FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
-#ifdef MNT_ACLS
-	if (sbuf.f_flags & MNT_ACLS)
-		statbuf->FsCapabilities |= FILE_PERSISTENT_ACLS;
-#endif
-#endif
-	if (sbuf.f_flags & MNT_QUOTA)
-		statbuf->FsCapabilities |= FILE_VOLUME_QUOTAS;
-	if (sbuf.f_flags & MNT_RDONLY)
-		statbuf->FsCapabilities |= FILE_READ_ONLY_VOLUME;
+	bsd_init_statvfs(&sbuf, statbuf);
 
 	return 0;
 }
+
+static int bsd_fstatvfs(int fd, struct vfs_statvfs_struct *statbuf)
+{
+	struct statfs sbuf;
+	int ret;
+
+	ret = fstatfs(fd, &sbuf);
+	if (ret != 0) {
+		return ret;
+	}
+
+	bsd_init_statvfs(&sbuf, statbuf);
+
+	return 0;
+}
+
 #elif defined(STAT_STATVFS) && defined(HAVE_FSID_INT)
+
+static void posix_init_statvfs(const struct statvfs *src,
+			       struct vfs_statvfs_struct *dst)
+{
+	/* statvfs bsize is not the statfs bsize, the naming is terrible,
+	 * see bug 11810 */
+	dst->OptimalTransferSize = src->f_bsize;
+	dst->BlockSize = src->f_frsize;
+	dst->TotalBlocks = src->f_blocks;
+	dst->BlocksAvail = src->f_bfree;
+	dst->UserBlocksAvail = src->f_bavail;
+	dst->TotalFileNodes = src->f_files;
+	dst->FreeFileNodes = src->f_ffree;
+	dst->FsIdentifier = src->f_fsid;
+	/* Try to extrapolate some of the fs flags into the
+	 * capabilities
+	 */
+	dst->FsCapabilities = FILE_CASE_SENSITIVE_SEARCH |
+			      FILE_CASE_PRESERVED_NAMES;
+#ifdef ST_QUOTA
+	if (src->f_flag & ST_QUOTA) {
+		dst->FsCapabilities |= FILE_VOLUME_QUOTAS;
+	}
+#endif
+	if (src->f_flag & ST_RDONLY) {
+		dst->FsCapabilities |= FILE_READ_ONLY_VOLUME;
+	}
+
+#if defined(HAVE_FALLOC_FL_PUNCH_HOLE) && defined(HAVE_LSEEK_HOLE_DATA)
+	/*
+	 * Only flag sparse file support if ZERO_DATA can be used to
+	 * deallocate blocks, and SEEK_HOLE / SEEK_DATA can be used
+	 * to provide QUERY_ALLOCATED_RANGES information.
+	 */
+	dst->FsCapabilities |= FILE_SUPPORTS_SPARSE_FILES;
+#endif
+}
+
 static int posix_statvfs(const char *path, struct vfs_statvfs_struct *statbuf)
 {
 	struct statvfs statvfs_buf;
@@ -129,38 +194,27 @@ static int posix_statvfs(const char *path, struct vfs_statvfs_struct *statbuf)
 		return ret;
 	}
 
-	/* statvfs bsize is not the statfs bsize, the naming is terrible,
-	 * see bug 11810 */
-	statbuf->OptimalTransferSize = statvfs_buf.f_bsize;
-	statbuf->BlockSize = statvfs_buf.f_frsize;
-	statbuf->TotalBlocks = statvfs_buf.f_blocks;
-	statbuf->BlocksAvail = statvfs_buf.f_bfree;
-	statbuf->UserBlocksAvail = statvfs_buf.f_bavail;
-	statbuf->TotalFileNodes = statvfs_buf.f_files;
-	statbuf->FreeFileNodes = statvfs_buf.f_ffree;
-	statbuf->FsIdentifier = statvfs_buf.f_fsid;
-	/* Try to extrapolate some of the fs flags into the
-	 * capabilities
-	 */
-	statbuf->FsCapabilities =
-		FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
-#ifdef ST_QUOTA
-	if (statvfs_buf.f_flag & ST_QUOTA)
-		statbuf->FsCapabilities |= FILE_VOLUME_QUOTAS;
-#endif
-	if (statvfs_buf.f_flag & ST_RDONLY)
-		statbuf->FsCapabilities |= FILE_READ_ONLY_VOLUME;
+	posix_init_statvfs(&statvfs_buf, statbuf);
 
-#if defined(HAVE_FALLOC_FL_PUNCH_HOLE) && defined(HAVE_LSEEK_HOLE_DATA)
-	/*
-	 * Only flag sparse file support if ZERO_DATA can be used to
-	 * deallocate blocks, and SEEK_HOLE / SEEK_DATA can be used
-	 * to provide QUERY_ALLOCATED_RANGES information.
-	 */
-	statbuf->FsCapabilities |= FILE_SUPPORTS_SPARSE_FILES;
-#endif
 	return 0;
 }
+
+static int posix_fstatvfs(int fd, struct vfs_statvfs_struct *statbuf)
+{
+	struct statvfs statvfs_buf;
+	int ret;
+
+	ret = fstatvfs(fd, &statvfs_buf);
+
+	if (ret != 0) {
+		return ret;
+	}
+
+	posix_init_statvfs(&statvfs_buf, statbuf);
+
+	return 0;
+}
+
 #endif
 
 /*
@@ -184,4 +238,49 @@ int sys_statvfs(const char *path, struct vfs_statvfs_struct *statbuf)
 #endif /* EOPNOTSUPP */
 #endif /* LINUX */
 
+}
+
+int sys_fstatvfs(int fd, struct vfs_statvfs_struct *statbuf)
+{
+#if defined(BSD_STYLE_STATVFS)
+	return bsd_fstatvfs(fd, statbuf);
+#elif defined(STAT_STATVFS) && defined(HAVE_FSID_INT)
+	return posix_fstatvfs(fd, statbuf);
+#else
+	/* BB change this to return invalid level */
+#ifdef EOPNOTSUPP
+	return EOPNOTSUPP;
+#else
+	return -1;
+#endif /* EOPNOTSUPP */
+#endif /* LINUX */
+}
+
+/*
+ * Return the number of TOSIZE-byte blocks used by BLOCKS
+ * FROMSIZE-byte blocks, rounding away from zero.
+ */
+static uint64_t adjust_blocks(uint64_t blocks, uint64_t fromsize)
+{
+	if (fromsize == 512) {
+		return blocks;
+	}
+
+	if (fromsize > 512) {
+		return blocks * (fromsize / 512);
+	}
+
+	if (fromsize == 0) {
+		fromsize = 512;
+	}
+
+	return (blocks + 1) / (512 / fromsize);
+}
+
+void statvfs2fsusage(const struct vfs_statvfs_struct *statbuf,
+		     uint64_t *dfree,
+		     uint64_t *dsize)
+{
+	*dfree = adjust_blocks(statbuf->UserBlocksAvail, statbuf->BlockSize);
+	*dsize = adjust_blocks(statbuf->TotalBlocks, statbuf->BlockSize);
 }

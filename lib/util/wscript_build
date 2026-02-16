@@ -188,7 +188,7 @@ else:
                          base64.c
                          dprintf.c
                          dns_cmp.c
-                         fsusage.c
+                         statvfs.c
                          genrand_util.c
                          getpass.c
                          idtree_random.c

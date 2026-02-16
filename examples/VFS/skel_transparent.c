@@ -49,27 +49,30 @@ static void skel_disconnect(vfs_handle_struct *handle)
 }
 
 static uint64_t skel_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+			       struct files_struct *fsp,
+			       uint64_t *bsize,
+			       uint64_t *dfree,
+			       uint64_t *dsize)
 {
-	return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname, bsize, dfree, dsize);
+	return SMB_VFS_NEXT_DISK_FREE(handle, fsp, bsize, dfree, dsize);
 }
 
 static int skel_get_quota(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *dq)
+			  struct files_struct *fsp,
+			  enum SMB_QUOTA_TYPE qtype,
+			  unid_t id,
+			  SMB_DISK_QUOTA *dq)
 {
-	return SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, dq);
+	return SMB_VFS_NEXT_GET_QUOTA(handle, fsp, qtype, id, dq);
 }
 
-static int skel_set_quota(vfs_handle_struct *handle, enum SMB_QUOTA_TYPE qtype,
-			  unid_t id, SMB_DISK_QUOTA *dq)
+static int skel_set_quota(vfs_handle_struct *handle,
+			  struct files_struct *fsp,
+			  enum SMB_QUOTA_TYPE qtype,
+			  unid_t id,
+			  SMB_DISK_QUOTA *dq)
 {
-	return SMB_VFS_NEXT_SET_QUOTA(handle, qtype, id, dq);
+	return SMB_VFS_NEXT_SET_QUOTA(handle, fsp, qtype, id, dq);
 }
 
 static int skel_get_shadow_copy_data(vfs_handle_struct *handle,
@@ -81,11 +84,11 @@ static int skel_get_shadow_copy_data(vfs_handle_struct *handle,
 						 labels);
 }
 
-static int skel_statvfs(struct vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			struct vfs_statvfs_struct *statbuf)
+static int skel_fstatvfs(struct vfs_handle_struct *handle,
+			 struct files_struct *fsp,
+			 struct vfs_statvfs_struct *statbuf)
 {
-	return SMB_VFS_NEXT_STATVFS(handle, smb_fname, statbuf);
+	return SMB_VFS_NEXT_FSTATVFS(handle, fsp, statbuf);
 }
 
 static uint32_t skel_fs_capabilities(struct vfs_handle_struct *handle,
@@ -1271,7 +1274,7 @@ static struct vfs_fn_pointers skel_transparent_fns = {
 	.get_quota_fn = skel_get_quota,
 	.set_quota_fn = skel_set_quota,
 	.get_shadow_copy_data_fn = skel_get_shadow_copy_data,
-	.statvfs_fn = skel_statvfs,
+	.fstatvfs_fn = skel_fstatvfs,
 	.fs_capabilities_fn = skel_fs_capabilities,
 	.get_dfs_referrals_fn = skel_get_dfs_referrals,
 	.create_dfs_pathat_fn = skel_create_dfs_pathat,

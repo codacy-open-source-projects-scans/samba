@@ -122,27 +122,33 @@ static NTSTATUS cmd_disk_free(struct vfs_state *vfs, TALLOC_CTX *mem_ctx, int ar
 {
 	struct smb_filename *smb_fname = NULL;
 	uint64_t diskfree, bsize, dfree, dsize;
+	NTSTATUS status;
+
 	if (argc != 2) {
 		printf("Usage: disk_free <path>\n");
 		return NT_STATUS_OK;
 	}
 
-	smb_fname = synthetic_smb_fname(talloc_tos(),
-					argv[1],
-					NULL,
-					NULL,
-					0,
-					ssf_flags());
-	if (smb_fname == NULL) {
-		return NT_STATUS_NO_MEMORY;
+	status = synthetic_pathref(talloc_tos(),
+				   vfs->conn->cwd_fsp,
+				   argv[1],
+				   NULL,
+				   NULL,
+				   0,
+				   ssf_flags(),
+				   &smb_fname);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
 	}
-	diskfree = SMB_VFS_DISK_FREE(vfs->conn, smb_fname,
-				&bsize, &dfree, &dsize);
-	printf("disk_free: %lu, bsize = %lu, dfree = %lu, dsize = %lu\n",
-			(unsigned long)diskfree,
-			(unsigned long)bsize,
-			(unsigned long)dfree,
-			(unsigned long)dsize);
+	diskfree = SMB_VFS_DISK_FREE(
+		vfs->conn, smb_fname->fsp, &bsize, &dfree, &dsize);
+	TALLOC_FREE(smb_fname);
+	printf("disk_free: %" PRIu64 ", bsize = %" PRIu64 ", dfree = %" PRIu64
+	       ", dsize = %" PRIu64 "\n",
+	       diskfree,
+	       bsize,
+	       dfree,
+	       dsize);
 	return NT_STATUS_OK;
 }
 
@@ -1048,7 +1054,7 @@ static NTSTATUS cmd_getwd(struct vfs_state *vfs, TALLOC_CTX *mem_ctx, int argc, 
 
 static NTSTATUS cmd_utime(struct vfs_state *vfs, TALLOC_CTX *mem_ctx, int argc, const char **argv)
 {
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	struct files_struct *dirfsp = NULL;
 	struct smb_filename *smb_fname = NULL;
 	NTSTATUS status;
@@ -1057,8 +1063,6 @@ static NTSTATUS cmd_utime(struct vfs_state *vfs, TALLOC_CTX *mem_ctx, int argc, 
 		printf("Usage: utime <path> <access> <modify>\n");
 		return NT_STATUS_OK;
 	}
-
-	init_smb_file_time(&ft);
 
 	ft.atime = time_t_to_full_timespec(atoi(argv[2]));
 	ft.mtime = time_t_to_full_timespec(atoi(argv[3]));

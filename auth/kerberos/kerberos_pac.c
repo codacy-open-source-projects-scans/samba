@@ -55,10 +55,10 @@ krb5_error_code check_pac_checksum(DATA_BLOB pac_data,
 		/* RFC8009 types. Not supported by AD yet but used by FreeIPA and MIT Kerberos */
 		{CKSUMTYPE_HMAC_SHA256_128_AES128, ENCTYPE_AES128_CTS_HMAC_SHA256_128},
 		{CKSUMTYPE_HMAC_SHA384_192_AES256, ENCTYPE_AES256_CTS_HMAC_SHA384_192},
-		{0, 0},
 	};
+	size_t num_supported_types = ARRAY_SIZE(supported_types);
 
-	for(idx = 0; supported_types[idx].cksum_type != 0; idx++) {
+	for (idx = 0; idx < num_supported_types; idx++) {
 		if (sig->type == supported_types[idx].cksum_type) {
 			if (KRB5_KEY_TYPE(keyblock) != supported_types[idx].enc_type) {
 				return EINVAL;
@@ -70,7 +70,7 @@ krb5_error_code check_pac_checksum(DATA_BLOB pac_data,
 
 	/* do not do key type check for HMAC-MD5 */
 	if ((sig->type != CKSUMTYPE_HMAC_MD5) &&
-	    (supported_types[idx].cksum_type == 0)) {
+	    (idx == num_supported_types)) {
 		DEBUG(2,("check_pac_checksum: Checksum Type %d is not supported\n",
 			(int)sig->type));
 		return EINVAL;
@@ -143,7 +143,7 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 	DATA_BLOB modified_pac_blob;
 
 	NTTIME tgs_authtime_nttime;
-	int i;
+	uint32_t i;
 
 	struct PAC_SIGNATURE_DATA *srv_sig_ptr = NULL;
 	struct PAC_SIGNATURE_DATA *kdc_sig_ptr = NULL;
@@ -414,14 +414,13 @@ NTSTATUS kerberos_decode_pac(TALLOC_CTX *mem_ctx,
 		 logon_info->info3.base.account_name.string,
 		 logon_info->info3.base.full_name.string));
 
-	DEBUG(10,("Successfully validated Kerberos PAC\n"));
-
 	if (DEBUGLEVEL >= 10) {
-		const char *s;
-		s = NDR_PRINT_STRUCT_STRING(tmp_ctx, PAC_DATA, pac_data);
-		if (s) {
-			DEBUGADD(10,("%s\n", s));
-		}
+		const char *s = NDR_PRINT_STRUCT_STRING(
+			tmp_ctx, PAC_DATA, pac_data);
+
+		DEBUG(10,("Successfully validated Kerberos PAC\n%s%c",
+			  s != NULL ? s : "",
+			  s != NULL ? '\n' : '\0'));
 	}
 
 	if (pac_data_out) {
@@ -447,7 +446,7 @@ NTSTATUS kerberos_pac_logon_info(TALLOC_CTX *mem_ctx,
 {
 	NTSTATUS nt_status;
 	struct PAC_DATA *pac_data;
-	int i;
+	uint32_t i;
 	nt_status = kerberos_decode_pac(mem_ctx,
 					blob,
 					context,

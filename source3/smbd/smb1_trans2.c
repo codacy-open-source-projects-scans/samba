@@ -1640,6 +1640,7 @@ static void call_trans2qfsinfo(connection_struct *conn,
 	uint16_t info_level;
 	int data_len = 0;
 	size_t fixed_portion;
+	struct smb_filename *dot = NULL;
 	NTSTATUS status;
 
 	if (total_params < 2) {
@@ -1661,14 +1662,30 @@ static void call_trans2qfsinfo(connection_struct *conn,
 
 	DBG_NOTICE("level = %" PRIu16 "\n", info_level);
 
-	status = smbd_do_qfsinfo(req->xconn, conn, req,
+	status = openat_pathref_fsp_dot(req,
+					conn->cwd_fsp,
+					req->posix_pathnames
+						? SMB_FILENAME_POSIX_PATH
+						: 0,
+					&dot);
+	if (!NT_STATUS_IS_OK(status)) {
+		reply_nterror(req, status);
+		return;
+	}
+
+	status = smbd_do_qfsinfo(req->xconn,
+				 conn,
+				 req,
 				 info_level,
 				 req->flags2,
 				 max_data_bytes,
 				 &fixed_portion,
-				 NULL,
-				 NULL,
-				 ppdata, &data_len);
+				 dot->fsp,
+				 ppdata,
+				 &data_len);
+
+	TALLOC_FREE(dot);
+
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
 		return;
@@ -3913,7 +3930,7 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 					files_struct *fsp,
 					struct smb_filename *smb_fname)
 {
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	uint32_t raw_unixmode;
 	mode_t unixmode;
 	off_t size = 0;
@@ -3926,8 +3943,6 @@ static NTSTATUS smb_set_file_unix_basic(connection_struct *conn,
 	if (!CAN_WRITE(conn)) {
 		return NT_STATUS_DOS(ERRSRV, ERRaccess);
 	}
-
-	init_smb_file_time(&ft);
 
 	if (total_data < 100) {
 		return NT_STATUS_INVALID_PARAMETER;

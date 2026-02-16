@@ -37,6 +37,7 @@
 #include "offload_token.h"
 #include "util_reparse.h"
 #include "lib/util/string_wrappers.h"
+#include "lib/util/statvfs.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
@@ -98,30 +99,39 @@ static void vfswrap_disconnect(vfs_handle_struct *handle)
 /* Disk operations */
 
 static uint64_t vfswrap_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+				  struct files_struct *fsp,
+				  uint64_t *bsize,
+				  uint64_t *dfree,
+				  uint64_t *dsize)
 {
-	if (sys_fsusage(smb_fname->base_name, dfree, dsize) != 0) {
+	struct vfs_statvfs_struct statvfsbuf;
+	int fd, ret;
+
+	fd = fsp_get_pathref_fd(fsp);
+
+	ret = sys_fstatvfs(fd, &statvfsbuf);
+	if (ret != 0) {
 		return (uint64_t)-1;
 	}
+	statvfs2fsusage(&statvfsbuf, dfree, dsize);
 
 	*bsize = 512;
 	return *dfree / 2;
 }
 
 static int vfswrap_get_quota(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *qt)
+			     struct files_struct *fsp,
+			     enum SMB_QUOTA_TYPE qtype,
+			     unid_t id,
+			     SMB_DISK_QUOTA *qt)
 {
 #ifdef HAVE_SYS_QUOTAS
+	struct smb_filename *smb_fname = fsp->fsp_name;
 	int result;
 
 	START_PROFILE_X(SNUM(handle->conn), syscall_get_quota);
-	result = sys_get_quota(smb_fname->base_name, qtype, id, qt);
+	result = sys_get_quota(
+		smb_fname->st.st_ex_dev, smb_fname->base_name, qtype, id, qt);
 	END_PROFILE_X(syscall_get_quota);
 	return result;
 #else
@@ -130,13 +140,19 @@ static int vfswrap_get_quota(struct vfs_handle_struct *handle,
 #endif
 }
 
-static int vfswrap_set_quota(struct vfs_handle_struct *handle, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *qt)
+static int vfswrap_set_quota(struct vfs_handle_struct *handle,
+			     struct files_struct *fsp,
+			     enum SMB_QUOTA_TYPE qtype,
+			     unid_t id,
+			     SMB_DISK_QUOTA *qt)
 {
 #ifdef HAVE_SYS_QUOTAS
+	struct smb_filename *smb_fname = fsp->fsp_name;
 	int result;
 
 	START_PROFILE_X(SNUM(handle->conn), syscall_set_quota);
-	result = sys_set_quota(handle->conn->connectpath, qtype, id, qt);
+	result = sys_set_quota(
+		smb_fname->st.st_ex_dev, smb_fname->base_name, qtype, id, qt);
 	END_PROFILE_X(syscall_set_quota);
 	return result;
 #else
@@ -154,11 +170,16 @@ static int vfswrap_get_shadow_copy_data(struct vfs_handle_struct *handle,
 	return -1;  /* Not implemented. */
 }
 
-static int vfswrap_statvfs(struct vfs_handle_struct *handle,
-			   const struct smb_filename *smb_fname,
-			   struct vfs_statvfs_struct *statbuf)
+static int vfswrap_fstatvfs(struct vfs_handle_struct *handle,
+			    struct files_struct *fsp,
+			    struct vfs_statvfs_struct *statbuf)
 {
-	return sys_statvfs(smb_fname->base_name, statbuf);
+	int ret, fd;
+
+	fd = fsp_get_pathref_fd(fsp);
+
+	ret = sys_fstatvfs(fd, statbuf);
+	return ret;
 }
 
 static uint32_t vfswrap_fs_capabilities(struct vfs_handle_struct *handle,
@@ -3011,8 +3032,7 @@ static int strict_allocate_ftruncate(vfs_handle_struct *handle, files_struct *fs
 		"error %d. Falling back to slow manual allocation\n", errno);
 
 	/* available disk space is enough or not? */
-	space_avail =
-	    get_dfree_info(fsp->conn, fsp->fsp_name, &bsize, &dfree, &dsize);
+	space_avail = get_dfree_info(fsp, &bsize, &dfree, &dsize);
 	/* space_avail is 1k blocks */
 	if (space_avail == (uint64_t)-1 ||
 			((uint64_t)space_to_write/1024 > space_avail) ) {
@@ -4037,7 +4057,7 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.get_quota_fn = vfswrap_get_quota,
 	.set_quota_fn = vfswrap_set_quota,
 	.get_shadow_copy_data_fn = vfswrap_get_shadow_copy_data,
-	.statvfs_fn = vfswrap_statvfs,
+	.fstatvfs_fn = vfswrap_fstatvfs,
 	.fs_capabilities_fn = vfswrap_fs_capabilities,
 	.get_dfs_referrals_fn = vfswrap_get_dfs_referrals,
 	.create_dfs_pathat_fn = vfswrap_create_dfs_pathat,

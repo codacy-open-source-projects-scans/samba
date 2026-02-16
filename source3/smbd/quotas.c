@@ -216,9 +216,13 @@ try to get the disk space from disk quotas (SunOS & Solaris2 version)
 Quota code by Peter Urbanec (amiga@cse.unsw.edu.au).
 ****************************************************************************/
 
-bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
-		 uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+bool disk_quotas(connection_struct *conn,
+		 struct files_struct *fsp,
+		 uint64_t *bsize,
+		 uint64_t *dfree,
+		 uint64_t *dsize)
 {
+	struct smb_filename *fname = fsp->fsp_name;
 	uid_t euser_id;
 	int ret;
 	struct dqblk D;
@@ -339,8 +343,11 @@ bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
 
 #else /* WITH_QUOTAS */
 
-bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
-		 uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+bool disk_quotas(connection_struct *conn,
+		 struct files_struct *fsp,
+		 uint64_t *bsize,
+		 uint64_t *dfree,
+		 uint64_t *dsize)
 {
 	(*bsize) = 512; /* This value should be ignored */
 
@@ -358,9 +365,13 @@ bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
 /* wrapper to the new sys_quota interface
    this file should be removed later
    */
-bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
-		 uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+bool disk_quotas(connection_struct *conn,
+		 struct files_struct *fsp,
+		 uint64_t *bsize,
+		 uint64_t *dfree,
+		 uint64_t *dsize)
 {
+	struct smb_filename *fname = fsp->fsp_name;
 	int r;
 	SMB_DISK_QUOTA D;
 	unid_t id;
@@ -372,8 +383,7 @@ bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
 	 */
 	ZERO_STRUCT(D);
 	id.uid = -1;
-	r = SMB_VFS_GET_QUOTA(conn, fname, SMB_USER_FS_QUOTA_TYPE,
-			      id, &D);
+	r = SMB_VFS_GET_QUOTA(fsp, SMB_USER_FS_QUOTA_TYPE, id, &D);
 	if (r == -1 && errno != ENOSYS) {
 		goto try_group_quota;
 	}
@@ -394,14 +404,12 @@ bool disk_quotas(connection_struct *conn, struct smb_filename *fname,
 
 		id.uid = fname->st.st_ex_uid;
 		become_root();
-		r = SMB_VFS_GET_QUOTA(conn, fname,
-				      SMB_USER_QUOTA_TYPE, id, &D);
+		r = SMB_VFS_GET_QUOTA(fsp, SMB_USER_QUOTA_TYPE, id, &D);
 		save_errno = errno;
 		unbecome_root();
 		errno = save_errno;
 	} else {
-		r = SMB_VFS_GET_QUOTA(conn, fname,
-				      SMB_USER_QUOTA_TYPE, id, &D);
+		r = SMB_VFS_GET_QUOTA(fsp, SMB_USER_QUOTA_TYPE, id, &D);
 	}
 
 	if (r == -1) {
@@ -438,8 +446,7 @@ try_group_quota:
 	 */
 	ZERO_STRUCT(D);
 	id.gid = -1;
-	r = SMB_VFS_GET_QUOTA(conn, fname, SMB_GROUP_FS_QUOTA_TYPE,
-			      id, &D);
+	r = SMB_VFS_GET_QUOTA(fsp, SMB_GROUP_FS_QUOTA_TYPE, id, &D);
 	if (r == -1 && errno != ENOSYS) {
 		return false;
 	}
@@ -459,13 +466,11 @@ try_group_quota:
 	    fname->st.st_ex_mode & S_ISGID) {
 		id.gid = fname->st.st_ex_gid;
 		become_root();
-		r = SMB_VFS_GET_QUOTA(conn, fname, SMB_GROUP_QUOTA_TYPE, id,
-				      &D);
+		r = SMB_VFS_GET_QUOTA(fsp, SMB_GROUP_QUOTA_TYPE, id, &D);
 		unbecome_root();
 	} else {
 		id.gid = getegid();
-		r = SMB_VFS_GET_QUOTA(conn, fname, SMB_GROUP_QUOTA_TYPE, id,
-				      &D);
+		r = SMB_VFS_GET_QUOTA(fsp, SMB_GROUP_QUOTA_TYPE, id, &D);
 	}
 
 	if (r == -1) {

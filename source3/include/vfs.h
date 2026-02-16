@@ -397,9 +397,15 @@
  * Version 52 - Remove connectpath
  * Version 52 - Remove audit_file
  * Version 52 - Add VFS_OPEN_HOW_RESOLVE_NO_XDEV for SMB_VFS_OPENAT()
+ * Change to Version 53 - will ship with 4.25
+ * Version 53 - Change DISK_FREE to take a fsp instead of a name
+ * Version 53 - Add fstatvfs
+ * Version 53 - Remove statvfs
+ * Version 53 - Change GET_QUOTA to take a fsp instead of a name
+ * Version 53 - Add fsp to SET_QUOTA
  */
 
-#define SMB_VFS_INTERFACE_VERSION 52
+#define SMB_VFS_INTERFACE_VERSION 53
 
 /*
     All intercepted VFS operations must be declared as static functions inside module source
@@ -983,20 +989,24 @@ struct vfs_fn_pointers {
 	int (*connect_fn)(struct vfs_handle_struct *handle, const char *service, const char *user);
 	void (*disconnect_fn)(struct vfs_handle_struct *handle);
 	uint64_t (*disk_free_fn)(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize);
+				 struct files_struct *fsp,
+				 uint64_t *bsize,
+				 uint64_t *dfree,
+				 uint64_t *dsize);
 	int (*get_quota_fn)(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *qt);
-	int (*set_quota_fn)(struct vfs_handle_struct *handle, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *qt);
+			    struct files_struct *fsp,
+			    enum SMB_QUOTA_TYPE qtype,
+			    unid_t id,
+			    SMB_DISK_QUOTA *qt);
+	int (*set_quota_fn)(struct vfs_handle_struct *handle,
+			    struct files_struct *fsp,
+			    enum SMB_QUOTA_TYPE qtype,
+			    unid_t id,
+			    SMB_DISK_QUOTA *qt);
 	int (*get_shadow_copy_data_fn)(struct vfs_handle_struct *handle, struct files_struct *fsp, struct shadow_copy_data *shadow_copy_data, bool labels);
-	int (*statvfs_fn)(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				struct vfs_statvfs_struct *statbuf);
+	int (*fstatvfs_fn)(struct vfs_handle_struct *handle,
+			   struct files_struct *fsp,
+			   struct vfs_statvfs_struct *statbuf);
 	uint32_t (*fs_capabilities_fn)(struct vfs_handle_struct *handle, enum timestamp_set_resolution *p_ts_res);
 
 	/*
@@ -1369,36 +1379,6 @@ typedef struct vfs_handle_struct {
 	void (*free_data)(void **data);
 } vfs_handle_struct;
 
-
-struct vfs_statvfs_struct {
-	/* For undefined recommended transfer size return -1 in that field */
-	uint32_t OptimalTransferSize;  /* bsize on some os, iosize on other os */
-	uint32_t BlockSize;
-
-	/*
-	 The next three fields are in terms of the block size.
-	 (above). If block size is unknown, 4096 would be a
-	 reasonable block size for a server to report.
-	 Note that returning the blocks/blocksavail removes need
-	 to make a second call (to QFSInfo level 0x103 to get this info.
-	 UserBlockAvail is typically less than or equal to BlocksAvail,
-	 if no distinction is made return the same value in each.
-	*/
-
-	uint64_t TotalBlocks;
-	uint64_t BlocksAvail;       /* bfree */
-	uint64_t UserBlocksAvail;   /* bavail */
-
-	/* For undefined Node fields or FSID return -1 */
-	uint64_t TotalFileNodes;
-	uint64_t FreeFileNodes;
-	uint64_t FsIdentifier;   /* fsid */
-	/* NB Namelen comes from FILE_SYSTEM_ATTRIBUTE_INFO call */
-	/* NB flags can come from FILE_SYSTEM_DEVICE_INFO call   */
-
-	int FsCapabilities;
-};
-
 /* Add a new FSP extension of the given type. Returns a pointer to the
  * extension data.
  */
@@ -1468,25 +1448,27 @@ int smb_vfs_call_connect(struct vfs_handle_struct *handle,
 			 const char *service, const char *user);
 void smb_vfs_call_disconnect(struct vfs_handle_struct *handle);
 uint64_t smb_vfs_call_disk_free(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_filename,
+				struct files_struct *fsp,
 				uint64_t *bsize,
 				uint64_t *dfree,
 				uint64_t *dsize);
 int smb_vfs_call_get_quota(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_filename,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *qt);
+			   struct files_struct *fsp,
+			   enum SMB_QUOTA_TYPE qtype,
+			   unid_t id,
+			   SMB_DISK_QUOTA *qt);
 int smb_vfs_call_set_quota(struct vfs_handle_struct *handle,
-			   enum SMB_QUOTA_TYPE qtype, unid_t id,
+			   struct files_struct *fsp,
+			   enum SMB_QUOTA_TYPE qtype,
+			   unid_t id,
 			   SMB_DISK_QUOTA *qt);
 int smb_vfs_call_get_shadow_copy_data(struct vfs_handle_struct *handle,
 				      struct files_struct *fsp,
 				      struct shadow_copy_data *shadow_copy_data,
 				      bool labels);
-int smb_vfs_call_statvfs(struct vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			struct vfs_statvfs_struct *statbuf);
+int smb_vfs_call_fstatvfs(struct vfs_handle_struct *handle,
+			  struct files_struct *fsp,
+			  struct vfs_statvfs_struct *statbuf);
 uint32_t smb_vfs_call_fs_capabilities(struct vfs_handle_struct *handle,
 				      enum timestamp_set_resolution *p_ts_res);
 /*
@@ -1901,25 +1883,27 @@ int vfs_not_implemented_connect(
 			const char *user);
 void vfs_not_implemented_disconnect(vfs_handle_struct *handle);
 uint64_t vfs_not_implemented_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize);
+				       struct files_struct *fsp,
+				       uint64_t *bsize,
+				       uint64_t *dfree,
+				       uint64_t *dsize);
 int vfs_not_implemented_get_quota(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *dq);
-int vfs_not_implemented_set_quota(vfs_handle_struct *handle,
+				  struct files_struct *fsp,
 				  enum SMB_QUOTA_TYPE qtype,
-				  unid_t id, SMB_DISK_QUOTA *dq);
+				  unid_t id,
+				  SMB_DISK_QUOTA *dq);
+int vfs_not_implemented_set_quota(vfs_handle_struct *handle,
+				  struct files_struct *fsp,
+				  enum SMB_QUOTA_TYPE qtype,
+				  unid_t id,
+				  SMB_DISK_QUOTA *dq);
 int vfs_not_implemented_get_shadow_copy_data(vfs_handle_struct *handle,
 				files_struct *fsp,
 				struct shadow_copy_data *shadow_copy_data,
 				bool labels);
-int vfs_not_implemented_statvfs(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				struct vfs_statvfs_struct *statbuf);
+int vfs_not_implemented_fstatvfs(struct vfs_handle_struct *handle,
+				 struct files_struct *fsp,
+				 struct vfs_statvfs_struct *statbuf);
 uint32_t vfs_not_implemented_fs_capabilities(struct vfs_handle_struct *handle,
 				enum timestamp_set_resolution *p_ts_res);
 NTSTATUS vfs_not_implemented_get_dfs_referrals(struct vfs_handle_struct *handle,

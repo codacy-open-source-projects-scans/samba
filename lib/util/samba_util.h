@@ -295,27 +295,9 @@ _PUBLIC_ size_t ascii_len_n(const char *src, size_t n);
 _PUBLIC_ bool set_boolean(const char *boolean_string, bool *boolean);
 
 /**
- * Parse a string containing a boolean value.
- *
- * val will be set to the read value.
- *
- * @retval true if a boolean value was parsed, false otherwise.
- */
-_PUBLIC_ bool conv_str_bool(const char * str, bool * val);
-
-/**
  * Convert a size specification like 16K into an integral number of bytes.
  **/
 _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val);
-
-/**
- * Parse a uint64_t value from a string
- *
- * val will be set to the value read.
- *
- * @retval true if parsing was successful, false otherwise
- */
-_PUBLIC_ bool conv_str_u64(const char * str, uint64_t * val);
 
 /**
  * @brief Constant time compare to memory regions.
@@ -507,19 +489,6 @@ void *malloc_array(size_t el_size, unsigned int count);
 void *memalign_array(size_t el_size, size_t align, unsigned int count);
 
 void *calloc_array(size_t size, size_t nmemb);
-
-/* The following definitions come from lib/util/fsusage.c  */
-
-
-/**
- * Retrieve amount of free disk space.
- * this does all of the system specific guff to get the free disk space.
- * It is derived from code in the GNU fileutils package, but has been
- * considerably mangled for use here
- *
- * results are returned in *dfree and *dsize, in 512 byte units
-*/
-_PUBLIC_ int sys_fsusage(const char *path, uint64_t *dfree, uint64_t *dsize);
 
 /* The following definitions come from lib/util/ms_fnmatch.c  */
 

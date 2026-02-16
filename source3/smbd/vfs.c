@@ -27,6 +27,7 @@
 #include "system/filesys.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
+#include "lib/util/statvfs.h"
 #include "../lib/util/memcache.h"
 #include "transfer_file.h"
 #include "ntioctl.h"
@@ -541,7 +542,6 @@ ssize_t vfs_pwrite_data(struct smb_request *req,
 int vfs_allocate_file_space(files_struct *fsp, uint64_t len)
 {
 	int ret;
-	connection_struct *conn = fsp->conn;
 	uint64_t space_avail;
 	uint64_t bsize,dfree,dsize;
 	NTSTATUS status;
@@ -613,8 +613,7 @@ int vfs_allocate_file_space(files_struct *fsp, uint64_t len)
 
 	len -= fsp->fsp_name->st.st_ex_size;
 	len /= 1024; /* Len is now number of 1k blocks needed. */
-	space_avail =
-	    get_dfree_info(conn, fsp->fsp_name, &bsize, &dfree, &dsize);
+	space_avail = get_dfree_info(fsp, &bsize, &dfree, &dsize);
 	if (space_avail == (uint64_t)-1) {
 		return -1;
 	}
@@ -1198,11 +1197,11 @@ NTSTATUS vfs_stat_fsp(files_struct *fsp)
 	return NT_STATUS_OK;
 }
 
-void init_smb_file_time(struct smb_file_time *ft)
+struct smb_file_time smb_file_time_omit(void)
 {
 	struct timespec omit = make_omit_timespec();
 
-	*ft = (struct smb_file_time) {
+	return (struct smb_file_time){
 		.atime = omit,
 		.ctime = omit,
 		.mtime = omit,
@@ -1318,14 +1317,30 @@ uint32_t vfs_get_fs_capabilities(struct connection_struct *conn,
 	uint32_t caps = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
 	struct smb_filename *smb_fname_cpath = NULL;
 	struct vfs_statvfs_struct statbuf = {};
-	int ret;
+	NTSTATUS status;
+	int dirfd, ret;
 
-	smb_fname_cpath = cp_smb_basename(talloc_tos(), conn->connectpath);
-	if (smb_fname_cpath == NULL) {
+	dirfd = fsp_get_pathref_fd(conn->cwd_fsp);
+
+	if (dirfd == -1) {
+		/*
+		 * This happens in create_conn_struct_as_root()
+		 */
+		status = openat_pathref_fsp_rootdir(talloc_tos(),
+						    conn,
+						    &smb_fname_cpath);
+	} else {
+		status = openat_pathref_fsp_dot(talloc_tos(),
+						conn->cwd_fsp,
+						0,
+						&smb_fname_cpath);
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
 		return caps;
 	}
 
-	ret = SMB_VFS_STATVFS(conn, smb_fname_cpath, &statbuf);
+	ret = SMB_VFS_FSTATVFS(conn, smb_fname_cpath->fsp, &statbuf);
 	if (ret == 0) {
 		caps = statbuf.FsCapabilities;
 	}
@@ -1340,12 +1355,6 @@ uint32_t vfs_get_fs_capabilities(struct connection_struct *conn,
 
 	/* Work out what timestamp resolution we can
 	 * use when setting a timestamp. */
-
-	ret = SMB_VFS_STAT(conn, smb_fname_cpath);
-	if (ret == -1) {
-		TALLOC_FREE(smb_fname_cpath);
-		return caps;
-	}
 
 	if (smb_fname_cpath->st.st_ex_mtime.tv_nsec ||
 			smb_fname_cpath->st.st_ex_atime.tv_nsec ||
@@ -1433,32 +1442,33 @@ void smb_vfs_call_disconnect(struct vfs_handle_struct *handle)
 }
 
 uint64_t smb_vfs_call_disk_free(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
+				struct files_struct *fsp,
 				uint64_t *bsize,
 				uint64_t *dfree,
 				uint64_t *dsize)
 {
 	VFS_FIND(disk_free);
-	return handle->fns->disk_free_fn(handle, smb_fname,
-			bsize, dfree, dsize);
+	return handle->fns->disk_free_fn(handle, fsp, bsize, dfree, dsize);
 }
 
 int smb_vfs_call_get_quota(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *qt)
+			   struct files_struct *fsp,
+			   enum SMB_QUOTA_TYPE qtype,
+			   unid_t id,
+			   SMB_DISK_QUOTA *qt)
 {
 	VFS_FIND(get_quota);
-	return handle->fns->get_quota_fn(handle, smb_fname, qtype, id, qt);
+	return handle->fns->get_quota_fn(handle, fsp, qtype, id, qt);
 }
 
 int smb_vfs_call_set_quota(struct vfs_handle_struct *handle,
-			   enum SMB_QUOTA_TYPE qtype, unid_t id,
+			   struct files_struct *fsp,
+			   enum SMB_QUOTA_TYPE qtype,
+			   unid_t id,
 			   SMB_DISK_QUOTA *qt)
 {
 	VFS_FIND(set_quota);
-	return handle->fns->set_quota_fn(handle, qtype, id, qt);
+	return handle->fns->set_quota_fn(handle, fsp, qtype, id, qt);
 }
 
 int smb_vfs_call_get_shadow_copy_data(struct vfs_handle_struct *handle,
@@ -1471,12 +1481,13 @@ int smb_vfs_call_get_shadow_copy_data(struct vfs_handle_struct *handle,
 						    shadow_copy_data,
 						    labels);
 }
-int smb_vfs_call_statvfs(struct vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			struct vfs_statvfs_struct *statbuf)
+
+int smb_vfs_call_fstatvfs(struct vfs_handle_struct *handle,
+			  struct files_struct *fsp,
+			  struct vfs_statvfs_struct *statbuf)
 {
-	VFS_FIND(statvfs);
-	return handle->fns->statvfs_fn(handle, smb_fname, statbuf);
+	VFS_FIND(fstatvfs);
+	return handle->fns->fstatvfs_fn(handle, fsp, statbuf);
 }
 
 uint32_t smb_vfs_call_fs_capabilities(struct vfs_handle_struct *handle,

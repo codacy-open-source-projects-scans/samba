@@ -32,6 +32,7 @@
 #include "lib/util/tevent_unix.h"
 #include "lib/pthreadpool/pthreadpool_tevent.h"
 #include "lib/util/gpfswrap.h"
+#include "lib/util/statvfs.h"
 
 #include <gnutls/gnutls.h>
 #include <gnutls/crypto.h>
@@ -2312,32 +2313,37 @@ static void vfs_gpfs_disk_free_quota(struct gpfs_quotaInfo qi, time_t cur_time,
 }
 
 static uint64_t vfs_gpfs_disk_free(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+				   struct files_struct *fsp,
+				   uint64_t *bsize,
+				   uint64_t *dfree,
+				   uint64_t *dsize)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
+	int fd = fsp_get_pathref_fd(fsp);
 	struct security_unix_token *utok;
 	struct gpfs_quotaInfo qi_user = { 0 }, qi_group = { 0 };
 	struct gpfs_config_data *config;
+	struct vfs_statvfs_struct statvfsbuf;
 	int err;
 	time_t cur_time;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config, struct gpfs_config_data,
 				return (uint64_t)-1);
 	if (!config->dfreequota) {
-		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
-					      bsize, dfree, dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, bsize, dfree, dsize);
 	}
 
-	err = sys_fsusage(smb_fname->base_name, dfree, dsize);
+	err = sys_fstatvfs(fd, &statvfsbuf);
 	if (err) {
 		DEBUG (0, ("Could not get fs usage, errno %d\n", errno));
-		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
-					      bsize, dfree, dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, bsize, dfree, dsize);
 	}
 
-	/* sys_fsusage returns units of 512 bytes */
+	statvfs2fsusage(&statvfsbuf, dfree, dsize);
+
+	/* statvfs2fsusage returns units of 512 bytes */
 	*bsize = 512;
 
 	DEBUG(10, ("fs dfree %llu, dsize %llu\n",
@@ -2348,8 +2354,8 @@ static uint64_t vfs_gpfs_disk_free(vfs_handle_struct *handle,
 	err = get_gpfs_quota(smb_fname->base_name,
 			GPFS_USRQUOTA, utok->uid, &qi_user);
 	if (err) {
-		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
-					      bsize, dfree, dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, bsize, dfree, dsize);
 	}
 
 	/*
@@ -2371,8 +2377,8 @@ static uint64_t vfs_gpfs_disk_free(vfs_handle_struct *handle,
 	}
 
 	if (err) {
-		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
-					      bsize, dfree, dsize);
+		return SMB_VFS_NEXT_DISK_FREE(
+			handle, fsp, bsize, dfree, dsize);
 	}
 
 	cur_time = time(NULL);
@@ -2385,10 +2391,10 @@ static uint64_t vfs_gpfs_disk_free(vfs_handle_struct *handle,
 }
 
 static int vfs_gpfs_get_quota(vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *dq)
+			      struct files_struct *fsp,
+			      enum SMB_QUOTA_TYPE qtype,
+			      unid_t id,
+			      SMB_DISK_QUOTA *dq)
 {
 	switch(qtype) {
 		/*
@@ -2406,8 +2412,8 @@ static int vfs_gpfs_get_quota(vfs_handle_struct *handle,
 			errno = ENOSYS;
 			return -1;
 		default:
-			return SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname,
-					qtype, id, dq);
+			return SMB_VFS_NEXT_GET_QUOTA(
+				handle, fsp, qtype, id, dq);
 	}
 }
 

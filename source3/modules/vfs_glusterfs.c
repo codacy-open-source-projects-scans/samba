@@ -37,6 +37,7 @@
 
 #include "includes.h"
 #include "smbd/smbd.h"
+#include "lib/util/statvfs.h"
 #include <stdio.h>
 #include <glusterfs/api/glfs.h>
 #include "lib/util/dlinklist.h"
@@ -517,11 +518,12 @@ static void vfs_gluster_disconnect(struct vfs_handle_struct *handle)
 }
 
 static uint64_t vfs_gluster_disk_free(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize_p,
-				uint64_t *dfree_p,
-				uint64_t *dsize_p)
+				      struct files_struct *fsp,
+				      uint64_t *bsize_p,
+				      uint64_t *dfree_p,
+				      uint64_t *dsize_p)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
 	struct statvfs statvfs = { 0, };
 	int ret;
 
@@ -544,18 +546,20 @@ static uint64_t vfs_gluster_disk_free(struct vfs_handle_struct *handle,
 }
 
 static int vfs_gluster_get_quota(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				enum SMB_QUOTA_TYPE qtype,
-				unid_t id,
-				SMB_DISK_QUOTA *qt)
+				 struct files_struct *fsp,
+				 enum SMB_QUOTA_TYPE qtype,
+				 unid_t id,
+				 SMB_DISK_QUOTA *qt)
 {
 	errno = ENOSYS;
 	return -1;
 }
 
-static int
-vfs_gluster_set_quota(struct vfs_handle_struct *handle,
-		      enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *qt)
+static int vfs_gluster_set_quota(struct vfs_handle_struct *handle,
+				 struct files_struct *fsp,
+				 enum SMB_QUOTA_TYPE qtype,
+				 unid_t id,
+				 SMB_DISK_QUOTA *qt)
 {
 	errno = ENOSYS;
 	return -1;
@@ -589,6 +593,13 @@ static int vfs_gluster_statvfs(struct vfs_handle_struct *handle,
 	    FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES;
 
 	return ret;
+}
+
+static int vfs_gluster_fstatvfs(struct vfs_handle_struct *handle,
+				struct files_struct *fsp,
+				struct vfs_statvfs_struct *vfs_statvfs)
+{
+	return vfs_gluster_statvfs(handle, fsp->fsp_name, vfs_statvfs);
 }
 
 static uint32_t vfs_gluster_fs_capabilities(struct vfs_handle_struct *handle,
@@ -2560,7 +2571,7 @@ static struct vfs_fn_pointers glusterfs_fns = {
 	.disk_free_fn = vfs_gluster_disk_free,
 	.get_quota_fn = vfs_gluster_get_quota,
 	.set_quota_fn = vfs_gluster_set_quota,
-	.statvfs_fn = vfs_gluster_statvfs,
+	.fstatvfs_fn = vfs_gluster_fstatvfs,
 	.fs_capabilities_fn = vfs_gluster_fs_capabilities,
 
 	.get_dfs_referrals_fn = NULL,

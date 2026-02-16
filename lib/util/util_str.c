@@ -34,31 +34,6 @@
  **/
 
 /**
- * Parse a string containing a boolean value.
- *
- * val will be set to the read value.
- *
- * @retval true if a boolean value was parsed, false otherwise.
- */
-_PUBLIC_ bool conv_str_bool(const char * str, bool * val)
-{
-	char *	end = NULL;
-	long	lval;
-
-	if (str == NULL || *str == '\0') {
-		return false;
-	}
-
-	lval = strtol(str, &end, 10 /* base */);
-	if (end == NULL || *end != '\0' || end == str) {
-		return set_boolean(str, val);
-	}
-
-	*val = (lval) ? true : false;
-	return true;
-}
-
-/**
  * Convert a size specification like 16K into an integral number of bytes.
  **/
 _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val)
@@ -90,31 +65,6 @@ _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val)
 		} else {
 			return false;
 		}
-	}
-
-	*val = (uint64_t)lval;
-	return true;
-}
-
-/**
- * Parse a uint64_t value from a string
- *
- * val will be set to the value read.
- *
- * @retval true if parsing was successful, false otherwise
- */
-_PUBLIC_ bool conv_str_u64(const char * str, uint64_t * val)
-{
-	unsigned long long  lval;
-	int error = 0;
-
-	if (str == NULL || *str == '\0') {
-		return false;
-	}
-
-	lval = smb_strtoull(str, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
-	if (error != 0) {
-		return false;
 	}
 
 	*val = (uint64_t)lval;
@@ -258,10 +208,11 @@ _PUBLIC_ bool set_boolean(const char *boolean_string, bool *boolean)
 	    strwicmp(boolean_string, "1") == 0) {
 		*boolean = true;
 		return true;
-	} else if (strwicmp(boolean_string, "no") == 0 ||
-		   strwicmp(boolean_string, "false") == 0 ||
-		   strwicmp(boolean_string, "off") == 0 ||
-		   strwicmp(boolean_string, "0") == 0) {
+	}
+	if (strwicmp(boolean_string, "no") == 0 ||
+	    strwicmp(boolean_string, "false") == 0 ||
+	    strwicmp(boolean_string, "off") == 0 ||
+	    strwicmp(boolean_string, "0") == 0) {
 		*boolean = false;
 		return true;
 	}

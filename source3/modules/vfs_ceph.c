@@ -32,6 +32,7 @@
 
 #include "includes.h"
 #include "smbd/smbd.h"
+#include "lib/util/statvfs.h"
 #include "system/filesys.h"
 #include <dirent.h>
 #include <sys/statvfs.h>
@@ -319,11 +320,12 @@ static void cephwrap_disconnect(struct vfs_handle_struct *handle)
 /* Disk operations */
 
 static uint64_t cephwrap_disk_free(struct vfs_handle_struct *handle,
-				const struct smb_filename *smb_fname,
-				uint64_t *bsize,
-				uint64_t *dfree,
-				uint64_t *dsize)
+				   struct files_struct *fsp,
+				   uint64_t *bsize,
+				   uint64_t *dfree,
+				   uint64_t *dsize)
 {
+	const struct smb_filename *smb_fname = fsp->fsp_name;
 	struct statvfs statvfs_buf = { 0 };
 	int ret;
 
@@ -374,6 +376,13 @@ static int cephwrap_statvfs(struct vfs_handle_struct *handle,
 		  (long int)statvfs_buf.f_bavail);
 
 	return ret;
+}
+
+static int cephwrap_fstatvfs(struct vfs_handle_struct *handle,
+			     struct files_struct *fsp,
+			     struct vfs_statvfs_struct *statbuf)
+{
+	return cephwrap_statvfs(handle, fsp->fsp_name, statbuf);
 }
 
 static uint32_t cephwrap_fs_capabilities(
@@ -1776,7 +1785,7 @@ static struct vfs_fn_pointers ceph_fns = {
 	.disk_free_fn = cephwrap_disk_free,
 	.get_quota_fn = vfs_not_implemented_get_quota,
 	.set_quota_fn = vfs_not_implemented_set_quota,
-	.statvfs_fn = cephwrap_statvfs,
+	.fstatvfs_fn = cephwrap_fstatvfs,
 	.fs_capabilities_fn = cephwrap_fs_capabilities,
 
 	/* Directory operations */

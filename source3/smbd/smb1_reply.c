@@ -872,7 +872,7 @@ void reply_getatr(struct smb_request *req)
 
 void reply_setatr(struct smb_request *req)
 {
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	connection_struct *conn = req->conn;
 	struct smb_filename *smb_fname = NULL;
 	struct files_struct *dirfsp = NULL;
@@ -886,7 +886,6 @@ void reply_setatr(struct smb_request *req)
 	TALLOC_CTX *ctx = talloc_tos();
 
 	START_PROFILE(SMBsetatr);
-	init_smb_file_time(&ft);
 
 	if (req->wct < 2) {
 		reply_nterror(req, NT_STATUS_INVALID_PARAMETER);
@@ -996,20 +995,23 @@ void reply_dskattr(struct smb_request *req)
 	connection_struct *conn = req->conn;
 	uint64_t ret;
 	uint64_t dfree,dsize,bsize;
-	struct smb_filename smb_fname;
+	struct smb_filename *dot = NULL;
+	NTSTATUS status;
+
 	START_PROFILE(SMBdskattr);
 
-	ZERO_STRUCT(smb_fname);
-	smb_fname.base_name = discard_const_p(char, ".");
-
-	if (SMB_VFS_STAT(conn, &smb_fname) != 0) {
-		reply_nterror(req, map_nt_error_from_unix(errno));
-		DBG_WARNING("stat of . failed (%s)\n", strerror(errno));
+	status = openat_pathref_fsp_dot(talloc_tos(), conn->cwd_fsp, 0, &dot);
+	if (!NT_STATUS_IS_OK(status)) {
+		reply_nterror(req, status);
+		DBG_WARNING("openat of . failed (%s)\n", nt_errstr(status));
 		END_PROFILE(SMBdskattr);
 		return;
 	}
 
-	ret = get_dfree_info(conn, &smb_fname, &bsize, &dfree, &dsize);
+	ret = get_dfree_info(dot->fsp, &bsize, &dfree, &dsize);
+
+	TALLOC_FREE(dot);
+
 	if (ret == (uint64_t)-1) {
 		reply_nterror(req, map_nt_error_from_unix(errno));
 		END_PROFILE(SMBdskattr);
@@ -2362,7 +2364,7 @@ void reply_mknew(struct smb_request *req)
 	struct smb_filename *smb_fname = NULL;
 	char *fname = NULL;
 	uint32_t fattr = 0;
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	struct files_struct *dirfsp = NULL;
 	files_struct *fsp;
 	int oplock_request = 0;
@@ -2376,7 +2378,6 @@ void reply_mknew(struct smb_request *req)
 	TALLOC_CTX *ctx = talloc_tos();
 
 	START_PROFILE(SMBcreate);
-	init_smb_file_time(&ft);
 
         if (req->wct < 3) {
 		reply_nterror(req, NT_STATUS_INVALID_PARAMETER);
@@ -4739,8 +4740,11 @@ void reply_lseek(struct smb_request *req)
 	reply_smb1_outbuf(req, 2, 0);
 	SIVAL(req->outbuf,smb_vwv0,res);
 
-	DEBUG(3,("lseek %s ofs=%.0f newpos = %.0f mode=%d\n",
-		fsp_fnum_dbg(fsp), (double)startpos, (double)res, mode));
+	DBG_NOTICE("lseek %s ofs=%ju newpos =%ju mode=%d\n",
+		   fsp_fnum_dbg(fsp),
+		   (uintmax_t)startpos,
+		   (uintmax_t)res,
+		   mode);
 
 	END_PROFILE(SMBlseek);
 	return;
@@ -6853,12 +6857,11 @@ void reply_readbs(struct smb_request *req)
 void reply_setattrE(struct smb_request *req)
 {
 	connection_struct *conn = req->conn;
-	struct smb_file_time ft;
+	struct smb_file_time ft = smb_file_time_omit();
 	files_struct *fsp;
 	NTSTATUS status;
 
 	START_PROFILE(SMBsetattrE);
-	init_smb_file_time(&ft);
 
 	if (req->wct < 7) {
 		reply_nterror(req, NT_STATUS_INVALID_PARAMETER);
