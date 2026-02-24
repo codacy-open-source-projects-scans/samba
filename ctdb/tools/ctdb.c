@@ -1047,9 +1047,6 @@ static int build_json_node_flags(json_t *parent_obj, uint32_t flags)
 	}
 
 	ret = json_object_set(parent_obj, "flags", flags_map);
-	if (ret != 0) {
-		goto done;
-	}
 done:
 	json_decref(flags_map);
 	return (ret == 0) ? 0 : 1;
@@ -1158,9 +1155,6 @@ static int build_json_nodemap(json_t *root_object,
 		goto done;
 	}
 	ret = json_object_set(root_object, "node_status", nodemap_obj);
-	if (ret != 0) {
-		goto done;
-	}
 done:
 	json_decref(nodes_obj);
 	json_decref(nodemap_obj);
@@ -1231,9 +1225,6 @@ static int build_json_vnnmap(json_t *root_object,
 		goto done;
 	}
 	ret = json_object_set(root_object, "vnn_status", vnnmap_obj);
-	if (ret != 0) {
-		goto done;
-	}
 done:
 	json_decref(gen_value);
 	json_decref(vnn_lst);
