@@ -30,17 +30,20 @@ struct {
 	char *basedir;
 	char datadir[PATH_MAX];
 	char etcdir[PATH_MAX];
+	const char* helperdir;
 	char rundir[PATH_MAX];
 	char vardir[PATH_MAX];
 	bool test_mode;
 	bool basedir_set;
 	bool datadir_set;
 	bool etcdir_set;
+	bool helperdir_set;
 	bool rundir_set;
 	bool vardir_set;
 } ctdb_paths = {
 	.datadir = CTDB_DATADIR,
 	.etcdir = CTDB_ETCDIR,
+	.helperdir = CTDB_HELPER_BINDIR,
 	.rundir = CTDB_RUNDIR,
 	.vardir = CTDB_VARDIR,
 };
@@ -143,6 +146,29 @@ const char *path_etcdir(void)
 	return ctdb_paths.etcdir;
 }
 
+const char *path_helperdir(void)
+{
+	path_set_test_mode();
+	if (!ctdb_paths.test_mode) {
+		goto done;
+	}
+
+	if (ctdb_paths.helperdir_set) {
+		goto done;
+	}
+
+	ctdb_paths.helperdir = getenv("CTDB_TEST_HELPER_BINDIR");
+	if (ctdb_paths.helperdir == NULL) {
+		D_ERR("Broken CTDB setup, "
+		      "CTDB_TEST_HELPER_BINDIR not set in test mode\n");
+		abort();
+	}
+
+done:
+	ctdb_paths.helperdir_set = true;
+	return ctdb_paths.helperdir;
+}
+
 const char *path_rundir(void)
 {
 	bool ok;
@@ -183,6 +209,11 @@ char *path_datadir_append(TALLOC_CTX *mem_ctx, const char *path)
 char *path_etcdir_append(TALLOC_CTX *mem_ctx, const char *path)
 {
 	return talloc_asprintf(mem_ctx, "%s/%s", path_etcdir(), path);
+}
+
+char *path_helperdir_append(TALLOC_CTX *mem_ctx, const char *path)
+{
+	return talloc_asprintf(mem_ctx, "%s/%s", path_helperdir(), path);
 }
 
 char *path_rundir_append(TALLOC_CTX *mem_ctx, const char *path)

@@ -222,9 +222,6 @@ bool winbindd_list_trusted_domains(struct winbindd_cli_state *state)
 	}
 
 	extra_data = talloc_strdup(state->mem_ctx, "");
-	if (extra_data == NULL) {
-		goto done;
-	}
 
 	for ( i = 0; i < num_domains; i++ ) {
 		struct winbindd_domain *domain;
@@ -244,19 +241,22 @@ bool winbindd_list_trusted_domains(struct winbindd_cli_state *state)
 			continue;
 		}
 
-		extra_data = talloc_asprintf_append_buffer(
-			extra_data,
-			"%s\\%s\\%s\\%s\\%s\\%s\\%s\\%s\n",
-			d->domain_name,
-			d->dns_name ? d->dns_name : "",
-			dom_sid_str_buf(&d->sid, &buf),
-			trust_type,
-			trust_is_transitive(d) ? "Yes" : "No",
-			trust_is_inbound(d) ? "Yes" : "No",
-			trust_is_outbound(d) ? "Yes" : "No",
-			is_online ? "Online" : "Offline" );
+		talloc_asprintf_addbuf(&extra_data,
+				       "%s\\%s\\%s\\%s\\%s\\%s\\%s\\%s\n",
+				       d->domain_name,
+				       d->dns_name ? d->dns_name : "",
+				       dom_sid_str_buf(&d->sid, &buf),
+				       trust_type,
+				       trust_is_transitive(d) ? "Yes" : "No",
+				       trust_is_inbound(d) ? "Yes" : "No",
+				       trust_is_outbound(d) ? "Yes" : "No",
+				       is_online ? "Online" : "Offline");
 
 		TALLOC_FREE(trust_type);
+	}
+
+	if (extra_data == NULL) {
+		goto done;
 	}
 
 	state->response->data.num_entries = num_domains;

@@ -524,7 +524,6 @@ static void ctdb_lock_timeout_handler(struct tevent_context *ev,
 				    struct timeval current_time,
 				    void *private_data)
 {
-	static char debug_locks[PATH_MAX+1] = "";
 	struct lock_context *lock_ctx;
 	struct ctdb_context *ctdb;
 	pid_t pid;
@@ -532,7 +531,6 @@ static void ctdb_lock_timeout_handler(struct tevent_context *ev,
 	bool skip;
 	char *keystr;
 	char **args;
-	bool ok;
 
 	lock_ctx = talloc_get_type_abort(private_data, struct lock_context);
 	ctdb = lock_ctx->ctdb;
@@ -570,15 +568,7 @@ static void ctdb_lock_timeout_handler(struct tevent_context *ev,
 	}
 
 lock_debug:
-
-	ok = ctdb_set_helper("lock debugging helper",
-			     debug_locks,
-			     sizeof(debug_locks),
-			     "CTDB_DEBUG_LOCKS",
-			     getenv("CTDB_BASE"),
-			     "debug_locks.sh");
-	if (!ok) {
-		DBG_WARNING("Unable to setup lock debugging\n");
+	if (ctdb->lock_debug_script == NULL) {
 		goto skip_lock_debug;
 	}
 
@@ -586,7 +576,7 @@ lock_debug:
 	if (args != NULL) {
 		pid = vfork();
 		if (pid == 0) {
-			execvp(debug_locks, args);
+			execvp(ctdb->lock_debug_script, args);
 			_exit(0);
 		}
 		talloc_free(args);
@@ -706,16 +696,7 @@ static void ctdb_lock_schedule(struct ctdb_context *ctdb)
 	struct lock_context *lock_ctx;
 	int ret;
 	TALLOC_CTX *tmp_ctx;
-	static char prog[PATH_MAX+1] = "";
 	char **args = NULL;
-
-	if (!ctdb_set_helper("lock helper",
-			     prog, sizeof(prog),
-			     "CTDB_LOCK_HELPER",
-			     CTDB_HELPER_BINDIR, "ctdb_lock_helper")) {
-		ctdb_die(ctdb, __location__
-			 " Unable to set lock helper\n");
-	}
 
 	/* Find a lock context with requests */
 	lock_ctx = ctdb_find_lock_context(ctdb);
@@ -761,7 +742,7 @@ static void ctdb_lock_schedule(struct ctdb_context *ctdb)
 
 	lock_ctx->child = ctdb_vfork_exec(lock_ctx,
 					  ctdb,
-					  prog,
+					  ctdb->lock_helper,
 					  talloc_array_length(args),
 					  (const char *const *)args);
 	if (lock_ctx->child == -1) {

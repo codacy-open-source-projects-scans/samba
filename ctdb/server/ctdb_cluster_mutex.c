@@ -34,6 +34,8 @@
 
 #include "ctdb_private.h"
 
+#include "common/path.h"
+
 #include "ctdb_cluster_mutex.h"
 
 struct ctdb_cluster_mutex_handle {
@@ -115,7 +117,7 @@ static void cluster_mutex_handler(struct tevent_context *ev,
 	}
 }
 
-static char cluster_mutex_helper[PATH_MAX+1] = "";
+static char cluster_mutex_helper[PATH_MAX] = "";
 
 static bool cluster_mutex_helper_args_file(TALLOC_CTX *mem_ctx,
 					   const char *argstring,
@@ -131,26 +133,20 @@ static bool cluster_mutex_helper_args_file(TALLOC_CTX *mem_ctx,
 		goto helper_done;
 	}
 
-	t = getenv("CTDB_CLUSTER_MUTEX_HELPER");
-	if (t != NULL) {
-		size_t len;
+	t = path_helperdir();
+	if (t == NULL) {
+		DBG_ERR("Failed get helper directory\n");
+		exit(1);
+	}
 
-		len = strlcpy(cluster_mutex_helper, t, size);
-		if (len >= size) {
-			DBG_ERR("error: CTDB_CLUSTER_MUTEX_HELPER too long\n");
-			exit(1);
-		}
-	} else {
-		ret = snprintf(cluster_mutex_helper,
-			       size,
-			       "%s/%s",
-			       CTDB_HELPER_BINDIR,
-			       "ctdb_mutex_fcntl_helper");
-		if (ret < 0 || (size_t)ret >= size) {
-			D_ERR("Unable to set cluster mutex helper - "
-			      "path too long\n");
-			exit(1);
-		}
+	ret = snprintf(cluster_mutex_helper,
+		       size,
+		       "%s/%s",
+		       t,
+		       "ctdb_mutex_fcntl_helper");
+	if (ret < 0 || (size_t)ret >= size) {
+		D_ERR("Unable to set cluster mutex helper - path too long\n");
+		exit(1);
 	}
 
 	ret = stat(cluster_mutex_helper, &st);

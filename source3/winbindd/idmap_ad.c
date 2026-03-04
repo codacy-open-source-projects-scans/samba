@@ -903,14 +903,7 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 	attrs[3] = ctx->schema->gid;
 
 	u_filter = talloc_strdup(talloc_tos(), "");
-	if (u_filter == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
 	g_filter = talloc_strdup(talloc_tos(), "");
-	if (g_filter == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
 
 	for (i=0; ids[i] != NULL; i++) {
 		struct id_map *id = ids[i];
@@ -919,22 +912,18 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 
 		switch (id->xid.type) {
 		    case ID_TYPE_UID: {
-			    u_filter = talloc_asprintf_append_buffer(
-				    u_filter, "(%s=%ju)", ctx->schema->uid,
-				    (uintmax_t)id->xid.id);
-			    if (u_filter == NULL) {
-				    return NT_STATUS_NO_MEMORY;
-			    }
+			    talloc_asprintf_addbuf(&u_filter,
+						   "(%s=%" PRIu32 ")",
+						   ctx->schema->uid,
+						   id->xid.id);
 			    break;
 		    }
 
 		    case ID_TYPE_GID: {
-			    g_filter = talloc_asprintf_append_buffer(
-				    g_filter, "(%s=%ju)", ctx->schema->gid,
-				    (uintmax_t)id->xid.id);
-			    if (g_filter == NULL) {
-				    return NT_STATUS_NO_MEMORY;
-			    }
+			    talloc_asprintf_addbuf(&g_filter,
+						   "(%s=%" PRIu32 ")",
+						   ctx->schema->gid,
+						   id->xid.id);
 			    break;
 		    }
 
@@ -945,38 +934,38 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 		}
 	}
 
-	filter = talloc_strdup(talloc_tos(), "(|");
-	if (filter == NULL) {
+	if ((u_filter == NULL) || (g_filter == NULL)) {
+		TALLOC_FREE(u_filter);
+		TALLOC_FREE(g_filter);
 		return NT_STATUS_NO_MEMORY;
 	}
 
+	filter = talloc_strdup(talloc_tos(), "(|");
+
 	if (*u_filter != '\0') {
-		filter = talloc_asprintf_append_buffer(
-			filter,
+		talloc_asprintf_addbuf(
+			&filter,
 			"(&(|(sAMAccountType=%d)(sAMAccountType=%d)"
 			"(sAMAccountType=%d))(|%s))",
-			ATYPE_NORMAL_ACCOUNT, ATYPE_WORKSTATION_TRUST,
-			ATYPE_INTERDOMAIN_TRUST, u_filter);
-		if (filter == NULL) {
-			return NT_STATUS_NO_MEMORY;
-		}
+			ATYPE_NORMAL_ACCOUNT,
+			ATYPE_WORKSTATION_TRUST,
+			ATYPE_INTERDOMAIN_TRUST,
+			u_filter);
 	}
 	TALLOC_FREE(u_filter);
 
 	if (*g_filter != '\0') {
-		filter = talloc_asprintf_append_buffer(
-			filter,
+		talloc_asprintf_addbuf(
+			&filter,
 			"(&(|(sAMAccountType=%d)(sAMAccountType=%d))(|%s))",
 			ATYPE_SECURITY_GLOBAL_GROUP,
 			ATYPE_SECURITY_LOCAL_GROUP,
 			g_filter);
-		if (filter == NULL) {
-			return NT_STATUS_NO_MEMORY;
-		}
 	}
 	TALLOC_FREE(g_filter);
 
-	filter = talloc_asprintf_append_buffer(filter, ")");
+	talloc_asprintf_addbuf(&filter, ")");
+
 	if (filter == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}

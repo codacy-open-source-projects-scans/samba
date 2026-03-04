@@ -963,11 +963,12 @@ static int file_version_is_newer(connection_struct *conn,
 /****************************************************************************
 Determine the correct cVersion associated with an architecture and driver
 ****************************************************************************/
-static uint32_t get_correct_cversion(const struct auth_session_info *session_info,
-				   const char *architecture,
-				   const char *driverpath_in,
-				   const char *driver_directory,
-				   WERROR *perr)
+static WERROR get_correct_cversion(
+	const struct auth_session_info *session_info,
+	const char *architecture,
+	const char *driverpath_in,
+	const char *driver_directory,
+	int *_cversion)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	const struct loadparm_substitution *lp_sub =
@@ -977,7 +978,7 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 	struct smb_filename *smb_fname = NULL;
 	files_struct      *fsp = NULL;
 	struct files_struct *dirfsp = NULL;
-	struct conn_struct_tos *c = NULL;
+	struct conn_wrap *w = NULL;
 	connection_struct *conn = NULL;
 	char *printdollar = NULL;
 	char *printdollar_path = NULL;
@@ -985,43 +986,38 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 	int printdollar_snum;
 	uint32_t major, minor;
 	int ret;
-
-	*perr = WERR_INVALID_PARAMETER;
+	WERROR werr = WERR_OK;
+	bool became_user = false;
 
 	/* If architecture is Windows 95/98/ME, the version is always 0. */
 	if (strcmp(architecture, SPL_ARCH_WIN40) == 0) {
-		DEBUG(10,("get_correct_cversion: Driver is Win9x, cversion = 0\n"));
-		*perr = WERR_OK;
-		TALLOC_FREE(frame);
-		return 0;
+		DBG_DEBUG("Driver is Win9x, cversion = 0\n");
+		cversion = 0;
+		goto done;
 	}
 
 	/* If architecture is Windows x64, the version is always 3. */
 	if (strcmp(architecture, SPL_ARCH_X64) == 0 ||
 		strcmp(architecture, SPL_ARCH_ARM64) == 0) {
-		DBG_DEBUG("get_correct_cversion: this architecture must be, cversion = 3\n");
-		*perr = WERR_OK;
-		TALLOC_FREE(frame);
-		return 3;
+		DBG_DEBUG("this architecture must be, cversion = 3\n");
+		cversion = 3;
+		goto done;
 	}
 
 	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
-		*perr = WERR_NOT_ENOUGH_MEMORY;
-		TALLOC_FREE(frame);
-		return -1;
+		werr = WERR_NOT_ENOUGH_MEMORY;
+		goto done;
 	}
 	if (printdollar_snum == -1) {
-		*perr = WERR_BAD_NET_NAME;
-		TALLOC_FREE(frame);
-		return -1;
+		werr = WERR_BAD_NET_NAME;
+		goto done;
 	}
 
 	printdollar_path = lp_path(frame, lp_sub, printdollar_snum);
 	if (printdollar_path == NULL) {
-		*perr = WERR_NOT_ENOUGH_MEMORY;
-		TALLOC_FREE(frame);
-		return -1;
+		werr = WERR_NOT_ENOUGH_MEMORY;
+		goto done;
 	}
 
 	working_dir = talloc_asprintf(frame,
@@ -1039,32 +1035,34 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 					      driver_directory);
 	}
 
-	nt_status = create_conn_struct_tos_cwd(global_messaging_context(),
-					       printdollar_snum,
-					       working_dir,
-					       session_info,
-					       &c);
+	nt_status = create_conn_struct_chdir(talloc_tos(),
+					     global_messaging_context(),
+					     printdollar_snum,
+					     working_dir,
+					     session_info,
+					     &w);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0,("get_correct_cversion: create_conn_struct "
-			 "returned %s\n", nt_errstr(nt_status)));
-		*perr = ntstatus_to_werror(nt_status);
-		TALLOC_FREE(frame);
-		return -1;
+		DBG_ERR("create_conn_struct returned %s\n",
+			nt_errstr(nt_status));
+		werr = ntstatus_to_werror(nt_status);
+		goto done;
 	}
-	conn = c->conn;
+	conn = conn_wrap_connection(w);
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0, ("failed set force user / group\n"));
-		*perr = ntstatus_to_werror(nt_status);
-		goto error_free_conn;
+		DBG_ERR("failed set force user / group: %s\n",
+			nt_errstr(nt_status));
+		werr = ntstatus_to_werror(nt_status);
+		goto done;
 	}
 
 	if (!become_user_without_service_by_session(conn, session_info)) {
-		DEBUG(0, ("failed to become user\n"));
-		*perr = WERR_ACCESS_DENIED;
-		goto error_free_conn;
+		DBG_ERR("failed to become user\n");
+		werr = WERR_ACCESS_DENIED;
+		goto done;
 	}
+	became_user = true;
 
 	/*
 	 * We switch to the directory where the driver files are located,
@@ -1075,8 +1073,8 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 					&dirfsp,
 					&smb_fname);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		*perr = ntstatus_to_werror(nt_status);
-		goto error_exit;
+		werr = ntstatus_to_werror(nt_status);
+		goto done;
 	}
 
 	nt_status = SMB_VFS_CREATE_FILE(
@@ -1100,22 +1098,22 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 		NULL, NULL);				/* create context */
 
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(3,("get_correct_cversion: Can't open file [%s], errno = "
-			 "%d\n", smb_fname_str_dbg(smb_fname), errno));
-		*perr = WERR_ACCESS_DENIED;
-		goto error_exit;
+		DBG_NOTICE("Can't open file [%s]: %s\n",
+			   smb_fname_str_dbg(smb_fname),
+			   nt_errstr(nt_status));
+		werr = WERR_ACCESS_DENIED;
+		goto done;
 	}
 
 	ret = get_file_version(fsp, smb_fname->base_name, &major, &minor);
 	if (ret == -1) {
-		*perr = WERR_INVALID_PARAMETER;
-		goto error_exit;
+		werr = WERR_INVALID_PARAMETER;
+		goto done;
 	} else if (!ret) {
-		DEBUG(6,("get_correct_cversion: Version info not "
-			 "found [%s]\n",
-			 smb_fname_str_dbg(smb_fname)));
-		*perr = WERR_INVALID_PARAMETER;
-		goto error_exit;
+		DBG_INFO("Version info not found [%s]\n",
+			 smb_fname_str_dbg(smb_fname));
+		werr = WERR_INVALID_PARAMETER;
+		goto done;
 	}
 
 	/*
@@ -1132,33 +1130,32 @@ static uint32_t get_correct_cversion(const struct auth_session_info *session_inf
 		break;
 
 	default:
-		DEBUG(6,("get_correct_cversion: cversion "
-			 "invalid [%s]  cversion = %d\n",
+		DBG_INFO("cversion invalid [%s]  cversion = %d\n",
 			 smb_fname_str_dbg(smb_fname),
-			 cversion));
-		goto error_exit;
+			 cversion);
+		werr = WERR_INVALID_PARAMETER;
+		goto done;
 	}
 
-	DEBUG(10,("get_correct_cversion: Version info found [%s] major"
-		  " = 0x%x  minor = 0x%x\n",
-		  smb_fname_str_dbg(smb_fname), major, minor));
+	DBG_DEBUG("Version info found [%s] major = 0x%x  minor = 0x%x "
+		  "cversion = %d\n",
+		  smb_fname_str_dbg(smb_fname),
+		  major,
+		  minor,
+		  cversion);
 
-	DEBUG(10,("get_correct_cversion: Driver file [%s] cversion = %d\n",
-		  smb_fname_str_dbg(smb_fname), cversion));
-	*perr = WERR_OK;
-
- error_exit:
-	unbecome_user_without_service();
- error_free_conn:
+done:
+	if (became_user) {
+		unbecome_user_without_service();
+	}
 	if (fsp != NULL) {
 		close_file_free(NULL, &fsp, NORMAL_CLOSE);
 	}
-	if (!W_ERROR_IS_OK(*perr)) {
-		cversion = -1;
-	}
+
+	*_cversion = cversion;
 
 	TALLOC_FREE(frame);
-	return cversion;
+	return werr;
 }
 
 /****************************************************************************
@@ -1184,7 +1181,7 @@ static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
 					   const char **driver_directory)
 {
 	const char *short_architecture;
-	int i;
+	int i, cversion;
 	WERROR err;
 	char *_p;
 
@@ -1271,16 +1268,16 @@ static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
 	 *	NT2K: cversion=3
 	 */
 
-	*version = get_correct_cversion(session_info,
-					short_architecture,
-					*driver_path,
-					*driver_directory,
-					&err);
-	if (*version == -1) {
-		return err;
+	err = get_correct_cversion(session_info,
+				   short_architecture,
+				   *driver_path,
+				   *driver_directory,
+				   &cversion);
+	if (W_ERROR_IS_OK(err)) {
+		*version = cversion;
 	}
 
-	return WERR_OK;
+	return err;
 }
 
 /****************************************************************************
@@ -1475,7 +1472,7 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 	struct files_struct *dirfsp = NULL;
 	struct smb_filename *smb_dname = NULL;
 	char *new_dir = NULL;
-	struct conn_struct_tos *c = NULL;
+	struct conn_wrap *w = NULL;
 	connection_struct *conn = NULL;
 	NTSTATUS nt_status;
 	int i;
@@ -1483,6 +1480,7 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 	char *printdollar = NULL;
 	int printdollar_snum;
 	WERROR err = WERR_OK;
+	bool became_user = false;
 
 	switch (r->level) {
 	case 3:
@@ -1497,53 +1495,56 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 		driver = &converted_driver;
 		break;
 	default:
-		DEBUG(0,("move_driver_to_download_area: Unknown info level (%u)\n", (unsigned int)r->level));
-		TALLOC_FREE(frame);
-		return WERR_INVALID_LEVEL;
+		DBG_ERR("Unknown info level (%" PRIu32 ")\n", r->level);
+		err = WERR_INVALID_LEVEL;
+		goto err_exit;
 	}
 
 	short_architecture = get_short_archi(driver->architecture);
 	if (!short_architecture) {
-		TALLOC_FREE(frame);
-		return WERR_UNKNOWN_PRINTER_DRIVER;
+		err = WERR_UNKNOWN_PRINTER_DRIVER;
+		goto err_exit;
 	}
 
 	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
-		TALLOC_FREE(frame);
-		return WERR_NOT_ENOUGH_MEMORY;
+		err = WERR_NOT_ENOUGH_MEMORY;
+		goto err_exit;
 	}
 	if (printdollar_snum == -1) {
-		TALLOC_FREE(frame);
-		return WERR_BAD_NET_NAME;
+		err = WERR_BAD_NET_NAME;
+		goto err_exit;
 	}
 
-	nt_status = create_conn_struct_tos_cwd(global_messaging_context(),
-					       printdollar_snum,
-					       lp_path(frame, lp_sub, printdollar_snum),
-					       session_info,
-					       &c);
+	nt_status = create_conn_struct_chdir(talloc_tos(),
+					     global_messaging_context(),
+					     printdollar_snum,
+					     lp_path(frame,
+						     lp_sub,
+						     printdollar_snum),
+					     session_info,
+					     &w);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0,("move_driver_to_download_area: create_conn_struct "
-			 "returned %s\n", nt_errstr(nt_status)));
+		DBG_ERR("create_conn_struct returned %s\n",
+			nt_errstr(nt_status));
 		err = ntstatus_to_werror(nt_status);
-		TALLOC_FREE(frame);
-		return err;
+		goto err_exit;
 	}
-	conn = c->conn;
+	conn = conn_wrap_connection(w);
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0, ("failed set force user / group\n"));
+		DBG_ERR("failed set force user / group\n");
 		err = ntstatus_to_werror(nt_status);
-		goto err_free_conn;
+		goto err_exit;
 	}
 
 	if (!become_user_without_service_by_session(conn, session_info)) {
-		DEBUG(0, ("failed to become user\n"));
+		DBG_ERR("failed to become user\n");
 		err = WERR_ACCESS_DENIED;
-		goto err_free_conn;
+		goto err_exit;
 	}
+	became_user = true;
 
 	new_dir = talloc_asprintf(frame,
 				"%s/%d",
@@ -1559,13 +1560,13 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 		goto err_exit;
 	}
 
-	DEBUG(5,("Creating first directory: %s\n", smb_dname->base_name));
+	DBG_INFO("Creating first directory: %s\n", smb_dname->base_name);
 
 	nt_status = create_directory(conn, NULL, dirfsp, smb_dname);
 	if (!NT_STATUS_IS_OK(nt_status)
 	 && !NT_STATUS_EQUAL(nt_status, NT_STATUS_OBJECT_NAME_COLLISION)) {
-		DEBUG(0, ("failed to create driver destination directory: %s\n",
-			  nt_errstr(nt_status)));
+		DBG_ERR("failed to create driver destination directory: %s\n",
+			nt_errstr(nt_status));
 		err = ntstatus_to_werror(nt_status);
 		goto err_exit;
 	}
@@ -1587,7 +1588,7 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 	 * done is appropriate... later JRR
 	 */
 
-	DEBUG(5,("Moving files now !\n"));
+	DBG_INFO("Moving files now !\n");
 
 	if ((driver->driver_path != NULL) && (driver->driver_path[0] != '\0'))
 	{
@@ -1685,8 +1686,9 @@ WERROR move_driver_to_download_area(const struct auth_session_info *session_info
 
 	err = WERR_OK;
  err_exit:
-	unbecome_user_without_service();
- err_free_conn:
+	if (became_user) {
+		unbecome_user_without_service();
+	}
 	TALLOC_FREE(frame);
 	return err;
 }
@@ -2046,105 +2048,106 @@ bool delete_driver_files(const struct auth_session_info *session_info,
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 	const char *short_arch;
-	struct conn_struct_tos *c = NULL;
+	struct conn_wrap *w = NULL;
 	connection_struct *conn = NULL;
 	NTSTATUS nt_status;
 	char *printdollar = NULL;
 	int printdollar_snum;
 	bool ret = false;
+	bool became_user = false;
 
 	if (!r) {
-		TALLOC_FREE(frame);
-		return false;
+		goto fail;
 	}
 
-	DEBUG(6,("delete_driver_files: deleting driver [%s] - version [%d]\n",
-		r->driver_name, r->version));
+	DBG_INFO("deleting driver [%s] - version [%d]\n",
+		 r->driver_name,
+		 r->version);
 
 	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
-		TALLOC_FREE(frame);
-		return false;
+		goto fail;
 	}
 	if (printdollar_snum == -1) {
-		TALLOC_FREE(frame);
-		return false;
+		goto fail;
 	}
 
-	nt_status = create_conn_struct_tos_cwd(global_messaging_context(),
-					       printdollar_snum,
-					       lp_path(frame, lp_sub, printdollar_snum),
-					       session_info,
-					       &c);
+	nt_status = create_conn_struct_chdir(talloc_tos(),
+					     global_messaging_context(),
+					     printdollar_snum,
+					     lp_path(frame,
+						     lp_sub,
+						     printdollar_snum),
+					     session_info,
+					     &w);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0,("delete_driver_files: create_conn_struct "
-			 "returned %s\n", nt_errstr(nt_status)));
-		TALLOC_FREE(frame);
-		return false;
+		DBG_ERR("create_conn_struct returned %s\n",
+			nt_errstr(nt_status));
+		goto fail;
 	}
-	conn = c->conn;
+	conn = conn_wrap_connection(w);
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(0, ("failed set force user / group\n"));
-		ret = false;
-		goto err_free_conn;
+		DBG_ERR("failed set force user / group\n");
+		goto fail;
 	}
 
 	if (!become_user_without_service_by_session(conn, session_info)) {
-		DEBUG(0, ("failed to become user\n"));
-		ret = false;
-		goto err_free_conn;
+		DBG_ERR("failed to become user\n");
+		goto fail;
 	}
+	became_user = true;
 
 	if ( !CAN_WRITE(conn) ) {
-		DEBUG(3,("delete_driver_files: Cannot delete print driver when [print$] is read-only\n"));
-		ret = false;
-		goto err_out;
+		DBG_NOTICE("Cannot delete print driver when [print$] is "
+			   "read-only\n");
+		goto fail;
 	}
 
 	short_arch = get_short_archi(r->architecture);
 	if (short_arch == NULL) {
-		DEBUG(0, ("bad architecture %s\n", r->architecture));
-		ret = false;
-		goto err_out;
+		DBG_ERR("bad architecture %s\n", r->architecture);
+		goto fail;
 	}
 
 	/* now delete the files */
 
 	if (r->driver_path && r->driver_path[0]) {
-		DEBUG(10,("deleting driverfile [%s]\n", r->driver_path));
+		DBG_DEBUG("deleting driverfile [%s]\n", r->driver_path);
 		driver_unlink_internals(conn, short_arch, r->version, r->driver_path);
 	}
 
 	if (r->config_file && r->config_file[0]) {
-		DEBUG(10,("deleting configfile [%s]\n", r->config_file));
+		DBG_DEBUG("deleting configfile [%s]\n", r->config_file);
 		driver_unlink_internals(conn, short_arch, r->version, r->config_file);
 	}
 
 	if (r->data_file && r->data_file[0]) {
-		DEBUG(10,("deleting datafile [%s]\n", r->data_file));
+		DBG_DEBUG("deleting datafile [%s]\n", r->data_file);
 		driver_unlink_internals(conn, short_arch, r->version, r->data_file);
 	}
 
 	if (r->help_file && r->help_file[0]) {
-		DEBUG(10,("deleting helpfile [%s]\n", r->help_file));
+		DBG_DEBUG("deleting helpfile [%s]\n", r->help_file);
 		driver_unlink_internals(conn, short_arch, r->version, r->help_file);
 	}
 
 	if (r->dependent_files) {
 		int i = 0;
 		while (r->dependent_files[i] && r->dependent_files[i][0]) {
-			DEBUG(10,("deleting dependent file [%s]\n", r->dependent_files[i]));
+			DBG_DEBUG("deleting dependent file [%s]\n",
+				  r->dependent_files[i]);
 			driver_unlink_internals(conn, short_arch, r->version, r->dependent_files[i]);
 			i++;
 		}
 	}
 
 	ret = true;
- err_out:
-	unbecome_user_without_service();
- err_free_conn:
+fail:
+	if (became_user) {
+		unbecome_user_without_service();
+	}
 	TALLOC_FREE(frame);
 	return ret;
 }

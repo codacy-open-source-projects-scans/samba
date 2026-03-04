@@ -167,42 +167,9 @@ static int widelinks_chdir(struct vfs_handle_struct *handle,
 	 * DOT or DOTDOT.
 	 */
 
-	if (smb_fname->base_name[0] == '/') {
-		/* Absolute path - replace. */
-		new_cwd = talloc_strdup(config,
-				smb_fname->base_name);
-	} else {
-		if (config->cwd == NULL) {
-			/*
-			 * Relative chdir before absolute one -
-			 * see note 1b above.
-			 */
-			struct smb_filename *current_dir_fname =
-					SMB_VFS_NEXT_GETWD(handle,
-							config);
-			if (current_dir_fname == NULL) {
-				return -1;
-			}
-			/* Paranoia.. */
-			if (current_dir_fname->base_name[0] != '/') {
-				DBG_ERR("SMB_VFS_NEXT_GETWD returned "
-					"non-absolute path |%s|\n",
-					current_dir_fname->base_name);
-				TALLOC_FREE(current_dir_fname);
-				return -1;
-			}
-			config->cwd = talloc_strdup(config,
-					current_dir_fname->base_name);
-			TALLOC_FREE(current_dir_fname);
-			if (config->cwd == NULL) {
-				return -1;
-			}
-		}
-		new_cwd = talloc_asprintf(config,
-				"%s/%s",
-				config->cwd,
-				smb_fname->base_name);
-	}
+	SMB_ASSERT(smb_fname->base_name[0] == '/');
+
+	new_cwd = talloc_strdup(config, smb_fname->base_name);
 	if (new_cwd == NULL) {
 		return -1;
 	}
@@ -216,27 +183,6 @@ static int widelinks_chdir(struct vfs_handle_struct *handle,
 	config->cwd = new_cwd;
 	DBG_DEBUG("config->cwd now |%s|\n", config->cwd);
 	return 0;
-}
-
-static struct smb_filename *widelinks_getwd(vfs_handle_struct *handle,
-                                TALLOC_CTX *ctx)
-{
-	struct widelinks_config *config = NULL;
-
-	SMB_VFS_HANDLE_GET_DATA(handle,
-				config,
-				struct widelinks_config,
-				return NULL);
-
-	if (!config->active) {
-		/* Module not active. */
-		return SMB_VFS_NEXT_GETWD(handle, ctx);
-	}
-	if (config->cwd == NULL) {
-		/* getwd before chdir. See note 1b above. */
-		return SMB_VFS_NEXT_GETWD(handle, ctx);
-	}
-	return cp_smb_basename(ctx, config->cwd);
 }
 
 static struct smb_filename *widelinks_realpath(vfs_handle_struct *handle,
@@ -406,7 +352,6 @@ static struct vfs_fn_pointers vfs_widelinks_fns = {
 	 * (b) on POSIX extensions names.
 	 */
 	.chdir_fn = widelinks_chdir,
-	.getwd_fn = widelinks_getwd,
 	.realpath_fn = widelinks_realpath,
 };
 

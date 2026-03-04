@@ -2410,18 +2410,11 @@ static char *wcache_make_sidlist(TALLOC_CTX *mem_ctx, uint32_t num_sids,
 	char *sidlist;
 
 	sidlist = talloc_strdup(mem_ctx, "");
-	if (sidlist == NULL) {
-		return NULL;
-	}
 	for (i=0; i<num_sids; i++) {
 		struct dom_sid_buf tmp;
-		sidlist = talloc_asprintf_append_buffer(
-			sidlist,
-			"/%s",
-			dom_sid_str_buf(&sids[i], &tmp));
-		if (sidlist == NULL) {
-			return NULL;
-		}
+		talloc_asprintf_addbuf(&sidlist,
+				       "/%s",
+				       dom_sid_str_buf(&sids[i], &tmp));
 	}
 	return sidlist;
 }

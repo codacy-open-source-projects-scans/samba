@@ -108,16 +108,13 @@ static char *utok_string(TALLOC_CTX *mem_ctx,
 
 bool chdir_current_service(connection_struct *conn)
 {
-	const struct smb_filename connectpath_fname = {
-		.base_name = conn->connectpath,
-	};
 	int saved_errno = 0;
 	char *utok_str = NULL;
 	int ret;
 
 	conn->lastused_count++;
 
-	ret = vfs_ChDir(conn, &connectpath_fname);
+	ret = vfs_ChDir_shareroot(conn);
 	if (ret == 0) {
 		return true;
 	}
@@ -130,7 +127,7 @@ bool chdir_current_service(connection_struct *conn)
 		return false;
 	}
 
-	DBG_ERR("vfs_ChDir(%s) failed: %s. Current token: %s\n",
+	DBG_ERR("vfs_ChDir_shareroot(%s) failed: %s. Current token: %s\n",
 		conn->connectpath,
 		strerror(saved_errno),
 		utok_str);
@@ -934,8 +931,6 @@ void close_cnum(connection_struct *conn,
 		uint64_t vuid,
 		enum file_close_type close_type)
 {
-	char rootpath[2] = { '/', '\0'};
-	struct smb_filename root_fname = { .base_name = rootpath };
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
 
@@ -950,7 +945,8 @@ void close_cnum(connection_struct *conn,
 				 lp_const_servicename(SNUM(conn))));
 
 	/* make sure we leave the directory available for unmount */
-	vfs_ChDir(conn, &root_fname);
+	SMB_ASSERT(chdir("/") == 0);
+	reset_chdir_lastconn_cache();
 
 	/* Call VFS disconnect hook */
 	SMB_VFS_DISCONNECT(conn);

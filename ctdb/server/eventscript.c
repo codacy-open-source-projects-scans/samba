@@ -69,8 +69,6 @@ static bool eventd_context_init(TALLOC_CTX *mem_ctx,
 				struct eventd_context **out)
 {
 	struct eventd_context *ectx;
-	const char *eventd = CTDB_HELPER_BINDIR "/ctdb-eventd";
-	const char *value;
 	int ret;
 
 	ectx = talloc_zero(mem_ctx, struct eventd_context);
@@ -80,12 +78,7 @@ static bool eventd_context_init(TALLOC_CTX *mem_ctx,
 
 	ectx->ev = ctdb->ev;
 
-	value = getenv("CTDB_EVENTD");
-	if (value != NULL) {
-		eventd = value;
-	}
-
-	ectx->path = talloc_strdup(ectx, eventd);
+	ectx->path = path_helperdir_append(ectx, "ctdb-eventd");
 	if (ectx->path == NULL) {
 		talloc_free(ectx);
 		return false;

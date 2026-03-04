@@ -134,33 +134,27 @@ static NTSTATUS append_info3_as_txt(TALLOC_CTX *mem_ctx,
 	}
 
 	ex = talloc_strdup(frame, "");
-	if (ex == NULL) {
-		status = NT_STATUS_NO_MEMORY;
-		goto out;
-	}
 
 	for (i=0; i < info3->base.groups.count; i++) {
-		ex = talloc_asprintf_append_buffer(ex, "0x%08X:0x%08X\n",
-						   info3->base.groups.rids[i].rid,
-						   info3->base.groups.rids[i].attributes);
-		if (ex == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto out;
-		}
+		talloc_asprintf_addbuf(&ex,
+				       "0x%08X:0x%08X\n",
+				       info3->base.groups.rids[i].rid,
+				       info3->base.groups.rids[i].attributes);
 	}
 
 	for (i=0; i < info3->sidcount; i++) {
 		struct dom_sid_buf sidbuf;
 
-		ex = talloc_asprintf_append_buffer(
-			ex,
-			"%s:0x%08X\n",
-			dom_sid_str_buf(info3->sids[i].sid, &sidbuf),
-			info3->sids[i].attributes);
-		if (ex == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto out;
-		}
+		talloc_asprintf_addbuf(&ex,
+				       "%s:0x%08X\n",
+				       dom_sid_str_buf(info3->sids[i].sid,
+						       &sidbuf),
+				       info3->sids[i].attributes);
+	}
+
+	if (ex == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
 	}
 
 	resp->length += talloc_get_size(ex);

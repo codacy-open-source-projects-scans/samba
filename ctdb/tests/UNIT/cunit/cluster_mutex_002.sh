@@ -4,12 +4,10 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-export CTDB_CLUSTER_MUTEX_HELPER="/bin/false"
-
 lockfile="${CTDB_TEST_TMP_DIR}/cluster_mutex.lockfile"
 trap 'rm ${lockfile}' 0
 
-t="${CTDB_SCRIPTS_HELPER_BINDIR}/ctdb_mutex_fcntl_helper"
+t="${CTDB_TEST_HELPER_BINDIR}/ctdb_mutex_fcntl_helper"
 helper="!${t} ${lockfile}"
 
 test_case "No contention: lock, unlock"
@@ -75,7 +73,7 @@ UNLOCK
 UNLOCK
 EOF
 unit_test cluster_mutex_test lock-file-removed-no-recheck \
-	  "$helper 0" "$lockfile"
+	"$helper 0" "$lockfile"
 
 test_case "Recheck on, lock file not removed"
 ok <<EOF
@@ -83,7 +81,7 @@ LOCK
 UNLOCK
 EOF
 unit_test cluster_mutex_test lock-file-wait-recheck-unlock \
-	  "$helper 5" 10
+	"$helper 5" 10
 
 test_case "Recheck on, lock file removed"
 ok <<EOF
@@ -121,7 +119,6 @@ LOCK
 UNLOCK
 EOF
 unit_test cluster_mutex_test lock-io-timeout "$helper 5 7" "$lockfile" 1 2
-
 
 test_case "Recheck on, ping on, child waits, child blocks causing ping timeout"
 ok <<EOF

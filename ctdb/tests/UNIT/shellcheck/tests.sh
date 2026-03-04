@@ -4,7 +4,7 @@
 
 define_test "tests"
 
-if "$CTDB_TESTS_ARE_INSTALLED" ; then
+if "$CTDB_TESTS_ARE_INSTALLED"; then
 	run_tests="${CTDB_SCRIPTS_TESTS_BIN_DIR}/ctdb_run_tests"
 	local_daemons="${CTDB_SCRIPTS_TESTS_BIN_DIR}/ctdb_local_daemons"
 else
@@ -14,9 +14,9 @@ fi
 
 # Scripts
 shellcheck_test \
-		"$run_tests" \
-		"$local_daemons" \
-		"${TEST_SCRIPTS_DIR}/test_wrap"
+	"$run_tests" \
+	"$local_daemons" \
+	"${TEST_SCRIPTS_DIR}/test_wrap"
 
 # Includes
 shellcheck_test -s sh \
@@ -32,5 +32,8 @@ shellcheck_test -s bash \
 
 # Test scripts and stubs
 shellcheck_test -s sh \
+	"${CTDB_TEST_DIR}/UNIT/eventd/scripts/"* \
 	"${CTDB_TEST_DIR}/UNIT/eventscripts/scripts/"* \
-	"${CTDB_TEST_DIR}/UNIT/eventscripts/stubs/"*
+	"${CTDB_TEST_DIR}/UNIT/eventscripts/stubs/"* \
+	"${CTDB_TEST_DIR}/UNIT/takeover_helper/scripts/"* \
+	"${CTDB_TEST_DIR}/UNIT/tool/scripts/"*

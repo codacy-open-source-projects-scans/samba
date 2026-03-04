@@ -94,8 +94,12 @@ Test and debugging variable options
 
 	   Set this environment variable to enable test mode.
 
-	   This enables daemons and tools to locate their socket and
-	   PID file relative to CTDB_BASE.
+	   This enables daemons and tools to:
+
+	   * Locate their socket and PID file relative to CTDB_BASE
+
+	   * Locate helper executables relative to
+	     CTDB_TEST_HELPER_BINDIR
 
 	   When testing with multiple local daemons on a single
 	   machine this does some extra things:

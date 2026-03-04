@@ -128,18 +128,18 @@ NTSTATUS winbindd_lookuprids_recv(struct tevent_req *req,
 	}
 
 	result = talloc_strdup(response, "");
-	if (result == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
 
 	for (i=0; i<state->names.num_principals; i++) {
 		struct wbint_Principal *p = &state->names.principals[i];
 
-		result = talloc_asprintf_append_buffer(
-			result, "%d %s\n", (int)p->type, p->name);
-		if (result == NULL) {
-			return NT_STATUS_NO_MEMORY;
-		}
+		talloc_asprintf_addbuf(&result,
+				       "%d %s\n",
+				       (int)p->type,
+				       p->name);
+	}
+
+	if (result == NULL) {
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	fstrcpy(response->data.domain_name, state->domain_name);

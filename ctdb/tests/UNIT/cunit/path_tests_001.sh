@@ -2,8 +2,6 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-PATH="$PATH:$CTDB_SCRIPTS_TOOLS_HELPER_DIR"
-
 setup_ctdb_base "${CTDB_TEST_TMP_DIR}" "ctdb-etc"
 
 ok <<EOF

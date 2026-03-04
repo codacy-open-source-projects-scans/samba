@@ -15,10 +15,13 @@ die()
 
 . "${TEST_SCRIPTS_DIR}/script_install_paths.sh"
 
-if [ -d "$CTDB_SCRIPTS_TOOLS_BIN_DIR" ]; then
-	PATH="${CTDB_SCRIPTS_TOOLS_BIN_DIR}:${PATH}"
+if [ -d "$CTDB_TEST_HELPER_BINDIR" ]; then
+	PATH="${CTDB_TEST_HELPER_BINDIR}:${PATH}"
 fi
 
+# Used by integration tests (via test_wrap) and unit tests to run test
+# helpers (built from ctdb/tests/src).  A hacky side-effect is that
+# local_daemons.sh takes advantage of this to be able to find ctdbd.
 if [ -d "$CTDB_SCRIPTS_TESTS_LIBEXEC_DIR" ]; then
 	PATH="${CTDB_SCRIPTS_TESTS_LIBEXEC_DIR}:${PATH}"
 fi

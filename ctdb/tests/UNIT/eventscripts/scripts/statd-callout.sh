@@ -189,7 +189,7 @@ EOF
 
 	case "$event" in
 	add-client)
-		cmd="${CTDB_SCRIPTS_HELPER_BINDIR}/statd_callout"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout"
 		unit_test "$cmd" "$event" "$@"
 		ctdb_get_my_public_addresses |
 			while read -r _ _sip _; do
@@ -197,7 +197,7 @@ EOF
 			done
 		;;
 	del-client)
-		cmd="${CTDB_SCRIPTS_HELPER_BINDIR}/statd_callout"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout"
 		unit_test "$cmd" "$event" "$@"
 		ctdb_get_my_public_addresses |
 			while read -r _ _sip _; do
@@ -205,21 +205,21 @@ EOF
 			done
 		;;
 	sm-notify)
-		cmd="${CTDB_SCRIPTS_HELPER_BINDIR}/statd_callout"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout"
 		unit_test "$cmd" "$event" "$@"
 		;;
 	takeip)
-		cmd="${CTDB_SCRIPTS_TOOLS_HELPER_DIR}/statd_callout_helper"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout_helper"
 		script_test "$cmd" "$event" "$@"
 		touch "${state_dir}/takeip@${FAKE_CTDB_PNN}@${1}"
 		;;
 	notify)
-		cmd="${CTDB_SCRIPTS_TOOLS_HELPER_DIR}/statd_callout_helper"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout_helper"
 		script_test "$cmd" "$event" "$@"
 		rm -f "${state_dir}/takeip@${FAKE_CTDB_PNN}@"*
 		;;
 	*)
-		cmd="${CTDB_SCRIPTS_TOOLS_HELPER_DIR}/statd_callout_helper"
+		cmd="${CTDB_TEST_HELPER_BINDIR}/statd_callout_helper"
 		script_test "$cmd" "$event" "$@"
 		;;
 	esac

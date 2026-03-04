@@ -242,13 +242,7 @@ static NTSTATUS vfswrap_get_dfs_referrals(struct vfs_handle_struct *handle,
 				   handle->conn->sconn->remote_address,
 				   handle->conn->sconn->local_address,
 				   junction, &consumedcnt, &self_referral);
-
-	{
-		struct smb_filename connectpath_fname = {
-			.base_name = handle->conn->connectpath
-		};
-		vfs_ChDir(handle->conn, &connectpath_fname);
-	}
+	vfs_ChDir_shareroot(handle->conn);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -2872,29 +2866,6 @@ static int vfswrap_chdir(vfs_handle_struct *handle,
 	return result;
 }
 
-static struct smb_filename *vfswrap_getwd(vfs_handle_struct *handle,
-				TALLOC_CTX *ctx)
-{
-	char *result;
-	struct smb_filename *smb_fname = NULL;
-
-	START_PROFILE_X(SNUM(handle->conn), syscall_getwd);
-	result = sys_getwd();
-	END_PROFILE_X(syscall_getwd);
-
-	if (result == NULL) {
-		return NULL;
-	}
-	smb_fname = cp_smb_basename(ctx, result);
-	/*
-	 * sys_getwd() *always* returns malloced memory.
-	 * We must free here to avoid leaks:
-	 * BUG:https://bugzilla.samba.org/show_bug.cgi?id=13372
-	 */
-	SAFE_FREE(result);
-	return smb_fname;
-}
-
 /*********************************************************************
  nsec timestamp resolution call. Convert down to whatever the underlying
  system will support.
@@ -4103,7 +4074,6 @@ static struct vfs_fn_pointers vfs_default_fns = {
 	.fchown_fn = vfswrap_fchown,
 	.lchown_fn = vfswrap_lchown,
 	.chdir_fn = vfswrap_chdir,
-	.getwd_fn = vfswrap_getwd,
 	.fntimes_fn = vfswrap_fntimes,
 	.ftruncate_fn = vfswrap_ftruncate,
 	.fallocate_fn = vfswrap_fallocate,

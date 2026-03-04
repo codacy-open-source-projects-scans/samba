@@ -366,25 +366,22 @@ int dsdb_dn_string_comparison(struct ldb_context *ldb, void *mem_ctx,
 char *drs_ObjectIdentifier_to_debug_string(TALLOC_CTX *mem_ctx,
 					   struct drsuapi_DsReplicaObjectIdentifier *nc)
 {
-	char *ret = NULL;
-	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
+	char *ret = talloc_strdup(mem_ctx, "");
 	if (!GUID_all_zero(&nc->guid)) {
-		char *guid = GUID_string(tmp_ctx, &nc->guid);
-		if (guid) {
-			ret = talloc_asprintf_append(ret, "<GUID=%s>;", guid);
-		}
+		struct GUID_txt_buf buf;
+		talloc_asprintf_addbuf(&ret,
+				       "<GUID=%s>;",
+				       GUID_buf_string(&nc->guid, &buf));
 	}
 	if (nc->__ndr_size_sid != 0 && nc->sid.sid_rev_num != 0) {
-		const char *sid = dom_sid_string(tmp_ctx, &nc->sid);
-		if (sid) {
-			ret = talloc_asprintf_append(ret, "<SID=%s>;", sid);
-		}
+		struct dom_sid_buf buf;
+		talloc_asprintf_addbuf(&ret,
+				       "<SID=%s>;",
+				       dom_sid_str_buf(&nc->sid, &buf));
 	}
 	if (nc->__ndr_size_dn != 0 && nc->dn) {
-		ret = talloc_asprintf_append(ret, "%s", nc->dn);
+		talloc_asprintf_addbuf(&ret, "%s", nc->dn);
 	}
-	talloc_free(tmp_ctx);
-	talloc_steal(mem_ctx, ret);
 	return ret;
 }
 

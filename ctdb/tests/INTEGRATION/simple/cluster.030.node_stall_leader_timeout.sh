@@ -13,7 +13,7 @@ select_test_node
 echo
 
 echo 'Get "leader timeout":'
-conf_tool="${CTDB_SCRIPTS_HELPER_BINDIR}/ctdb-config"
+conf_tool="${CTDB_TEST_HELPER_BINDIR}/ctdb-config"
 # shellcheck disable=SC2154
 # $test_node set by select_test_node() above
 try_command_on_node "$test_node" "${conf_tool} get cluster 'leader timeout'"

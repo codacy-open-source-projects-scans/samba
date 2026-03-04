@@ -44,16 +44,17 @@ char *ldap_encode_ndr_uint32(TALLOC_CTX *mem_ctx, uint32_t value)
 */
 char *ldap_encode_ndr_dom_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid)
 {
-	DATA_BLOB blob;
+	uint8_t buf[ndr_size_dom_sid(sid, 0)];
+	DATA_BLOB blob = {.data = buf, .length = sizeof(buf)};
 	enum ndr_err_code ndr_err;
 	char *ret;
-	ndr_err = ndr_push_struct_blob(&blob, mem_ctx, sid,
-				       (ndr_push_flags_fn_t)ndr_push_dom_sid);
+
+	ndr_err = ndr_push_struct_into_fixed_blob(
+		&blob, sid, (ndr_push_flags_fn_t)ndr_push_dom_sid);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 		return NULL;
 	}
 	ret = ldb_binary_encode(mem_ctx, blob);
-	data_blob_free(&blob);
 	return ret;
 }
 

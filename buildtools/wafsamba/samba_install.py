@@ -175,7 +175,8 @@ def apply_vscript(self):
 
 
 ##############################
-# handle the creation of links for libraries and binaries in the build tree
+# handle the creation of links for libraries, binaries and generated
+# items in the build tree
 
 @feature('symlink_lib')
 @after('apply_link')
@@ -234,3 +235,31 @@ def symlink_bin(self):
             return
         os.unlink(bldpath)
     os.symlink(binpath, bldpath)
+
+
+@feature('symlink_generated')
+def symlink_generated(self):
+    """Symlink a generated file into the build directory."""
+    target = self.target
+    if isinstance(target, list):
+        if len(target) > 1:
+            return
+        target = target[0]
+
+    if target.endswith('.inst'):
+        return
+
+    genpath = os.path.join(self.path.get_bld().abspath(), target)
+    bldpath = os.path.join(self.bld.env.BUILD_DIRECTORY, target)
+
+    if os.path.lexists(bldpath):
+        if os.path.islink(bldpath) and os.readlink(bldpath) == genpath:
+            return
+        os.unlink(bldpath)
+
+    def run_symlink_generated(_):
+        os.symlink(genpath, bldpath)
+
+    # This way the symlink is always created after genpath, so is
+    # never dangling.
+    self.bld.add_post_fun(run_symlink_generated)

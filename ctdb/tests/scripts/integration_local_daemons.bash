@@ -1,8 +1,5 @@
 # Hey Emacs, this is a -*- shell-script -*- !!!  :-)
 
-hdir="$CTDB_SCRIPTS_HELPER_BINDIR"
-export CTDB_EVENT_HELPER="${hdir}/ctdb-event"
-
 if $CTDB_TESTS_ARE_INSTALLED; then
 	# Find it in $PATH
 	helper="ctdb_local_daemons"

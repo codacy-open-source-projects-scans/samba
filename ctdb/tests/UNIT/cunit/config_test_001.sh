@@ -2,13 +2,11 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-PATH="$PATH:$CTDB_SCRIPTS_TOOLS_HELPER_DIR"
-
 setup_ctdb_base "${CTDB_TEST_TMP_DIR}" "ctdb-etc"
 
 conffile="${CTDB_BASE}/ctdb.conf"
 
-remove_files ()
+remove_files()
 {
 	rm -f "$conffile"
 }
@@ -18,14 +16,14 @@ test_cleanup remove_files
 # Get the default values that are dependent on install prefix
 logging_location=$(ctdb-config get "logging" "location")
 database_volatile_dbdir=$(ctdb-config get \
-				      "database" \
-				      "volatile database directory")
+	"database" \
+	"volatile database directory")
 database_persistent_dbdir=$(ctdb-config get \
-					"database" \
-					"persistent database directory")
+	"database" \
+	"persistent database directory")
 database_state_dbdir=$(ctdb-config get \
-				   "database" \
-				   "state database directory")
+	"database" \
+	"state database directory")
 
 ok <<EOF
 [logging]
@@ -65,13 +63,13 @@ Failed to load config file $conffile
 EOF
 unit_test ctdb-config validate
 
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 EOF
 
 ok_null
 unit_test ctdb-config validate
 
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 [foobar]
 EOF
 
@@ -81,7 +79,7 @@ Failed to load config file $conffile
 EOF
 unit_test ctdb-config validate
 
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 foobar = cat
 EOF
 
@@ -98,7 +96,7 @@ unit_test ctdb-config get section key
 
 # Confirm that an unknown key doesn't stop the rest of the file from
 # loading
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 [database]
 	unknown key = 123
 

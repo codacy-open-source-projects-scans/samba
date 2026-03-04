@@ -113,26 +113,23 @@ NTSTATUS winbindd_xids_to_sids_recv(struct tevent_req *req,
 	}
 
 	result = talloc_strdup(response, "");
-	if (result == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
 
 	for (i=0; i<state->num_xids; i++) {
 		struct dom_sid_buf sid_buf;
 		const char *str = "-";
 
 		if (!is_null_sid(&state->sids[i])) {
-			dom_sid_str_buf(&state->sids[i], &sid_buf);
-			str = sid_buf.buf;
+			str = dom_sid_str_buf(&state->sids[i], &sid_buf);
 		}
 
 		D_NOTICE("%"PRIu32": XID %"PRIu32" mapped to SID %s.\n",
 			 i, state->xids[i].id, str);
-		result = talloc_asprintf_append_buffer(
-			result, "%s\n", str);
-		if (result == NULL) {
-			return NT_STATUS_NO_MEMORY;
-		}
+
+		talloc_asprintf_addbuf(&result, "%s\n", str);
+	}
+
+	if (result == NULL) {
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	response->extra_data.data = result;

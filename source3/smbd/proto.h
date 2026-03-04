@@ -490,45 +490,29 @@ int setup_dfs_referral(connection_struct *orig_conn,
 			const char *dfs_path,
 			int max_referral_level,
 			char **ppdata, NTSTATUS *pstatus);
-bool create_junction(TALLOC_CTX *ctx,
-		const char *dfs_path,
-		struct junction_map *jucn);
+
 struct referral;
 char *msdfs_link_string(TALLOC_CTX *ctx,
 		const struct referral *reflist,
 		size_t referral_count);
-bool create_msdfs_link(const struct junction_map *jucn,
-		       struct auth_session_info *session_info);
-bool remove_msdfs_link(const struct junction_map *jucn,
-		       struct auth_session_info *session_info);
 
-struct junction_map *enum_msdfs_links(TALLOC_CTX *ctx,
-				      struct auth_session_info *session_info,
-				      size_t *p_num_jn);
 struct connection_struct;
 struct smb_filename;
 
-NTSTATUS create_conn_struct_cwd(TALLOC_CTX *mem_ctx,
-				struct tevent_context *ev,
-				struct messaging_context *msg,
-				const struct auth_session_info *session_info,
-				int snum,
-				const char *path,
-				struct connection_struct **c);
-struct conn_struct_tos {
-	struct connection_struct *conn;
-	struct smb_filename *oldcwd_fname;
-};
-NTSTATUS create_conn_struct_tos(struct messaging_context *msg,
-				int snum,
-				const char *path,
-				const struct auth_session_info *session_info,
-				struct conn_struct_tos **_c);
-NTSTATUS create_conn_struct_tos_cwd(struct messaging_context *msg,
-				    int snum,
-				    const char *path,
-				    const struct auth_session_info *session_info,
-				    struct conn_struct_tos **_c);
+NTSTATUS parse_dfs_path_strict(TALLOC_CTX *ctx,
+			       const char *pathname,
+			       char **_hostname,
+			       char **_servicename,
+			       char **_remaining_path);
+
+struct conn_wrap;
+NTSTATUS create_conn_struct_chdir(TALLOC_CTX *mem_ctx,
+				  struct messaging_context *msg,
+				  int snum,
+				  const char *path,
+				  const struct auth_session_info *session_info,
+				  struct conn_wrap **_wrap);
+struct connection_struct *conn_wrap_connection(const struct conn_wrap *w);
 
 /* The following definitions come from smbd/notify.c  */
 
@@ -1190,9 +1174,8 @@ const char *vfs_readdirname(connection_struct *conn,
 			    struct files_struct *dirfsp,
 			    DIR *d,
 			    char **talloced);
-int vfs_ChDir(connection_struct *conn,
-			const struct smb_filename *smb_fname);
-struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn);
+void reset_chdir_lastconn_cache(void);
+int vfs_ChDir_shareroot(connection_struct *conn);
 int vfs_stat(struct connection_struct *conn,
 	     struct smb_filename *smb_fname);
 int vfs_stat_smb_basename(struct connection_struct *conn,

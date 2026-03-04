@@ -109,6 +109,13 @@ static struct ctdb_context *ctdb_init(struct tevent_context *ev)
 		return NULL;
 	}
 
+	ctdb->lock_helper = path_helperdir_append(ctdb, "ctdb_lock_helper");
+	if (ctdb->lock_helper == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		talloc_free(ctdb);
+		return NULL;
+	}
+
 	ctdbd_pidfile = path_pidfile(ctdb, "ctdbd");
 	if (ctdbd_pidfile == NULL) {
 		DBG_ERR("Memory allocation error\n");
@@ -343,13 +350,12 @@ int main(int argc, const char *argv[])
 		goto fail;
 	}
 
-	if (ctdb_config.lock_debug_script != NULL) {
-		ret = setenv("CTDB_DEBUG_LOCKS",
-			     ctdb_config.lock_debug_script,
-			     1);
-		if (ret != 0) {
-			D_ERR("Failed to set up lock debugging (%s)\n",
-			      strerror(errno));
+	ctdb->lock_debug_script = ctdb_config.lock_debug_script;
+	if (ctdb->lock_debug_script == NULL) {
+		ctdb->lock_debug_script = path_etcdir_append(ctdb,
+							     "debug_locks.sh");
+		if (ctdb->lock_debug_script == NULL) {
+			DBG_ERR("No memory for lock debugging script path\n");
 			goto fail;
 		}
 	}

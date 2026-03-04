@@ -43,6 +43,7 @@
 #include "common/system_socket.h"
 #include "common/common.h"
 #include "common/logging.h"
+#include "common/path.h"
 
 #include "conf/ctdb_config.h"
 
@@ -264,7 +265,9 @@ struct ctdb_recoverd {
 	bool election_in_progress;
 	struct tevent_timer *election_timeout;
 	struct srvid_requests *reallocate_requests;
+	const char *takeover_helper;
 	struct ctdb_op_state *takeover_run;
+	const char *recovery_helper;
 	struct ctdb_op_state *recovery;
 	struct ctdb_iface_list_old *ifaces;
 	uint32_t *force_rebalance_nodes;
@@ -1154,16 +1157,9 @@ fail:
 static int ctdb_takeover(struct ctdb_recoverd *rec,
 			 uint32_t *force_rebalance_nodes)
 {
-	static char prog[PATH_MAX+1] = "";
 	char *arg;
 	unsigned int i;
 	int ret;
-
-	if (!ctdb_set_helper("takeover_helper", prog, sizeof(prog),
-			     "CTDB_TAKEOVER_HELPER", CTDB_HELPER_BINDIR,
-			     "ctdb_takeover_helper")) {
-		ctdb_die(rec->ctdb, "Unable to set takeover helper\n");
-	}
 
 	arg = NULL;
 	for (i = 0; i < talloc_array_length(force_rebalance_nodes); i++) {
@@ -1187,7 +1183,7 @@ static int ctdb_takeover(struct ctdb_recoverd *rec,
 		}
 	}
 
-	return helper_run(rec, rec, prog, arg, "takeover");
+	return helper_run(rec, rec, rec->takeover_helper, arg, "takeover");
 }
 
 static bool do_takeover_run(struct ctdb_recoverd *rec,
@@ -1280,14 +1276,7 @@ done:
 
 static int db_recovery_parallel(struct ctdb_recoverd *rec, TALLOC_CTX *mem_ctx)
 {
-	static char prog[PATH_MAX+1] = "";
 	const char *arg;
-
-	if (!ctdb_set_helper("recovery_helper", prog, sizeof(prog),
-			     "CTDB_RECOVERY_HELPER", CTDB_HELPER_BINDIR,
-			     "ctdb_recovery_helper")) {
-		ctdb_die(rec->ctdb, "Unable to set recovery helper\n");
-	}
 
 	arg = talloc_asprintf(mem_ctx, "%u", new_generation());
 	if (arg == NULL) {
@@ -1297,7 +1286,7 @@ static int db_recovery_parallel(struct ctdb_recoverd *rec, TALLOC_CTX *mem_ctx)
 
 	setenv("CTDB_DBDIR_STATE", rec->ctdb->db_directory_state, 1);
 
-	return helper_run(rec, mem_ctx, prog, arg, "recovery");
+	return helper_run(rec, mem_ctx, rec->recovery_helper, arg, "recovery");
 }
 
 /*
@@ -3063,9 +3052,21 @@ static void monitor_cluster(struct ctdb_context *ctdb)
 	rec->cluster_lock_handle = NULL;
 	rec->helper_pid = -1;
 
+	rec->takeover_helper = path_helperdir_append(rec,
+						     "ctdb_takeover_helper");
+	if (rec->takeover_helper == NULL) {
+		DBG_ERR("Memory allocation error setting takeover helper\n");
+		exit(1);
+	}
 	rec->takeover_run = ctdb_op_init(rec, "takeover runs");
 	CTDB_NO_MEMORY_FATAL(ctdb, rec->takeover_run);
 
+	rec->recovery_helper = path_helperdir_append(rec,
+						     "ctdb_recovery_helper");
+	if (rec->recovery_helper == NULL) {
+		DBG_ERR("Memory allocation error setting recovery helper\n");
+		exit(1);
+	}
 	rec->recovery = ctdb_op_init(rec, "recoveries");
 	CTDB_NO_MEMORY_FATAL(ctdb, rec->recovery);
 

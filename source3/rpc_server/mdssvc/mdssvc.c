@@ -241,7 +241,7 @@ static int cnid_comp_fn(const void *p1, const void *p2)
 static bool sort_cnids(struct sl_query *slq, const DALLOC_CTX *d)
 {
 	uint64_t *cnids = NULL;
-	int i;
+	size_t i;
 	const void *p;
 
 	cnids = talloc_array(slq, uint64_t, dalloc_size(d));
@@ -1619,11 +1619,8 @@ static int mds_ctx_destructor_cb(struct mds_ctx *mds_ctx)
 		talloc_free(mds_ctx->query_list);
 	}
 	TALLOC_FREE(mds_ctx->ino_path_map);
-
-	if (mds_ctx->conn != NULL) {
-		SMB_VFS_DISCONNECT(mds_ctx->conn);
-		TALLOC_FREE(mds_ctx->conn);
-	}
+	TALLOC_FREE(mds_ctx->wrap);
+	mds_ctx->conn = NULL;
 
 	ZERO_STRUCTP(mds_ctx);
 
@@ -1647,10 +1644,8 @@ NTSTATUS mds_init_ctx(TALLOC_CTX *mem_ctx,
 {
 	const struct loadparm_substitution *lp_sub =
 		loadparm_s3_global_substitution();
-	struct smb_filename conn_basedir;
 	struct mds_ctx *mds_ctx;
 	int backend;
-	int ret;
 	bool ok;
 	smb_iconv_t iconv_hnd = (smb_iconv_t)-1;
 	NTSTATUS status;
@@ -1739,30 +1734,18 @@ NTSTATUS mds_init_ctx(TALLOC_CTX *mem_ctx,
 		goto error;
 	}
 
-	status = create_conn_struct_cwd(mds_ctx,
-					ev,
-					msg_ctx,
-					session_info,
-					snum,
-					lp_path(talloc_tos(), lp_sub, snum),
-					&mds_ctx->conn);
+	status = create_conn_struct_chdir(mds_ctx,
+					  msg_ctx,
+					  snum,
+					  lp_path(talloc_tos(), lp_sub, snum),
+					  session_info,
+					  &mds_ctx->wrap);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("failed to create conn for vfs: %s\n",
 			nt_errstr(status));
 		goto error;
 	}
-
-	conn_basedir = (struct smb_filename) {
-		.base_name = mds_ctx->conn->connectpath,
-	};
-
-	ret = vfs_ChDir(mds_ctx->conn, &conn_basedir);
-	if (ret != 0) {
-		DBG_ERR("vfs_ChDir [%s] failed: %s\n",
-			conn_basedir.base_name, strerror(errno));
-		status = map_nt_error_from_unix(errno);
-		goto error;
-	}
+	mds_ctx->conn = conn_wrap_connection(mds_ctx->wrap);
 
 	ok = mds_ctx->backend->connect(mds_ctx);
 	if (!ok) {
@@ -1800,9 +1783,6 @@ bool mds_dispatch(struct mds_ctx *mds_ctx,
 	DALLOC_CTX *reply = NULL;
 	char *rpccmd;
 	const struct slrpc_cmd *slcmd;
-	const struct smb_filename conn_basedir = {
-		.base_name = mds_ctx->conn->connectpath,
-	};
 	NTSTATUS status;
 
 	if (CHECK_DEBUGLVL(10)) {
@@ -1855,10 +1835,11 @@ bool mds_dispatch(struct mds_ctx *mds_ctx,
 		goto cleanup;
 	}
 
-	ret = vfs_ChDir(mds_ctx->conn, &conn_basedir);
+	ret = vfs_ChDir_shareroot(mds_ctx->conn);
 	if (ret != 0) {
-		DBG_ERR("vfs_ChDir [%s] failed: %s\n",
-			conn_basedir.base_name, strerror(errno));
+		DBG_ERR("vfs_ChDir_shareroot [%s] failed: %s\n",
+			mds_ctx->conn->connectpath,
+			strerror(errno));
 		ok = false;
 		goto cleanup;
 	}

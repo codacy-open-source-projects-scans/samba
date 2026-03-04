@@ -2211,8 +2211,8 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				 bytes_per_sector,
 				 dsize,
 				 dfree);
-			SBIG_UINT(pdata,0,dsize);
-			SBIG_UINT(pdata,8,dfree);
+			PUSH_LE_U64(pdata, 0, dsize);
+			PUSH_LE_U64(pdata, 8, dfree);
 			SIVAL(pdata,16,sectors_per_unit);
 			SIVAL(pdata,20,bytes_per_sector);
 			*fixed_portion = 24;
@@ -2252,9 +2252,9 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				 bytes_per_sector,
 				 dsize,
 				 dfree);
-			SBIG_UINT(pdata,0,dsize); /* Total Allocation units. */
-			SBIG_UINT(pdata,8,dfree); /* Caller available allocation units. */
-			SBIG_UINT(pdata,16,dfree); /* Actual available allocation units. */
+			PUSH_LE_U64(pdata, 0, dsize); /* Total Allocation units. */
+			PUSH_LE_U64(pdata, 8, dfree); /* Caller available allocation units. */
+			PUSH_LE_U64(pdata, 16, dfree); /* Actual available allocation units. */
 			SIVAL(pdata,24,sectors_per_unit); /* Sectors per allocation unit. */
 			SIVAL(pdata,28,bytes_per_sector); /* Bytes per sector. */
 			*fixed_portion = 32;
@@ -2329,15 +2329,15 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				  lp_servicename(talloc_tos(), lp_sub, SNUM(conn))));
 
 			/* Unknown1 24 NULL bytes*/
-			SBIG_UINT(pdata,0,(uint64_t)0);
-			SBIG_UINT(pdata,8,(uint64_t)0);
-			SBIG_UINT(pdata,16,(uint64_t)0);
+			PUSH_LE_U64(pdata, 0, 0);
+			PUSH_LE_U64(pdata, 8, 0);
+			PUSH_LE_U64(pdata, 16, 0);
 
 			/* Default Soft Quota 8 bytes */
-			SBIG_UINT(pdata,24,quotas.softlim);
+			PUSH_LE_U64(pdata, 24, quotas.softlim);
 
 			/* Default Hard Quota 8 bytes */
-			SBIG_UINT(pdata,32,quotas.hardlim);
+			PUSH_LE_U64(pdata, 32, quotas.hardlim);
 
 			/* Quota flag 2 bytes */
 			SSVAL(pdata,40,quotas.qflags);
@@ -2358,7 +2358,9 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			SIVAL(pdata,16,extended_info.samba_magic);
 			SIVAL(pdata,20,extended_info.samba_version);
 			SIVAL(pdata,24,extended_info.samba_subversion);
-			SBIG_UINT(pdata,28,extended_info.samba_gitcommitdate);
+			PUSH_LE_U64(pdata,
+				    28,
+				    extended_info.samba_gitcommitdate);
 			memcpy(pdata+36,extended_info.samba_version_string,28);
 			data_len = 64;
 			break;
@@ -2450,16 +2452,18 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			/* We have POSIX ACLs, pathname, encryption,
 			 * large read/write, and locking capability. */
 
-			SBIG_UINT(pdata,4,((uint64_t)(
-					CIFS_UNIX_POSIX_ACLS_CAP|
-					CIFS_UNIX_POSIX_PATHNAMES_CAP|
-					CIFS_UNIX_FCNTL_LOCKS_CAP|
-					CIFS_UNIX_EXTATTR_CAP|
-					CIFS_UNIX_POSIX_PATH_OPERATIONS_CAP|
-					encrypt_caps|
-					(large_read ? CIFS_UNIX_LARGE_READ_CAP : 0) |
-					(large_write ?
-					CIFS_UNIX_LARGE_WRITE_CAP : 0))));
+			PUSH_LE_U64(pdata,
+				    4,
+				    CIFS_UNIX_POSIX_ACLS_CAP |
+				    CIFS_UNIX_POSIX_PATHNAMES_CAP |
+				    CIFS_UNIX_FCNTL_LOCKS_CAP |
+				    CIFS_UNIX_EXTATTR_CAP |
+				    CIFS_UNIX_POSIX_PATH_OPERATIONS_CAP |
+				    encrypt_caps |
+				    (large_read ?
+					CIFS_UNIX_LARGE_READ_CAP : 0) |
+				    (large_write ?
+					CIFS_UNIX_LARGE_WRITE_CAP : 0));
 			break;
 		}
 #endif
@@ -2505,6 +2509,9 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 
 		case SMB_QUERY_POSIX_WHOAMI:
 		{
+			struct auth_session_info *sess = conn->session_info;
+			struct security_token *tok = sess->security_token;
+			struct security_unix_token *utok = sess->unix_token;
 			uint32_t flags = 0;
 			uint32_t sid_bytes;
 			uint32_t i;
@@ -2517,7 +2524,8 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				return NT_STATUS_BUFFER_TOO_SMALL;
 			}
 
-			if (security_session_user_level(conn->session_info, NULL) < SECURITY_USER) {
+			if (security_session_user_level(sess, NULL) <
+			    SECURITY_USER) {
 				flags |= SMB_WHOAMI_GUEST;
 			}
 
@@ -2525,27 +2533,23 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			 * platform size. This matches
 			 * SMB_QUERY_FILE_UNIX_BASIC and friends.
 			 */
-			data_len = 4 /* flags */
-			    + 4 /* flag mask */
-			    + 8 /* uid */
-			    + 8 /* gid */
-			    + 4 /* ngroups */
-			    + 4 /* num_sids */
-			    + 4 /* SID bytes */
-			    + 4 /* pad/reserved */
-			    + (conn->session_info->unix_token->ngroups * 8)
-				/* groups list */
-			    + (conn->session_info->security_token->num_sids *
-				    SID_MAX_SIZE)
+			data_len = 4   /* flags */
+				   + 4 /* flag mask */
+				   + 8 /* uid */
+				   + 8 /* gid */
+				   + 4 /* ngroups */
+				   + 4 /* num_sids */
+				   + 4 /* SID bytes */
+				   + 4 /* pad/reserved */
+				   + (utok->ngroups * 8)
+				   /* groups list */
+				   + (tok->num_sids * SID_MAX_SIZE)
 				/* SID list */;
 
 			SIVAL(pdata, 0, flags);
 			SIVAL(pdata, 4, SMB_WHOAMI_MASK);
-			SBIG_UINT(pdata, 8,
-				  (uint64_t)conn->session_info->unix_token->uid);
-			SBIG_UINT(pdata, 16,
-				  (uint64_t)conn->session_info->unix_token->gid);
-
+			PUSH_LE_U64(pdata, 8, utok->uid);
+			PUSH_LE_U64(pdata, 16, utok->gid);
 
 			if (data_len >= max_data_bytes) {
 				/* Potential overflow, skip the GIDs and SIDs. */
@@ -2559,18 +2563,16 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 				break;
 			}
 
-			SIVAL(pdata, 24, conn->session_info->unix_token->ngroups);
-			SIVAL(pdata, 28, conn->session_info->security_token->num_sids);
+			SIVAL(pdata, 24, utok->ngroups);
+			SIVAL(pdata, 28, tok->num_sids);
 
 			/* We walk the SID list twice, but this call is fairly
 			 * infrequent, and I don't expect that it's performance
 			 * sensitive -- jpeach
 			 */
-			for (i = 0, sid_bytes = 0;
-			     i < conn->session_info->security_token->num_sids; ++i) {
-				sid_bytes += ndr_size_dom_sid(
-					&conn->session_info->security_token->sids[i],
-					0);
+			for (i = 0, sid_bytes = 0; i < tok->num_sids; ++i) {
+				sid_bytes += ndr_size_dom_sid(&tok->sids[i],
+							      0);
 			}
 
 			/* SID list byte count */
@@ -2581,22 +2583,19 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			data_len = 40;
 
 			/* GID list */
-			for (i = 0; i < conn->session_info->unix_token->ngroups; ++i) {
-				SBIG_UINT(pdata, data_len,
-					  (uint64_t)conn->session_info->unix_token->groups[i]);
+			for (i = 0; i < utok->ngroups; ++i) {
+				PUSH_LE_U64(pdata, data_len, utok->groups[i]);
 				data_len += 8;
 			}
 
 			/* SID list */
-			for (i = 0;
-			    i < conn->session_info->security_token->num_sids; ++i) {
-				int sid_len = ndr_size_dom_sid(
-					&conn->session_info->security_token->sids[i],
-					0);
+			for (i = 0; i < tok->num_sids; ++i) {
+				int sid_len = ndr_size_dom_sid(&tok->sids[i],
+							       0);
 
 				sid_linearize((uint8_t *)(pdata + data_len),
 					      sid_len,
-				    &conn->session_info->security_token->sids[i]);
+					      &tok->sids[i]);
 				data_len += sid_len;
 			}
 

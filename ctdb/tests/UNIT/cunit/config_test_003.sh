@@ -2,28 +2,26 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-PATH="$PATH:$CTDB_SCRIPTS_TOOLS_HELPER_DIR"
-
 setup_ctdb_base "${CTDB_TEST_TMP_DIR}" "ctdb-etc"
 
 conffile="${CTDB_BASE}/ctdb.conf"
 scriptfile="${CTDB_BASE}/debug-hung-script.sh"
 
-remove_files ()
+remove_files()
 {
 	rm -f "$conffile"
 }
 
 test_cleanup remove_files
 
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 EOF
 
 ok <<EOF
 EOF
 unit_test ctdb-config get "event" "debug script"
 
-cat > "$conffile" <<EOF
+cat >"$conffile" <<EOF
 [event]
     debug script = debug-hung-script.sh
 EOF

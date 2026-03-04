@@ -162,10 +162,6 @@ typedef sig_atomic_t volatile SIG_ATOMIC_T;
 #define INO_T_VAL(p, ofs) ((SMB_INO_T)(IVAL((p),(ofs))))
 #endif
 
-/* TODO: remove this macros */
-#define SBIG_UINT(p, ofs, v) SBVAL(p, ofs, v)
-#define BIG_UINT(p, ofs) BVAL(p, ofs)
-
 /*
  * Set the define that tells us if we can do 64 bit
  * NT SMB calls.

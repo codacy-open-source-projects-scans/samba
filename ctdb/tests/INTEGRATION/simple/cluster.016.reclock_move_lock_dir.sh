@@ -29,14 +29,14 @@ ctdb_onnode "$test_node" getreclock
 # $out set by ctdb_onnode() above
 reclock_setting="$out"
 
-if [ -z "$reclock_setting" ] ; then
+if [ -z "$reclock_setting" ]; then
 	ctdb_test_skip "Cluster lock is not set"
 fi
 
 t="${reclock_setting% 5}"
 reclock="${t##* }"
 
-if [ ! -f "$reclock" ] ; then
+if [ ! -f "$reclock" ]; then
 	ctdb_test_error "Cluster lock file \"${reclock}\" is missing"
 fi
 
@@ -64,7 +64,7 @@ echo "OK: leader is UNKNOWN"
 echo
 
 echo 'Get "leader timeout":'
-conf_tool="${CTDB_SCRIPTS_HELPER_BINDIR}/ctdb-config"
+conf_tool="${CTDB_TEST_HELPER_BINDIR}/ctdb-config"
 # shellcheck disable=SC2154
 # $test_node set by select_test_node() above
 try_command_on_node "$test_node" "${conf_tool} get cluster 'leader timeout'"

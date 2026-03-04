@@ -3240,24 +3240,22 @@ char *samdb_dn_to_dns_domain(TALLOC_CTX *mem_ctx, struct ldb_dn *dn)
 {
 	int i, num_components = ldb_dn_get_comp_num(dn);
 	char *dns_name = talloc_strdup(mem_ctx, "");
-	if (dns_name == NULL) {
-		return NULL;
-	}
 
 	for (i=0; i<num_components; i++) {
 		const struct ldb_val *v = ldb_dn_get_component_val(dn, i);
-		char *s;
 		if (v == NULL) {
 			talloc_free(dns_name);
 			return NULL;
 		}
-		s = talloc_asprintf_append_buffer(dns_name, "%*.*s.",
-						  (int)v->length, (int)v->length, (char *)v->data);
-		if (s == NULL) {
-			talloc_free(dns_name);
-			return NULL;
-		}
-		dns_name = s;
+		talloc_asprintf_addbuf(&dns_name,
+				       "%*.*s.",
+				       (int)v->length,
+				       (int)v->length,
+				       (char *)v->data);
+	}
+
+	if (dns_name == NULL) {
+		return NULL;
 	}
 
 	/* remove the last '.' */
@@ -4112,16 +4110,8 @@ const char *samdb_cn_to_lDAPDisplayName(TALLOC_CTX *mem_ctx, const char *cn)
 		tokens[i][0] = toupper(tokens[i][0]);
 
 	ret = talloc_strdup(mem_ctx, tokens[0]);
-	if (ret == NULL) {
-		talloc_free(tokens);
-		return NULL;
-	}
 	for (i = 1; tokens[i] != NULL; i++) {
-		ret = talloc_asprintf_append_buffer(ret, "%s", tokens[i]);
-		if (ret == NULL) {
-			talloc_free(tokens);
-			return NULL;
-		}
+		talloc_asprintf_addbuf(&ret, "%s", tokens[i]);
 	}
 
 	talloc_free(tokens);

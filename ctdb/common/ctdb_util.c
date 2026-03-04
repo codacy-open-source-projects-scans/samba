@@ -77,69 +77,6 @@ void ctdb_die(struct ctdb_context *ctdb, const char *msg)
 	exit(1);
 }
 
-/* Set the path of a helper program from envvar, falling back to
- * dir/file if envvar unset. type is a string to print in log
- * messages.  helper is assumed to point to a statically allocated
- * array of size bytes, initialised to "".  If file is NULL don't fall
- * back if envvar is unset.  If dir is NULL and envvar is unset (but
- * file is not NULL) then this is an error.  Returns true if helper is
- * set, either previously or this time. */
-bool ctdb_set_helper(const char *type, char *helper, size_t size,
-		     const char *envvar,
-		     const char *dir, const char *file)
-{
-	const char *t;
-	struct stat st;
-
-	if (helper[0] != '\0') {
-		/* Already set */
-		return true;
-	}
-
-	t = getenv(envvar);
-	if (t != NULL) {
-		if (strlen(t) >= size) {
-			DEBUG(DEBUG_ERR,
-			      ("Unable to set %s - path too long\n", type));
-			return false;
-		}
-
-		strncpy(helper, t, size);
-	} else if (file == NULL) {
-		return false;
-	} else if (dir == NULL) {
-			DEBUG(DEBUG_ERR,
-			      ("Unable to set %s - dir is NULL\n", type));
-		return false;
-	} else {
-		int ret;
-
-		ret = snprintf(helper, size, "%s/%s", dir, file);
-		if (ret < 0 || (size_t)ret >= size) {
-			DEBUG(DEBUG_ERR,
-			      ("Unable to set %s - path too long\n", type));
-			return false;
-		}
-	}
-
-	if (stat(helper, &st) != 0) {
-		DEBUG(DEBUG_ERR,
-		      ("Unable to set %s \"%s\" - %s\n",
-		       type, helper, strerror(errno)));
-		return false;
-	}
-	if (!(st.st_mode & S_IXUSR)) {
-		DEBUG(DEBUG_ERR,
-		      ("Unable to set %s \"%s\" - not executable\n",
-		       type, helper));
-		return false;
-	}
-
-	DEBUG(DEBUG_NOTICE,
-	      ("Set %s to \"%s\"\n", type, helper));
-	return true;
-}
-
 /*
   check if two addresses are the same
 */

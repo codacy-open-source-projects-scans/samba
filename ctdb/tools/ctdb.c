@@ -2945,21 +2945,13 @@ static int control_lvs(TALLOC_CTX *mem_ctx,
 		       int argc,
 		       const char **argv)
 {
-	char *t, *lvs_helper = NULL;
+	char *lvs_helper = NULL;
 
 	if (argc != 1) {
 		usage("lvs");
 	}
 
-	t = getenv("CTDB_LVS_HELPER");
-	if (t != NULL) {
-		lvs_helper = talloc_strdup(mem_ctx, t);
-	} else {
-		lvs_helper = talloc_asprintf(mem_ctx,
-					     "%s/ctdb_lvs",
-					     CTDB_HELPER_BINDIR);
-	}
-
+	lvs_helper = path_helperdir_append(mem_ctx, "ctdb_lvs");
 	if (lvs_helper == NULL) {
 		fprintf(stderr, "Unable to set LVS helper\n");
 		return 1;
@@ -5648,17 +5640,9 @@ static int control_event(TALLOC_CTX *mem_ctx,
 			 int argc,
 			 const char **argv)
 {
-	char *t, *event_helper = NULL;
+	char *event_helper = NULL;
 
-	t = getenv("CTDB_EVENT_HELPER");
-	if (t != NULL) {
-		event_helper = talloc_strdup(mem_ctx, t);
-	} else {
-		event_helper = talloc_asprintf(mem_ctx,
-					       "%s/ctdb-event",
-					       CTDB_HELPER_BINDIR);
-	}
-
+	event_helper = path_helperdir_append(mem_ctx, "ctdb-event");
 	if (event_helper == NULL) {
 		fprintf(stderr, "Unable to set event daemon helper\n");
 		return 1;
@@ -5693,21 +5677,13 @@ static int control_natgw(TALLOC_CTX *mem_ctx,
 			 int argc,
 			 const char **argv)
 {
-	char *t, *natgw_helper = NULL;
+	char *natgw_helper = NULL;
 
 	if (argc != 1) {
 		usage("natgw");
 	}
 
-	t = getenv("CTDB_NATGW_HELPER");
-	if (t != NULL) {
-		natgw_helper = talloc_strdup(mem_ctx, t);
-	} else {
-		natgw_helper = talloc_asprintf(mem_ctx,
-					       "%s/ctdb_natgw",
-					       CTDB_HELPER_BINDIR);
-	}
-
+	natgw_helper = path_helperdir_append(mem_ctx, "ctdb_natgw");
 	if (natgw_helper == NULL) {
 		fprintf(stderr, "Unable to set NAT gateway helper\n");
 		return 1;
