@@ -184,7 +184,7 @@ static int eventd_event_set(struct event_component *comp,
 			continue;
 		}
 
-		if (new->summary == -ENODATA) {
+		if (new->summary == -ENOMSG) {
 			/*
 			 * Do not do a struct assignment here.  This
 			 * would cause name and output to point to

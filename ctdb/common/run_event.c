@@ -800,7 +800,7 @@ static void run_event_fail(struct tevent_req *req,
 
 	/* Mark remaining scripts as having no data */
 	for (i = state->index + 1; i < script_list->num_scripts; i++) {
-		script_list->script[i].summary = -ENODATA;
+		script_list->script[i].summary = -ENOMSG;
 	}
 
 	if (script->summary == -ETIMEDOUT && pid != -1) {

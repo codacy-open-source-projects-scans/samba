@@ -1,3 +1,5 @@
+ctdb_test_check_supported_OS "Linux"
+
 setup()
 {
 	CTDB_STATD_CALLOUT_SHARED_STORAGE="$1"

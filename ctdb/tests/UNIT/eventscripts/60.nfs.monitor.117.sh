@@ -14,8 +14,10 @@ unhealthy_after=2
 service_stop_cmd="\$CTDB_NFS_CALLOUT stop nfs"
 service_start_cmd="\$CTDB_NFS_CALLOUT start nfs"
 service_debug_cmd="program_stack_traces nfsd 5"
-# Dummy pipeline confirms that pipelines work in this context
-service_stats_cmd="date --rfc-3339=ns | grep ."
+# There is a tiny chance that this could return the same output
+# twice, causing the test to fail.  Note that this also confirms
+# that pipelines work in this context.
+service_stats_cmd="dd if=/dev/urandom bs=256 count=1 2>/dev/null | od -A n -t x1"
 EOF
 
 nfs_iterate_test 10 "nfs:TIMEOUT"

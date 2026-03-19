@@ -520,7 +520,7 @@ kill_tcp_summarise()
 	if [ -z "$_connections" ]; then
 		_remaining=0
 	else
-		_remaining=$(echo "$_connections" | wc -l)
+		_remaining=$(echo "$_connections" | wc -l | tr -d '[:space:]')
 	fi
 
 	case "$_mode" in
@@ -558,7 +558,9 @@ kill_tcp_connections()
 
 	case "$CTDB_KILLTCP_USE_SS_KILL" in
 	yes | try)
-		_killcount=$(ss -K -tnH state established src "$_ip" | wc -l)
+		_killcount=$(ss -K -tnH state established src "$_ip" |
+			wc -l |
+			tr -d '[:space:]')
 		kill_tcp_summarise "killed" "$_killcount" "ss -K"
 		if [ "$CTDB_KILLTCP_USE_SS_KILL" = "yes" ]; then
 			return

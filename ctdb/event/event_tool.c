@@ -289,7 +289,7 @@ static void print_status(const char *component,
 		 * Occurs when a new script is enabled, it hasn't
 		 * been previously run, and a previous script fails
 		 */
-		if (s->result == -ENODATA) {
+		if (s->result == -ENOMSG) {
 			continue;
 		}
 

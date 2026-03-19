@@ -27,6 +27,10 @@ def configure(conf):
             addmain=False,
             strict=True,
             msg='Checking for printf format validation support')
+        conf.CHECK_C_PROTOTYPE('syscall',
+                               'int syscall(int number, ...)',
+                               define='HAVE_SYSCALL_INT',
+                               headers='unistd.h sys/syscall.h')
 
         conf.CHECK_HEADERS('sys/signalfd.h')
         conf.CHECK_HEADERS('sys/eventfd.h')
