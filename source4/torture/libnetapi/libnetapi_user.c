@@ -69,31 +69,40 @@ static NET_API_STATUS test_netuserenum(struct torture_context *tctx,
 		if (status == 0 || status == ERROR_MORE_DATA) {
 			switch (level) {
 				case 0:
-					info0 = (struct USER_INFO_0 *)buffer;
+					info0 = talloc_get_type_abort(
+						buffer, struct USER_INFO_0);
 					break;
 				case 1:
-					info1 = (struct USER_INFO_1 *)buffer;
+					info1 = talloc_get_type_abort(
+						buffer, struct USER_INFO_1);
 					break;
 				case 2:
-					info2 = (struct USER_INFO_2 *)buffer;
+					info2 = talloc_get_type_abort(
+						buffer, struct USER_INFO_2);
 					break;
 				case 3:
-					info3 = (struct USER_INFO_3 *)buffer;
+					info3 = talloc_get_type_abort(
+						buffer, struct USER_INFO_3);
 					break;
 				case 4:
-					info4 = (struct USER_INFO_4 *)buffer;
+					info4 = talloc_get_type_abort(
+						buffer, struct USER_INFO_4);
 					break;
 				case 10:
-					info10 = (struct USER_INFO_10 *)buffer;
+					info10 = talloc_get_type_abort(
+						buffer, struct USER_INFO_10);
 					break;
 				case 11:
-					info11 = (struct USER_INFO_11 *)buffer;
+					info11 = talloc_get_type_abort(
+						buffer, struct USER_INFO_11);
 					break;
 				case 20:
-					info20 = (struct USER_INFO_20 *)buffer;
+					info20 = talloc_get_type_abort(
+						buffer, struct USER_INFO_20);
 					break;
 				case 23:
-					info23 = (struct USER_INFO_23 *)buffer;
+					info23 = talloc_get_type_abort(
+						buffer, struct USER_INFO_23);
 					break;
 				default:
 					return -1;
@@ -289,10 +298,14 @@ static NET_API_STATUS test_netusergetgroups(struct torture_context *tctx,
 		if (status == 0 || status == ERROR_MORE_DATA) {
 			switch (level) {
 				case 0:
-					i0 = (struct GROUP_USERS_INFO_0 *)buffer;
+					i0 = talloc_get_type_abort(
+						buffer,
+						struct GROUP_USERS_INFO_0);
 					break;
 				case 1:
-					i1 = (struct GROUP_USERS_INFO_1 *)buffer;
+					i1 = talloc_get_type_abort(
+						buffer,
+						struct GROUP_USERS_INFO_1);
 					break;
 				default:
 					return -1;

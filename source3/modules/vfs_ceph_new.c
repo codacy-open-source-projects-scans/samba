@@ -41,7 +41,7 @@
 #include "modules/posixacl_xattr.h"
 #include "lib/util/tevent_unix.h"
 #include "lib/util/base64.h"
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 #include <linux/fscrypt.h>
 #include "modules/varlink_keybridge.h"
 #endif
@@ -126,7 +126,7 @@ struct vfs_ceph_config {
 #ifdef HAVE_CEPH_ASYNCIO
 	struct tevent_threaded_context *tctx;
 #endif
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 	struct varlink_keybridge_config *kbc;
 	struct vfs_ceph_fscrypt_key *fskey;
 #endif
@@ -197,7 +197,7 @@ struct vfs_ceph_config {
 #ifdef HAVE_CEPH_ASYNCIO
 	CEPH_FN(ceph_ll_nonblocking_readv_writev);
 #endif
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 	CEPH_FN(ceph_add_fscrypt_key);
 	CEPH_FN(ceph_ll_set_fscrypt_policy_v2);
 #endif
@@ -500,7 +500,7 @@ static bool vfs_cephfs_load_lib(struct vfs_ceph_config *config)
 #ifdef HAVE_CEPH_ASYNCIO
 	CHECK_CEPH_FN(libhandle, ceph_ll_nonblocking_readv_writev);
 #endif
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 	CHECK_CEPH_FN(libhandle, ceph_add_fscrypt_key);
 	CHECK_CEPH_FN(libhandle, ceph_ll_set_fscrypt_policy_v2);
 #endif
@@ -521,7 +521,7 @@ static int vfs_ceph_config_destructor(struct vfs_ceph_config *config)
 	return 0;
 }
 
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 static bool parse_keybridge_config(int snum,
 				   const char *module_name,
 				   struct vfs_ceph_config *config)
@@ -687,6 +687,7 @@ static bool vfs_ceph_load_config(struct vfs_handle_struct *handle,
 					       VFS_CEPHFS_PROXY_NO);
 	if (config_tmp->proxy == -1) {
 		DBG_ERR("[CEPH] value for proxy: mode unknown\n");
+		TALLOC_FREE(config_tmp);
 		return false;
 	}
 	config_tmp->fscrypt = lp_parm_enum(snum,
@@ -696,23 +697,24 @@ static bool vfs_ceph_load_config(struct vfs_handle_struct *handle,
 					   VFS_CEPHFS_FSCRYPT_DISABLED);
 	if (config_tmp->fscrypt == -1) {
 		DBG_ERR("[CEPH] value for fscrypt: unknown\n");
+		TALLOC_FREE(config_tmp);
 		return false;
 	}
-#if HAVE_CEPH_FSCRYPT
+
 	if (config_tmp->fscrypt == VFS_CEPHFS_FSCRYPT_KEYBRIDGE) {
+#ifdef HAVE_CEPH_FSCRYPT
 		if (parse_keybridge_config(snum, module_name, config_tmp)) {
 			fetch_keybridge_config(config_tmp);
 		}
-	}
 #else
-	if (config_tmp->fscrypt == VFS_CEPHFS_FSCRYPT_KEYBRIDGE) {
 		DBG_ERR("[CEPH] fscrypt support configured but"
 			" not enabled during build, ignoring\n");
-	}
 #endif
+	}
 
 	ok = vfs_cephfs_load_lib(config_tmp);
 	if (!ok) {
+		TALLOC_FREE(config_tmp);
 		return false;
 	}
 
@@ -731,7 +733,7 @@ done:
    is sure to try and execute them.  These stubs are used to prevent
    this possibility. */
 
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 static int vfs_ceph_setup_fscrypt(struct vfs_handle_struct *handle);
 #endif /* HAVE_CEPH_FSCRYPT */
 
@@ -780,7 +782,7 @@ connect_ok:
 		 SNUM(handle->conn),
 		 cookie);
 
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 	if (config->fscrypt != VFS_CEPHFS_FSCRYPT_DISABLED) {
 		DBG_INFO("[CEPH] fscrypt is enabled\n");
 		ret = vfs_ceph_setup_fscrypt(handle);
@@ -2308,7 +2310,7 @@ static void vfs_ceph_iput(const struct vfs_handle_struct *handle,
 	}
 }
 
-#if HAVE_CEPH_FSCRYPT
+#ifdef HAVE_CEPH_FSCRYPT
 /* Fscrypt */
 /*
  * struct ceph_fscrypt_key_identifier isn't exported so we cannot know its
@@ -4329,12 +4331,12 @@ static ssize_t vfs_ceph_flistxattr(struct vfs_handle_struct *handle,
 					    list,
 					    size,
 					    &list_size);
+		vfs_ceph_iput(handle, &iref);
 		if (ret != 0) {
 			goto out;
 		}
-		vfs_ceph_iput(handle, &iref);
 	}
-	ret = (int)list_size;
+	ret = (ssize_t)list_size;
 out:
 	DBG_DEBUG("[CEPH] flistxattr done: ret=%zd\n", ret);
 	END_PROFILE_X(syscall_flistxattr);

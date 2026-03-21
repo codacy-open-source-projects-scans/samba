@@ -645,7 +645,7 @@ static bool test_get_core_printer_drivers_arch_guid(struct torture_context *tctx
 	r.in.pszServer = talloc_asprintf(tctx, "\\\\%s", dcerpc_server_name(p));
 	r.in.pszEnvironment = architecture;
 	r.in.cchCoreDrivers = blob.length/2;
-	r.in.pszzCoreDriverDependencies = (uint16_t *)blob.data;
+	r.in.pszzCoreDriverDependencies = discard_align_p(uint16_t, blob.data);
 	r.in.cCorePrinterDrivers = 1;
 	r.out.pCorePrinterDrivers = talloc_zero_array(tctx, struct spoolss_CorePrinterDriver, r.in.cCorePrinterDrivers);
 

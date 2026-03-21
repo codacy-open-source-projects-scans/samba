@@ -8187,7 +8187,7 @@ static bool test_get_core_printer_drivers_arch_guid(struct torture_context *tctx
 	r.in.servername	= talloc_asprintf(tctx, "\\\\%s", dcerpc_server_name(p));
 	r.in.architecture = "foobar";
 	r.in.core_driver_size = 0;
-	r.in.core_driver_dependencies = (uint16_t *)blob.data;
+	r.in.core_driver_dependencies = discard_align_p(uint16_t, blob.data);
 	r.in.core_printer_driver_count = 0;
 	r.out.core_printer_drivers = &core_printer_drivers;
 
@@ -8205,7 +8205,7 @@ static bool test_get_core_printer_drivers_arch_guid(struct torture_context *tctx
 		"push_reg_multi_sz failed");
 
 	r.in.core_driver_size = blob.length/2;
-	r.in.core_driver_dependencies = (uint16_t *)blob.data;
+	r.in.core_driver_dependencies = discard_align_p(uint16_t, blob.data);
 	r.in.core_printer_driver_count = 1;
 	r.out.core_printer_drivers = talloc_zero_array(tctx, struct spoolss_CorePrinterDriver, r.in.core_printer_driver_count);
 
@@ -8232,7 +8232,7 @@ static bool test_get_core_printer_drivers_arch_guid(struct torture_context *tctx
 		"push_reg_multi_sz failed");
 
 	r.in.core_driver_size = blob.length/2;
-	r.in.core_driver_dependencies = (uint16_t *)blob.data;
+	r.in.core_driver_dependencies = discard_align_p(uint16_t, blob.data);
 	r.in.core_printer_driver_count = 1;
 	r.out.core_printer_drivers = talloc_zero_array(tctx, struct spoolss_CorePrinterDriver, r.in.core_printer_driver_count);
 

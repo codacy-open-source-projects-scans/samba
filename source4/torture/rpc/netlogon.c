@@ -1101,11 +1101,12 @@ static DATA_BLOB netlogon_very_rand_pass(TALLOC_CTX *mem_ctx, int len)
 {
 	int i;
 	DATA_BLOB password = data_blob_talloc(mem_ctx, NULL, len * 2 /* number of unicode chars */);
+	uint16_t *p = discard_align_p(uint16_t, password.data);
 	generate_random_buffer(password.data, password.length);
 
 	for (i=0; i < len; i++) {
-		if (((uint16_t *)password.data)[i] == 0) {
-			((uint16_t *)password.data)[i] = 1;
+		if (p[i] == 0) {
+			p[i] = 1;
 		}
 	}
 
@@ -4773,23 +4774,28 @@ static bool test_netr_DsRAddressToSitenamesW(struct torture_context *tctx,
 
 	/* First try valid IP addresses */
 
+	/*
+	 * addrs[i].buffer elements will be correctly aligned via
+	 * talloc_zero_array
+	 */
+
 	addrs[0].size = sizeof(struct sockaddr_in);
 	addrs[0].buffer = talloc_zero_array(tctx, uint8_t, addrs[0].size);
-	addr = (struct sockaddr_in *) addrs[0].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[0].buffer);
 	addrs[0].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "127.0.0.1", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[1].size = sizeof(struct sockaddr_in);
 	addrs[1].buffer = talloc_zero_array(tctx, uint8_t, addrs[1].size);
-	addr = (struct sockaddr_in *) addrs[1].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[1].buffer);
 	addrs[1].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "0.0.0.0", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[2].size = sizeof(struct sockaddr_in);
 	addrs[2].buffer = talloc_zero_array(tctx, uint8_t, addrs[2].size);
-	addr = (struct sockaddr_in *) addrs[2].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[2].buffer);
 	addrs[2].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "255.255.255.255", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
@@ -4797,21 +4803,21 @@ static bool test_netr_DsRAddressToSitenamesW(struct torture_context *tctx,
 #ifdef HAVE_IPV6
 	addrs[3].size = sizeof(struct sockaddr_in6);
 	addrs[3].buffer = talloc_zero_array(tctx, uint8_t, addrs[3].size);
-	addr6 = (struct sockaddr_in6 *) addrs[3].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[3].buffer);
 	addrs[3].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "::1", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[4].size = sizeof(struct sockaddr_in6);
 	addrs[4].buffer = talloc_zero_array(tctx, uint8_t, addrs[4].size);
-	addr6 = (struct sockaddr_in6 *) addrs[4].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[4].buffer);
 	addrs[4].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "::", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[5].size = sizeof(struct sockaddr_in6);
 	addrs[5].buffer = talloc_zero_array(tctx, uint8_t, addrs[5].size);
-	addr6 = (struct sockaddr_in6 *) addrs[5].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[5].buffer);
 	addrs[5].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "ff02::1", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
@@ -4820,21 +4826,21 @@ static bool test_netr_DsRAddressToSitenamesW(struct torture_context *tctx,
 	 * compatibility with IPv4-only machines */
 	addrs[3].size = sizeof(struct sockaddr_in);
 	addrs[3].buffer = talloc_zero_array(tctx, uint8_t, addrs[3].size);
-	addr = (struct sockaddr_in *) addrs[3].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[3].buffer);
 	addrs[3].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "127.0.0.1", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[4].size = sizeof(struct sockaddr_in);
 	addrs[4].buffer = talloc_zero_array(tctx, uint8_t, addrs[4].size);
-	addr = (struct sockaddr_in *) addrs[4].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[4].buffer);
 	addrs[4].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "0.0.0.0", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[5].size = sizeof(struct sockaddr_in);
 	addrs[5].buffer = talloc_zero_array(tctx, uint8_t, addrs[5].size);
-	addr = (struct sockaddr_in *) addrs[5].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[5].buffer);
 	addrs[5].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "255.255.255.255", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
@@ -4949,24 +4955,28 @@ static bool test_netr_DsRAddressToSitenamesExW(struct torture_context *tctx,
         }
 
 	/* First try valid IP addresses */
+	/*
+	 * addrs[i].buffer elements will be correctly aligned via
+	 * talloc_zero_array
+	 **/
 
 	addrs[0].size = sizeof(struct sockaddr_in);
 	addrs[0].buffer = talloc_zero_array(tctx, uint8_t, addrs[0].size);
-	addr = (struct sockaddr_in *) addrs[0].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[0].buffer);
 	addrs[0].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "127.0.0.1", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[1].size = sizeof(struct sockaddr_in);
 	addrs[1].buffer = talloc_zero_array(tctx, uint8_t, addrs[1].size);
-	addr = (struct sockaddr_in *) addrs[1].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[1].buffer);
 	addrs[1].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "0.0.0.0", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[2].size = sizeof(struct sockaddr_in);
 	addrs[2].buffer = talloc_zero_array(tctx, uint8_t, addrs[2].size);
-	addr = (struct sockaddr_in *) addrs[2].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[2].buffer);
 	addrs[2].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "255.255.255.255", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
@@ -4974,21 +4984,21 @@ static bool test_netr_DsRAddressToSitenamesExW(struct torture_context *tctx,
 #ifdef HAVE_IPV6
 	addrs[3].size = sizeof(struct sockaddr_in6);
 	addrs[3].buffer = talloc_zero_array(tctx, uint8_t, addrs[3].size);
-	addr6 = (struct sockaddr_in6 *) addrs[3].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[3].buffer);
 	addrs[3].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "::1", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[4].size = sizeof(struct sockaddr_in6);
 	addrs[4].buffer = talloc_zero_array(tctx, uint8_t, addrs[4].size);
-	addr6 = (struct sockaddr_in6 *) addrs[4].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[4].buffer);
 	addrs[4].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "::", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[5].size = sizeof(struct sockaddr_in6);
 	addrs[5].buffer = talloc_zero_array(tctx, uint8_t, addrs[5].size);
-	addr6 = (struct sockaddr_in6 *) addrs[5].buffer;
+	addr6 = discard_align_p(struct sockaddr_in6, addrs[5].buffer);
 	addrs[5].buffer[0] = AF_INET6;
 	ret = inet_pton(AF_INET6, "ff02::1", &addr6->sin6_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
@@ -4997,21 +5007,21 @@ static bool test_netr_DsRAddressToSitenamesExW(struct torture_context *tctx,
 	 * compatibility with IPv4-only machines */
 	addrs[3].size = sizeof(struct sockaddr_in);
 	addrs[3].buffer = talloc_zero_array(tctx, uint8_t, addrs[3].size);
-	addr = (struct sockaddr_in *) addrs[3].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[3].buffer);
 	addrs[3].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "127.0.0.1", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[4].size = sizeof(struct sockaddr_in);
 	addrs[4].buffer = talloc_zero_array(tctx, uint8_t, addrs[4].size);
-	addr = (struct sockaddr_in *) addrs[4].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[4].buffer);
 	addrs[4].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "0.0.0.0", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");
 
 	addrs[5].size = sizeof(struct sockaddr_in);
 	addrs[5].buffer = talloc_zero_array(tctx, uint8_t, addrs[5].size);
-	addr = (struct sockaddr_in *) addrs[5].buffer;
+	addr = discard_align_p(struct sockaddr_in, addrs[5].buffer);
 	addrs[5].buffer[0] = AF_INET;
 	ret = inet_pton(AF_INET, "255.255.255.255", &addr->sin_addr);
 	torture_assert(tctx, ret > 0, "inet_pton failed");

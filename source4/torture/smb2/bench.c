@@ -128,6 +128,43 @@
 		       __location__, (unsigned int)(sattrib), fname); \
 	}} while (0)
 
+struct uint64_comma_str_buf {
+	char buf[sizeof("18,446,744,073,709,551,615")];
+};
+
+static const char *uint64_comma_str(struct uint64_comma_str_buf *buf,
+				    uint64_t val)
+{
+	char tmp[sizeof("18446744073709551615")];
+	int ret;
+	int ti;
+	int bi = 0;
+
+	ret = snprintf(tmp, ARRAY_SIZE(tmp), "%"PRIu64"", val);
+	SMB_ASSERT(ret >= 1);
+	SMB_ASSERT(ret < ARRAY_SIZE(tmp));
+
+	for (ti = 0; ti < ret; ti++) {
+		int pos = ret - ti;
+
+		SMB_ASSERT(bi < ARRAY_SIZE(buf->buf));
+		buf->buf[bi++] = tmp[ti];
+		switch (pos) {
+		case  4:
+		case  7:
+		case 10:
+		case 13:
+		case 16:
+		case 19:
+			buf->buf[bi++] = ',';
+		}
+	}
+
+	SMB_ASSERT(bi < ARRAY_SIZE(buf->buf));
+	buf->buf[bi] = '\0';
+	return buf->buf;
+}
+
 /*
    stress testing keepalive iops
  */
@@ -277,6 +314,7 @@ static void test_smb2_bench_echo_progress(struct tevent_context *ev,
 	double min_echo_latency = 0;
 	double max_echo_latency = 0;
 	double avs_echo_latency = 0;
+	struct uint64_comma_str_buf num_buf = {};
 	size_t i;
 
 	state->timecount += 1;
@@ -335,9 +373,9 @@ static void test_smb2_bench_echo_progress(struct tevent_context *ev,
 
 		torture_comment(state->tctx,
 				"%.2f second: "
-				"echo[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]      \r",
+				"echo[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]      \r",
 				timeval_elapsed(&state->starttime),
-				(unsigned long long)num_echos,
+				uint64_comma_str(&num_buf, num_echos),
 				avs_echo_latency,
 				min_echo_latency,
 				max_echo_latency);
@@ -349,9 +387,9 @@ static void test_smb2_bench_echo_progress(struct tevent_context *ev,
 
 	torture_comment(state->tctx,
 			"%.2f second: "
-			"echo[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
+			"echo[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]\n",
 			timeval_elapsed(&state->starttime),
-			(unsigned long long)num_echos,
+			uint64_comma_str(&num_buf, num_echos),
 			avs_echo_latency,
 			state->min_latency,
 			state->max_latency);
@@ -704,11 +742,13 @@ static void test_smb2_bench_path_contention_progress(struct tevent_context *ev,
 	double min_open_latency = 0;
 	double max_open_latency = 0;
 	double avs_open_latency = 0;
+	struct uint64_comma_str_buf open_buf = {};
 	uint64_t num_closes = 0;
 	double total_close_latency = 0;
 	double min_close_latency = 0;
 	double max_close_latency = 0;
 	double avs_close_latency = 0;
+	struct uint64_comma_str_buf close_buf = {};
 	size_t i;
 
 	state->timecount += 1;
@@ -800,14 +840,14 @@ static void test_smb2_bench_path_contention_progress(struct tevent_context *ev,
 
 		torture_comment(state->tctx,
 				"%.2f second: "
-				"open[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
-				"close[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]     \r",
+				"open[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f] "
+				"close[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]     \r",
 				timeval_elapsed(&state->starttime),
-				(unsigned long long)num_opens,
+				uint64_comma_str(&open_buf, num_opens),
 				avs_open_latency,
 				min_open_latency,
 				max_open_latency,
-				(unsigned long long)num_closes,
+				uint64_comma_str(&close_buf, num_closes),
 				avs_close_latency,
 				min_close_latency,
 				max_close_latency);
@@ -821,14 +861,14 @@ static void test_smb2_bench_path_contention_progress(struct tevent_context *ev,
 
 	torture_comment(state->tctx,
 			"%.2f second: "
-			"open[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
-			"close[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
+			"open[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f] "
+			"close[num/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]\n",
 			timeval_elapsed(&state->starttime),
-			(unsigned long long)num_opens,
+			uint64_comma_str(&open_buf, num_opens),
 			avs_open_latency,
 			state->opens.min_latency,
 			state->opens.max_latency,
-			(unsigned long long)num_closes,
+			uint64_comma_str(&close_buf, num_closes),
 			avs_close_latency,
 			state->closes.min_latency,
 			state->closes.max_latency);
@@ -1141,6 +1181,8 @@ static void test_smb2_bench_read_progress(struct tevent_context *ev,
 	double min_read_latency = 0;
 	double max_read_latency = 0;
 	double avs_read_latency = 0;
+	struct uint64_comma_str_buf num_buf = {};
+	struct uint64_comma_str_buf bytes_buf = {};
 	size_t i;
 
 	state->timecount += 1;
@@ -1199,10 +1241,10 @@ static void test_smb2_bench_read_progress(struct tevent_context *ev,
 
 		torture_comment(state->tctx,
 				"%.2f second: "
-				"read[num/s=%llu,bytes/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]      \r",
+				"read[num/s=%s;bytes/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]      \r",
 				timeval_elapsed(&state->starttime),
-				(unsigned long long)num_reads,
-				(unsigned long long)num_reads*state->io_size,
+				uint64_comma_str(&num_buf, num_reads),
+				uint64_comma_str(&bytes_buf, num_reads*state->io_size),
 				avs_read_latency,
 				min_read_latency,
 				max_read_latency);
@@ -1214,10 +1256,10 @@ static void test_smb2_bench_read_progress(struct tevent_context *ev,
 
 	torture_comment(state->tctx,
 			"%.2f second: "
-			"read[num/s=%llu,bytes/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
+			"read[num/s=%s;bytes/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]\n",
 			timeval_elapsed(&state->starttime),
-			(unsigned long long)num_reads,
-			(unsigned long long)num_reads*state->io_size,
+			uint64_comma_str(&num_buf, num_reads),
+			uint64_comma_str(&bytes_buf, num_reads*state->io_size),
 			avs_read_latency,
 			state->min_latency,
 			state->max_latency);
@@ -1566,6 +1608,8 @@ static void test_smb2_bench_write_progress(struct tevent_context *ev,
 	double min_write_latency = 0;
 	double max_write_latency = 0;
 	double avs_write_latency = 0;
+	struct uint64_comma_str_buf num_buf = {};
+	struct uint64_comma_str_buf bytes_buf = {};
 	size_t i;
 
 	state->timecount += 1;
@@ -1624,10 +1668,10 @@ static void test_smb2_bench_write_progress(struct tevent_context *ev,
 
 		torture_comment(state->tctx,
 				"%.2f second: "
-				"write[num/s=%llu,bytes/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]      \r",
+				"write[num/s=%s;bytes/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]      \r",
 				timeval_elapsed(&state->starttime),
-				(unsigned long long)num_writes,
-				(unsigned long long)num_writes*state->io_size,
+				uint64_comma_str(&num_buf, num_writes),
+				uint64_comma_str(&bytes_buf, num_writes*state->io_size),
 				avs_write_latency,
 				min_write_latency,
 				max_write_latency);
@@ -1639,10 +1683,10 @@ static void test_smb2_bench_write_progress(struct tevent_context *ev,
 
 	torture_comment(state->tctx,
 			"%.2f second: "
-			"write[num/s=%llu,bytes/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
+			"write[num/s=%s;bytes/s=%s;avslat=%.6f;minlat=%.6f;maxlat=%.6f]\n",
 			timeval_elapsed(&state->starttime),
-			(unsigned long long)num_writes,
-			(unsigned long long)num_writes*state->io_size,
+			uint64_comma_str(&num_buf, num_writes),
+			uint64_comma_str(&bytes_buf, num_writes*state->io_size),
 			avs_write_latency,
 			state->min_latency,
 			state->max_latency);
@@ -2059,11 +2103,13 @@ static void test_smb2_bench_session_setup_progress(struct tevent_context *ev,
 	double min_setup_latency = 0;
 	double max_setup_latency = 0;
 	double avs_setup_latency = 0;
+	struct uint64_comma_str_buf setup_buf = {};
 	uint64_t num_logoffs = 0;
 	double total_logoff_latency = 0;
 	double min_logoff_latency = 0;
 	double max_logoff_latency = 0;
 	double avs_logoff_latency = 0;
+	struct uint64_comma_str_buf logoff_buf = {};
 	size_t i;
 
 	state->timecount += 1;
@@ -2155,14 +2201,14 @@ static void test_smb2_bench_session_setup_progress(struct tevent_context *ev,
 
 		torture_comment(state->tctx,
 				"%.2f second: "
-				"setup[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
-				"logoff[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]     \r",
+				"setup[num/s=%s,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
+				"logoff[num/s=%s,avslat=%.6f,minlat=%.6f,maxlat=%.6f]     \r",
 				timeval_elapsed(&state->starttime),
-				(unsigned long long)num_setups,
+				uint64_comma_str(&setup_buf, num_setups),
 				avs_setup_latency,
 				min_setup_latency,
 				max_setup_latency,
-				(unsigned long long)num_logoffs,
+				uint64_comma_str(&logoff_buf, num_logoffs),
 				avs_logoff_latency,
 				min_logoff_latency,
 				max_logoff_latency);
@@ -2176,14 +2222,14 @@ static void test_smb2_bench_session_setup_progress(struct tevent_context *ev,
 
 	torture_comment(state->tctx,
 			"%.2f second: "
-			"setup[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
-			"logoff[num/s=%llu,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
+			"setup[num/s=%s,avslat=%.6f,minlat=%.6f,maxlat=%.6f] "
+			"logoff[num/s=%s,avslat=%.6f,minlat=%.6f,maxlat=%.6f]\n",
 			timeval_elapsed(&state->starttime),
-			(unsigned long long)num_setups,
+			uint64_comma_str(&setup_buf, num_setups),
 			avs_setup_latency,
 			state->setups.min_latency,
 			state->setups.max_latency,
-			(unsigned long long)num_logoffs,
+			uint64_comma_str(&logoff_buf, num_logoffs),
 			avs_logoff_latency,
 			state->logoffs.min_latency,
 			state->logoffs.max_latency);

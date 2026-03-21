@@ -21,6 +21,7 @@
 #include "torture/smbtorture.h"
 #include <netapi.h>
 #include "torture/libnetapi/proto.h"
+#include "lib/util/alignment.h"
 
 #undef strcasecmp
 
@@ -34,6 +35,28 @@
 	torture_warning(tctx, "FAILURE: line %d: %s failed with status: %s (%d), %s\n", \
 		__LINE__, fn, libnetapi_get_error_string(x,y), y, z);
 
+static bool check_netgroupenum_alignment(
+	struct torture_context *tctx,
+	uint8_t *buffer)
+{
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_INFO_0),
+		"buffer is incorrectly aligned for struct GROUP_INFO_0");
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_INFO_1),
+		"buffer is incorrectly aligned for struct GROUP_INFO_1");
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_INFO_2),
+		"buffer is incorrectly aligned for struct GROUP_INFO_2");
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_INFO_3),
+		"buffer is incorrectly aligned for struct GROUP_INFO_3");
+	return true;
+}
 static NET_API_STATUS test_netgroupenum(struct torture_context *tctx,
 					const char *hostname,
 					uint32_t level,
@@ -64,18 +87,23 @@ static NET_API_STATUS test_netgroupenum(struct torture_context *tctx,
 				      &total_entries,
 				      &resume_handle);
 		if (status == 0 || status == ERROR_MORE_DATA) {
+			check_netgroupenum_alignment(tctx, buffer);
 			switch (level) {
 				case 0:
-					info0 = (struct GROUP_INFO_0 *)buffer;
+					info0 = discard_align_p(
+						struct GROUP_INFO_0, buffer);
 					break;
 				case 1:
-					info1 = (struct GROUP_INFO_1 *)buffer;
+					info1 = discard_align_p(
+						struct GROUP_INFO_1, buffer);
 					break;
 				case 2:
-					info2 = (struct GROUP_INFO_2 *)buffer;
+					info2 = discard_align_p(
+						struct GROUP_INFO_2, buffer);
 					break;
 				case 3:
-					info3 = (struct GROUP_INFO_3 *)buffer;
+					info3 = discard_align_p(
+						struct GROUP_INFO_3, buffer);
 					break;
 				default:
 					return -1;
@@ -135,6 +163,21 @@ static NET_API_STATUS test_netgroupenum(struct torture_context *tctx,
 	return 0;
 }
 
+static bool check_netgroupgetusers_alignment(
+	struct torture_context *tctx,
+	uint8_t *buffer)
+{
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_USERS_INFO_0),
+		"buffer is incorrectly aligned for struct GROUP_USERS_INFO_0");
+	torture_assert(
+		tctx,
+		check_alignment( buffer, struct GROUP_USERS_INFO_1),
+		"buffer is incorrectly aligned for struct GROUP_USERS_INFO_1");
+	return true;
+}
+
 static NET_API_STATUS test_netgroupgetusers(struct torture_context *tctx,
 					    const char *hostname,
 					    uint32_t level,
@@ -165,13 +208,17 @@ static NET_API_STATUS test_netgroupgetusers(struct torture_context *tctx,
 					  &total_entries,
 					  &resume_handle);
 		if (status == 0 || status == ERROR_MORE_DATA) {
-
+			check_netgroupgetusers_alignment(tctx, buffer);
 			switch (level) {
 				case 0:
-					info0 = (struct GROUP_USERS_INFO_0 *)buffer;
+					info0 = discard_align_p(
+						struct GROUP_USERS_INFO_0,
+						buffer);
 					break;
 				case 1:
-					info1 = (struct GROUP_USERS_INFO_1 *)buffer;
+					info1 = discard_align_p(
+						struct GROUP_USERS_INFO_1,
+						buffer);
 					break;
 				default:
 					break;

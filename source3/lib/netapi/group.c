@@ -1148,6 +1148,7 @@ static WERROR convert_samr_disp_groups_to_GROUP_INFO_0_buffer(TALLOC_CTX *mem_ct
 	*buffer = (uint8_t *)talloc_memdup(mem_ctx, g0,
 					   sizeof(struct GROUP_INFO_0) * groups->count);
 	W_ERROR_HAVE_NO_MEMORY(*buffer);
+	talloc_set_type(*buffer, struct GROUP_INFO_0);
 
 	return WERR_OK;
 }
@@ -1176,6 +1177,7 @@ static WERROR convert_samr_disp_groups_to_GROUP_INFO_1_buffer(TALLOC_CTX *mem_ct
 	*buffer = (uint8_t *)talloc_memdup(mem_ctx, g1,
 					   sizeof(struct GROUP_INFO_1) * groups->count);
 	W_ERROR_HAVE_NO_MEMORY(*buffer);
+	talloc_set_type(*buffer, struct GROUP_INFO_1);
 
 	return WERR_OK;
 }
@@ -1206,6 +1208,7 @@ static WERROR convert_samr_disp_groups_to_GROUP_INFO_2_buffer(TALLOC_CTX *mem_ct
 	*buffer = (uint8_t *)talloc_memdup(mem_ctx, g2,
 					   sizeof(struct GROUP_INFO_2) * groups->count);
 	W_ERROR_HAVE_NO_MEMORY(*buffer);
+	talloc_set_type(*buffer, struct GROUP_INFO_2);
 
 	return WERR_OK;
 }
@@ -1244,6 +1247,7 @@ static WERROR convert_samr_disp_groups_to_GROUP_INFO_3_buffer(TALLOC_CTX *mem_ct
 	*buffer = (uint8_t *)talloc_memdup(mem_ctx, g3,
 					   sizeof(struct GROUP_INFO_3) * groups->count);
 	W_ERROR_HAVE_NO_MEMORY(*buffer);
+	talloc_set_type(*buffer, struct GROUP_INFO_3);
 
 	return WERR_OK;
 }

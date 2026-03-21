@@ -262,7 +262,12 @@ static const char *extract_name(void *data, enum smb_search_level level,
 	for (i=0;i<ARRAY_SIZE(levels);i++) {
 		if (level == levels[i].level &&
 		    data_level == levels[i].data_level) {
-			return *(const char **)(levels[i].name_offset + (char *)data);
+			char *name = NULL;
+			char **name_ptr = &name;
+			memcpy( name_ptr,
+			        (levels[i].name_offset + (char *)data),
+				sizeof(char *));
+			return name;
 		}
 	}
 	return NULL;
@@ -278,7 +283,11 @@ static uint32_t extract_resume_key(void *data, enum smb_search_level level,
 	for (i=0;i<ARRAY_SIZE(levels);i++) {
 		if (level == levels[i].level &&
 		    data_level == levels[i].data_level) {
-			return *(uint32_t *)(levels[i].resume_key_offset + (char *)data);
+			uint32_t resume_key = 0;
+			memcpy( &resume_key,
+				levels[i].resume_key_offset + (char *)data,
+				sizeof(uint32_t));
+			return resume_key;
 		}
 	}
 	return 0;

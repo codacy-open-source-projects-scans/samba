@@ -595,14 +595,15 @@ static DATA_BLOB samr_very_rand_pass(TALLOC_CTX *mem_ctx, int len)
 {
 	int i;
 	DATA_BLOB password = data_blob_talloc(mem_ctx, NULL, len * 2 /* number of unicode chars */);
+	/* password.data will be correctly aligned via data_blob_talloc */
+	uint16_t *p = discard_align_p(uint16_t, password.data);
 	generate_random_buffer(password.data, password.length);
 
 	for (i=0; i < len; i++) {
-		if (((uint16_t *)password.data)[i] == 0) {
-			((uint16_t *)password.data)[i] = 1;
+		if (p[i] == 0) {
+			p[i] = 1;
 		}
 	}
-
 	return password;
 }
 
@@ -1329,7 +1330,8 @@ static bool test_SetUserPass_21(struct dcerpc_pipe *p, struct torture_context *t
 				     u.info21.lm_owf_password.length);
 		out = data_blob_talloc_zero(tctx, 16);
 		sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
-		u.info21.lm_owf_password.array = (uint16_t *)out.data;
+		u.info21.lm_owf_password.array = discard_align_p(uint16_t,
+								 out.data);
 	}
 
 	if (fields_present & SAMR_FIELD_NT_PASSWORD_PRESENT) {
@@ -1338,7 +1340,8 @@ static bool test_SetUserPass_21(struct dcerpc_pipe *p, struct torture_context *t
 				     u.info21.nt_owf_password.length);
 		out = data_blob_talloc_zero(tctx, 16);
 		sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
-		u.info21.nt_owf_password.array = (uint16_t *)out.data;
+		u.info21.nt_owf_password.array = discard_align_p(uint16_t,
+								 out.data);
 	}
 
 	torture_comment(tctx, "Testing SetUserInfo level 21 (set password hash)\n");
@@ -1540,7 +1543,8 @@ static bool test_SetUserPass_level_ex(struct dcerpc_pipe *p,
 					     u.info21.lm_owf_password.length);
 			out = data_blob_talloc_zero(tctx, 16);
 			sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
-			u.info21.lm_owf_password.array = (uint16_t *)out.data;
+			u.info21.lm_owf_password.array = discard_align_p(
+				uint16_t, out.data);
 		}
 		if (fields_present & SAMR_FIELD_NT_PASSWORD_PRESENT) {
 			DATA_BLOB in,out;
@@ -1548,7 +1552,8 @@ static bool test_SetUserPass_level_ex(struct dcerpc_pipe *p,
 					     u.info21.nt_owf_password.length);
 			out = data_blob_talloc_zero(tctx, 16);
 			sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
-			u.info21.nt_owf_password.array = (uint16_t *)out.data;
+			u.info21.nt_owf_password.array = discard_align_p(
+				uint16_t, out.data);
 		}
 		break;
 	case 23:
