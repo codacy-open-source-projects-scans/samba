@@ -560,7 +560,7 @@ doit(const char *filename, int mergep)
 	    continue;
 	}
 
-	if (parse_integer_alloc (&ent.max_life,  e.max_life) == -1) {
+	if (parse_integer_alloc ((unsigned int **) &ent.max_life,  e.max_life) == -1) {
 	    fprintf (stderr, "%s:%d:error parsing lifetime (%s)\n",
 		     filename, lineno, e.max_life);
 	    hdb_free_entry (context, db, &ent);
@@ -568,7 +568,7 @@ doit(const char *filename, int mergep)
 	    continue;
 
 	}
-	if (parse_integer_alloc (&ent.max_renew, e.max_renew) == -1) {
+	if (parse_integer_alloc ((unsigned int**) &ent.max_renew, e.max_renew) == -1) {
 	    fprintf (stderr, "%s:%d:error parsing lifetime (%s)\n",
 		     filename, lineno, e.max_renew);
 	    hdb_free_entry (context, db, &ent);

@@ -170,6 +170,7 @@ static krb5plugin_kdc_ftable kdc_plugin = {
     NULL, /* pac_update */
     client_access,
     NULL, /* referral_policy */
+    NULL,
     finalize_reply,
     audit
 };

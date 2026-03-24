@@ -36,16 +36,6 @@ static inline bool is_aligned(const void *ptr, const size_t alignment)
 {
 	return ((uintptr_t) ptr % alignment)  == 0;
 }
-/*
-* Is the address of the data pointed to aligned on the specified alignment?
-*
-* @param ptr       The pointer to check
-* @param alignment The expected alignment
-*
-* @return True if pointer has the specified alignment
-*         False otherwise
-*/
-bool is_aligned(const void *ptr, const size_t alignment);
 
 
 /*

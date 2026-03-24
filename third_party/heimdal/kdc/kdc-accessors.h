@@ -406,6 +406,6 @@ ASTGS_REQUEST_GET_ACCESSOR_PTR(struct krb5_pac_data *, armor_pac);
  * kdc_request_get_explicit_armor_present(astgs_request_t);
  */
 
-ASTGS_REQUEST_GET_ACCESSOR_PTR(krb5_boolean, explicit_armor_present);
+ASTGS_REQUEST_GET_ACCESSOR(krb5_boolean, explicit_armor_present);
 
 #endif /* HEIMDAL_KDC_KDC_ACCESSORS_H */
