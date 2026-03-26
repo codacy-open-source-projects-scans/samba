@@ -466,7 +466,6 @@ _PUBLIC_ char *generate_random_machine_password(TALLOC_CTX *mem_ctx, size_t min,
 		return NULL;
 	}
 	talloc_keep_secret(new_pw);
-	talloc_set_name_const(new_pw, __func__);
 	TALLOC_FREE(frame);
 	return new_pw;
 

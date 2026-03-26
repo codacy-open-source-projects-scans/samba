@@ -45,7 +45,6 @@ static const char *cmdline_get_userpassword(struct cli_credentials *creds)
 	if (ret == NULL) {
 		goto fail;
 	}
-	talloc_set_name_const(ret, __location__);
 	talloc_keep_secret(ret);
 fail:
 	ZERO_STRUCT(pwd);

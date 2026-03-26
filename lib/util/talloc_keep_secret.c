@@ -49,5 +49,12 @@ void _talloc_keep_secret(void *ptr, const char *name)
 		return;
 	}
 
+	/*
+	 * Overwrite talloc name only if it reveals memory content.
+	 * That prevents breaking talloc_get_type_abort().
+	 */
+	if (talloc_get_name(ptr) == ptr) {
+		talloc_set_name_const(ptr, name);
+	}
 	talloc_set_destructor(ptr, talloc_keep_secret_destructor);
 }
