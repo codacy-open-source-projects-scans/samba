@@ -30,6 +30,10 @@
 #include <com_err.h>
 #endif /* HAVE_COM_ERR_H */
 
+#ifdef HAVE_PROFILE_H
+#include <profile.h>
+#endif /* HAVE_PROFILE_H */
+
 #ifndef KRB5_AUTHDATA_WIN2K_PAC
 #define KRB5_AUTHDATA_WIN2K_PAC 128
 #endif
@@ -4094,6 +4098,87 @@ const char *smb_force_krb5_cc_default_name(krb5_context ctx)
 	return krb5_cc_default_name(ctx);
 #define krb5_cc_default_name __ERROR__XX__NEVER_USE_krb5_cc_default_name__;
 }
+
+/**
+ * @brief Read the default ccache name from krb5.conf without expanding tokens
+ * like %{uid}.
+ *
+ * This returns the raw configured value.
+ *
+ * @param mem_ctx The memory context to allocate `pname` on.
+ *
+ * @param ctx The krb5 context.
+ *
+ * @param pname A pointer to store the default_ccache_name.
+ *
+ * @return 0 on success, or and krb5 error code otherwise.
+ */
+#ifdef SAMBA4_USES_HEIMDAL
+krb5_error_code smb_krb5_config_cc_default_name(TALLOC_CTX *mem_ctx,
+						krb5_context ctx,
+						char **pname)
+{
+	const char *cfg = NULL;
+
+	*pname = NULL;
+
+	cfg = krb5_config_get_string(
+		ctx, NULL, "libdefaults", "default_cc_name", NULL);
+	if (cfg == NULL) {
+		cfg = krb5_config_get_string(
+			ctx, NULL, "libdefaults", "default_ccache_name", NULL);
+	}
+	if (cfg == NULL) {
+		return 0;
+	}
+
+	*pname = talloc_strdup(mem_ctx, cfg);
+	if (*pname == NULL) {
+		return ENOMEM;
+	}
+
+	return 0;
+}
+#else  /* MIT */
+krb5_error_code smb_krb5_config_cc_default_name(TALLOC_CTX *mem_ctx,
+						krb5_context ctx,
+						char **pname)
+{
+	krb5_error_code ret;
+	profile_t profile = NULL;
+	char *value = NULL;
+
+	*pname = NULL;
+
+	ret = krb5_get_profile(ctx, &profile);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = profile_get_string(profile,
+				 "libdefaults",
+				 "default_ccache_name",
+				 NULL,
+				 NULL,
+				 &value);
+	profile_release(profile);
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (value == NULL) {
+		return 0;
+	}
+
+	*pname = talloc_strdup(mem_ctx, value);
+	profile_release_string(value);
+	if (*pname == NULL) {
+		return ENOMEM;
+	}
+
+	return 0;
+}
+#endif /* SAMBA4_USES_HEIMDAL */
 
 #else /* HAVE_KRB5 */
 /* This saves a few linking headaches */

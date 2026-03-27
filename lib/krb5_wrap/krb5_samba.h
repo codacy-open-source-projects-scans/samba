@@ -317,6 +317,14 @@ krb5_error_code smb_force_krb5_cc_default(krb5_context ctx, krb5_ccache *id);
  */
 const char *smb_force_krb5_cc_default_name(krb5_context ctx);
 
+/*
+ * Read the default ccache name from krb5.conf without expanding tokens
+ * like %{uid}. Returns the raw configured value.
+ */
+krb5_error_code smb_krb5_config_cc_default_name(TALLOC_CTX *mem_ctx,
+						krb5_context ctx,
+						char **pname);
+
 krb5_error_code krb5_set_default_tgs_ktypes(krb5_context ctx, const krb5_enctype *enc);
 
 #if defined(HAVE_KRB5_AUTH_CON_SETKEY) && !defined(HAVE_KRB5_AUTH_CON_SETUSERUSERKEY)

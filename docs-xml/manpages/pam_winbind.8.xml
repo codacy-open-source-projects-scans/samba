@@ -56,7 +56,7 @@
 <refsect1>
 	<title>OPTIONS</title>
 	<para>
-	
+
 		pam_winbind supports several options which can either be set in
 		the PAM configuration files or in the pam_winbind configuration
 		file situated at
@@ -119,7 +119,7 @@
 		<varlistentry>
 		<term>use_authtok</term>
 		<listitem><para>
-		Set the new password to the one provided by the previously stacked password module. If this option is not set 
+		Set the new password to the one provided by the previously stacked password module. If this option is not set
 		pam_winbind will ask the user for the new password.
 		</para></listitem>
 		</varlistentry>
@@ -157,38 +157,68 @@
 		by enabling the <parameter>krb5_auth</parameter> option, it can
 		store the retrieved Ticket Granting Ticket (TGT) in a
 		credential cache. The type of credential cache can be
-		controlled with this option.  The supported values are:
-		<parameter>KCM</parameter> or <parameter>KEYRING</parameter>
-		(when supported by the system's Kerberos library and
-		operating system),
-		<parameter>FILE</parameter> and <parameter>DIR</parameter>
-		(when the DIR type is supported by the system's Kerberos
-		library). In case of FILE a credential cache in the form of
-		/tmp/krb5cc_UID will be created -  in case of DIR you NEED
-		to specify a directory which must exist, the UID directory
-		will be created in the specified directory.
-		In all cases UID is replaced with the numeric user id.
-		Check the details of the Kerberos implementation.</para>
+		controlled with this option.</para>
 
-		<para>When using the KEYRING type, the supported mechanism is
-		<quote>KEYRING:persistent:UID</quote>, which uses the Linux
-		kernel keyring to store credentials on a per-UID basis.
-		KEYRING has limitations. For example, it is secure kernel memory,
-		so bulk storage of credentials is not possible.</para>
-
-		<para>When using the KCM type, the supported mechanism is
-		<quote>KCM:UID</quote>, which uses a Kerberos credential
-		manager to store credentials on a per-UID basis similar to
-		KEYRING. This is the recommended choice on latest Linux
-		distributions that offer a Kerberos Credential Manager. If not,
-		we suggest to use KEYRING, as those are the most secure and
-		predictable method.</para>
-
-		<para>It is also possible to define custom filepaths and use the "%u"
-		pattern in order to substitute the numeric user id.
-		Examples:</para>
+		<para>The following simple type names are supported (these will
+		generate default paths with the user's UID):</para>
 
 		<variablelist>
+			<varlistentry>
+				<term>DEFAULT</term>
+				<listitem><para>Uses the default credential cache
+				location as specified in the system's
+				<filename>krb5.conf</filename> configuration file
+				(<quote>default_ccache_name</quote>). This option
+				allows the Kerberos configuration to centrally
+				control the credential cache location. The
+				<quote>%{uid}</quote> pattern in
+				<filename>krb5.conf</filename> will be substituted
+				with the user's UID.</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>KCM</term>
+				<listitem><para>Uses Kerberos Credential Manager
+				(generates <quote>KCM:&lt;UID&gt;</quote>). This is the
+				recommended choice on latest Linux distributions
+				offering a Kerberos Credential Manager.</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>KEYRING</term>
+				<listitem><para>Uses Linux kernel keyring
+				(generates <quote>KEYRING:persistent:&lt;UID&gt;</quote>).
+				The KEYRING has its limitations. As it is secure
+				kernel memory, for example bulk storage of
+				credentials is not possible. This is a good
+				fallback if KCM is not available.</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>FILE</term>
+				<listitem><para>Uses file-based credential cache
+				(generates <quote>FILE:/tmp/krb5cc_&lt;UID&gt;</quote>).
+				</para></listitem>
+			</varlistentry>
+			<varlistentry>
+				<term>WRFILE</term>
+				<listitem><para>Uses file-based credential cache with
+				write-only mode (generates <quote>WRFILE:/tmp/krb5cc_&lt;UID&gt;</quote>).
+				</para></listitem>
+			</varlistentry>
+		</variablelist>
+
+		<para>It is also possible to specify custom paths with explicit
+		prefixes. The following prefixes are recognized:
+		<parameter>KEYRING:type</parameter>,
+		<parameter>DIR:/path</parameter>,
+		<parameter>FILE:/path</parameter>, and
+		<parameter>WRFILE:/path</parameter>.
+		You can use the <quote>%u</quote> or <quote>%{uid}</quote> pattern to
+		substitute the numeric user ID. Examples:</para>
+
+		<variablelist>
+			<varlistentry>
+				<term>krb5_ccache_type = KEYRING:session:%u</term>
+					<listitem><para>This will use a session keyring for the credential cache.</para></listitem>
+			</varlistentry>
 			<varlistentry>
 				<term>krb5_ccache_type = DIR:/run/user/%u/krb5cc</term>
 					<listitem><para>This will create a credential cache file in the specified directory.</para></listitem>
@@ -197,12 +227,17 @@
 				<term>krb5_ccache_type = FILE:/tmp/krb5cc_%u</term>
 					<listitem><para>This will create a credential cache file.</para></listitem>
 			</varlistentry>
+			<varlistentry>
+				<term>krb5_ccache_type = WRFILE:/var/lib/sss/ccache/ccache_%u</term>
+					<listitem><para>This will create a write-only credential cache file.</para></listitem>
+			</varlistentry>
 		</variablelist>
 
 		<para>Leave empty to just do kerberos authentication without
-		having a ticket cache after the logon has succeeded.
-		This setting is empty by default.</para>
-		</listitem>
+			having a ticket cache after the logon has succeeded.
+			This setting is empty by default.
+
+		</para></listitem>
 		</varlistentry>
 
 		<varlistentry>
@@ -306,12 +341,12 @@
 
 <refsect1>
 	<title>AUTHOR</title>
-	
+
 	<para>
 	The original Samba software and related utilities were created by Andrew Tridgell. Samba is now developed by
 	the Samba Team as an Open Source project similar to the way the Linux kernel is developed.
 	</para>
-	
+
 	<para>This manpage was written by Jelmer Vernooij and Guenther Deschner.</para>
 
 </refsect1>

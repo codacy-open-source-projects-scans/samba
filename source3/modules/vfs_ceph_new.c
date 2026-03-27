@@ -1057,6 +1057,9 @@ static int vfs_ceph_ll_walk(const struct vfs_handle_struct *handle,
 				return -ENOMEM);
 
 	cwd = config->ceph_getcwd_fn(config->mount);
+	if (cwd == NULL) {
+		return -ENOMEM;
+	}
 	cwdlen = strlen(cwd);
 
 	/*
@@ -2864,7 +2867,7 @@ static void vfs_ceph_aio_finish(struct vfs_ceph_aio_state *state,
 	state->vfs_aio_state.duration = nsec_time_diff(&state->finish_time,
 						       &state->start_time);
 	if (result < 0) {
-		state->vfs_aio_state.error = (int)result;
+		state->vfs_aio_state.error = -((int)result);
 	}
 
 	state->result = result;
@@ -4104,10 +4107,6 @@ static int vfs_ceph_linkat(struct vfs_handle_struct *handle,
 	}
 
 	result = vfs_ceph_ll_link(handle, dst_dircfh, newname, &iref);
-	if (result != 0) {
-		goto out;
-	}
-
 	vfs_ceph_iput(handle, &iref);
 out:
 	DBG_DEBUG("[CEPH] link done: result=%d\n", result);
