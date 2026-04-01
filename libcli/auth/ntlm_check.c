@@ -58,6 +58,7 @@ static bool smb_pwd_check_ntlmv1(TALLOC_CTX *mem_ctx,
 
 	rc = SMBOWFencrypt(part_passwd, sec_blob->data, p24);
 	if (rc != 0) {
+		ZERO_ARRAY(p24);
 		return false;
 	}
 
@@ -73,16 +74,19 @@ static bool smb_pwd_check_ntlmv1(TALLOC_CTX *mem_ctx,
 #endif
 	ok = mem_equal_const_time(p24, nt_response->data, 24);
 	if (!ok) {
+		ZERO_ARRAY(p24);
 		return false;
 	}
 	if (user_sess_key != NULL) {
-		*user_sess_key = data_blob_talloc(mem_ctx, NULL, 16);
+		*user_sess_key = data_blob_talloc_s(mem_ctx, NULL, 16);
 		if (user_sess_key->data == NULL) {
 			DBG_ERR("data_blob_talloc failed\n");
+			ZERO_ARRAY(p24);
 			return false;
 		}
 		SMBsesskeygen_ntv1(part_passwd, user_sess_key->data);
 	}
+	ZERO_ARRAY(p24);
 	return true;
 }
 
@@ -125,13 +129,16 @@ static bool smb_pwd_check_ntlmv2(TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
-	client_key_data = data_blob_talloc(mem_ctx, ntv2_response->data+16, ntv2_response->length-16);
+	client_key_data = data_blob_talloc_s(mem_ctx,
+					     ntv2_response->data + 16,
+					     ntv2_response->length - 16);
 	/*
 	   todo:  should we be checking this for anything?  We can't for LMv2,
 	   but for NTLMv2 it is meant to contain the current time etc.
 	*/
 
 	if (!ntv2_owf_gen(part_passwd, user, domain, kr)) {
+		ZERO_ARRAY(kr);
 		return false;
 	}
 
@@ -140,6 +147,8 @@ static bool smb_pwd_check_ntlmv2(TALLOC_CTX *mem_ctx,
 				    &client_key_data,
 				    value_from_encryption);
 	if (!NT_STATUS_IS_OK(status)) {
+		ZERO_ARRAY(kr);
+		ZERO_ARRAY(value_from_encryption);
 		return false;
 	}
 
@@ -159,21 +168,29 @@ static bool smb_pwd_check_ntlmv2(TALLOC_CTX *mem_ctx,
 
 	ok = mem_equal_const_time(value_from_encryption, ntv2_response->data, 16);
 	if (!ok) {
+		ZERO_ARRAY(kr);
+		ZERO_ARRAY(value_from_encryption);
 		return false;
 	}
 	if (user_sess_key != NULL) {
-		*user_sess_key = data_blob_talloc(mem_ctx, NULL, 16);
+		*user_sess_key = data_blob_talloc_s(mem_ctx, NULL, 16);
 		if (user_sess_key->data == NULL) {
 			DBG_ERR("data_blob_talloc failed\n");
+			ZERO_ARRAY(kr);
+			ZERO_ARRAY(value_from_encryption);
 			return false;
 		}
 
 		status = SMBsesskeygen_ntv2(
 			kr, value_from_encryption, user_sess_key->data);
 		if (!NT_STATUS_IS_OK(status)) {
+			ZERO_ARRAY(kr);
+			ZERO_ARRAY(value_from_encryption);
 			return false;
 		}
 	}
+	ZERO_ARRAY(kr);
+	ZERO_ARRAY(value_from_encryption);
 	return true;
 }
 
@@ -215,9 +232,12 @@ static bool smb_sess_key_ntlmv2(TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
-	client_key_data = data_blob_talloc(mem_ctx, ntv2_response->data+16, ntv2_response->length-16);
+	client_key_data = data_blob_talloc_s(mem_ctx,
+					     ntv2_response->data + 16,
+					     ntv2_response->length - 16);
 
 	if (!ntv2_owf_gen(part_passwd, user, domain, kr)) {
+		ZERO_ARRAY(kr);
 		return false;
 	}
 
@@ -226,19 +246,27 @@ static bool smb_sess_key_ntlmv2(TALLOC_CTX *mem_ctx,
 				    &client_key_data,
 				    value_from_encryption);
 	if (!NT_STATUS_IS_OK(status)) {
+		ZERO_ARRAY(kr);
+		ZERO_ARRAY(value_from_encryption);
 		return false;
 	}
-	*user_sess_key = data_blob_talloc(mem_ctx, NULL, 16);
+	*user_sess_key = data_blob_talloc_s(mem_ctx, NULL, 16);
 	if (user_sess_key->data == NULL) {
 		DBG_ERR("data_blob_talloc failed\n");
+		ZERO_ARRAY(kr);
+		ZERO_ARRAY(value_from_encryption);
 		return false;
 	}
 	status = SMBsesskeygen_ntv2(kr,
 				    value_from_encryption,
 				    user_sess_key->data);
 	if (!NT_STATUS_IS_OK(status)) {
+		ZERO_ARRAY(kr);
+		ZERO_ARRAY(value_from_encryption);
 		return false;
 	}
+	ZERO_ARRAY(kr);
+	ZERO_ARRAY(value_from_encryption);
 	return true;
 }
 
@@ -420,7 +448,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 					 client_domain,
 					 user_sess_key)) {
 			if (user_sess_key->length) {
-				*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+				*lm_sess_key = data_blob_talloc_s(
+					mem_ctx,
+					user_sess_key->data,
+					MIN(8, user_sess_key->length));
 			}
 			return NT_STATUS_OK;
 		}
@@ -434,7 +465,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 					 upper_client_domain,
 					 user_sess_key)) {
 			if (user_sess_key->length) {
-				*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+				*lm_sess_key = data_blob_talloc_s(
+					mem_ctx,
+					user_sess_key->data,
+					MIN(8, user_sess_key->length));
 			}
 			return NT_STATUS_OK;
 		}
@@ -447,7 +481,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 					 "",
 					 user_sess_key)) {
 			if (user_sess_key->length) {
-				*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+				*lm_sess_key = data_blob_talloc_s(
+					mem_ctx,
+					user_sess_key->data,
+					MIN(8, user_sess_key->length));
 			}
 			return NT_STATUS_OK;
 		} else {
@@ -468,7 +505,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 				   so use it only if we otherwise allow LM authentication */
 
 				if (lanman_auth && stored_lanman) {
-					*lm_sess_key = data_blob_talloc(mem_ctx, stored_lanman->hash, MIN(8, user_sess_key->length));
+					*lm_sess_key = data_blob_talloc_s(
+						mem_ctx,
+						stored_lanman->hash,
+						MIN(8, user_sess_key->length));
 				}
 				return NT_STATUS_OK;
 			} else {
@@ -519,8 +559,11 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 				uint8_t first_8_lm_hash[16];
 				memcpy(first_8_lm_hash, stored_lanman->hash, 8);
 				memset(first_8_lm_hash + 8, '\0', 8);
-				*user_sess_key = data_blob_talloc(mem_ctx, first_8_lm_hash, 16);
-				*lm_sess_key = data_blob_talloc(mem_ctx, stored_lanman->hash, 8);
+				*user_sess_key = data_blob_talloc_s(
+					mem_ctx, first_8_lm_hash, 16);
+				*lm_sess_key = data_blob_talloc_s(
+					mem_ctx, stored_lanman->hash, 8);
+				ZERO_ARRAY(first_8_lm_hash);
 			}
 			return NT_STATUS_OK;
 		}
@@ -558,7 +601,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 			*user_sess_key = tmp_sess_key;
 		}
 		if (user_sess_key->length) {
-			*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+			*lm_sess_key = data_blob_talloc_s(
+				mem_ctx,
+				user_sess_key->data,
+				MIN(8, user_sess_key->length));
 		}
 		return NT_STATUS_OK;
 	}
@@ -587,7 +633,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 			*user_sess_key = tmp_sess_key;
 		}
 		if (user_sess_key->length) {
-			*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+			*lm_sess_key = data_blob_talloc_s(
+				mem_ctx,
+				user_sess_key->data,
+				MIN(8, user_sess_key->length));
 		}
 		return NT_STATUS_OK;
 	}
@@ -615,7 +664,10 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 			*user_sess_key = tmp_sess_key;
 		}
 		if (user_sess_key->length) {
-			*lm_sess_key = data_blob_talloc(mem_ctx, user_sess_key->data, MIN(8, user_sess_key->length));
+			*lm_sess_key = data_blob_talloc_s(
+				mem_ctx,
+				user_sess_key->data,
+				MIN(8, user_sess_key->length));
 		}
 		return NT_STATUS_OK;
 	}
@@ -637,8 +689,11 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 				uint8_t first_8_lm_hash[16];
 				memcpy(first_8_lm_hash, stored_lanman->hash, 8);
 				memset(first_8_lm_hash + 8, '\0', 8);
-				*user_sess_key = data_blob_talloc(mem_ctx, first_8_lm_hash, 16);
-				*lm_sess_key = data_blob_talloc(mem_ctx, stored_lanman->hash, 8);
+				*user_sess_key = data_blob_talloc_s(
+					mem_ctx, first_8_lm_hash, 16);
+				*lm_sess_key = data_blob_talloc_s(
+					mem_ctx, stored_lanman->hash, 8);
+				ZERO_ARRAY(first_8_lm_hash);
 			}
 			return NT_STATUS_OK;
 		}

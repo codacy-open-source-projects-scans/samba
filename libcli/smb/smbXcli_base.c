@@ -5120,7 +5120,7 @@ static void smbXcli_negprot_smb1_done(struct tevent_req *subreq)
 			}
 
 			blob1 = data_blob_const(bytes+16, num_bytes-16);
-			blob2 = data_blob_dup_talloc(state, blob1);
+			blob2 = data_blob_dup_talloc_s(state, blob1);
 			if (blob1.length > 0 &&
 			    tevent_req_nomem(blob2.data, req)) {
 				return;
@@ -5728,9 +5728,9 @@ static void smbXcli_negprot_smb2_done(struct tevent_req *subreq)
 		return;
 	}
 
-	conn->smb2.server.gss_blob = data_blob_talloc(conn,
-						iov[2].iov_base,
-						security_length);
+	conn->smb2.server.gss_blob = data_blob_talloc_s(conn,
+							iov[2].iov_base,
+							security_length);
 	if (tevent_req_nomem(conn->smb2.server.gss_blob.data, req)) {
 		return;
 	}
@@ -6659,7 +6659,7 @@ NTSTATUS smb2cli_session_signing_key(struct smbXcli_session *session,
 		return NT_STATUS_NO_USER_SESSION_KEY;
 	}
 
-	*key = data_blob_dup_talloc(mem_ctx, sig->blob);
+	*key = data_blob_dup_talloc_s(mem_ctx, sig->blob);
 	if (key->data == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -6683,7 +6683,8 @@ NTSTATUS smb2cli_session_encryption_key(struct smbXcli_session *session,
 		return NT_STATUS_NO_USER_SESSION_KEY;
 	}
 
-	*key = data_blob_dup_talloc(mem_ctx, session->smb2->encryption_key->blob);
+	*key = data_blob_dup_talloc_s(mem_ctx,
+				      session->smb2->encryption_key->blob);
 	if (key->data == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -6707,7 +6708,8 @@ NTSTATUS smb2cli_session_decryption_key(struct smbXcli_session *session,
 		return NT_STATUS_NO_USER_SESSION_KEY;
 	}
 
-	*key = data_blob_dup_talloc(mem_ctx, session->smb2->decryption_key->blob);
+	*key = data_blob_dup_talloc_s(mem_ctx,
+				      session->smb2->decryption_key->blob);
 	if (key->data == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -6740,7 +6742,7 @@ NTSTATUS smbXcli_session_application_key(struct smbXcli_session *session,
 		return NT_STATUS_NO_USER_SESSION_KEY;
 	}
 
-	*key = data_blob_dup_talloc(mem_ctx, *application_key);
+	*key = data_blob_dup_talloc_s(mem_ctx, *application_key);
 	if (key->data == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -6798,9 +6800,8 @@ NTSTATUS smb1cli_session_set_session_key(struct smbXcli_session *session,
 	memcpy(session_key, _session_key.data,
 	       MIN(_session_key.length, sizeof(session_key)));
 
-	session->smb1.application_key = data_blob_talloc(session,
-							 session_key,
-							 sizeof(session_key));
+	session->smb1.application_key = data_blob_talloc_s(
+		session, session_key, sizeof(session_key));
 	ZERO_STRUCT(session_key);
 	if (session->smb1.application_key.data == NULL) {
 		return NT_STATUS_NO_MEMORY;
@@ -7289,10 +7290,10 @@ NTSTATUS smb2cli_session_set_channel_key(struct smbXcli_session *session,
 	memcpy(channel_key, _channel_key.data,
 	       MIN(_channel_key.length, sizeof(channel_key)));
 
-	session->smb2_channel.signing_key->blob =
-		data_blob_talloc(session->smb2_channel.signing_key,
-				 channel_key,
-				 sizeof(channel_key));
+	session->smb2_channel.signing_key->blob = data_blob_talloc_s(
+		session->smb2_channel.signing_key,
+		channel_key,
+		sizeof(channel_key));
 	if (!smb2_signing_key_valid(session->smb2_channel.signing_key)) {
 		ZERO_STRUCT(channel_key);
 		return NT_STATUS_NO_MEMORY;

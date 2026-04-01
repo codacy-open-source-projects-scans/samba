@@ -287,6 +287,7 @@ static NTSTATUS netsec_do_seal(struct schannel_state *state,
 					GNUTLS_CIPHER_AES_128_CFB8,
 					&key,
 					&iv);
+		ZERO_ARRAY(sess_kf0);
 		if (rc < 0) {
 			DBG_ERR("ERROR: gnutls_cipher_init: %s\n",
 				gnutls_strerror(rc));
@@ -373,6 +374,7 @@ static NTSTATUS netsec_do_seal(struct schannel_state *state,
 				      zeros,
 				      4,
 				      digest2);
+		ZERO_ARRAY(sess_kf0);
 		if (rc < 0) {
 			ZERO_ARRAY(digest2);
 			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);

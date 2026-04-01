@@ -380,7 +380,8 @@ static NTSTATUS session_setup_nt1(struct composite_context *c,
 		if (password == NULL) {
 			password = "";
 		}
-		state->setup.nt1.in.password1 = data_blob_talloc(state, password, strlen(password));
+		state->setup.nt1.in.password1 = data_blob_talloc_s(
+			state, password, strlen(password));
 		state->setup.nt1.in.password2 = data_blob(NULL, 0);
 	} else {
 		/* could match windows client and return 'cannot logon from this workstation', but it just confuses everybody */

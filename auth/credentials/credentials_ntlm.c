@@ -427,6 +427,7 @@ _PUBLIC_ bool cli_credentials_set_old_utf16_password(struct cli_credentials *cre
 		return false;
 	}
 
+	talloc_keep_secret(password_talloc);
 	ok = cli_credentials_set_old_password(cred, password_talloc, CRED_SPECIFIED);
 	TALLOC_FREE(password_talloc);
 	if (!ok) {

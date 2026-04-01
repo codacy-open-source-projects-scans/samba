@@ -1229,7 +1229,7 @@ pa_enc_ts_validate(astgs_request_t r, const PA_DATA *pa)
 
 	ret = KRB5KRB_AP_ERR_SKEW;
 	_kdc_r_log(r, 4, "Too large time skew, "
-		   "client time %s is out by %u > %u seconds -- %s",
+		   "client time %s is out by %u > %ld seconds -- %s",
 		   client_time,
 		   (unsigned)labs(kdc_time - p.patimestamp),
 		   r->context->max_skew,
@@ -2471,6 +2471,7 @@ _kdc_as_rep(astgs_request_t r)
     const char *msg;
     Key *krbtgt_key;
     unsigned krbtgt_kvno;
+    krb5_boolean key_expired = FALSE;
 
     memset(rep, 0, sizeof(*rep));
 
@@ -2613,8 +2614,11 @@ _kdc_as_rep(astgs_request_t r)
     }
 
     ret = _kdc_check_access(r);
-    if(ret)
+    if (ret == KRB5KDC_ERR_KEY_EXPIRED) {
+	key_expired = TRUE;
+    } else if(ret) {
 	goto out;
+    }
 
     /*
      * This has to be here (not later), because we need to have r->sessionetype
@@ -2827,6 +2831,11 @@ _kdc_as_rep(astgs_request_t r)
     }
 
     r->canon_client_princ = r->client->principal;
+
+    if (key_expired) {
+	ret = KRB5KDC_ERR_KEY_EXPIRED;
+	goto out;
+    }
 
     if (_kdc_is_anon_request(&r->req)) {
 	ret = _kdc_check_anon_policy(r);

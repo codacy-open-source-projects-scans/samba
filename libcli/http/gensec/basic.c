@@ -119,6 +119,7 @@ static NTSTATUS gensec_http_basic_update_internal(struct gensec_security *gensec
 				state->step = GENSEC_HTTP_BASIC_ERROR;
 				return NT_STATUS_NO_MEMORY;
 			}
+			talloc_keep_secret(tmp);
 			*out = data_blob_string_const(tmp);
 
 			b64 = base64_encode_data_blob(mem_ctx, *out);
@@ -126,6 +127,7 @@ static NTSTATUS gensec_http_basic_update_internal(struct gensec_security *gensec
 				state->step = GENSEC_HTTP_BASIC_ERROR;
 				return NT_STATUS_NO_MEMORY;
 			}
+			talloc_keep_secret(b64);
 			TALLOC_FREE(tmp);
 
 			tmp = talloc_asprintf(mem_ctx, "Basic %s", b64);
@@ -133,6 +135,7 @@ static NTSTATUS gensec_http_basic_update_internal(struct gensec_security *gensec
 				state->step = GENSEC_HTTP_BASIC_ERROR;
 				return NT_STATUS_NO_MEMORY;
 			}
+			talloc_keep_secret(tmp);
 			TALLOC_FREE(b64);
 
 			*out = data_blob_string_const(tmp);

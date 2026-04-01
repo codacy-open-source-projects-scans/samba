@@ -707,8 +707,7 @@ class AsReqKerberosTests(AsReqBaseTest):
             # the uncanonicalized client is going to be found first.
             expected_error = KDC_ERR_C_PRINCIPAL_UNKNOWN
         else:
-            expected_error = (KDC_ERR_KEY_EXPIRED,
-                              KDC_ERR_PREAUTH_FAILED,
+            expected_error = (KDC_ERR_PREAUTH_FAILED,
                               KDC_ERR_PREAUTH_REQUIRED)
 
         self._run_as_req_enc_timestamp(

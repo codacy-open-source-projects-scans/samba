@@ -60,6 +60,8 @@ static void smb1_signing_reset_info(struct smb1_signing_state *si)
 	si->active = false;
 	si->seqnum = 0;
 
+	data_blob_clear(&si->mac_key);
+
 	if (si->free_fn) {
 		si->free_fn(si->mem_ctx, si->mac_key.data);
 	} else {

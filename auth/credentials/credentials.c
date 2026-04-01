@@ -1125,11 +1125,16 @@ _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, 
 	}
 
 	uname = talloc_strdup(credentials, data);
+	if (uname == NULL) {
+		return;
+	}
 	uname_free = uname;
 
 	if ((p = strchr_m(uname,'%'))) {
 		*p = 0;
 		cli_credentials_set_password(credentials, p+1, obtained);
+		/* zero the copy if it contains password */
+		talloc_keep_secret(uname_free);
 	}
 
 	if ((p = strchr_m(uname,'@'))) {
@@ -1812,16 +1817,19 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 				"Error reading password from file descriptor "
 				"%d: empty password\n",
 				fd);
+			ZERO_ARRAY(pass);
 			return false;
 
 		default:
 			fprintf(stderr, "Error reading password from file descriptor %d: %s\n",
 					fd, strerror(errno));
+			ZERO_ARRAY(pass);
 			return false;
 		}
 	}
 
 	cli_credentials_set_password(credentials, pass, obtained);
+	ZERO_ARRAY(pass);
 	return true;
 }
 

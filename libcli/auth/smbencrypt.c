@@ -50,6 +50,7 @@ int SMBencrypt_hash(const uint8_t lm_hash[16], const uint8_t *c8, uint8_t p24[24
 	dump_data(100, p24, 24);
 #endif
 
+	ZERO_STRUCT(p21);
 	return rc;
 }
 
@@ -72,6 +73,7 @@ bool SMBencrypt(const char *passwd, const uint8_t *c8, uint8_t p24[24])
 	if (rc != 0) {
 		ret = false;
 	}
+	ZERO_ARRAY(lm_hash);
 	return ret;
 }
 
@@ -277,11 +279,14 @@ out:
 int SMBOWFencrypt(const uint8_t passwd[16], const uint8_t *c8, uint8_t p24[24])
 {
 	uint8_t p21[21];
+	int rc;
 
 	ZERO_STRUCT(p21);
 
 	memcpy(p21, passwd, 16);
-	return E_P24(p21, c8, p24);
+	rc = E_P24(p21, c8, p24);
+	ZERO_STRUCT(p21);
+	return rc;
 }
 
 /* Does the des encryption. */
@@ -302,6 +307,7 @@ int SMBNTencrypt_hash(const uint8_t nt_hash[16], const uint8_t *c8, uint8_t *p24
 	dump_data(100, p24, 24);
 #endif
 
+	ZERO_STRUCT(p21);
 	return rc;
 }
 
@@ -309,9 +315,12 @@ int SMBNTencrypt_hash(const uint8_t nt_hash[16], const uint8_t *c8, uint8_t *p24
 
 int SMBNTencrypt(const char *passwd, const uint8_t *c8, uint8_t *p24)
 {
+	int ret;
 	uint8_t nt_hash[16];
 	E_md4hash(passwd, nt_hash);
-	return SMBNTencrypt_hash(nt_hash, c8, p24);
+	ret = SMBNTencrypt_hash(nt_hash, c8, p24);
+	ZERO_ARRAY(nt_hash);
+	return ret;
 }
 
 
@@ -411,14 +420,20 @@ NTSTATUS SMBsesskeygen_lm_sess_key(const uint8_t lm_hash[16],
 
 	rc = des_crypt56_gnutls(p24, lm_resp, partial_lm_hash, SAMBA_GNUTLS_ENCRYPT);
 	if (rc < 0) {
+		ZERO_ARRAY(partial_lm_hash);
+		ZERO_ARRAY(p24);
 		return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
 	}
 	rc = des_crypt56_gnutls(p24+8, lm_resp, partial_lm_hash + 7, SAMBA_GNUTLS_ENCRYPT);
 	if (rc < 0) {
+		ZERO_ARRAY(partial_lm_hash);
+		ZERO_ARRAY(p24);
 		return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
 	}
 
 	memcpy(sess_key, p24, 16);
+	ZERO_ARRAY(partial_lm_hash);
+	ZERO_ARRAY(p24);
 
 #ifdef DEBUG_PASSWORD
 	DEBUG(100, ("SMBsesskeygen_lm_sess_key: \n"));
@@ -506,10 +521,14 @@ static DATA_BLOB NTLMv2_generate_response(TALLOC_CTX *out_mem_ctx,
 				    ntlmv2_response);
 	if (!NT_STATUS_IS_OK(status)) {
 		talloc_free(mem_ctx);
+		ZERO_ARRAY(ntlmv2_response);
 		return data_blob(NULL, 0);
 	}
 
-	final_response = data_blob_talloc(out_mem_ctx, NULL, sizeof(ntlmv2_response) + ntlmv2_client_data.length);
+	final_response = data_blob_talloc_s(out_mem_ctx,
+					    NULL,
+					    sizeof(ntlmv2_response) +
+						    ntlmv2_client_data.length);
 
 	memcpy(final_response.data, ntlmv2_response, sizeof(ntlmv2_response));
 
@@ -518,6 +537,7 @@ static DATA_BLOB NTLMv2_generate_response(TALLOC_CTX *out_mem_ctx,
 
 	talloc_free(mem_ctx);
 
+	ZERO_ARRAY(ntlmv2_response);
 	return final_response;
 }
 
@@ -526,8 +546,8 @@ static DATA_BLOB LMv2_generate_response(TALLOC_CTX *mem_ctx,
 					const DATA_BLOB *server_chal)
 {
 	uint8_t lmv2_response[16];
-	DATA_BLOB lmv2_client_data = data_blob_talloc(mem_ctx, NULL, 8);
-	DATA_BLOB final_response = data_blob_talloc(mem_ctx, NULL,24);
+	DATA_BLOB lmv2_client_data = data_blob_talloc_s(mem_ctx, NULL, 8);
+	DATA_BLOB final_response = data_blob_talloc_s(mem_ctx, NULL, 24);
 	NTSTATUS status;
 
 	/* LMv2 */
@@ -541,6 +561,7 @@ static DATA_BLOB LMv2_generate_response(TALLOC_CTX *mem_ctx,
 				    lmv2_response);
 	if (!NT_STATUS_IS_OK(status)) {
 		data_blob_free(&lmv2_client_data);
+		ZERO_ARRAY(lmv2_response);
 		return data_blob(NULL, 0);
 	}
 	memcpy(final_response.data, lmv2_response, sizeof(lmv2_response));
@@ -552,6 +573,7 @@ static DATA_BLOB LMv2_generate_response(TALLOC_CTX *mem_ctx,
 
 	data_blob_free(&lmv2_client_data);
 
+	ZERO_ARRAY(lmv2_response);
 	return final_response;
 }
 
@@ -571,6 +593,7 @@ bool SMBNTLMv2encrypt_hash(TALLOC_CTX *mem_ctx,
 	   This prevents username swapping during the auth exchange
 	*/
 	if (!ntv2_owf_gen(nt_hash, user, domain, ntlm_v2_hash)) {
+		ZERO_ARRAY(ntlm_v2_hash);
 		return false;
 	}
 
@@ -590,7 +613,9 @@ bool SMBNTLMv2encrypt_hash(TALLOC_CTX *mem_ctx,
 							*nttime,
 							names_blob);
 		if (user_session_key) {
-			*user_session_key = data_blob_talloc(mem_ctx, NULL, 16);
+			*user_session_key = data_blob_talloc_s(mem_ctx,
+							       NULL,
+							       16);
 
 			/* The NTLMv2 calculations also provide a session key, for signing etc later */
 			/* use only the first 16 bytes of nt_response for session key */
@@ -598,6 +623,7 @@ bool SMBNTLMv2encrypt_hash(TALLOC_CTX *mem_ctx,
 						    nt_response->data,
 						    user_session_key->data);
 			if (!NT_STATUS_IS_OK(status)) {
+				ZERO_ARRAY(ntlm_v2_hash);
 				return false;
 			}
 		}
@@ -614,7 +640,9 @@ bool SMBNTLMv2encrypt_hash(TALLOC_CTX *mem_ctx,
 							      server_chal);
 		}
 		if (lm_session_key) {
-			*lm_session_key = data_blob_talloc(mem_ctx, NULL, 16);
+			*lm_session_key = data_blob_talloc_s(mem_ctx,
+							     NULL,
+							     16);
 
 			/* The NTLMv2 calculations also provide a session key, for signing etc later */
 			/* use only the first 16 bytes of lm_response for session key */
@@ -622,11 +650,13 @@ bool SMBNTLMv2encrypt_hash(TALLOC_CTX *mem_ctx,
 						    lm_response->data,
 						    lm_session_key->data);
 			if (!NT_STATUS_IS_OK(status)) {
+				ZERO_ARRAY(ntlm_v2_hash);
 				return false;
 			}
 		}
 	}
 
+	ZERO_ARRAY(ntlm_v2_hash);
 	return true;
 }
 
@@ -639,12 +669,24 @@ bool SMBNTLMv2encrypt(TALLOC_CTX *mem_ctx,
 		      DATA_BLOB *lm_session_key, DATA_BLOB *user_session_key)
 {
 	uint8_t nt_hash[16];
+	bool ret;
+
 	E_md4hash(password, nt_hash);
 
-	return SMBNTLMv2encrypt_hash(mem_ctx,
-				     user, domain, nt_hash,
-				     server_chal, NULL, names_blob,
-				     lm_response, nt_response, lm_session_key, user_session_key);
+	ret = SMBNTLMv2encrypt_hash(mem_ctx,
+				    user,
+				    domain,
+				    nt_hash,
+				    server_chal,
+				    NULL,
+				    names_blob,
+				    lm_response,
+				    nt_response,
+				    lm_session_key,
+				    user_session_key);
+
+	ZERO_ARRAY(nt_hash);
+	return ret;
 }
 
 static NTSTATUS NTLMv2_RESPONSE_verify_workstation(const char *account_name,

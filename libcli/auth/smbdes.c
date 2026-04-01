@@ -73,11 +73,15 @@ int des_crypt56_gnutls(uint8_t out[8], const uint8_t in[8],
 
 	ret = gnutls_global_init();
 	if (ret != 0) {
+		ZERO_ARRAY(key2);
+		ZERO_ARRAY(outb);
 		return ret;
 	}
 
 	ret = gnutls_cipher_init(&ctx, GNUTLS_CIPHER_DES_CBC, &key, &iv);
 	if (ret != 0) {
+		ZERO_ARRAY(key2);
+		ZERO_ARRAY(outb);
 		return ret;
 	}
 
@@ -94,6 +98,8 @@ int des_crypt56_gnutls(uint8_t out[8], const uint8_t in[8],
 
 	gnutls_cipher_deinit(ctx);
 
+	ZERO_ARRAY(key2);
+	ZERO_ARRAY(outb);
 	return ret;
 }
 
@@ -147,10 +153,13 @@ int des_crypt128(uint8_t out[8], const uint8_t in[8], const uint8_t key[16])
 
 	ret = des_crypt56_gnutls(buf, in, key, SAMBA_GNUTLS_ENCRYPT);
 	if (ret != 0) {
+		ZERO_ARRAY(buf);
 		return ret;
 	}
 
-	return des_crypt56_gnutls(out, buf, key+9, SAMBA_GNUTLS_ENCRYPT);
+	ret = des_crypt56_gnutls(out, buf, key + 9, SAMBA_GNUTLS_ENCRYPT);
+	ZERO_ARRAY(buf);
+	return ret;
 }
 
 /* des encryption with a 112 bit (14 byte) key */
@@ -163,18 +172,27 @@ int des_crypt112(uint8_t out[8], const uint8_t in[8], const uint8_t key[14],
 	if (encrypt == SAMBA_GNUTLS_ENCRYPT) {
 		ret = des_crypt56_gnutls(buf, in, key, SAMBA_GNUTLS_ENCRYPT);
 		if (ret != 0) {
+			ZERO_ARRAY(buf);
 			return ret;
 		}
 
-		return des_crypt56_gnutls(out, buf, key+7, SAMBA_GNUTLS_ENCRYPT);
+		ret = des_crypt56_gnutls(out,
+					 buf,
+					 key + 7,
+					 SAMBA_GNUTLS_ENCRYPT);
+		ZERO_ARRAY(buf);
+		return ret;
 	}
 
 	ret = des_crypt56_gnutls(buf, in, key+7, SAMBA_GNUTLS_DECRYPT);
 	if (ret != 0) {
+		ZERO_ARRAY(buf);
 		return ret;
 	}
 
-	return des_crypt56_gnutls(out, buf, key, SAMBA_GNUTLS_DECRYPT);
+	ret = des_crypt56_gnutls(out, buf, key, SAMBA_GNUTLS_DECRYPT);
+	ZERO_ARRAY(buf);
+	return ret;
 }
 
 /* des encryption of a 16 byte lump of data with a 112 bit key */

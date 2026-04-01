@@ -56,10 +56,17 @@ int sess_crypt_blob(DATA_BLOB *out, const DATA_BLOB *in, const DATA_BLOB *sessio
 
 		rc = des_crypt56_gnutls(bout, bin, key, encrypt);
 		if (rc != 0) {
+			ZERO_ARRAY(bin);
+			ZERO_ARRAY(bout);
+			ZERO_ARRAY(key);
 			return rc;
 		}
 
 		memcpy(&out->data[i], bout, 8);
+
+		ZERO_ARRAY(bin);
+		ZERO_ARRAY(bout);
+		ZERO_ARRAY(key);
 	}
 	return 0;
 }
@@ -122,8 +129,8 @@ char *sess_decrypt_string(TALLOC_CTX *mem_ctx,
 	if (blob->length < 8) {
 		return NULL;
 	}
-	
-	out = data_blob_talloc(mem_ctx, NULL, blob->length);
+
+	out = data_blob_talloc_s(mem_ctx, NULL, blob->length);
 	if (!out.data) {
 		return NULL;
 	}
@@ -171,12 +178,12 @@ DATA_BLOB sess_encrypt_blob(TALLOC_CTX *mem_ctx, DATA_BLOB *blob_in, const DATA_
 	int dlen = (blob_in->length+7) & ~7;
 	int rc;
 
-	src = data_blob_talloc(mem_ctx, NULL, 8+dlen);
+	src = data_blob_talloc_s(mem_ctx, NULL, 8 + dlen);
 	if (!src.data) {
 		return data_blob(NULL, 0);
 	}
 
-	ret = data_blob_talloc(mem_ctx, NULL, 8+dlen);
+	ret = data_blob_talloc_s(mem_ctx, NULL, 8 + dlen);
 	if (!ret.data) {
 		data_blob_free(&src);
 		return data_blob(NULL, 0);
@@ -212,8 +219,8 @@ NTSTATUS sess_decrypt_blob(TALLOC_CTX *mem_ctx, const DATA_BLOB *blob, const DAT
 			  (int)blob->length));
 		return NT_STATUS_INVALID_PARAMETER;
 	}
-	
-	out = data_blob_talloc(mem_ctx, NULL, blob->length);
+
+	out = data_blob_talloc_s(mem_ctx, NULL, blob->length);
 	if (!out.data) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -236,7 +243,7 @@ NTSTATUS sess_decrypt_blob(TALLOC_CTX *mem_ctx, const DATA_BLOB *blob, const DAT
 		return NT_STATUS_WRONG_PASSWORD;
 	}
 
-	*ret = data_blob_talloc(mem_ctx, out.data+8, slen);
+	*ret = data_blob_talloc_s(mem_ctx, out.data + 8, slen);
 	if (slen && !ret->data) {
 		return NT_STATUS_NO_MEMORY;
 	}
