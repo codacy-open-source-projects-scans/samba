@@ -110,6 +110,7 @@ static const struct enum_list enum_vfs_cephfs_fscrypt_vals[] = {
 	{VFS_CEPHFS_FSCRYPT_DISABLED, "disabled"},
 	{VFS_CEPHFS_FSCRYPT_DISABLED, "none"},
 	{VFS_CEPHFS_FSCRYPT_KEYBRIDGE, "keybridge"},
+	{-1, NULL},
 };
 
 struct vfs_ceph_fscrypt_key {
@@ -2596,8 +2597,7 @@ static struct dirent *vfs_ceph_readdir(struct vfs_handle_struct *handle,
 {
 	struct vfs_ceph_fh *dircfh = (struct vfs_ceph_fh *)dirp;
 	struct dirent *result = NULL;
-	int saved_errno = errno;
-	int ret = -1;
+	int ret = -ENOMEM;
 
 	START_PROFILE_X(SNUM(handle->conn), syscall_readdir);
 	DBG_DEBUG("[CEPH] readdir: dirfsp_name=%s\n", fsp_str_dbg(dirfsp));
@@ -2614,7 +2614,6 @@ static struct dirent *vfs_ceph_readdir(struct vfs_handle_struct *handle,
 		/* Error case */
 		vfs_ceph_put_fh_dirent(dircfh);
 		result = NULL;
-		saved_errno = ret;
 	} else if (ret == 0) {
 		/* End of directory stream */
 		vfs_ceph_put_fh_dirent(dircfh);
@@ -2623,8 +2622,10 @@ static struct dirent *vfs_ceph_readdir(struct vfs_handle_struct *handle,
 		/* Normal case */
 		DBG_DEBUG("[CEPH] readdir: dirp=%p result=%p\n", dirp, result);
 	}
-	errno = saved_errno;
 out:
+	if (ret < 0) {
+		errno = -ret;
+	}
 	DBG_DEBUG("[CEPH] readdir: dirfsp_name=%s ret=%d\n",
 		  fsp_str_dbg(dirfsp),
 		  ret);
