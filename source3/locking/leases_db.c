@@ -50,7 +50,7 @@ bool leases_db_init(bool read_only)
 			    SMBD_VOLATILE_TDB_HASH_SIZE,
 			    SMBD_VOLATILE_TDB_FLAGS |
 			    TDB_SEQNUM,
-			    read_only ? O_RDONLY : O_RDWR|O_CREAT, 0644,
+			    read_only ? O_RDONLY : O_RDWR|O_CREAT, 0640,
 			    DBWRAP_LOCK_ORDER_4, DBWRAP_FLAG_NONE);
 	TALLOC_FREE(db_path);
 	if (leases_db == NULL) {

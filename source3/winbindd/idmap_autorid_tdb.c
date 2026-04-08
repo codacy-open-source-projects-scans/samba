@@ -737,7 +737,7 @@ NTSTATUS idmap_autorid_db_open(const char *path,
 	}
 
 	/* Open idmap repository */
-	*db = db_open(mem_ctx, path, 0, TDB_DEFAULT, O_RDWR | O_CREAT, 0644,
+	*db = db_open(mem_ctx, path, 0, TDB_DEFAULT, O_RDWR | O_CREAT, 0640,
 		      DBWRAP_LOCK_ORDER_1, DBWRAP_FLAG_NONE);
 
 	if (*db == NULL) {

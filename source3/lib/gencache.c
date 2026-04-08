@@ -90,7 +90,7 @@ static bool gencache_init(void)
 
 	cache = tdb_wrap_open(NULL, cache_fname, hash_size,
 			      tdb_flags,
-			      open_flags, 0644);
+			      open_flags, 0640);
 	/*
 	 * Allow client tools to create a gencache in the home directory
 	 * as a normal user.
@@ -139,7 +139,7 @@ static bool gencache_init(void)
 				      hash_size,
 				      tdb_flags,
 				      open_flags,
-				      0644);
+				      0640);
 		if (cache != NULL) {
 			DBG_INFO("Opening user cache file %s.\n",
 				 cache_fname);

@@ -54,6 +54,12 @@ class TestProtocolClient(unittest.TestResult):
         self._stream = stream
         self.successes = []
 
+        self._errors_idx: int = 0
+        self._failures_idx: int = 0
+        self._expected_failures_idx: int = 0
+        self._skipped_idx: int = 0
+        self._unexpected_successes_idx: int = 0
+
     def _addOutcome(self, outcome, test, errors=None):
         """Report an outcome of test test.
 
@@ -81,7 +87,7 @@ class TestProtocolClient(unittest.TestResult):
         self._stream.write("test: " + test.id() + "\n")
         self._stream.flush()
 
-    def addDuration(self, *args):
+    def addDuration(self, *args, **kwargs):
         pass
 
     def stopTest(self, test):
@@ -91,12 +97,23 @@ class TestProtocolClient(unittest.TestResult):
 
     def writeOutcome(self, test):
         """Output the overall outcome for test test."""
-        err,       self.errors              = self._filterErrors(test,    self.errors)
-        fail,      self.failures            = self._filterErrors(test,    self.failures)
-        xfail,     self.expectedFailures    = self._filterErrors(test,    self.expectedFailures)
-        skip,      self.skipped             = self._filterErrors(test,    self.skipped)
-        success,   self.successes           = self._filterSuccesses(test, self.successes)
-        uxsuccess, self.unexpectedSuccesses = self._filterSuccesses(test, self.unexpectedSuccesses)
+        err = self._filterErrors(test, self.errors[self._errors_idx:])
+        self._errors_idx = len(self.errors)
+
+        fail = self._filterErrors(test, self.failures[self._failures_idx:])
+        self._failures_idx = len(self.failures)
+
+        xfail = self._filterErrors(test, self.expectedFailures[self._expected_failures_idx:])
+        self._expected_failures_idx = len(self.expectedFailures)
+
+        skip = self._filterErrors(test, self.skipped[self._skipped_idx:])
+        self._skipped_idx = len(self.skipped)
+
+        success = self._filterSuccesses(test, self.successes)
+        self.successes.clear()
+
+        uxsuccess = self._filterSuccesses(test, self.unexpectedSuccesses[self._unexpected_successes_idx:])
+        self._unexpected_successes_idx = len(self.unexpectedSuccesses)
 
         if err:
             outcome = "error"
@@ -124,20 +141,9 @@ class TestProtocolClient(unittest.TestResult):
         :param test: The test to filter by.
         :param errors: A list of <test, error> pairs to filter.
 
-        :return: A pair whose first element is a list of strings containing
-            errors that apply to test test, and whose second element is a list
-            of the remaining elements.
+        :return: A list of strings containing errors that apply to test test.
         """
-        filtered = []
-        unfiltered = []
-
-        for error in errors:
-            if error[0] is test:
-                filtered.append(error[1])
-            else:
-                unfiltered.append(error)
-
-        return (filtered, unfiltered)
+        return [err for (t, err) in errors if t is test]
 
     def _filterSuccesses(self, test, successes):
         """Filter a list of successes by test test.
@@ -145,20 +151,10 @@ class TestProtocolClient(unittest.TestResult):
         :param test: The test to filter by.
         :param successes: A list of tests to filter.
 
-        :return: A tuple whose first element is a boolean stating whether test
-            test was found in the list of successes, and whose second element is
-            a list of the remaining elements.
+        :return: A boolean stating whether test test was found in the list of
+            successes.
         """
-        filtered = False
-        unfiltered = []
-
-        for success in successes:
-            if success is test:
-                filtered = True
-            else:
-                unfiltered.append(success)
-
-        return (filtered, unfiltered)
+        return any(t is test for t in successes)
 
     def time(self, a_datetime):
         """Inform the client of the time.
@@ -457,7 +453,7 @@ class AutoTimingTestResultDecorator(HookedTestResultDecorator):
         self._time = a_datetime
         return self.decorated.time(a_datetime)
 
-    def addDuration(self, *args):
+    def addDuration(self, *args, **kwargs):
         pass
 
 

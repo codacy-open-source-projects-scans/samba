@@ -141,7 +141,7 @@ bool profile_setup(struct messaging_context *msg_ctx, bool rdonly)
 	smbprofile_state.internal.db = tdb_wrap_open(
 		NULL, db_name, 0,
 		rdonly ? 0 : TDB_CLEAR_IF_FIRST|TDB_MUTEX_LOCKING,
-		O_CREAT | (rdonly ? O_RDONLY : O_RDWR), 0644);
+		O_CREAT | (rdonly ? O_RDONLY : O_RDWR), 0640);
 	TALLOC_FREE(db_name);
 	if (smbprofile_state.internal.db == NULL) {
 		return false;

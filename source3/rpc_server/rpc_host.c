@@ -2465,7 +2465,7 @@ static struct tevent_req *rpc_host_send(
 		0,
 		TDB_CLEAR_IF_FIRST|TDB_INCOMPATIBLE_HASH,
 		O_RDWR|O_CREAT,
-		0644);
+		0640);
 	if (host->epmdb == NULL) {
 		DBG_DEBUG("tdb_wrap_open(%s) failed: %s\n",
 			  epmdb_path,

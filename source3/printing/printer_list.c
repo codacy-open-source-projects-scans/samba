@@ -50,7 +50,7 @@ static struct db_context *get_printer_list_db(void)
 				 0,
 				 TDB_DEFAULT|TDB_INCOMPATIBLE_HASH,
 				 O_RDWR|O_CREAT,
-				 0644,
+				 0640,
 				 DBWRAP_LOCK_ORDER_1,
 				 DBWRAP_FLAG_NONE);
 	TALLOC_FREE(db_path);

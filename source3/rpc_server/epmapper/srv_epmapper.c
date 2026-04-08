@@ -1044,7 +1044,7 @@ static NTSTATUS epmapper_init_server(
 		0,
 		TDB_CLEAR_IF_FIRST|TDB_INCOMPATIBLE_HASH,
 		O_RDONLY,
-		0644);
+		0640);
 	if (epmdb == NULL) {
 		DBG_DEBUG("Could not open epmdb.tdb: %s\n", strerror(errno));
 		return map_nt_error_from_unix(errno);

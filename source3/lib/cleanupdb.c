@@ -50,7 +50,7 @@ static struct tdb_wrap *cleanup_db(void)
 	}
 
 	db = tdb_wrap_open(NULL, db_path, 0, tdbflags,
-			   O_CREAT | O_RDWR, 0644);
+			   O_CREAT | O_RDWR, 0640);
 	if (db == NULL) {
 		DBG_ERR("Failed to open smbd_cleanupd.tdb\n");
 	}

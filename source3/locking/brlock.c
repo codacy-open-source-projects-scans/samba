@@ -359,7 +359,7 @@ void brl_init(bool read_only)
 
 	brlock_db = db_open(NULL, db_path,
 			    SMBD_VOLATILE_TDB_HASH_SIZE, tdb_flags,
-			    read_only?O_RDONLY:(O_RDWR|O_CREAT), 0644,
+			    read_only?O_RDONLY:(O_RDWR|O_CREAT), 0640,
 			    DBWRAP_LOCK_ORDER_2, DBWRAP_FLAG_NONE);
 	if (!brlock_db) {
 		DEBUG(0,("Failed to open byte range locking database %s\n",

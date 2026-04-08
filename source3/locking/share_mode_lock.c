@@ -128,7 +128,7 @@ static bool locking_init_internal(bool read_only)
 			  SMBD_VOLATILE_TDB_HASH_SIZE,
 			  SMBD_VOLATILE_TDB_FLAGS |
 			  TDB_SEQNUM,
-			  read_only?O_RDONLY:O_RDWR|O_CREAT, 0644,
+			  read_only?O_RDONLY:O_RDWR|O_CREAT, 0640,
 			  DBWRAP_LOCK_ORDER_NONE,
 			  DBWRAP_FLAG_NONE);
 	TALLOC_FREE(db_path);
