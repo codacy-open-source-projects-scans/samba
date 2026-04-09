@@ -3,7 +3,7 @@
 # See also bootstrap/config.py
 #
 
-FROM ubuntu:20.04
+FROM opensuse/leap:16.0
 
 # pass in with --build-arg while build
 ARG SHA1SUM

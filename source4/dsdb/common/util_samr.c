@@ -43,7 +43,8 @@ NTSTATUS dsdb_add_user(struct ldb_context *ldb,
 	const char *name;
 	struct ldb_message *msg;
 	int ret;
-	const char *container, *obj_class=NULL;
+	const char *obj_class = NULL;
+	const char *wk_guid = NULL;
 	char *cn_name;
 	size_t cn_name_len;
 
@@ -115,7 +116,7 @@ NTSTATUS dsdb_add_user(struct ldb_context *ldb,
 
 	/* This must be one of these values *only* */
 	if (acct_flags == ACB_NORMAL) {
-		container = "CN=Users";
+		wk_guid = DS_GUID_USERS_CONTAINER;
 		obj_class = "user";
 		user_account_control = UF_NORMAL_ACCOUNT;
 	} else if (acct_flags == ACB_WSTRUST) {
@@ -124,7 +125,7 @@ NTSTATUS dsdb_add_user(struct ldb_context *ldb,
 			return NT_STATUS_FOOBAR;
 		}
 		cn_name[cn_name_len - 1] = '\0';
-		container = "CN=Computers";
+		wk_guid = DS_GUID_COMPUTERS_CONTAINER;
 		obj_class = "computer";
 		user_account_control = UF_WORKSTATION_TRUST_ACCOUNT;
 
@@ -134,7 +135,7 @@ NTSTATUS dsdb_add_user(struct ldb_context *ldb,
 			return NT_STATUS_FOOBAR;
 		}
 		cn_name[cn_name_len - 1] = '\0';
-		container = "OU=Domain Controllers";
+		wk_guid = DS_GUID_DOMAIN_CONTROLLERS_CONTAINER;
 		obj_class = "computer";
 		user_account_control = UF_SERVER_TRUST_ACCOUNT;
 	} else if (acct_flags == ACB_DOMTRUST) {
@@ -155,8 +156,14 @@ NTSTATUS dsdb_add_user(struct ldb_context *ldb,
 	user_account_control |= UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD;
 
 	/* add core elements to the ldb_message for the user */
-	msg->dn = ldb_dn_copy(msg, ldb_get_default_basedn(ldb));
-	if ( ! ldb_dn_add_child_fmt(msg->dn, "CN=%s,%s", cn_name, container)) {
+	ret = dsdb_wellknown_dn(ldb, msg,
+				ldb_get_default_basedn(ldb),
+				wk_guid,
+				&msg->dn);
+	if (ret != LDB_SUCCESS) {
+		goto failed;
+	}
+	if ( ! ldb_dn_add_child_fmt(msg->dn, "CN=%s", cn_name)) {
 		ldb_transaction_cancel(ldb);
 		talloc_free(tmp_ctx);
 		return NT_STATUS_FOOBAR;

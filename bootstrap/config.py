@@ -490,15 +490,6 @@ DEB_DISTS = {
             'landscape-common': '',
         }
     },
-    'ubuntu2004': {
-        'docker_image': 'ubuntu:20.04',
-        'vagrant_box': 'ubuntu/focal64',
-        'replace': {
-            'liburing-dev': '',   # not available
-            'shfmt': '',
-            'mold': '',
-        }
-    },
     'ubuntu2204': {
         'docker_image': 'ubuntu:22.04',
         'vagrant_box': 'ubuntu/jammy64',
@@ -565,9 +556,9 @@ RPM_DISTS = {
             'python3-iso8601': 'python3-dateutil',
         }
     },
-    'opensuse155': {
-        'docker_image': 'opensuse/leap:15.5',
-        'vagrant_box': 'opensuse/openSUSE-15.5-x86_64',
+    'opensuse160': {
+        'docker_image': 'opensuse/leap:16.0',
+        'vagrant_box': 'opensuse/openSUSE-16.0-x86_64',
         'bootstrap': ZYPPER_BOOTSTRAP,
         'replace': {
             '@development-tools': '',
@@ -598,6 +589,7 @@ RPM_DISTS = {
             'shfmt': '',
             'yum-utils': '',
             'libvarlink-devel': '', # not available
+            'python3-varlink': '', # not available
         }
     }
 }

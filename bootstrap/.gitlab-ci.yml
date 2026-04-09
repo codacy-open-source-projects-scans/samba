@@ -87,9 +87,6 @@
       #
       - $SAMBA_CI_REBUILD_BROKEN_IMAGES == "yes"
 
-ubuntu2004:
-  extends: .build_image_template
-
 ubuntu2204:
   extends: .build_image_template
 
@@ -117,5 +114,5 @@ rocky8:
 centos9s:
   extends: .build_image_template
 
-opensuse155:
+opensuse160:
   extends: .build_image_template

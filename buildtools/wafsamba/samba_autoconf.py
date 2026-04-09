@@ -1040,5 +1040,5 @@ def SAMBA_CHECK_UNDEFINED_SYMBOL_FLAGS(conf):
         conf.env.undefined_ldflags = conf.ADD_LDFLAGS('-Wl,-no-undefined', testflags=True)
 
         if (conf.env.undefined_ignore_ldflags == [] and
-            conf.CHECK_LDFLAGS(['-undefined', 'dynamic_lookup'])):
-            conf.env.undefined_ignore_ldflags = ['-undefined', 'dynamic_lookup']
+            conf.CHECK_LDFLAGS(['-Wl,-undefined,dynamic_lookup'])):
+            conf.env.undefined_ignore_ldflags = ['-Wl,-undefined,dynamic_lookup']
