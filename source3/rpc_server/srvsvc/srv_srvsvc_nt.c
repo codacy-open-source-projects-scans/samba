@@ -105,7 +105,8 @@ static int enum_file_fn(struct file_id id,
 
 	/* If the pid was not found delete the entry from connections.tdb */
 
-	if ( !process_exists(e->pid) ) {
+	if (lp_parm_bool(-1, "srvsvc", "file enum check stale", true) &&
+	    !process_exists(e->pid) ) {
 		return 0;
 	}
 
@@ -184,16 +185,23 @@ static WERROR net_enum_files(TALLOC_CTX *ctx,
 		.ctx = ctx, .username = username, .ctr3 = *ctr3,
 	};
 	uint32_t i;
+	bool count_file_locks =
+		lp_parm_bool(-1, "srvsvc", "file enum count locks", true);
 
 	share_entry_forall_read(enum_file_fn, (void *)&f_enum_cnt );
 
 	*ctr3 = f_enum_cnt.ctr3;
 
 	/* need to count the number of locks on a file */
-
 	for (i=0; i<(*ctr3)->count; i++) {
 		struct files_struct *fsp = NULL;
 		struct byte_range_lock *brl = NULL;
+
+		(*ctr3)->array[i].num_locks = 0;
+
+		if (!count_file_locks) {
+			continue;
+		}
 
 		fsp = talloc_zero(talloc_tos(), struct files_struct);
 		if (fsp == NULL) {
@@ -202,12 +210,10 @@ static WERROR net_enum_files(TALLOC_CTX *ctx,
 		fsp->file_id = f_enum_cnt.fids[i];
 
 		brl = brl_get_locks_readonly(fsp);
-		if (brl == NULL) {
-			continue;
+		if (brl != NULL) {
+			(*ctr3)->array[i].num_locks = brl_num_locks(brl);
+			TALLOC_FREE(brl);
 		}
-
-		(*ctr3)->array[i].num_locks = brl_num_locks(brl);
-		TALLOC_FREE(brl);
 		TALLOC_FREE(fsp);
 	}
 

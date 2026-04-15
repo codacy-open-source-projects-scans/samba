@@ -76,6 +76,8 @@ struct rpc_worker {
 	struct rpc_worker_status status;
 
 	bool done;
+	struct timeval last_connect;
+	struct timeval last_disconnect;
 };
 
 static void rpc_worker_print_interface(
@@ -159,6 +161,7 @@ static void rpc_worker_connection_terminated(
 
 	worker->status.num_connections -= 1;
 
+	GetTimeOfDay(&worker->last_disconnect);
 	status = rpc_worker_report_status(worker);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_DEBUG("rpc_worker_report_status returned %s\n",
@@ -361,6 +364,14 @@ static void rpc_worker_new_client(
 				  info8->local_server_name);
 			goto fail;
 		}
+
+		ncacn_conn->remote_client_addr = talloc_strdup(
+			ncacn_conn, info8->remote_client_addr);
+		if (ncacn_conn->remote_client_addr == NULL) {
+			DBG_DEBUG("talloc_strdup(%s) failed\n",
+				  info8->remote_client_addr);
+			goto fail;
+		}
 	}
 
 	if (transport == NCACN_NP) {
@@ -484,9 +495,10 @@ static void rpc_worker_new_client(
 
 	TALLOC_FREE(client);
 
+	GetTimeOfDay(&ncacn_conn->tv);
 	DLIST_ADD(worker->conns, ncacn_conn);
 	worker->status.num_connections += 1;
-
+	worker->last_connect = ncacn_conn->tv;
 	dcesrv_loop_next_packet(dcesrv_conn, pkt, buffer);
 
 	return;
@@ -558,6 +570,82 @@ static bool rpc_worker_new_client_filter(
 
 	rpc_worker_new_client(worker, client, sock);
 
+	return false;
+}
+
+static void dump_worker_client_info(TALLOC_CTX *root,
+				    struct rpc_worker *worker,
+				    FILE *f)
+{
+	struct dcerpc_ncacn_conn *conn = NULL;
+	struct timeval_buf buf_con = {0};
+	struct timeval_buf buf_discon = {0};
+	int i = 1;
+	fprintf(f,
+		"%s pid %u:\n"
+		"      num_connections = %" PRIu32 "\n"
+		"      num_association_groups = %" PRIu32 "\n"
+		"      last client connection %s\n"
+		"      last client disconnection %s\n",
+		getprogname(),
+		(unsigned int)getpid(),
+		worker->status.num_connections,
+		worker->status.num_association_groups,
+		(worker->last_connect.tv_sec != 0)
+			? timeval_str_buf(
+				  &worker->last_connect, false, true, &buf_con)
+			: "N/A",
+		(worker->last_disconnect.tv_sec != 0)
+			? timeval_str_buf(&worker->last_disconnect,
+					  false,
+					  true,
+					  &buf_discon)
+			: "N/A");
+	for (conn = worker->conns; conn != NULL; conn = conn->next) {
+		char *endpoint = NULL;
+		struct timeval_buf tvbuf = {0};
+		endpoint = dcerpc_binding_string(
+			conn, conn->endpoint->ep_description);
+		timeval_str_buf(&conn->tv, false, true, &tvbuf);
+		if (i == 1) {
+			fprintf(f, "   active connections:\n");
+		}
+		fprintf(f,
+			"      [%d] endpoint=%s client addr=%s server=%s "
+			"connected at %s\n",
+			i++,
+			endpoint ? endpoint : "UNKNOWN",
+			conn->remote_client_addr,
+			conn->local_server_name,
+			tvbuf.buf);
+		TALLOC_FREE(endpoint);
+	}
+}
+
+static bool rpc_worker_client_info(struct messaging_rec *rec,
+				   void *private_data)
+{
+	struct rpc_worker *worker = talloc_get_type_abort(private_data,
+							  struct rpc_worker);
+	FILE *f = NULL;
+
+	if (rec->msg_type != MSG_RPC_WORKER_INFO) {
+		return false;
+	}
+
+	DBG_DEBUG("Got MSG_RPC_WORKER_INFO\n");
+	if (rec->num_fds != 1) {
+		DBG_DEBUG("Got %" PRIu8 " fds, expected one\n", rec->num_fds);
+		return false;
+	}
+
+	f = fdopen_keepfd(rec->fds[0], "w");
+	if (f == NULL) {
+		DBG_DEBUG("fdopen failed: %s\n", strerror(errno));
+		return false;
+	}
+	dump_worker_client_info(NULL, worker, f);
+	fclose(f);
 	return false;
 }
 
@@ -840,6 +928,16 @@ static struct tevent_req *rpc_worker_send(
 		messaging_tevent_context(w->msg_ctx),
 		w->msg_ctx,
 		rpc_worker_new_client_filter,
+		w);
+	if (tevent_req_nomem(state->new_client_req, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	state->new_client_req = messaging_filtered_read_send(
+		w,
+		messaging_tevent_context(w->msg_ctx),
+		w->msg_ctx,
+		rpc_worker_client_info,
 		w);
 	if (tevent_req_nomem(state->new_client_req, req)) {
 		return tevent_req_post(req, ev);

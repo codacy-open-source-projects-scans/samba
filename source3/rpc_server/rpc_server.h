@@ -24,6 +24,7 @@
 
 #include "librpc/rpc/dcesrv_core.h"
 #include "rpc_pipes.h"
+#include "lib/util/time_basic.h"
 
 struct auth_session_info;
 struct cli_credentials;
@@ -42,7 +43,9 @@ struct dcerpc_ncacn_conn {
 	struct dcesrv_endpoint *endpoint;
 
 	char *remote_client_name;
+	char *remote_client_addr;
 	char *local_server_name;
+	struct timeval tv;
 };
 
 void set_incoming_fault(struct pipes_struct *p);
