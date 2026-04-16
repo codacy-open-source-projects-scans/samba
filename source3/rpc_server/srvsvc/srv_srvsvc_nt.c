@@ -2473,7 +2473,9 @@ WERROR _srvsvc_NetShareDel(struct pipes_struct *p,
 	/* Delete the SD in the database. */
 	delete_share_security(share_name);
 
-	lp_killservice(snum);
+	if (!connections_snum_used(NULL, snum)) {
+		lp_killservice(snum);
+	}
 
 	return WERR_OK;
 }

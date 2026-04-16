@@ -119,6 +119,21 @@ static bool defaults_saved = false;
 
 static struct loadparm_global Globals;
 
+/*
+ * Callback to check if a service number is currently in use
+ * by any active connection. Registered by smbd at startup.
+ * When NULL (non-smbd programs), no connections exist so
+ * it is always safe to free services.
+ */
+static bool (*snum_in_use)(struct smbd_server_connection *unused,
+			   int snum) = NULL;
+
+void lp_register_snum_in_use_fn(bool (*fn)(struct smbd_server_connection *,
+					   int))
+{
+	snum_in_use = fn;
+}
+
 /* This is a default service used to prime a services structure */
 static const struct loadparm_service _sDefault =
 {
@@ -4397,6 +4412,15 @@ int lp_servicenumber(const char *pszServiceName)
 		struct timespec last_mod;
 
 		if (!usershare_exists(iService, &last_mod)) {
+			if (snum_in_use != NULL &&
+			    snum_in_use(NULL, iService)) {
+				/*
+				 * Service is in use, don't destroy it.
+				 * The periodic load_usershare_shares()
+				 * sweep will clean it up safely.
+				 */
+				return GLOBAL_SECTION_SNUM;
+			}
 			/* Remove the share security tdb entry for it. */
 			delete_share_security(lp_const_servicename(iService));
 			/* Remove it from the array. */
@@ -4408,6 +4432,15 @@ int lp_servicenumber(const char *pszServiceName)
 		/* Has it been modified ? If so delete and reload. */
 		if (timespec_compare(&ServicePtrs[iService]->usershare_last_mod,
 				     &last_mod) < 0) {
+			if (snum_in_use != NULL &&
+			    snum_in_use(NULL, iService)) {
+				/*
+				 * Service is in use, defer the reload
+				 * to load_usershare_shares() which can
+				 * safely handle in-use services.
+				 */
+				return iService;
+			}
 			/* Remove it from the array. */
 			free_service_byindex(iService);
 			/* and now reload it. */
@@ -4437,6 +4470,9 @@ const char *volume_label(TALLOC_CTX *ctx, int snum)
 
 	if (!*label) {
 		label = lp_servicename(ctx, lp_sub, snum);
+	}
+	if (label == NULL) {
+		label = "";
 	}
 
 	/*

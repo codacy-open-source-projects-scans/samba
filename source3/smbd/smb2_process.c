@@ -2031,6 +2031,7 @@ void smbd_process(struct tevent_context *ev_ctx,
 	/* this is needed so that we get decent entries
 	   in smbstatus for port 445 connects */
 	set_remote_machine_name(remaddr, false);
+	lp_register_snum_in_use_fn(connections_snum_used);
 	reload_services(sconn, conn_snum_used, true);
 	sub_set_socket_ids(remaddr,
 			   sconn->remote_hostname,

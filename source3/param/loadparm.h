@@ -144,6 +144,8 @@ void lp_killunused(struct smbd_server_connection *sconn,
 		   bool (*snumused) (struct smbd_server_connection *, int));
 void lp_kill_all_services(void);
 void lp_killservice(int iServiceIn);
+void lp_register_snum_in_use_fn(bool (*fn)(struct smbd_server_connection *,
+					   int));
 const char* server_role_str(uint32_t role);
 enum usershare_err parse_usershare_file(TALLOC_CTX *ctx,
 			SMB_STRUCT_STAT *psbuf,

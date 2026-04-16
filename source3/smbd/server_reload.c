@@ -109,7 +109,8 @@ void delete_and_reload_printers(void)
 
 		/* check printer, but avoid removing non-autoloaded printers */
 		if (lp_autoloaded(snum) &&
-		    !printer_list_printername_exists(pname)) {
+		    !printer_list_printername_exists(pname) &&
+		    !connections_snum_used(NULL, snum)) {
 			lp_killservice(snum);
 		}
 	}
