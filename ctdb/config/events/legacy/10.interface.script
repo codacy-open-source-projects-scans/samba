@@ -56,34 +56,50 @@ monitor_interfaces()
 }
 
 # Sets: iface, ip, maskbits
-get_iface_ip_maskbits()
+get_ip_prefix_iface()
 {
 	_iface_in="$1"
 	ip="$2"
 	_maskbits_in="$3"
 
+	# This produces output when $ip is on $_iface_in.  This works
+	# for interface altnames.
+	#
 	# Intentional word splitting here
 	# shellcheck disable=SC2046
-	set -- $(ip_maskbits_iface "$ip")
-	if [ -n "$1" ]; then
-		maskbits="$1"
+	set -- $(ip -brief addr show to "$ip" dev "$_iface_in" 2>/dev/null)
+	if [ -n "$3" ]; then
+		# $ip was on $_iface_in.  Ignore looked up interface
+		# name ($1) and use $_iface_in instead, since it might
+		# be an altname..
+		iface="$_iface_in"
+		prefix="$3"
+	else
+		# $ip was not on $_iface_in.  Try again, without
+		# specifying interface.
+
+		# Intentional word splitting here
+		# shellcheck disable=SC2046
+		set -- $(ip_prefix_iface "$ip")
+		if [ -z "$1" ]; then
+			echo "WARNING: Unable to determine interface for IP ${ip}"
+			iface=""
+			return
+		fi
+
+		prefix="$1"
 		iface="$2"
 
 		if [ "$iface" != "$_iface_in" ]; then
 			printf 'WARNING: Public IP %s hosted on interface %s but VNN says %s\n' \
 				"$ip" "$iface" "$_iface_in"
 		fi
-		if [ "$maskbits" != "$_maskbits_in" ]; then
-			printf 'WARNING: Public IP %s has %s bit netmask but VNN says %s\n' \
-				"$ip" "$maskbits" "$_maskbits_in"
-		fi
-	else
-		if [ "$_iface_in" = "__none__" ]; then
-			echo "WARNING: Unable to determine interface for IP ${ip}"
-			iface="$_iface_in"
-			return
-		fi
-		die "ERROR: Unable to determine interface for IP ${ip}"
+	fi
+
+	_maskbits="${prefix#*/}"
+	if [ "$_maskbits" != "$_maskbits_in" ]; then
+		printf 'WARNING: Public IP %s has %s bit netmask but VNN says %s\n' \
+			"$ip" "$_maskbits" "$_maskbits_in"
 	fi
 }
 
@@ -146,9 +162,9 @@ takeip)
 
 	update_my_public_ip_addresses "takeip" "$ip"
 
-	add_ip_to_iface "$iface" "$ip" "$maskbits" || {
+	if ! ip_addr_add "${ip}/${maskbits}" "$iface"; then
 		exit 1
-	}
+	fi
 
 	# In case a previous "releaseip" for this IP was killed...
 	ip_unblock "$ip" "$iface"
@@ -171,20 +187,24 @@ releaseip)
 	# 3) remove the IP from the interface
 	# 4) remove the firewall rule
 	shift
-	get_iface_ip_maskbits "$@"
+	get_ip_prefix_iface "$@"
 
-	ip_block "$ip" "$iface"
+	if [ -n "$iface" ]; then
+		ip_block "$ip" "$iface"
 
-	kill_tcp_connections "$iface" "$ip"
+		kill_tcp_connections "$iface" "$ip"
+	fi
 
 	update_my_public_ip_addresses "releaseip" "$ip"
 
-	delete_ip_from_iface "$iface" "$ip" "$maskbits" || {
-		ip_unblock "$ip" "$iface"
-		exit 1
-	}
+	if [ -n "$iface" ]; then
+		if ! ip_addr_del "$prefix" "$iface"; then
+			ip_unblock "$ip" "$iface"
+			exit 1
+		fi
 
-	ip_unblock "$ip" "$iface"
+		ip_unblock "$ip" "$iface"
+	fi
 
 	flush_route_cache
 	;;
@@ -198,7 +218,7 @@ updateip)
 	# The steps are:
 	#
 	# 1) firewall this IP, so no new external packets arrive for it
-	# 2) remove the IP from the old interface (and new interface, to be sure)
+	# 2) remove the IP from the old interface
 	# 3) add the IP to the new interface
 	# 4) remove the firewall rule
 	# 5) use ctdb gratarp to propagate the new mac address
@@ -209,7 +229,7 @@ updateip)
 	_ip=$4
 	_maskbits=$5
 
-	get_iface_ip_maskbits "$_oiface" "$_ip" "$_maskbits"
+	get_ip_prefix_iface "$_oiface" "$_ip" "$_maskbits"
 	oiface="$iface"
 
 	# Could check maskbits too.  However, that should never change
@@ -222,16 +242,16 @@ updateip)
 	# Behave more like takeip when the IP is not assigned.  No
 	# need for a similar condition around ip_unblock()s because
 	# they will silently fail.
-	if [ "$oiface" != "__none__" ]; then
+	if [ -n "$oiface" ]; then
 		ip_block "$ip" "$oiface"
-		delete_ip_from_iface "$oiface" "$ip" "$maskbits" >/dev/null 2>&1
+		ip_addr_del "$prefix" "$oiface" >/dev/null 2>&1
 	fi
-	delete_ip_from_iface "$niface" "$ip" "$maskbits" >/dev/null 2>&1
 
-	add_ip_to_iface "$niface" "$ip" "$maskbits" || {
+	# No, this should not be $prefix!
+	if ! ip_addr_add "${ip}/${_maskbits}" "$niface"; then
 		ip_unblock "$ip" "$oiface"
 		exit 1
-	}
+	fi
 
 	ip_unblock "$ip" "$oiface"
 

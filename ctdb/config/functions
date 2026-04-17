@@ -96,7 +96,7 @@ script_log()
 
 	case "$CTDB_LOGGING" in
 	file:)
-		if [ -n "$*" ] ; then
+		if [ -n "$*" ]; then
 			echo "$*"
 		else
 			cat
@@ -313,7 +313,7 @@ update_my_public_ip_addresses()
 			_pnn=$(ctdb_get_pnn)
 			$CTDB -X ip |
 				awk -F'|' -v pnn="$_pnn" \
-				    '$3 == pnn {print $2}' >"$_new"
+					'$3 == pnn {print $2}' >"$_new"
 			;;
 		esac
 
@@ -649,11 +649,10 @@ get_tcp_connections_for_ip()
 
 ########################################################
 
-add_ip_to_iface()
+ip_addr_add()
 {
-	_iface=$1
-	_ip=$2
-	_maskbits=$3
+	_prefix="$1"
+	_iface="$2"
 
 	# Ensure interface is up
 	ip link set "$_iface" up ||
@@ -661,38 +660,72 @@ add_ip_to_iface()
 
 	# Only need to define broadcast for IPv4
 	case "$_ip" in
-	*:*) _bcast="" ;;
-	*) _bcast="brd +" ;;
+	*:*)
+		_bcast=""
+		_ipv6=true
+		;;
+	*)
+		_bcast="brd +"
+		_ipv6=false
+		;;
 	esac
 
 	# Intentionally unquoted multi-word value here
 	# shellcheck disable=SC2086
-	ip addr add "$_ip/$_maskbits" $_bcast dev "$_iface" || {
-		echo "Failed to add $_ip/$_maskbits on dev $_iface"
+	if ! ip addr add "$_prefix" $_bcast dev "$_iface"; then
+		echo "Failed to add ${_prefix} on dev ${_iface}"
 		return 1
-	}
+	fi
 
 	# Wait 5 seconds for IPv6 addresses to stop being tentative...
-	if [ -z "$_bcast" ]; then
+	if $_ipv6; then
+		_ip="${_prefix%/*}"
 		for _x in $(seq 1 10); do
-			ip addr show to "${_ip}/128" | grep -q "tentative" || break
+			ip addr show to "$_ip" | grep -q "tentative" || break
 			sleep 0.5
 		done
 
 		# If the address was a duplicate then it won't be on the
 		# interface so flag an error.
-		_t=$(ip addr show to "${_ip}/128")
+		_t=$(ip addr show to "$_ip")
 		case "$_t" in
 		"")
-			echo "Failed to add $_ip/$_maskbits on dev $_iface"
+			echo "Failed to add ${_prefix} on dev ${_iface}"
 			return 1
 			;;
 		*tentative* | *dadfailed*)
-			echo "Failed to add $_ip/$_maskbits on dev $_iface"
-			ip addr del "$_ip/$_maskbits" dev "$_iface"
+			echo "Failed to add ${_prefix} on dev ${_iface}"
+			ip addr del "$_prefix" dev "$_iface"
 			return 1
 			;;
 		esac
+	fi
+}
+
+add_ip_to_iface()
+{
+	_iface=$1
+	_ip=$2
+	_maskbits=$3
+
+	ip_addr_add "${_ip}/${_maskbits}" "$_iface"
+}
+
+ip_addr_del()
+{
+	_prefix="$1"
+	_iface="$2"
+
+	# This could be set globally for all interfaces but it is probably
+	# better to avoid surprises, so limit it the interfaces where CTDB
+	# has public IP addresses.  There isn't anywhere else convenient
+	# to do this so just set it each time.  This is much cheaper than
+	# remembering and re-adding secondaries.
+	set_proc "sys/net/ipv4/conf/${_iface}/promote_secondaries" 1
+
+	if ! ip addr del "$_prefix" dev "$_iface"; then
+		echo "Failed to del ${_prefix} on dev ${_iface}"
+		return 1
 	fi
 }
 
@@ -702,17 +735,15 @@ delete_ip_from_iface()
 	_ip=$2
 	_maskbits=$3
 
-	# This could be set globally for all interfaces but it is probably
-	# better to avoid surprises, so limit it the interfaces where CTDB
-	# has public IP addresses.  There isn't anywhere else convenient
-	# to do this so just set it each time.  This is much cheaper than
-	# remembering and re-adding secondaries.
-	set_proc "sys/net/ipv4/conf/${_iface}/promote_secondaries" 1
+	ip_addr_del "${_ip}/${_maskbits}" "$_iface"
+}
 
-	ip addr del "$_ip/$_maskbits" dev "$_iface" || {
-		echo "Failed to del $_ip on dev $_iface"
-		return 1
-	}
+# If the given IP is hosted then print 2 items: prefix and iface
+ip_prefix_iface()
+{
+	_addr="$1"
+
+	ip -brief addr show to "$_addr" 2>/dev/null | awk '{ print $3, $1 }'
 }
 
 # If the given IP is hosted then print 2 items: maskbits and iface
@@ -720,15 +751,7 @@ ip_maskbits_iface()
 {
 	_addr="$1"
 
-	case "$_addr" in
-	*:*) _bits=128 ;;
-	*) _bits=32 ;;
-	esac
-	ip addr show to "${_addr}/${_bits}" 2>/dev/null |
-		awk 'NR == 1 { iface = $2; sub(":$", "", iface) ;
-		       sub("@.*", "", iface) }
-             $1 ~ /inet/ { mask = $2; sub(".*/", "", mask);
-                           print mask, iface }'
+	ip_prefix_iface "$_addr" | sed -e 's|[^/]*/||'
 }
 
 drop_ip()
@@ -737,12 +760,13 @@ drop_ip()
 
 	# Intentional word splitting here
 	# shellcheck disable=SC2046
-	set -- $(ip_maskbits_iface "$_addr")
+	set -- $(ip_prefix_iface "$_addr")
 	if [ -n "$1" ]; then
-		_maskbits="$1"
+		_prefix="$1"
 		_iface="$2"
-		echo "Removing public address $_addr/$_maskbits from device $_iface"
-		delete_ip_from_iface "$_iface" "$_addr" "$_maskbits" >/dev/null 2>&1
+
+		echo "Removing public address ${_prefix} from device ${_iface}"
+		ip_addr_del "$_prefix" "$_iface" >/dev/null 2>&1
 	fi
 }
 
@@ -993,13 +1017,13 @@ failcount_incr()
 	if _failcount_validate_threshold "$_unhealthy_threshold" "$_thing"; then
 		if [ "$_failcount" -ge "$_unhealthy_threshold" ]; then
 			printf 'ERROR: %s: fail count %d >= threshold %d\n' \
-			       "$_thing" \
-			       "$_failcount" \
-			       "$_unhealthy_threshold"
+				"$_thing" \
+				"$_failcount" \
+				"$_unhealthy_threshold"
 			# Only print output when exceeding the
 			# unhealthy threshold
-			if [ "$_failcount" -eq "$_unhealthy_threshold" ] && \
-				   [ -n "$_output" ]; then
+			if [ "$_failcount" -eq "$_unhealthy_threshold" ] &&
+				[ -n "$_output" ]; then
 				echo "$_output"
 			fi
 			exit 1
@@ -1013,9 +1037,9 @@ failcount_incr()
 	fi
 
 	printf 'WARNING: %s: fail count %d >= threshold %d\n' \
-	       "$_thing" \
-	       "$_failcount" \
-	       "$_warn_threshold"
+		"$_thing" \
+		"$_failcount" \
+		"$_warn_threshold"
 	if [ "$_failcount" -eq "$_warn_threshold" ] && [ -n "$_output" ]; then
 		# Only print output when exceeding the warning threshold
 		echo "$_output"

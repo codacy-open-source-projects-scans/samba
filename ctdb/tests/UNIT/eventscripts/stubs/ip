@@ -37,8 +37,26 @@ ip_link()
 		shift
 		ip_link_delete "$@"
 		;;
+	prop*)
+		shift
+		ip_link_property "$@"
+		;;
 	*) not_implemented "$*" ;;
 	esac
+}
+
+# updates $dev
+convert_altname_dev()
+{
+	for _t in "${FAKE_IP_STATE}/altname/"*"/${dev}"; do
+		if [ -e "$_t" ]; then
+			_t="${_t%/*}"   # dirname
+			dev="${_t##*/}" # basename
+			return 0
+		fi
+	done
+
+	return 1
 }
 
 ip_link_add()
@@ -87,6 +105,8 @@ ip_link_delete()
 	mkdir -p "${FAKE_IP_STATE}/interfaces-deleted"
 	touch "${FAKE_IP_STATE}/interfaces-deleted/$1"
 	rm -f "${FAKE_IP_STATE}/interfaces-vlan/$1"
+	rm -rf "${FAKE_IP_STATE}/altname/$1"
+
 }
 
 ip_link_set_up()
@@ -113,6 +133,8 @@ ip_link_show()
 		echo "Device \"${dev}\" does not exist." >&2
 		exit 255
 	fi
+
+	convert_altname_dev
 
 	if [ -r "${FAKE_IP_STATE}/interfaces-vlan/${dev}" ]; then
 		read -r _link <"${FAKE_IP_STATE}/interfaces-vlan/${dev}"
@@ -145,11 +167,40 @@ ip_link_show()
 
 	if $brief; then
 		printf '%-16s %-14s %-17s %s\n' \
-			"$dev" "$_status" "$_mac" "$_status"
+			"$dev" "$_state" "$_mac" "$_status"
 	else
 		echo "${n:-42}: ${dev}: ${_status} ${_opts}"
 		echo "    link/${_type} ${_mac} brd ${_brd}"
+		for _altname in "${FAKE_IP_STATE}/altname/${dev}/"*; do
+			if [ -e "$_altname" ]; then
+				echo "    altname ${_altname##*/}" # basename
+			fi
+		done
 	fi
+}
+
+ip_link_property()
+{
+	_t="ip link property"
+	if [ $# -ne 5 ]; then
+		not_implemented "${_t} without \"add\""
+	fi
+	if [ "$1" != "add" ] || [ "$2" != "dev" ] || [ "$4" != "altname" ]; then
+		not_implemented \
+			"${_t} without \"add dev <dev> altname <altname>\""
+	fi
+
+	dev="$3"
+	_altname="$5"
+
+	if convert_altname_dev; then
+		echo "RTNETLINK answers: File exists" >&2
+		exit 2
+	fi
+
+	# Each device can multiple altname properties, each specified
+	# by a subdirectory
+	mkdir -p "${FAKE_IP_STATE}/altname/${dev}/${_altname}"
 }
 
 # This is incomplete because it doesn't actually look up table ids in
@@ -219,10 +270,6 @@ ip_addr_show()
 	secondary=true
 	_to=""
 
-	if $brief; then
-		not_implemented "ip -br addr show in \"$orig_args\""
-	fi
-
 	while [ -n "$1" ]; do
 		case "$1" in
 		dev)
@@ -251,6 +298,7 @@ ip_addr_show()
 			;;
 		esac
 	done
+	convert_altname_dev
 	devices="$dev"
 	if [ -z "$devices" ]; then
 		# No device specified?  Get all the primaries...
@@ -268,33 +316,61 @@ ip_addr_show()
 	}
 	show_iface()
 	{
-		ip_link_show "$dev"
+		if ! $brief; then
+			ip_link_show "$dev"
+		fi
 
 		nets=$(find "${FAKE_IP_STATE}/addresses" -name "${dev}-*-primary" |
 			sed -e 's@.*/@@' -e "s@${dev}-\(.*\)-primary\$@\1@")
 
+		_primary=""
+		_secondaries=""
 		for net in $nets; do
 			pf="${FAKE_IP_STATE}/addresses/${dev}-${net}-primary"
 			sf="${FAKE_IP_STATE}/addresses/${dev}-${net}-secondary"
 			if $primary && [ -r "$pf" ]; then
 				read -r local scope <"$pf"
 				if [ -z "$_to" ] || [ "${_to%/*}" = "${local%/*}" ]; then
-					calc_brd
-					echo "    inet ${local} ${brd:+brd ${brd} }scope ${scope} ${dev}"
+					_primary="$local"
 				fi
 			fi
 			if $secondary && [ -r "$sf" ]; then
 				while read -r local scope; do
 					if [ -z "$_to" ] || [ "${_to%/*}" = "${local%/*}" ]; then
-						calc_brd
-						echo "    inet ${local} ${brd:+brd }${brd} scope ${scope} secondary ${dev}"
+						_secondaries="${_secondaries}${_secondaries:+ }${local}"
 					fi
 				done <"$sf"
 			fi
-			if [ -z "$_to" ]; then
-				echo "       valid_lft forever preferred_lft forever"
-			fi
 		done
+		if $brief; then
+			# Checking $_primary should be enough, but be defensive
+			if [ -n "$_primary" ] || [ -n "$_secondaries" ]; then
+				_state="UP"
+				if [ "$dev" = "lo" ]; then
+					_state="UNKNOWN"
+				fi
+				printf '%-16s %-14s %s\n' \
+					"$dev" \
+					"$_state" \
+					"${_primary}${_primary:+ }${_secondaries}"
+			fi
+		else
+			if [ -n "$_primary" ]; then
+				local="$_primary"
+				calc_brd
+				cat <<EOF
+    inet ${local} ${brd:+brd ${brd} }scope ${scope} ${dev}
+       valid_lft forever preferred_lft forever
+EOF
+			fi
+			for local in $_secondaries; do
+				calc_brd
+				cat <<EOF
+    inet ${local} ${brd:+brd ${brd} }scope ${scope} secondary ${dev}
+       valid_lft forever preferred_lft forever
+EOF
+			done
+		fi
 	}
 	n=1
 	for dev in $devices; do
@@ -379,6 +455,7 @@ ip_addr_add()
 	if [ -z "$dev" ]; then
 		not_implemented "addr add (without dev)"
 	fi
+	convert_altname_dev
 	mkdir -p "${FAKE_IP_STATE}/addresses"
 	net_str=$(ipv4_host_addr_to_net "$local")
 	net_str=$(echo "$net_str" | sed -e 's@/@_@')
@@ -425,6 +502,7 @@ ip_addr_del()
 	if [ -z "$dev" ]; then
 		not_implemented "addr del (without dev)"
 	fi
+	convert_altname_dev
 	mkdir -p "${FAKE_IP_STATE}/addresses"
 	net_str=$(ipv4_host_addr_to_net "$local")
 	net_str=$(echo "$net_str" | sed -e 's@/@_@')

@@ -81,7 +81,7 @@ static char *_test_ndr_pull_dns_string_list(TALLOC_CTX *mem_ctx,
 						     dot_every,
 						     is_nbt);
 
-	char *name;
+	char *name = NULL;
 	ndr_pull_flags_fn_t fn;
 
 	if (is_nbt) {

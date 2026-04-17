@@ -201,7 +201,7 @@ NTSTATUS delete_all_streams(struct files_struct *fsp,
 			NULL,
 			smb_fname->twrp,
 			(smb_fname->flags & ~SMB_FILENAME_POSIX_PATH));
-		if (!NT_STATUS_IS_OK(status)) {
+		if (smb_fname_stream == NULL) {
 			DEBUG(0, ("talloc_aprintf failed\n"));
 			status = NT_STATUS_NO_MEMORY;
 			goto fail;
