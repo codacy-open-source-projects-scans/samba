@@ -1081,7 +1081,8 @@ static int gpfsacl_sys_acl_blob_get_fd(vfs_handle_struct *handle,
 					 blob_description, blob);
 }
 
-static struct gpfs_acl *smb2gpfs_acl(const SMB_ACL_T pacl,
+static struct gpfs_acl *smb2gpfs_acl(TALLOC_CTX *mem_ctx,
+				     const SMB_ACL_T pacl,
 				     SMB_ACL_TYPE_T type)
 {
 	gpfs_aclLen_t len;
@@ -1093,7 +1094,7 @@ static struct gpfs_acl *smb2gpfs_acl(const SMB_ACL_T pacl,
 	len = offsetof(gpfs_acl_t, ace_v1) + (pacl->count) *
 		sizeof(gpfs_ace_v1_t);
 
-	result = (struct gpfs_acl *)SMB_MALLOC(len);
+	result = (struct gpfs_acl *)talloc_size(mem_ctx, len);
 	if (result == NULL) {
 		errno = ENOMEM;
 		return result;
@@ -1145,7 +1146,7 @@ static struct gpfs_acl *smb2gpfs_acl(const SMB_ACL_T pacl,
 		default:
 			DEBUG(10, ("Got invalid ace_type: %d\n", ace->a_type));
 			errno = EINVAL;
-			SAFE_FREE(result);
+			TALLOC_FREE(result);
 			return NULL;
 		}
 
@@ -1170,6 +1171,7 @@ static int gpfsacl_sys_acl_set_fd(vfs_handle_struct *handle,
 {
 	struct gpfs_config_data *config;
 	struct gpfs_acl *gpfs_acl = NULL;
+	TALLOC_CTX *mem_ctx = talloc_tos();
 	int result;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config,
@@ -1180,7 +1182,7 @@ static int gpfsacl_sys_acl_set_fd(vfs_handle_struct *handle,
 		return SMB_VFS_NEXT_SYS_ACL_SET_FD(handle, fsp, type, theacl);
 	}
 
-	gpfs_acl = smb2gpfs_acl(theacl, type);
+	gpfs_acl = smb2gpfs_acl(mem_ctx, theacl, type);
 	if (gpfs_acl == NULL) {
 		return -1;
 	}
@@ -1191,7 +1193,7 @@ static int gpfsacl_sys_acl_set_fd(vfs_handle_struct *handle,
 	result = gpfswrap_putacl(fsp->fsp_name->base_name,
 				 GPFS_PUTACL_STRUCT|GPFS_ACL_SAMBA,
 				 gpfs_acl);
-	SAFE_FREE(gpfs_acl);
+	TALLOC_FREE(gpfs_acl);
 	return result;
 }
 
