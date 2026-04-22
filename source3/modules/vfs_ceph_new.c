@@ -2407,18 +2407,18 @@ static uint64_t vfs_ceph_disk_free(struct vfs_handle_struct *handle,
 	struct vfs_ceph_iref iref = {0};
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config, struct vfs_ceph_config,
-				return -ENOMEM);
+				{ errno = ENOMEM; return UINT64_MAX; });
 
 	ret = vfs_ceph_iget(handle, smb_fname->base_name, 0, &iref);
 	if (ret != 0) {
 		errno = -ret;
-		return (uint64_t)(-1);
+		return UINT64_MAX;
 	}
 	ret = vfs_ceph_ll_statfs(handle, &iref, &statvfs_buf);
 	vfs_ceph_iput(handle, &iref);
 	if (ret != 0) {
 		errno = -ret;
-		return (uint64_t)(-1);
+		return UINT64_MAX;
 	}
 	*bsize = (uint64_t)statvfs_buf.f_bsize;
 	*dfree = (uint64_t)statvfs_buf.f_bavail;
@@ -2678,7 +2678,6 @@ static int vfs_ceph_closedir(struct vfs_handle_struct *handle, DIR *dirp)
 	START_PROFILE_X(SNUM(handle->conn), syscall_closedir);
 	DBG_DEBUG("[CEPH] closedir: dirp=%p\n", dirp);
 	result = vfs_ceph_ll_releasedir(handle, cfh);
-	vfs_ceph_release_fh(cfh);
 	vfs_ceph_remove_fh(handle, cfh->fsp);
 	DBG_DEBUG("[CEPH] closedir: dirp=%p result=%d\n", dirp, result);
 	END_PROFILE_X(syscall_closedir);
@@ -3855,7 +3854,7 @@ static int vfs_ceph_ftruncate(struct vfs_handle_struct *handle,
 		  (intmax_t)len);
 
 	if (lp_strict_allocate(SNUM(fsp->conn))) {
-		END_PROFILE(syscall_ftruncate);
+		END_PROFILE_X(syscall_ftruncate);
 		return strict_allocate_ftruncate(handle, fsp, len);
 	}
 

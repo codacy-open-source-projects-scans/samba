@@ -437,7 +437,7 @@ NTSTATUS brl_lock_windows_default(struct byte_range_lock *br_lck,
 				status = NT_STATUS_LOCK_NOT_GRANTED;
 				goto fail;
 			} else {
-				status = map_nt_error_from_unix(errno);
+				status = map_nt_error_from_unix(errno_ret);
 				goto fail;
 			}
 		}
@@ -890,7 +890,7 @@ static NTSTATUS brl_lock_posix(struct byte_range_lock *br_lck,
 				goto fail;
 			} else {
 				TALLOC_FREE(tp);
-				status = map_nt_error_from_unix(errno);
+				status = map_nt_error_from_unix(errno_ret);
 				goto fail;
 			}
 		}
