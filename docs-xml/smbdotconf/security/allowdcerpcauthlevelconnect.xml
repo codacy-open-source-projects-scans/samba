@@ -1,6 +1,7 @@
 <samba:parameter name="allow dcerpc auth level connect"
                  context="G"
                  type="boolean"
+                 deprecated="1"
                  xmlns:samba="http://www.samba.org/samba/DTD/samba-doc">
 <description>
 	<para>This option controls whether DCERPC services are allowed to
@@ -19,9 +20,10 @@
 	E.g. the drsuapi and backupkey protocols require DCERPC_AUTH_LEVEL_PRIVACY.
 	The dnsserver protocol requires DCERPC_AUTH_LEVEL_INTEGRITY.
 	</para>
+
+	<para>This option should not be used, it's related to CVE-2016-2118. It will be removed in future releases.</para>
 </description>
 
 <value type="default">no</value>
-<value type="example">yes</value>
 
 </samba:parameter>
