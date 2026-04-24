@@ -54,8 +54,7 @@ class SambaToolDrsShowReplTests(drs_base.DrsBaseTestCase):
 
         # Manually run kcc to create a "Connection" object, so we can find
         # this for the expected output below.
-        kcc_out = self.check_output("samba-tool drs kcc %s %s" % (self.dc1,
-                                                                  self.cmdline_creds))
+        kcc_out = self._run_drs_kcc(self.dc1)
         self.assertIn(b"successful", kcc_out)
 
         # Run replicate to ensure there are incoming and outgoing partners

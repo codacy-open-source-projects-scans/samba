@@ -70,8 +70,7 @@ class SambaToolDrsTests(drs_base.DrsBaseTestCase):
         """Tests 'samba-tool drs kcc' command."""
 
         # Output should be like 'Consistency check on <DC> successful.'
-        out = self.check_output("samba-tool drs kcc %s %s" % (self.dc1,
-                                                              self.cmdline_creds))
+        out = self._run_drs_kcc(self.dc1)
         self.assertTrue(b"Consistency check on" in out)
         self.assertTrue(b"successful" in out)
 

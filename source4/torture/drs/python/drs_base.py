@@ -126,6 +126,25 @@ class DrsBaseTestCase(SambaToolCmdTest):
         # bin/samba-tool drs <drs_command> <cmdline_auth>
         return ["drs", drs_command, cmdline_auth]
 
+    def _run_drs_kcc(self, DC, cmdline_creds=None):
+        """Run 'samba-tool drs kcc' with retries.
+
+        The KCC periodic task may already be running when we call
+        DsExecuteKCC, causing it to return NT_STATUS_DS_BUSY.  Retry
+        a few times until we are out of the periodic window (up to 40s).
+        """
+        if cmdline_creds is None:
+            cmdline_creds = self.cmdline_creds
+        for i in range(5):
+            try:
+                out = self.check_output(
+                    "samba-tool drs kcc %s %s" % (DC, cmdline_creds))
+                return out
+            except samba.tests.BlackboxProcessError:
+                if i == 4:
+                    raise
+                time.sleep(10)
+
     def _net_drs_replicate(self, DC, fromDC, nc_dn=None, forced=True,
                            local=False, full_sync=False, single=False):
         if nc_dn is None:

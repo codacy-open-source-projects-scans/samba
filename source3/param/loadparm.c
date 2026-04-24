@@ -2675,7 +2675,7 @@ const char *lp_idmap_backend(const char *domain_name)
 					domain_name);
 	if (config_option == NULL) {
 		DEBUG(0, ("out of memory\n"));
-		return false;
+		return NULL;
 	}
 
 	backend = lp_parm_const_string(-1, config_option, "backend", NULL);
