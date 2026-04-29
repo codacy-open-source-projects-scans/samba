@@ -1977,6 +1977,15 @@ static NTSTATUS init_dc_connection_rpc(struct winbindd_domain *domain, bool need
 		return NT_STATUS_TRUSTED_DOMAIN_FAILURE;
 	}
 
+	if (domain->dcname == NULL) {
+		/*
+		 * This can happen on a DC itself trying to talk to itself,
+		 * which is currently not expected.
+		 */
+		DBG_WARNING("no dcname for domain %s\n", domain->name);
+		return NT_STATUS_NO_LOGON_SERVERS;
+	}
+
 	return NT_STATUS_OK;
 }
 
@@ -2565,8 +2574,8 @@ retry:
 		goto anonymous;
 	}
 
-	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
-	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
+	remote_name = domain->dcname;
+	remote_sockaddr = &domain->dcaddr;
 
 	/*
 	 * We have an authenticated connection. Use a SPNEGO
@@ -2840,8 +2849,8 @@ static NTSTATUS cm_connect_lsa_tcp(struct winbindd_domain *domain,
 		goto done;
 	}
 
-	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
-	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
+	remote_name = domain->dcname;
+	remote_sockaddr = &domain->dcaddr;
 
 	status = winbindd_get_trust_credentials(domain,
 						talloc_tos(),
@@ -2931,8 +2940,8 @@ retry:
 		goto anonymous;
 	}
 
-	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
-	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
+	remote_name = domain->dcname;
+	remote_sockaddr = &domain->dcaddr;
 
 	/*
 	 * We have an authenticated connection. Use a SPNEGO
@@ -3216,8 +3225,8 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 	TALLOC_FREE(conn->netlogon_pipe);
 	TALLOC_FREE(conn->netlogon_creds_ctx);
 
-	remote_name = smbXcli_conn_remote_name(conn->cli->conn);
-	remote_sockaddr = smbXcli_conn_remote_sockaddr(conn->cli->conn);
+	remote_name = domain->dcname;
+	remote_sockaddr = &domain->dcaddr;
 
 	result = winbindd_get_trust_credentials(domain,
 						talloc_tos(),
