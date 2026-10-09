@@ -92,7 +92,7 @@ sub teardown_env_samba($$)
 	my $count = 0;
 
 	# This should cause smbd to terminate gracefully
-	close($envvars->{STDIN_PIPE});
+	close($envvars->{STDIN_PIPE}) if defined($envvars->{STDIN_PIPE});
 
 	my $smbdpid = $envvars->{SMBD_TL_PID};
 	my $nmbdpid = $envvars->{NMBD_TL_PID};
@@ -552,6 +552,24 @@ sub setup_clusteredmember
        dbwrap_tdb_mutexes:* = yes
        ${require_mutexes}
        sync machine password to keytab = $node_prefix/keytab0:account_name:machine_password:sync_kvno
+       persistent handles = yes
+       smb3 directory leases = yes
+       smbd:FSCTL_SMBTORTURE = yes
+       clusteredmember:stop_node = $prefix/stop_node.sh
+       clusteredmember:start_node = $prefix/start_node.sh
+
+[so]
+	path = $prefix/shared
+	continuous availability = no
+	kernel share modes = no
+	kernel oplocks = no
+	posix locking = no
+[ca_so]
+	path = $prefix/shared
+	continuous availability = yes
+	kernel share modes = no
+	kernel oplocks = no
+	posix locking = no
 ";
 
 		my $node_ret = $self->provision(
@@ -646,7 +664,7 @@ sub setup_clusteredmember
 	$cmd .= "RESOLV_CONF=\"$ret->{RESOLV_CONF}\" ";
 	$cmd .= "KRB5_CONFIG=\"$ret->{KRB5_CONFIG}\" ";
 	$cmd .= "SELFTEST_WINBINDD_SOCKET_DIR=\"$ret->{SELFTEST_WINBINDD_SOCKET_DIR}\" ";
-	$cmd .= "$net join $ret->{CONFIGURATION} $dcvars->{DOMAIN} member";
+	$cmd .= "$net ads join $ret->{CONFIGURATION} $dcvars->{DOMAIN}";
 	$cmd .= " -U$dcvars->{USERNAME}\%$dcvars->{PASSWORD}";
 
 	if (system($cmd) != 0) {
@@ -741,7 +759,8 @@ sub provision_ad_member
 	    $force_fips_mode,
 	    $offline_logon,
 	    $no_nss_winbind,
-	    $sync_pw2keytab) = @_;
+	    $sync_pw2keytab,
+	    $join_args) = @_;
 
 	if (defined($offline_logon) && defined($no_nss_winbind)) {
 		warn ("Offline logon incompatible with no nss winbind\n");
@@ -906,6 +925,9 @@ sub provision_ad_member
 	$ret->{DOMAIN} = $dcvars->{DOMAIN};
 	$ret->{REALM} = $dcvars->{REALM};
 	$ret->{DOMSID} = $dcvars->{DOMSID};
+	if ($machine_account eq "LOCALADMEMBER") {
+		$ret->{NETBIOSALIAS} = "foo";
+	}
 
 	my $ctx;
 	$ctx = {};
@@ -943,6 +965,9 @@ sub provision_ad_member
 	$cmd .= "SELFTEST_WINBINDD_SOCKET_DIR=\"$ret->{SELFTEST_WINBINDD_SOCKET_DIR}\" ";
 	$cmd .= "$net join $ret->{CONFIGURATION}";
 	$cmd .= " -U$dcvars->{USERNAME}\%$dcvars->{PASSWORD} --use-kerberos=required";
+	if (defined($join_args)) {
+		$cmd .= ${join_args};
+	}
 
 	if (system($cmd) != 0) {
 	    warn("Join failed\n$cmd");
@@ -1126,13 +1151,21 @@ sub setup_ad_member_s3_join
                 return "UNKNOWN";
         }
 
-        print "PROVISIONING AD MEMBER...";
+        print "PROVISIONING AD MEMBER S3 JOIN...";
+
+        my $join_args = " --server=$dcvars->{SERVER}.$dcvars->{REALM}";
 
         return $self->provision_ad_member($prefix,
                                           "LOCALADMEMBER2",
                                           $dcvars,
                                           $trustvars_f,
-                                          $trustvars_e);
+                                          $trustvars_e,
+                                          undef, # extra_member_options
+                                          undef, # force_fips_mode
+                                          undef, # offline_logon
+                                          undef, # no_nss_winbind
+                                          undef, # sync_pw2keytab
+                                          ${join_args});
 }
 
 sub setup_ad_member_rfc2307
@@ -1367,6 +1400,7 @@ sub setup_ad_member_idmap_rid
         map to guest = bad user
 	winbind expand groups = 10
 	server signing = required
+	winbind use s4u2self = yes
 ";
 
 	my $ret = $self->provision(
@@ -1722,8 +1756,9 @@ sub setup_ad_member_idmap_nss
 	# jane:x:65520:65531:localjane gecos:/:/bin/false
 	# jackthemapper:x:65519:65531:localjackthemaper gecos:/:/bin/false
 	# jacknomapper:x:65518:65531:localjacknomaper gecos:/:/bin/false
+	# systemuser:x:65517:65531:localsystemuser gecos:/:/bin/false
 	idmap config $dcvars->{DOMAIN} : backend = nss
-	idmap config $dcvars->{DOMAIN} : range = 65518-65521
+	idmap config $dcvars->{DOMAIN} : range = 65517-65521
 
 	# Support SMB1 so that we can use posix_whoami().
 	client min protocol = CORE
@@ -1960,6 +1995,7 @@ sub setup_fileserver
 	my $ip4 = Samba::get_ipv4_addr("FILESERVER");
 	my $fileserver_options = "
 	server smb transports = +quic
+	persistent handles = yes
 
         smb3 unix extensions = yes
 	kernel change notify = yes
@@ -1967,6 +2003,9 @@ sub setup_fileserver
 	elasticsearch:address = $ip4
 	elasticsearch:port = 8080
 	elasticsearch:mappings = $srcdir_abs/source3/rpc_server/mdssvc/elasticsearch_mappings.json
+	elasticsearch:wsp_mappings = $srcdir_abs/source3/rpc_server/wsp/elasticsearch_mappings.json
+
+	wsp backend = elasticsearch
 
 	usershare path = $usershare_dir
 	usershare max shares = 10
@@ -1985,6 +2024,10 @@ sub setup_fileserver
 	path = $tarmode2_sharedir
 	comment = tar test share
 	xattr_tdb:file = $prefix/tarmode2-xattr.tdb
+[wsp]
+	path = $share_dir
+	wsp = yes
+	read only = no
 [spotlight]
 	path = $share_dir
 	spotlight = yes
@@ -2138,6 +2181,32 @@ sub setup_fileserver
 	path = $share_dir
 	vfs objects = streams_depot
 	inherit permissions = yes
+
+[fo]
+	path = $share_dir
+	smb3 share cap:CLUSTER = yes
+	smb3 share cap:SCALE OUT = no
+	continuous availability = no
+	kernel share modes = no
+	kernel oplocks = no
+	posix locking = no
+[ca_fo]
+	path = $share_dir
+	smb3 share cap:CLUSTER = yes
+	smb3 share cap:SCALE OUT = no
+	continuous availability = yes
+	kernel share modes = no
+	kernel oplocks = no
+	posix locking = no
+[ca_fo_max_rwh]
+	path = $share_dir
+	smb3 share cap:CLUSTER = yes
+	smb3 share cap:SCALE OUT = no
+	continuous availability = yes
+	smb3 ca:max lease mask = RWH
+	kernel share modes = no
+	kernel oplocks = no
+	posix locking = no
 ";
 
 	if (defined($more_conf)) {
@@ -2923,6 +2992,7 @@ sub provision($$)
 	my ($gid_force_user);
 	my ($gid_jackthemapper);
 	my ($gid_jacknomapper);
+	my ($gid_systemuser);
 	my ($gid_group1);
 	my ($gid_group2);
 	my ($uid_user1);
@@ -2934,6 +3004,7 @@ sub provision($$)
 	my ($uid_localjane);
 	my ($uid_localjackthemapper);
 	my ($uid_localjacknomapper);
+	my ($uid_localsystemuser);
 
 	if ($unix_uid < 0xffff - 13) {
 		$max_uid = 0xffff;
@@ -2958,6 +3029,7 @@ sub provision($$)
 	$uid_localjane = $max_uid - 15;
 	$uid_localjackthemapper = $max_uid - 16;
 	$uid_localjacknomapper = $max_uid - 17;
+	$uid_localsystemuser = $max_uid - 18;
 
 	if ($unix_gids[0] < 0xffff - 8) {
 		$max_gid = 0xffff;
@@ -2977,6 +3049,7 @@ sub provision($$)
 	$gid_jacknomapper = $max_gid - 10;
 	$gid_group1 = $max_gid - 11;
 	$gid_group2 = $max_gid - 12;
+	$gid_systemuser = $max_gid - 13;
 
 	##
 	## create conffile
@@ -3846,6 +3919,7 @@ bob:x:$uid_localbob:$gid_domusers:localbob gecos:/:/bin/false
 jane:x:$uid_localjane:$gid_domusers:localjane gecos:/:/bin/false
 jackthemapper:x:$uid_localjackthemapper:$gid_domusers:localjackthemaper gecos:/:/bin/false
 jacknomapper:x:$uid_localjacknomapper:$gid_domusers:localjacknomaper gecos:/:/bin/false
+systemuser:x:$uid_localsystemuser:$gid_systemuser:localsystemuser gecos:/:/bin/false
 ";
 	if ($unix_uid != 0) {
 		print PASSWD "root:x:$uid_root:$gid_root:root gecos:$prefix:/bin/false
@@ -3869,6 +3943,7 @@ jackthemappergroup:x:$gid_jackthemapper:jackthemapper
 jacknomappergroup:x:$gid_jacknomapper:jacknomapper
 group1:x:$gid_group1:user1
 group2:x:$gid_group2:user2
+systemusergroup:x:$gid_systemuser:systemuser
 ";
 	if ($unix_gids[0] != 0) {
 		print GROUP "root:x:$gid_root:
@@ -3916,6 +3991,7 @@ group2:x:$gid_group2:user2
 	createuser($self, "slashuser", $password, $conffile, \%createuser_env) || die("Unable to create slashuser");
 	createuser($self, "jackthemapper", "mApsEcrEt", $conffile, \%createuser_env) || die("Unable to create jackthemapper");
 	createuser($self, "jacknomapper", "nOmApsEcrEt", $conffile, \%createuser_env) || die("Unable to create jacknomapper");
+	createuser($self, "systemuser", "ag67aca0wcbhritu1", $conffile, \%createuser_env) || die("Unable to create systemuser");
 
 	open(DNS_UPDATE_LIST, ">$prefix/dns_update_list") or die("Unable to open $$prefix/dns_update_list");
 	print DNS_UPDATE_LIST "A $server. $server_ip\n";
@@ -4125,6 +4201,28 @@ sub wait_for_start($$$$$)
 		return 1;
 	}
 
+	$cmd = $netcmd . "groupmap add sid=S-1-5-32-544 unixgroup=systemusergroup type=builtin";
+	$ret = system($cmd);
+	if ($ret != 0) {
+		print("\"$cmd\" failed\n");
+		return 1;
+	}
+
+	my $systemusersid;
+	$cmd = $netcmd . "lookup name systemuser |";
+	open(IN, $cmd) or die ("Unable to lookup systemuser");
+	while (<IN>) {
+	    $systemusersid = (split / /, $_)[0];
+	}
+	close IN;
+
+	$cmd = $netcmd . "groupmap addmem S-1-5-32-544 $systemusersid";
+	$ret = system($cmd);
+	if ($ret != 0) {
+		print("\"$cmd\" failed\n");
+		return 1;
+	}
+
 	$cmd = $netcmd . "groupmap add unixgroup=group1 type=domain";
 	$ret = system($cmd);
 	if ($ret != 0) {
@@ -4224,6 +4322,8 @@ sub provision_ctdb($$$$)
 {
 	my ($self, $prefix, $num_nodes) = @_;
 	my $rc;
+	my $abs_prefix = abs_path($prefix);
+	my $ctdb = abs_path(Samba::bindir_path($self, "ctdb"));
 
 	print "PROVISIONING CTDB...\n";
 
@@ -4327,6 +4427,110 @@ sub provision_ctdb($$$$)
 		}
 		chomp $out;
 		$nodes[$i]->{NODE_PREFIX} = "$out";
+	}
+
+	my $srcdir_abs = abs_path($self->{srcdir});
+
+	#
+	# Helpers used by smbd:FSCTL_SMBTORTURE, see
+	# smbd_fsctl_torture_[start|stop]_ctdb_node() in source3/smbd/.
+	#
+	my $node_script_tmpl = <<'NODE_SCRIPT_END';
+#!/bin/sh
+#
+# @DESC@
+#
+# "ctdb @CTDB_CMD@" already waits for the node flag to propagate across the
+# cluster and for the takeover run to complete, but not for the recovery that
+# the flag change triggers. Poll until the cluster reports a finished recovery
+# and a vnnmap of the expected size.
+#
+
+num_nodes=@NUM_NODES@
+timeout=30
+
+ctdb="@SRCDIR@/bin/ctdb"
+onnode="@SRCDIR@/ctdb/tests/local_daemons.sh @PREFIX@ onnode"
+
+pnn="$1"
+if [ -z "$pnn" ]; then
+	echo "usage: $0 <pnn>" >&2
+	exit 1
+fi
+
+# Ask a node that is part of the cluster about the cluster state: the node
+# itself after "continue", any other node after "stop", as a stopped node
+# stays in recovery mode itself.
+if [ "@QUERY@" = "other" ]; then
+	query=0
+	while [ "$query" -lt "$num_nodes" ] && [ "$query" -eq "$pnn" ]; do
+		query=$((query + 1))
+	done
+else
+	query="$pnn"
+fi
+
+cmd="$onnode $pnn $ctdb @CTDB_CMD@"
+echo "Running cmd = $cmd" >&2
+$cmd || exit 1
+
+want_size=@WANT_SIZE@
+
+t="$timeout"
+while [ "$t" -gt 0 ]; do
+	status=$($onnode "$query" $ctdb status 2>/dev/null)
+	if echo "$status" | grep -q "Recovery mode:NORMAL" &&
+	   echo "$status" | grep -q "Size:$want_size\$"; then
+		exit 0
+	fi
+	sleep 1
+	t=$((t - 1))
+done
+
+echo "Timed out after ${timeout}s waiting for @WAIT_DESC@" >&2
+$onnode "$query" $ctdb status >&2
+exit 1
+NODE_SCRIPT_END
+
+	my @node_scripts = (
+		{
+			name      => 'stop_node.sh',
+			ctdb_cmd  => 'stop',
+			query     => 'other',
+			want_size => '$((num_nodes - 1))',
+			desc      => 'Stop ctdb node $1 and wait until the remaining nodes have re-formed the cluster.',
+			wait_desc => 'the cluster to recover without node $pnn',
+		},
+		{
+			name      => 'start_node.sh',
+			ctdb_cmd  => 'continue',
+			query     => 'self',
+			want_size => '$num_nodes',
+			desc      => 'Continue ctdb node $1 and wait until it has rejoined the cluster.',
+			wait_desc => 'node $pnn to rejoin the cluster',
+		},
+	);
+
+	foreach my $node_script (@node_scripts) {
+		my $script = $node_script_tmpl;
+		my $path = "$abs_prefix/$node_script->{name}";
+
+		$script =~ s/\@NUM_NODES\@/$num_nodes/g;
+		$script =~ s/\@SRCDIR\@/$srcdir_abs/g;
+		$script =~ s/\@PREFIX\@/$prefix/g;
+		$script =~ s/\@CTDB_CMD\@/$node_script->{ctdb_cmd}/g;
+		$script =~ s/\@QUERY\@/$node_script->{query}/g;
+		$script =~ s/\@WANT_SIZE\@/$node_script->{want_size}/g;
+		$script =~ s/\@DESC\@/$node_script->{desc}/g;
+		$script =~ s/\@WAIT_DESC\@/$node_script->{wait_desc}/g;
+
+		unless (open(SCRIPT, ">$path")) {
+			warn("Unable to open '$path'");
+			return undef;
+		}
+		print SCRIPT $script;
+		close(SCRIPT);
+		chmod 0755, $path;
 	}
 
 	my %ret = ();
@@ -4445,6 +4649,39 @@ sub wait_for_start_ctdb($$)
 	}
 
 	print "\nCTDB initialized\n";
+
+	#
+	# In order to do manual cluster level testing
+	# you can use something like this:
+	# make testenv \
+	# SELFTEST_TESTENV="clusteredmember:local" \
+	# TESTENV_CLUSTER_LEVEL_GLOBAL_HEX_VALUE=...
+	#
+	# For level 0.1 set TESTENV_CLUSTER_LEVEL_GLOBAL_HEX_VALUE to:
+	# 0x01000000010000000000000000000000000000000000000001000000
+	# See cluster_level.idl for more examples.
+	#
+	my $node0_ctdb = "ctdb/tests/local_daemons.sh ${prefix} onnode 0 ${ctdb}";
+	if (defined($ENV{TESTENV_CLUSTER_LEVEL_GLOBAL_HEX_VALUE})) {
+
+		# This is "CLUSTER_LEVEL_GLOBAL" in hex without zero termination
+		my $hexkey = "0x434c55535445525f4c4556454c5f474c4f42414c";
+		my $hexval = $ENV{TESTENV_CLUSTER_LEVEL_GLOBAL_HEX_VALUE};
+
+		my $cmd1 ="${node0_ctdb} attach cluster_level.tdb persistent";
+		my $ret1 = system($cmd1);
+		if ($ret1 != 0) {
+			print("\"$cmd1\" failed\n");
+			return undef;
+		}
+
+		my $cmd2 = "${node0_ctdb} pstore cluster_level.tdb ${hexkey} ${hexval}";
+		my $ret2 = system($cmd2);
+		if ($ret1 != 0) {
+			print("\"$cmd2\" failed\n");
+			return undef;
+		}
+	}
 
 	return 1;
 }

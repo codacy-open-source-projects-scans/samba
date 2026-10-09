@@ -1,25 +1,25 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    LDAP protocol helper functions for SAMBA
-   
+
    Copyright (C) Andrew Tridgell  2004
    Copyright (C) Volker Lendecke 2004
    Copyright (C) Stefan Metzmacher 2004
    Copyright (C) Simo Sorce 2004
-    
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-   
+
 */
 
 #include "includes.h"
@@ -35,12 +35,16 @@ _PUBLIC_ struct ldap_message *new_ldap_message(TALLOC_CTX *mem_ctx)
 static bool add_value_to_attrib(TALLOC_CTX *mem_ctx, struct ldb_val *value,
 				struct ldb_message_element *attrib)
 {
-	attrib->values = talloc_realloc(mem_ctx,
-					attrib->values,
-					DATA_BLOB,
-					attrib->num_values+1);
-	if (attrib->values == NULL)
+	DATA_BLOB *tmp = NULL;
+
+	tmp = talloc_realloc(mem_ctx,
+			     attrib->values,
+			     DATA_BLOB,
+			     attrib->num_values + 1);
+	if (tmp == NULL) {
 		return false;
+	}
+	attrib->values = tmp;
 
 	attrib->values[attrib->num_values].data = talloc_steal(attrib->values,
 							       value->data);
@@ -54,13 +58,16 @@ static bool add_attrib_to_array_talloc(TALLOC_CTX *mem_ctx,
 				       struct ldb_message_element **attribs,
 				       int *num_attribs)
 {
-	*attribs = talloc_realloc(mem_ctx,
-				  *attribs,
-				  struct ldb_message_element,
-				  *num_attribs+1);
+	struct ldb_message_element *tmp = NULL;
 
-	if (*attribs == NULL)
+	tmp = talloc_realloc(mem_ctx,
+			     *attribs,
+			     struct ldb_message_element,
+			     *num_attribs + 1);
+	if (tmp == NULL) {
 		return false;
+	}
+	*attribs = tmp;
 
 	(*attribs)[*num_attribs] = *attrib;
 	talloc_steal(*attribs, attrib->values);
@@ -74,10 +81,13 @@ static bool add_mod_to_array_talloc(TALLOC_CTX *mem_ctx,
 				    struct ldap_mod **mods,
 				    int *num_mods)
 {
-	*mods = talloc_realloc(mem_ctx, *mods, struct ldap_mod, (*num_mods)+1);
+	struct ldap_mod *tmp = NULL;
 
-	if (*mods == NULL)
+	tmp = talloc_realloc(mem_ctx, *mods, struct ldap_mod, (*num_mods) + 1);
+	if (tmp == NULL) {
 		return false;
+	}
+	*mods = tmp;
 
 	(*mods)[*num_mods] = *mod;
 	*num_mods += 1;
@@ -519,13 +529,13 @@ _PUBLIC_ bool ldap_encode(struct ldap_message *msg,
 				if (!asn1_write_OctetString(data,
 						       attrib->values[j].data,
 						       attrib->values[j].length)) goto err;
-	
+
 			}
 			if (!asn1_pop_tag(data)) goto err;
 			if (!asn1_pop_tag(data)) goto err;
 			if (!asn1_pop_tag(data)) goto err;
 		}
-		
+
 		if (!asn1_pop_tag(data)) goto err;
 		if (!asn1_pop_tag(data)) goto err;
 		break;
@@ -678,7 +688,7 @@ _PUBLIC_ bool ldap_encode(struct ldap_message *msg,
 
 	if (msg->controls != NULL) {
 		if (!asn1_push_tag(data, ASN1_CONTEXT(0))) goto err;
-		
+
 		for (i = 0; msg->controls[i] != NULL; i++) {
 			if (!ldap_encode_control(mem_ctx, data,
 						 control_handlers,
@@ -777,7 +787,7 @@ static struct ldb_val **ldap_decode_substring(TALLOC_CTX *mem_ctx, struct ldb_va
 /*
   parse the ASN.1 formatted search string into a ldb_parse_tree
 */
-static struct ldb_parse_tree *ldap_decode_filter_tree(TALLOC_CTX *mem_ctx, 
+static struct ldb_parse_tree *ldap_decode_filter_tree(TALLOC_CTX *mem_ctx,
 						      struct asn1_data *data)
 {
 	uint8_t filter_tag;
@@ -810,9 +820,9 @@ static struct ldb_parse_tree *ldap_decode_filter_tree(TALLOC_CTX *mem_ctx,
 			if (subtree == NULL) {
 				goto failed;
 			}
-			ret->u.list.elements = 
-				talloc_realloc(ret, ret->u.list.elements, 
-					       struct ldb_parse_tree *, 
+			ret->u.list.elements =
+				talloc_realloc(ret, ret->u.list.elements,
+					       struct ldb_parse_tree *,
 					       ret->u.list.num_elements+1);
 			if (ret->u.list.elements == NULL) {
 				goto failed;
@@ -1046,7 +1056,7 @@ static struct ldb_parse_tree *ldap_decode_filter_tree(TALLOC_CTX *mem_ctx,
 		}
 
 		/* FIXME: read carefully rfc2251.txt there are a number of 'MUST's
-		   we need to check we properly implement --SSS */ 
+		   we need to check we properly implement --SSS */
 		/* either oid or type must be defined */
 		if (asn1_peek_tag(data, ASN1_CONTEXT_SIMPLE(1))) { /* optional */
 			if (!asn1_start_tag(data, ASN1_CONTEXT_SIMPLE(1))) goto failed;
@@ -1112,12 +1122,12 @@ static struct ldb_parse_tree *ldap_decode_filter_tree(TALLOC_CTX *mem_ctx,
 	default:
 		goto failed;
 	}
-	
+
 	return ret;
 
 failed:
 	talloc_free(ret);
-	return NULL;	
+	return NULL;
 }
 
 /* Decode a single LDAP attribute, possibly containing multiple values */
@@ -1142,11 +1152,19 @@ bool ldap_decode_attribs_bare(TALLOC_CTX *mem_ctx, struct asn1_data *data,
 			      int *num_attributes)
 {
 	while (asn1_peek_tag(data, ASN1_SEQUENCE(0))) {
-		struct ldb_message_element attrib;
-		ZERO_STRUCT(attrib);
-		if (!ldap_decode_attrib(mem_ctx, data, &attrib)) return false;
-		add_attrib_to_array_talloc(mem_ctx, &attrib,
-					   attributes, num_attributes);
+		struct ldb_message_element attrib = {};
+		bool ok;
+
+		ok = ldap_decode_attrib(mem_ctx, data, &attrib);
+		if (!ok) {
+			return false;
+		}
+
+		ok = add_attrib_to_array_talloc(
+			mem_ctx, &attrib, attributes, num_attributes);
+		if (!ok) {
+			return false;
+		}
 	}
 	return true;
 }
@@ -1184,11 +1202,18 @@ _PUBLIC_ NTSTATUS ldap_decode(struct asn1_data *data,
 		if (!asn1_start_tag(data, tag)) goto prot_err;
 		if (!asn1_read_Integer(data, &r->version)) goto prot_err;
 		if (!asn1_read_OctetString_talloc(msg, data, &r->dn)) goto prot_err;
-		if (asn1_peek_tag(data, ASN1_CONTEXT_SIMPLE(0))) {
+		if (asn1_peek_tag(data,
+				  ASN1_CONTEXT_SIMPLE(LDAP_AUTH_MECH_SIMPLE)))
+		{
 			int pwlen;
 			r->creds.password = "";
 			r->mechanism = LDAP_AUTH_MECH_SIMPLE;
-			if (!asn1_start_tag(data, ASN1_CONTEXT_SIMPLE(0))) goto prot_err;
+			if (!asn1_start_tag(data,
+					    ASN1_CONTEXT_SIMPLE(
+						    LDAP_AUTH_MECH_SIMPLE)))
+			{
+				goto prot_err;
+			}
 			pwlen = asn1_tag_remaining(data);
 			if (pwlen == -1) {
 				goto prot_err;
@@ -1203,8 +1228,14 @@ _PUBLIC_ NTSTATUS ldap_decode(struct asn1_data *data,
 				r->creds.password = pw;
 			}
 			if (!asn1_end_tag(data)) goto prot_err;
-		} else if (asn1_peek_tag(data, ASN1_CONTEXT(3))){
-			if (!asn1_start_tag(data, ASN1_CONTEXT(3))) goto prot_err;
+		} else if (asn1_peek_tag(data,
+					 ASN1_CONTEXT(LDAP_AUTH_MECH_SASL)))
+		{
+			if (!asn1_start_tag(data,
+					    ASN1_CONTEXT(LDAP_AUTH_MECH_SASL)))
+			{
+				goto prot_err;
+			}
 			r->mechanism = LDAP_AUTH_MECH_SASL;
 			if (!asn1_read_OctetString_talloc(msg, data, &r->creds.SASL.mechanism)) goto prot_err;
 			if (asn1_peek_tag(data, ASN1_OCTET_STRING)) { /* optional */

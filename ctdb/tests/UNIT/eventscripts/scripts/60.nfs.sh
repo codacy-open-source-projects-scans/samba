@@ -25,9 +25,7 @@ EOF
 	TEST_RPC_ALL_SERVICES="portmapper nfs mountd rquotad nlockmgr status"
 
 	if [ "$1" != "down" ]; then
-		debug <<EOF
-Setting up NFS environment: all RPC services up, NFS managed by CTDB
-EOF
+		debug "Setting up NFS environment: all RPC services up"
 
 		case "$CTDB_NFS_DISTRO_STYLE" in
 		sysvinit-*)
@@ -49,9 +47,7 @@ EOF
 		nfs_setup_fake_threads "nfsd"
 		nfs_setup_fake_threads "rpc.foobar" # Set the variable to empty
 	else
-		debug <<EOF
-Setting up NFS environment: all RPC services down, NFS not managed by CTDB
-EOF
+		debug "Setting up NFS environment: all RPC services down"
 
 		case "$CTDB_NFS_DISTRO_STYLE" in
 		sysvinit-*)
@@ -398,7 +394,7 @@ rpc_set_service_failure_response()
 		# matter...
 		_stats_changed=false
 		if nfs_stats_check_changed \
-			   "$_rpc_service" "$service_stats_cmd"; then
+			"$_rpc_service" "$service_stats_cmd"; then
 			_stats_changed=true
 		fi
 
@@ -552,7 +548,6 @@ EOF
 			# ... and a successful monitor result
 			simple_test
 		fi
-
 
 		cat <<EOF
 --------------------------------------------------

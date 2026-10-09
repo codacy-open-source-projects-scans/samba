@@ -182,6 +182,16 @@ int32_t ctdb_control_trans3_commit(struct ctdb_context *ctdb,
 	struct ctdb_marshall_buffer *m = (struct ctdb_marshall_buffer *)recdata.dptr;
 	struct ctdb_db_context *ctdb_db;
 
+	if (recdata.dsize < offsetof(struct ctdb_marshall_buffer, data)) {
+		DBG_ERR("Invalid packet\n");
+		return -1;
+	}
+	if (m->count >
+	    recdata.dsize - offsetof(struct ctdb_marshall_buffer, data)) {
+		DBG_ERR("Invalid packet\n");
+		return -1;
+	}
+
 	if (ctdb->recovery_mode != CTDB_RECOVERY_NORMAL) {
 		DEBUG(DEBUG_INFO,("rejecting ctdb_control_trans3_commit when recovery active\n"));
 		return -1;
@@ -231,8 +241,8 @@ int32_t ctdb_control_trans3_commit(struct ctdb_context *ctdb,
 
 	talloc_set_destructor(state, ctdb_persistent_state_destructor);
 
-	for (i = 0; i < ctdb->vnn_map->size; i++) {
-		struct ctdb_node *node = ctdb->nodes[ctdb->vnn_map->map[i]];
+	for (i = 0; i < ctdb->num_nodes; i++) {
+		struct ctdb_node *node = ctdb->nodes[i];
 		int ret;
 
 		/* only send to active nodes */
@@ -272,55 +282,6 @@ int32_t ctdb_control_trans3_commit(struct ctdb_context *ctdb,
 	tevent_add_timer(ctdb->ev, state,
 			 timeval_current_ofs(ctdb->tunable.control_timeout, 0),
 			 ctdb_persistent_store_timeout, state);
-
-	return 0;
-}
-
-
-/*
-  backwards compatibility:
-
-  start a persistent store operation. passing both the key, header and
-  data to the daemon. If the client disconnects before it has issued
-  a persistent_update call to the daemon we trigger a full recovery
-  to ensure the databases are brought back in sync.
-  for now we ignore the recdata that the client has passed to us.
- */
-int32_t ctdb_control_start_persistent_update(struct ctdb_context *ctdb, 
-				      struct ctdb_req_control_old *c,
-				      TDB_DATA recdata)
-{
-	struct ctdb_client *client = reqid_find(ctdb->idr, c->client_id, struct ctdb_client);
-
-	if (client == NULL) {
-		DEBUG(DEBUG_ERR,(__location__ " can not match start_persistent_update to a client. Returning error\n"));
-		return -1;
-	}
-
-	client->num_persistent_updates++;
-
-	return 0;
-}
-
-/* 
-  backwards compatibility:
-
-  called to tell ctdbd that it is no longer doing a persistent update 
-*/
-int32_t ctdb_control_cancel_persistent_update(struct ctdb_context *ctdb, 
-					      struct ctdb_req_control_old *c,
-					      TDB_DATA recdata)
-{
-	struct ctdb_client *client = reqid_find(ctdb->idr, c->client_id, struct ctdb_client);
-
-	if (client == NULL) {
-		DEBUG(DEBUG_ERR,(__location__ " can not match cancel_persistent_update to a client. Returning error\n"));
-		return -1;
-	}
-
-	if (client->num_persistent_updates > 0) {
-		client->num_persistent_updates--;
-	}
 
 	return 0;
 }

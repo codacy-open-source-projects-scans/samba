@@ -1569,12 +1569,32 @@ static char *_pam_compose_pwd_restriction_string(struct pwb_context *ctx,
 
 static int _pam_create_homedir(struct pwb_context *ctx,
 			       const char *dirname,
-			       mode_t mode)
+			       mode_t mode,
+			       uid_t uid,
+			       gid_t gid)
 {
 	int ret;
 
 	ret = mkdir(dirname, mode);
-	if (ret != 0 && errno == EEXIST) {
+	if (ret == 0) {
+		if (uid == 0 && gid == 0) {
+			return PAM_SUCCESS;
+		}
+
+		ret = chown(dirname, uid, gid);
+		if (ret == 0) {
+			return PAM_SUCCESS;
+		}
+
+		_make_remark_format(ctx, PAM_TEXT_INFO,
+				    _("Change owner of user homedir: %s failed: %s"),
+				    dirname, strerror(errno));
+		_pam_log(ctx, LOG_ERR, "failed to chown user homedir: %s (%s)",
+			 dirname, strerror(errno));
+		return PAM_PERM_DENIED;
+	}
+
+	if (errno == EEXIST) {
 		struct stat sbuf;
 
 		ret = stat(dirname, &sbuf);
@@ -1585,32 +1605,16 @@ static int _pam_create_homedir(struct pwb_context *ctx,
 		if (!S_ISDIR(sbuf.st_mode)) {
 			return PAM_PERM_DENIED;
 		}
+
+		return PAM_SUCCESS;
 	}
 
-	if (ret != 0) {
-		_make_remark_format(ctx, PAM_TEXT_INFO,
-				    _("Creating directory: %s failed: %s"),
-				    dirname, strerror(errno));
-		_pam_log(ctx, LOG_ERR, "could not create dir: %s (%s)",
+	_make_remark_format(ctx, PAM_TEXT_INFO,
+			    _("Creating directory: %s failed: %s"),
+			    dirname, strerror(errno));
+	_pam_log(ctx, LOG_ERR, "could not create dir: %s (%s)",
 		 dirname, strerror(errno));
-		 return PAM_PERM_DENIED;
-	}
-
-	return PAM_SUCCESS;
-}
-
-static int _pam_chown_homedir(struct pwb_context *ctx,
-			      const char *dirname,
-			      uid_t uid,
-			      gid_t gid)
-{
-	if (chown(dirname, uid, gid) != 0) {
-		_pam_log(ctx, LOG_ERR, "failed to chown user homedir: %s (%s)",
-			 dirname, strerror(errno));
-		return PAM_PERM_DENIED;
-	}
-
-	return PAM_SUCCESS;
+	return PAM_PERM_DENIED;
 }
 
 static int _pam_mkhomedir(struct pwb_context *ctx)
@@ -1621,7 +1625,6 @@ static int _pam_mkhomedir(struct pwb_context *ctx)
 	char *user_dir = NULL;
 	int ret;
 	const char *username;
-	mode_t mode = 0700;
 	char *safe_ptr = NULL;
 	char *p = NULL;
 
@@ -1638,14 +1641,18 @@ static int _pam_mkhomedir(struct pwb_context *ctx)
 		return PAM_USER_UNKNOWN;
 	}
 	_pam_log_debug(ctx, LOG_DEBUG, "homedir is: %s", pwd->pw_dir);
-
-	ret = _pam_create_homedir(ctx, pwd->pw_dir, 0700);
-	if (ret == PAM_SUCCESS) {
-		ret = _pam_chown_homedir(ctx, pwd->pw_dir,
-					 pwd->pw_uid,
-					 pwd->pw_gid);
+	if (pwd->pw_uid == 0 && pwd->pw_gid == 0) {
+		/*
+		 * Just skip this for root.
+		 */
+		return PAM_SUCCESS;
 	}
 
+	ret = _pam_create_homedir(ctx,
+				  pwd->pw_dir,
+				  0700,
+				  pwd->pw_uid,
+				  pwd->pw_gid);
 	if (ret == PAM_SUCCESS) {
 		return ret;
 	}
@@ -1668,8 +1675,9 @@ static int _pam_mkhomedir(struct pwb_context *ctx)
 	p = pwd->pw_dir;
 
 	while ((token = strtok_r(p, "/", &safe_ptr)) != NULL) {
-
-		mode = 0755;
+		mode_t mode = 0755;
+		uid_t uid = 0;
+		gid_t gid = 0;
 
 		p = NULL;
 
@@ -1684,17 +1692,17 @@ static int _pam_mkhomedir(struct pwb_context *ctx)
 		if (strcmp(token, user_dir) == 0) {
 			_pam_log_debug(ctx, LOG_DEBUG, "assuming last directory: %s", token);
 			mode = 0700;
+			uid = pwd->pw_uid;
+			gid = pwd->pw_gid;
 		}
 
-		ret = _pam_create_homedir(ctx, create_dir, mode);
+		ret = _pam_create_homedir(ctx, create_dir, mode, uid, gid);
 		if (ret != PAM_SUCCESS) {
 			return ret;
 		}
 	}
 
-	return _pam_chown_homedir(ctx, create_dir,
-				  pwd->pw_uid,
-				  pwd->pw_gid);
+	return PAM_SUCCESS;
 }
 
 /* talk to winbindd */
@@ -2317,20 +2325,28 @@ static const char *get_conf_item_string(struct pwb_context *ctx,
 	}
 
 	/* let the pam opt take precedence over the pam_winbind.conf option */
-	for (i=0; i<ctx->argc; i++) {
+	for (i = 0; i < ctx->argc; i++) {
+		const char *p = strchr(ctx->argv[i], '=');
+		if (p != NULL) {
+			size_t len = p - ctx->argv[i];
+			char name[len + 1];
 
-		if ((strncmp(ctx->argv[i], item, strlen(item)) == 0)) {
-			char *p;
+			memcpy(name, ctx->argv[i], len);
+			name[len] = 0;
 
-			if ((p = strchr(ctx->argv[i], '=')) == NULL) {
-				_pam_log(ctx, LOG_INFO,
-					 "no \"=\" delimiter for \"%s\" found\n",
-					 item);
-				goto out;
+			if (strcmp(name, item) != 0) {
+				continue;
 			}
 			_pam_log_debug(ctx, LOG_INFO,
-				       "PAM config: %s '%s'\n", item, p+1);
+				       "PAM config: %s '%s'\n",
+				       item, p + 1);
 			return p + 1;
+		}
+		if (strcmp(ctx->argv[i], item) == 0) {
+			_pam_log(ctx, LOG_INFO,
+				 "no \"=\" delimiter for \"%s\" found\n",
+				 item);
+			goto out;
 		}
 	}
 
@@ -2356,49 +2372,14 @@ static int get_config_item_int(struct pwb_context *ctx,
 			       const char *item,
 			       int config_flag)
 {
-	int i, parm_opt = -1;
+	const char *value;
 
-	if (!(ctx->ctrl & config_flag)) {
-		goto out;
+	value = get_conf_item_string(ctx, item, config_flag);
+	if (value == NULL) {
+		return -1;
 	}
 
-	/* let the pam opt take precedence over the pam_winbind.conf option */
-	for (i = 0; i < ctx->argc; i++) {
-
-		if ((strncmp(ctx->argv[i], item, strlen(item)) == 0)) {
-			char *p;
-
-			if ((p = strchr(ctx->argv[i], '=')) == NULL) {
-				_pam_log(ctx, LOG_INFO,
-					 "no \"=\" delimiter for \"%s\" found\n",
-					 item);
-				goto out;
-			}
-			parm_opt = atoi(p + 1);
-			_pam_log_debug(ctx, LOG_INFO,
-				       "PAM config: %s '%d'\n",
-				       item, parm_opt);
-			return parm_opt;
-		}
-	}
-
-	if (ctx->dict) {
-		char *key = NULL;
-
-		key = talloc_asprintf(ctx, "global:%s", item);
-		if (!key) {
-			goto out;
-		}
-
-		parm_opt = tiniparser_getint(ctx->dict, key, -1);
-		TALLOC_FREE(key);
-
-		_pam_log_debug(ctx, LOG_INFO,
-			       "CONFIG file: %s '%d'\n",
-			       item, parm_opt);
-	}
-out:
-	return parm_opt;
+	return atoi(value);
 }
 
 static const char *get_krb5_cc_type_from_config(struct pwb_context *ctx)

@@ -34,13 +34,13 @@ echo "lmaster=${lmaster}"
 
 non_lmaster=""
 # Find a non-lmaster node
-for i in $all_pnns ; do
-	if [ "$i" != "$lmaster" ] ; then
+for i in $all_pnns; do
+	if [ "$i" != "$lmaster" ]; then
 		non_lmaster="$i"
 		break
 	fi
 done
-if [ -z "$non_lmaster" ] ; then
+if [ -z "$non_lmaster" ]; then
 	ctdb_test_fail "Could not find non-lmaster node for key"
 fi
 
@@ -102,7 +102,7 @@ echo
 echo "Confirm that nodes ${lmaster} and ${non_lmaster} still have the record"
 check_cattdb_num_records "$db" 1 "${lmaster} ${non_lmaster}"
 
-vacuum_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
+db_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
 
 echo
 
@@ -114,4 +114,4 @@ echo
 echo "Confirm that nodes ${lmaster} and ${non_lmaster} still have the record"
 check_cattdb_num_records "$db" 1 "${lmaster} ${non_lmaster}"
 
-vacuum_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
+db_confirm_key_empty_dmaster "$lmaster" "$db" "$key"

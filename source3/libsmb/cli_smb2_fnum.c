@@ -72,6 +72,11 @@ static NTSTATUS map_smb2_handle_to_fnum(struct cli_state *cli,
 	struct idr_context *idp = cli->smb2.open_handles;
 	struct smb2_hnd *owned_h = NULL;
 
+	if (fid_persistent == UINT64_MAX && fid_volatile == UINT64_MAX) {
+		*pfnum = UINT16_MAX;
+		return NT_STATUS_OK;
+	}
+
 	owned_h = talloc(cli, struct smb2_hnd);
 	if (owned_h == NULL) {
 		return NT_STATUS_NO_MEMORY;
@@ -106,12 +111,22 @@ static NTSTATUS map_smb2_handle_to_fnum(struct cli_state *cli,
  Return the smb2_hnd pointer associated with the given fnum.
 ***************************************************************/
 
+static const struct smb2_hnd map_fnum_no_smb2_hnd = {
+	.fid_persistent = UINT64_MAX,
+	.fid_volatile = UINT64_MAX,
+};
+
 static NTSTATUS map_fnum_to_smb2_handle(struct cli_state *cli,
 				uint16_t fnum,		/* In */
-				struct smb2_hnd **pph)	/* Out */
+				const struct smb2_hnd **pph)	/* Out */
 {
 	struct idr_context *idp = cli->smb2.open_handles;
 	void *ph = NULL;
+
+	if (fnum == UINT16_MAX) {
+		*pph = &map_fnum_no_smb2_hnd;
+		return NT_STATUS_OK;
+	}
 
 	if (idp == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -130,11 +145,18 @@ static NTSTATUS map_fnum_to_smb2_handle(struct cli_state *cli,
 ***************************************************************/
 
 static NTSTATUS delete_smb2_handle_mapping(struct cli_state *cli,
-				struct smb2_hnd **pph,	/* In */
+				const struct smb2_hnd **pph,	/* In */
 				uint16_t fnum)			/* In */
 {
 	struct idr_context *idp = cli->smb2.open_handles;
 	struct smb2_hnd *ph;
+
+	if (fnum == UINT16_MAX) {
+		if (*pph != &map_fnum_no_smb2_hnd) {
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+		return NT_STATUS_OK;
+	}
 
 	if (idp == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -145,7 +167,8 @@ static NTSTATUS delete_smb2_handle_mapping(struct cli_state *cli,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 	idr_remove(idp, fnum);
-	TALLOC_FREE(*pph);
+	TALLOC_FREE(ph);
+	*pph = NULL;
 	return NT_STATUS_OK;
 }
 
@@ -490,7 +513,7 @@ NTSTATUS cli_smb2_create_fnum_recv(
 
 bool cli_smb2_fnum_is_posix(struct cli_state *cli, uint16_t fnum)
 {
-	struct smb2_hnd *ph = NULL;
+	const struct smb2_hnd *ph = NULL;
 	NTSTATUS status;
 
 	status = map_fnum_to_smb2_handle(cli, fnum, &ph);
@@ -565,7 +588,7 @@ NTSTATUS cli_smb2_create_fnum(
 struct cli_smb2_close_fnum_state {
 	struct cli_state *cli;
 	uint16_t fnum;
-	struct smb2_hnd *ph;
+	const struct smb2_hnd *ph;
 };
 
 static void cli_smb2_close_fnum_done(struct tevent_req *subreq);
@@ -685,7 +708,7 @@ struct tevent_req *cli_smb2_set_info_fnum_send(
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct cli_smb2_set_info_fnum_state *state = NULL;
-	struct smb2_hnd *ph = NULL;
+	const struct smb2_hnd *ph = NULL;
 	NTSTATUS status;
 
 	req = tevent_req_create(
@@ -726,6 +749,64 @@ static void cli_smb2_set_info_fnum_done(struct tevent_req *subreq)
 }
 
 NTSTATUS cli_smb2_set_info_fnum_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_ntstatus(req);
+}
+
+struct cli_smb2_lock_state {
+	uint8_t dummy;
+};
+
+static void cli_smb2_lock_done(struct tevent_req *subreq);
+
+struct tevent_req *cli_smb2_lock_send(TALLOC_CTX *mem_ctx,
+				      struct tevent_context *ev,
+				      struct cli_state *cli,
+				      uint16_t fnum,
+				      uint32_t lock_sequence,
+				      uint16_t num_locks,
+				      const struct smb2_lock_element *locks)
+{
+	struct tevent_req *req = NULL, *subreq = NULL;
+	struct cli_smb2_lock_state *state = NULL;
+	const struct smb2_hnd *ph = NULL;
+	NTSTATUS status;
+
+	req = tevent_req_create(mem_ctx, &state, struct cli_smb2_lock_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	status = map_fnum_to_smb2_handle(cli, fnum, &ph);
+	if (tevent_req_nterror(req, status)) {
+		return tevent_req_post(req, ev);
+	}
+
+	subreq = smb2cli_lock_send(state,
+				   ev,
+				   cli->conn,
+				   cli->timeout,
+				   cli->smb2.session,
+				   cli->smb2.tcon,
+				   ph->fid_persistent,
+				   ph->fid_volatile,
+				   lock_sequence,
+				   num_locks,
+				   locks);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, cli_smb2_lock_done, req);
+	return req;
+}
+
+static void cli_smb2_lock_done(struct tevent_req *subreq)
+{
+	NTSTATUS status = smb2cli_lock_recv(subreq);
+	tevent_req_simple_finish_ntstatus(subreq, status);
+}
+
+NTSTATUS cli_smb2_lock_recv(struct tevent_req *req)
 {
 	return tevent_req_simple_recv_ntstatus(req);
 }
@@ -1461,7 +1542,7 @@ static bool windows_parent_dirname(TALLOC_CTX *mem_ctx,
 				char **parent,
 				const char **name)
 {
-	char *p;
+	const char *p;
 	ptrdiff_t len;
 
 	p = strrchr_m(dir, '\\'); /* Find final '\\', if any */
@@ -1679,7 +1760,7 @@ NTSTATUS cli_smb2_list_recv(
 	if (response == NULL) {
 		struct tevent_req *subreq = NULL;
 		struct cli_state *cli = state->cli;
-		struct smb2_hnd *ph = NULL;
+		const struct smb2_hnd *ph = NULL;
 		uint32_t max_trans, max_avail_len;
 		bool ok;
 
@@ -1896,7 +1977,7 @@ struct tevent_req *cli_smb2_query_info_fnum_send(
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct cli_smb2_query_info_fnum_state *state = NULL;
-	struct smb2_hnd *ph = NULL;
+	const struct smb2_hnd *ph = NULL;
 	NTSTATUS status;
 
 	req = tevent_req_create(
@@ -3858,7 +3939,7 @@ cleanup:
 struct cli_smb2_read_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
-	struct smb2_hnd *ph;
+	const struct smb2_hnd *ph;
 	uint64_t start_offset;
 	uint32_t size;
 	uint32_t received;
@@ -3962,7 +4043,7 @@ NTSTATUS cli_smb2_read_recv(struct tevent_req *req,
 struct cli_smb2_write_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
-	struct smb2_hnd *ph;
+	const struct smb2_hnd *ph;
 	uint32_t flags;
 	const uint8_t *buf;
 	uint64_t offset;
@@ -4077,7 +4158,7 @@ NTSTATUS cli_smb2_write_recv(struct tevent_req *req,
 struct cli_smb2_writeall_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
-	struct smb2_hnd *ph;
+	const struct smb2_hnd *ph;
 	uint32_t flags;
 	const uint8_t *buf;
 	uint64_t offset;
@@ -4229,8 +4310,8 @@ NTSTATUS cli_smb2_writeall_recv(struct tevent_req *req,
 struct cli_smb2_splice_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
-	struct smb2_hnd *src_ph;
-	struct smb2_hnd *dst_ph;
+	const struct smb2_hnd *src_ph;
+	const struct smb2_hnd *dst_ph;
 	int (*splice_cb)(off_t n, void *priv);
 	void *priv;
 	off_t written;
@@ -4500,7 +4581,7 @@ NTSTATUS cli_smb2_splice_recv(struct tevent_req *req, off_t *written)
 struct cli_smb2_shadow_copy_data_fnum_state {
 	struct cli_state *cli;
 	uint16_t fnum;
-	struct smb2_hnd *ph;
+	const struct smb2_hnd *ph;
 	DATA_BLOB out_input_buffer;
 	DATA_BLOB out_output_buffer;
 };
@@ -4772,7 +4853,7 @@ struct tevent_req *cli_smb2_notify_send(
 {
 	struct tevent_req *req = NULL;
 	struct cli_smb2_notify_state *state = NULL;
-	struct smb2_hnd *ph = NULL;
+	const struct smb2_hnd *ph = NULL;
 	NTSTATUS status;
 
 	req = tevent_req_create(mem_ctx, &state,
@@ -4968,7 +5049,7 @@ struct tevent_req *cli_smb2_fsctl_send(
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct cli_smb2_fsctl_state *state = NULL;
-	struct smb2_hnd *ph = NULL;
+	const struct smb2_hnd *ph = NULL;
 	NTSTATUS status;
 
 	req = tevent_req_create(mem_ctx, &state, struct cli_smb2_fsctl_state);

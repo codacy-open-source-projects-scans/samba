@@ -387,14 +387,15 @@ _PUBLIC_ char *cli_credentials_get_principal_and_obtained(struct cli_credentials
 
 		cred->principal = NULL;
 		if (princ != NULL) {
+			char *s = NULL;
 			char *p = NULL;
 
-			cred->principal = talloc_strdup(cred, princ);
-			if (cred->principal == NULL) {
+			s = talloc_strdup(cred, princ);
+			if (s == NULL) {
 				return NULL;
 			}
 
-			p = strchr(cred->principal, '@');
+			p = strchr(s, '@');
 			if (p != NULL) {
 				p += 1;
 
@@ -402,6 +403,7 @@ _PUBLIC_ char *cli_credentials_get_principal_and_obtained(struct cli_credentials
 					*p = toupper(p[0]);
 				}
 			}
+			cred->principal = s;
 		}
 
 		if (cred->principal_obtained == CRED_CALLBACK) {
@@ -484,20 +486,24 @@ _PUBLIC_ bool cli_credentials_set_principal(struct cli_credentials *cred,
 		/* If `val = NULL` is passed, principal is reset */
 		cred->principal = NULL;
 		if (val != NULL) {
-			char *p = strchr(val, '@');
-			if (p != NULL) {
+			const char *cp = NULL;
+			char *s = NULL;
+			char *p = NULL;
+
+			cp = strchr(val, '@');
+			if (cp != NULL) {
 				/* For realm names, only ASCII is allowed */
-				if (!str_is_ascii(p + 1)) {
+				if (!str_is_ascii(cp + 1)) {
 					return false;
 				}
 			}
 
-			cred->principal = talloc_strdup(cred, val);
-			if (cred->principal == NULL) {
+			s = talloc_strdup(cred, val);
+			if (s == NULL) {
 				return false;
 			}
 
-			p = strchr(cred->principal, '@');
+			p = strchr(s, '@');
 			if (p != NULL) {
 				p += 1;
 
@@ -505,6 +511,7 @@ _PUBLIC_ bool cli_credentials_set_principal(struct cli_credentials *cred,
 					*p = toupper(p[0]);
 				}
 			}
+			cred->principal = s;
 		}
 		cred->principal_obtained = obtained;
 		cli_credentials_invalidate_ccache(cred, cred->principal_obtained);
@@ -654,6 +661,12 @@ _PUBLIC_ bool cli_credentials_set_password(struct cli_credentials *cred,
 		cred->nt_response = data_blob_null;
 		cred->nt_hash = NULL;
 		cred->password = NULL;
+		cred->old_nt_hash = NULL;
+		cred->old_password = NULL;
+		cred->older_nt_hash = NULL;
+		cred->older_password = NULL;
+		cred->next_nt_hash = NULL;
+		cred->next_password = NULL;
 
 		cli_credentials_invalidate_ccache(cred, obtained);
 
@@ -731,8 +744,7 @@ _PUBLIC_ const char *cli_credentials_get_old_password(struct cli_credentials *cr
 }
 
 _PUBLIC_ bool cli_credentials_set_old_password(struct cli_credentials *cred,
-				      const char *val,
-				      enum credentials_obtained obtained)
+					       const char *val)
 {
 	cred->old_nt_hash = NULL;
 	if (val == NULL) {
@@ -744,6 +756,59 @@ _PUBLIC_ bool cli_credentials_set_old_password(struct cli_credentials *cred,
 		return false;
 	}
 	talloc_keep_secret(discard_const(cred->old_password));
+	return true;
+}
+
+_PUBLIC_ const char *cli_credentials_get_older_password(
+					struct cli_credentials *cred)
+{
+	if (cred->machine_account_pending) {
+		cli_credentials_set_machine_account(cred,
+					cred->machine_account_pending_lp_ctx);
+	}
+
+	return cred->older_password;
+}
+
+_PUBLIC_ bool cli_credentials_set_older_password(struct cli_credentials *cred,
+					         const char *val)
+{
+	cred->older_nt_hash = NULL;
+	if (val == NULL) {
+		cred->older_password = NULL;
+		return true;
+	}
+	cred->older_password = talloc_strdup(cred, val);
+	if (cred->older_password == NULL) {
+		return false;
+	}
+	talloc_keep_secret(discard_const(cred->older_password));
+	return true;
+}
+
+_PUBLIC_ const char *cli_credentials_get_next_password(struct cli_credentials *cred)
+{
+	if (cred->machine_account_pending) {
+		cli_credentials_set_machine_account(cred,
+					cred->machine_account_pending_lp_ctx);
+	}
+
+	return cred->next_password;
+}
+
+_PUBLIC_ bool cli_credentials_set_next_password(struct cli_credentials *cred,
+						const char *val)
+{
+	cred->next_nt_hash = NULL;
+	if (val == NULL) {
+		cred->next_password = NULL;
+		return true;
+	}
+	cred->next_password = talloc_strdup(cred, val);
+	if (cred->next_password == NULL) {
+		return false;
+	}
+	talloc_keep_secret(discard_const(cred->next_password));
 	return true;
 }
 
@@ -877,6 +942,92 @@ _PUBLIC_ struct samr_Password *cli_credentials_get_old_nt_hash(struct cli_creden
 		talloc_keep_secret(nt_hash);
 
 		E_md4hash(old_password, nt_hash->hash);
+
+		return nt_hash;
+	}
+
+	return NULL;
+}
+
+/**
+ * Obtain the older password, in the form MD4(unicode(password)) for this credentials context.
+ *
+ * Sometimes we only have this much of the password, while the rest of
+ * the time this call avoids calling E_md4hash themselves.
+ *
+ * @param cred credentials context
+ * @retval If set, the cleartext password, otherwise NULL
+ */
+_PUBLIC_ struct samr_Password *cli_credentials_get_older_nt_hash(
+						struct cli_credentials *cred,
+						TALLOC_CTX *mem_ctx)
+{
+	const char *older_password = NULL;
+
+	if (cred->older_nt_hash != NULL) {
+		struct samr_Password *nt_hash = talloc(mem_ctx, struct samr_Password);
+		if (!nt_hash) {
+			return NULL;
+		}
+		talloc_keep_secret(nt_hash);
+
+		*nt_hash = *cred->older_nt_hash;
+
+		return nt_hash;
+	}
+
+	older_password = cli_credentials_get_older_password(cred);
+	if (older_password) {
+		struct samr_Password *nt_hash = talloc(mem_ctx, struct samr_Password);
+		if (!nt_hash) {
+			return NULL;
+		}
+		talloc_keep_secret(nt_hash);
+
+		E_md4hash(older_password, nt_hash->hash);
+
+		return nt_hash;
+	}
+
+	return NULL;
+}
+
+/**
+ * Obtain the next password, in the form MD4(unicode(password)) for this credentials context.
+ *
+ * Sometimes we only have this much of the password, while the rest of
+ * the time this call avoids calling E_md4hash themselves.
+ *
+ * @param cred credentials context
+ * @retval If set, the cleartext password, otherwise NULL
+ */
+_PUBLIC_ struct samr_Password *cli_credentials_get_next_nt_hash(
+						struct cli_credentials *cred,
+						TALLOC_CTX *mem_ctx)
+{
+	const char *next_password = NULL;
+
+	if (cred->next_nt_hash != NULL) {
+		struct samr_Password *nt_hash = talloc(mem_ctx, struct samr_Password);
+		if (!nt_hash) {
+			return NULL;
+		}
+		talloc_keep_secret(nt_hash);
+
+		*nt_hash = *cred->next_nt_hash;
+
+		return nt_hash;
+	}
+
+	next_password = cli_credentials_get_next_password(cred);
+	if (next_password) {
+		struct samr_Password *nt_hash = talloc(mem_ctx, struct samr_Password);
+		if (!nt_hash) {
+			return NULL;
+		}
+		talloc_keep_secret(nt_hash);
+
+		E_md4hash(next_password, nt_hash->hash);
 
 		return nt_hash;
 	}
@@ -1432,13 +1583,16 @@ _PUBLIC_ bool cli_credentials_guess(struct cli_credentials *cred,
 		size_t len = strlen(env);
 
 		if (len > 0 && len <= 1024) {
-			char *p = NULL;
+			const char *p = NULL;
 
 			(void)cli_credentials_parse_string(cred,
 							   env,
 							   CRED_GUESS_ENV);
-			if ((p = strchr_m(env, '%'))) {
-				memset(p, '\0', strlen(cred->password));
+			p = strchr_m(env, '%');
+			if (p != NULL) {
+				memset(discard_const_p(char, p),
+				       '\0',
+				       strlen(cred->password));
 			}
 		}
 	}

@@ -62,12 +62,10 @@ static WERROR add_response_rr(const char *name,
 	/*
 	 * "ans" is always non-NULL and thus its own talloc context
 	 */
-	ans = talloc_realloc(ans, ans, struct dns_res_rec, ai+1);
+	ans = talloc_realloc_zero(ans, ans, struct dns_res_rec, ai+1);
 	if (ans == NULL) {
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
-
-	ZERO_STRUCT(ans[ai]);
 
 	switch (rec->wType) {
 	case DNS_QTYPE_CNAME:
@@ -155,12 +153,10 @@ static WERROR add_dns_res_rec(struct dns_res_rec **pdst,
 		return WERR_BUFFER_OVERFLOW;
 	}
 
-	dst = talloc_realloc(dst, dst, struct dns_res_rec, di+1);
+	dst = talloc_realloc_zero(dst, dst, struct dns_res_rec, di+1);
 	if (dst == NULL) {
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
-
-	ZERO_STRUCT(dst[di]);
 
 	dst[di] = (struct dns_res_rec) {
 		.name = talloc_strdup(dst, src->name),
@@ -282,15 +278,22 @@ static struct tevent_req *ask_forwarder_send(
 {
 	struct tevent_req *req, *subreq;
 	struct ask_forwarder_state *state;
+	struct dns_name_packet *q = NULL;
 
 	req = tevent_req_create(mem_ctx, &state, struct ask_forwarder_state);
 	if (req == NULL) {
 		return NULL;
 	}
 
-	subreq = dns_cli_request_send(state, ev, forwarder,
-				      question->name, question->question_class,
-				      question->question_type);
+	q = dns_cli_create_query(state,
+				 question->name,
+				 question->question_class,
+				 question->question_type);
+	if (tevent_req_nomem(q, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	subreq = dns_cli_request_send(state, ev, forwarder, q);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -654,7 +657,8 @@ static WERROR handle_authoritative_recv(struct tevent_req *req)
 	return WERR_OK;
 }
 
-static NTSTATUS create_tkey(struct dns_server *dns,
+static NTSTATUS create_tkey(TALLOC_CTX *mem_ctx,
+			    struct dns_server *dns,
 			    const char* name,
 			    const char* algorithm,
 			    const struct tsocket_address *remote_address,
@@ -662,7 +666,6 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 			    struct dns_server_tkey **tkey)
 {
 	NTSTATUS status;
-	struct dns_server_tkey_store *store = dns->tkeys;
 	struct dns_server_tkey *k = NULL;
 
 	if (strcmp(algorithm, "gss-tsig") == 0) {
@@ -673,20 +676,20 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	k = talloc_zero(store, struct dns_server_tkey);
+	k = talloc_zero(mem_ctx, struct dns_server_tkey);
 	if (k == NULL) {
-		return NT_STATUS_NO_MEMORY;
+		goto nomem;
 	}
 
 	k->name = talloc_strdup(k, name);
 
 	if (k->name  == NULL) {
-		return NT_STATUS_NO_MEMORY;
+		goto nomem;
 	}
 
 	k->algorithm = talloc_strdup(k, algorithm);
 	if (k->algorithm == NULL) {
-		return NT_STATUS_NO_MEMORY;
+		goto nomem;
 	}
 
 	/*
@@ -704,8 +707,7 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 						&k->gensec);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("Failed to start GENSEC server code: %s\n", nt_errstr(status)));
-		*tkey = NULL;
-		return status;
+		goto fail;
 	}
 
 	gensec_want_feature(k->gensec, GENSEC_FEATURE_SIGN);
@@ -715,8 +717,7 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("Failed to set remote address into GENSEC: %s\n",
 			  nt_errstr(status)));
-		*tkey = NULL;
-		return status;
+		goto fail;
 	}
 
 	status = gensec_set_local_address(k->gensec,
@@ -724,8 +725,7 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("Failed to set local address into GENSEC: %s\n",
 			  nt_errstr(status)));
-		*tkey = NULL;
-		return status;
+		goto fail;
 	}
 
 	status = gensec_start_mech_by_oid(k->gensec, GENSEC_OID_SPNEGO);
@@ -733,18 +733,29 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("Failed to start GENSEC server code: %s\n",
 			  nt_errstr(status)));
-		*tkey = NULL;
-		return status;
+		goto fail;
 	}
-
-	TALLOC_FREE(store->tkeys[store->next_idx]);
-
-	store->tkeys[store->next_idx] = k;
-	(store->next_idx)++;
-	store->next_idx %= store->size;
 
 	*tkey = k;
 	return NT_STATUS_OK;
+
+nomem:
+	status = NT_STATUS_NO_MEMORY;
+fail:
+	TALLOC_FREE(k);
+	*tkey = NULL;
+	return status;
+}
+
+static void add_tkey(struct dns_server_tkey_store *store,
+		     struct dns_server_tkey **tkey)
+{
+	TALLOC_FREE(store->tkeys[store->next_idx]);
+
+	store->tkeys[store->next_idx] = talloc_move(store->tkeys, tkey);
+
+	(store->next_idx)++;
+	store->next_idx %= store->size;
 }
 
 static NTSTATUS accept_gss_ticket(TALLOC_CTX *mem_ctx,
@@ -860,6 +871,7 @@ static WERROR handle_tkey(struct dns_server *dns,
 		struct dns_server_tkey *tkey;
 		DATA_BLOB key;
 		DATA_BLOB reply;
+		bool created = false;
 
 		tkey = dns_find_tkey(dns->tkeys, in->questions[0].name);
 		if (tkey != NULL && tkey->complete) {
@@ -870,15 +882,19 @@ static WERROR handle_tkey(struct dns_server *dns,
 		}
 
 		if (tkey == NULL) {
-			status  = create_tkey(dns, in->questions[0].name,
-					      in_tkey->rdata.tkey_record.algorithm,
-					      state->remote_address,
-					      state->local_address,
-					      &tkey);
+			status = create_tkey(
+				mem_ctx,
+				dns,
+				in->questions[0].name,
+				in_tkey->rdata.tkey_record.algorithm,
+				state->remote_address,
+				state->local_address,
+				&tkey);
 			if (!NT_STATUS_IS_OK(status)) {
 				ret_tkey->rdata.tkey_record.error = DNS_RCODE_BADKEY;
 				return ntstatus_to_werror(status);
 			}
+			created = true;
 		}
 
 		key.data = in_tkey->rdata.tkey_record.key_data;
@@ -902,6 +918,9 @@ static WERROR handle_tkey(struct dns_server *dns,
 			state->key_name = talloc_strdup(state->mem_ctx, tkey->name);
 			if (state->key_name == NULL) {
 				return WERR_NOT_ENOUGH_MEMORY;
+			}
+			if (created) {
+				add_tkey(dns->tkeys, &tkey);
 			}
 		} else {
 			DEBUG(1, ("GSS key negotiation returned %s\n", nt_errstr(status)));

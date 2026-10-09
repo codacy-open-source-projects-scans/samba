@@ -11,7 +11,6 @@ bld.SAMBA_SUBSYSTEM('DCERPC_COMMON',
                     source='''
                            common/server_info.c
                            common/forward.c
-                           common/loadparm.c
                            ''',
                     autoproto='common/proto.h',
                     deps='ldb DCERPC_SHARE',
@@ -84,16 +83,6 @@ bld.SAMBA_MODULE('dcesrv_samr',
                       GNUTLS_HELPERS
                       DCERPC_HELPER
                       '''
-                 )
-
-
-bld.SAMBA_MODULE('dcerpc_winreg',
-                 source='winreg/rpc_winreg.c',
-                 subsystem='dcerpc_server',
-                 init_function='dcerpc_server_winreg_init',
-                 deps='registry ndr-standard',
-                 internal_module=True,
-                 enabled=bld.CONFIG_SET('WITH_NTVFS_FILESERVER')
                  )
 
 
@@ -181,13 +170,19 @@ bld.SAMBA_MODULE('dcerpc_eventlog',
 bld.SAMBA_MODULE('dcerpc_dnsserver',
                  source='''
                         dnsserver/dcerpc_dnsserver.c
-                        dnsserver/dnsutils.c
                         dnsserver/dnsdata.c
                         dnsserver/dnsdb.c
                         ''',
                  subsystem='dcerpc_server',
                  init_function='dcerpc_server_dnsserver_init',
                  deps='DCERPC_COMMON dnsserver_common netif'
+                 )
+
+bld.SAMBA_MODULE('dcerpc_gkdi',
+                 source='gkdi/dcesrv_gkdi.c',
+                 subsystem='dcerpc_server',
+                 init_function='dcerpc_server_gkdi_init',
+                 deps='DCERPC_COMMON'
                  )
 
 

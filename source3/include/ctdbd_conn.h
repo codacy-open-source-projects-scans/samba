@@ -28,8 +28,10 @@
 #include <tevent.h>
 
 struct ctdbd_connection;
+struct ctdb_node_and_flags;
 struct messaging_context;
 struct messaging_rec;
+struct cluster_level_active;
 
 int ctdbd_init_connection(TALLOC_CTX *mem_ctx,
 			  const char *sockname, int timeout,
@@ -39,11 +41,21 @@ int ctdbd_init_async_connection(
 	const char *sockname,
 	int timeout,
 	struct ctdbd_connection **pconn);
-int ctdbd_reinit_connection(TALLOC_CTX *mem_ctx,
-			    const char *sockname, int timeout,
-			    struct ctdbd_connection *conn);
 
+int ctdbd_nodes_foreach(struct ctdbd_connection *conn,
+			int (*cb)(uint32_t total_nodes_count,
+				  const struct ctdb_node_and_flags *nf,
+				  void *private_data),
+			void *private_data);
+
+int ctdbd_generation(struct ctdbd_connection *conn, uint32_t *generation);
+const struct cluster_level_active *ctdbd_conn_get_cluster_level(
+					struct ctdbd_connection *conn);
+void ctdbd_conn_set_cluster_level(struct ctdbd_connection *conn,
+				  const struct cluster_level_active *level);
 uint32_t ctdbd_vnn(const struct ctdbd_connection *conn);
+pid_t ctdbd_pid(const struct ctdbd_connection *conn);
+struct timeval ctdbd_start_time(const struct ctdbd_connection *conn);
 
 int ctdbd_conn_get_fd(struct ctdbd_connection *conn);
 void ctdbd_socket_readable(struct tevent_context *ev,
@@ -64,9 +76,12 @@ int ctdbd_db_attach(struct ctdbd_connection *conn, const char *name,
 
 int ctdbd_migrate(struct ctdbd_connection *conn, uint32_t db_id, TDB_DATA key);
 
+struct ctdb_ltdb_header;
 int ctdbd_parse(struct ctdbd_connection *conn, uint32_t db_id,
 		TDB_DATA key, bool local_copy,
-		void (*parser)(TDB_DATA key, TDB_DATA data,
+		void (*parser)(TDB_DATA key,
+			       struct ctdb_ltdb_header *header,
+			       TDB_DATA data,
 			       void *private_data),
 		void *private_data);
 
@@ -135,6 +150,14 @@ int ctdbd_control_local(struct ctdbd_connection *conn, uint32_t opcode,
 			uint64_t srvid, uint32_t flags, TDB_DATA data,
 			TALLOC_CTX *mem_ctx, TDB_DATA *outdata,
 			int32_t *cstatus);
+int ctdbd_control_broadcast(struct ctdbd_connection *conn,
+			    uint32_t opcode,
+			    uint64_t srvid,
+			    uint32_t flags,
+			    TDB_DATA data,
+			    TALLOC_CTX *mem_ctx,
+			    TDB_DATA *outdata,
+			    int32_t *cstatus);
 int ctdb_watch_us(struct ctdbd_connection *conn);
 int ctdb_unwatch(struct ctdbd_connection *conn);
 
@@ -185,6 +208,7 @@ struct tevent_req *ctdbd_parse_send(TALLOC_CTX *mem_ctx,
 				    TDB_DATA key,
 				    bool local_copy,
 				    void (*parser)(TDB_DATA key,
+						   struct ctdb_ltdb_header *header,
 						   TDB_DATA data,
 						   void *private_data),
 				    void *private_data,

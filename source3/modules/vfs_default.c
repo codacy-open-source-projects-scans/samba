@@ -96,6 +96,25 @@ static void vfswrap_disconnect(vfs_handle_struct *handle)
 {
 }
 
+static int vfswrap_open_share_root(struct vfs_handle_struct *handle,
+				   struct files_struct *root_fsp,
+				   const char *connectpath)
+{
+	SMB_STRUCT_STAT st = {};
+	int ret;
+
+	ret = sys_stat(connectpath,
+		       &st,
+		       lp_fake_directory_create_times(SNUM(handle->conn)));
+	if (ret == -1) {
+		return ret;
+	}
+
+	ret = vfs_set_share_root(root_fsp, connectpath, &st);
+
+	return ret;
+}
+
 /* Disk operations */
 
 static uint64_t vfswrap_disk_free(vfs_handle_struct *handle,
@@ -859,8 +878,7 @@ struct vfswrap_pread_state {
 	off_t offset;
 
 	struct vfs_aio_state vfs_aio_state;
-	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes);
-	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes_x);
+	SMBPROFILE_BYTES_ASYNC_STATE_X(profile_bytes, profile_bytes_x);
 };
 
 static void vfs_pread_do(void *private_data);
@@ -1102,8 +1120,8 @@ static void vfs_pwrite_done(struct tevent_req *subreq)
 
 	ret = pthreadpool_tevent_job_recv(subreq);
 	TALLOC_FREE(subreq);
-	SMBPROFILE_BYTES_ASYNC_END(state->profile_bytes);
-	SMBPROFILE_BYTES_ASYNC_END(state->profile_bytes_x);
+	SMBPROFILE_BYTES_ASYNC_END_X(state->profile_bytes,
+				     state->profile_bytes_x);
 	talloc_set_destructor(state, NULL);
 	if (ret != 0) {
 		if (ret != EAGAIN) {
@@ -1141,8 +1159,7 @@ struct vfswrap_fsync_state {
 	int fd;
 
 	struct vfs_aio_state vfs_aio_state;
-	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes);
-	SMBPROFILE_BYTES_ASYNC_STATE(profile_bytes_x);
+	SMBPROFILE_BYTES_ASYNC_STATE_X(profile_bytes, profile_bytes_x);
 };
 
 static void vfs_fsync_do(void *private_data);
@@ -3996,7 +4013,6 @@ static bool vfswrap_aio_force(struct vfs_handle_struct *handle, struct files_str
 static bool vfswrap_is_offline(struct connection_struct *conn,
 			       const struct smb_filename *fname)
 {
-	NTSTATUS status;
 	char *path;
 	bool offline = false;
 
@@ -4011,11 +4027,11 @@ static bool vfswrap_is_offline(struct connection_struct *conn,
 		return false;
 	}
 
-        status = get_full_smb_filename(talloc_tos(), fname, &path);
-        if (!NT_STATUS_IS_OK(status)) {
-                errno = map_errno_from_nt_status(status);
-                return false;
-        }
+	path = get_full_smb_filename(talloc_tos(), fname);
+	if (path == NULL) {
+		errno = ENOMEM;
+		return false;
+	}
 
 	offline = (dmapi_file_flags(path) & FILE_ATTRIBUTE_OFFLINE) != 0;
 
@@ -4046,12 +4062,13 @@ static NTSTATUS vfswrap_durable_reconnect(struct vfs_handle_struct *handle,
 					  struct smb_request *smb1req,
 					  struct smbXsrv_open *op,
 					  const DATA_BLOB old_cookie,
+					  const struct smb2_lease *lease,
 					  TALLOC_CTX *mem_ctx,
 					  struct files_struct **fsp,
 					  DATA_BLOB *new_cookie)
 {
 	return vfs_default_durable_reconnect(handle->conn, smb1req, op,
-					     old_cookie, mem_ctx,
+					     old_cookie, lease, mem_ctx,
 					     fsp, new_cookie);
 }
 
@@ -4060,6 +4077,7 @@ static struct vfs_fn_pointers vfs_default_fns = {
 
 	.connect_fn = vfswrap_connect,
 	.disconnect_fn = vfswrap_disconnect,
+	.open_share_root_fn = vfswrap_open_share_root,
 	.disk_free_fn = vfswrap_disk_free,
 	.get_quota_fn = vfswrap_get_quota,
 	.set_quota_fn = vfswrap_set_quota,

@@ -47,6 +47,128 @@
 		} \
 	}
 
+bool torture_smb2_samba3_checkfsp(struct torture_context *tctx,
+				   struct smb2_tree *tree)
+{
+	const char *fname = "test.txt";
+	const char *dirname = "testdir";
+	NTSTATUS status;
+	bool ret = true;
+	TALLOC_CTX *mem_ctx = NULL;
+	struct smb2_handle h = {{0}};
+	struct smb2_read rd = {0};
+	struct smb2_tree *tree2 = NULL;
+	bool ok;
+	mem_ctx = talloc_init("torture_samba3_checkfsp");
+
+	torture_assert_goto(tctx,
+		mem_ctx != NULL,
+		ret,
+		done,
+		"talloc_init failed\n");
+
+	ok = torture_smb2_tree_connect(tctx,
+			tree->session,
+			tctx,
+			&tree2);
+	torture_assert_goto(tctx,
+				ok == true,
+				ret,
+				done,
+				"error creating second tcon");
+
+	/* Try a read on an invalid FID */
+	h.data[0] = 4711;
+	rd.in.file.handle = h;
+	rd.in.length      = 5;
+	rd.in.offset      = 0;
+	status = smb2_read(tree, tree, &rd);
+
+	torture_assert_ntstatus_equal_goto(tctx,
+				status,
+				NT_STATUS_FILE_CLOSED,
+				ret,
+				done,
+				talloc_asprintf(tctx,
+					"expected NT_STATUS_FILE_CLOSED got "
+					"%s", nt_errstr(status)));
+
+	/* Try a read on a directory handle */
+	torture_assert_goto(tctx,
+		smb2_util_setup_dir(tctx, tree, dirname),
+		ret,
+		done,
+		"creating test directory");
+
+	/* Open the directory */
+	status = torture_smb2_testdir_access(tree,
+			dirname,
+			&h,
+			SEC_FILE_EXECUTE | SEC_FILE_READ_ATTRIBUTE);
+
+	torture_assert_ntstatus_ok_goto(tctx,
+				status,
+				ret,
+				done,
+				"can't open test dir");
+
+	rd.in.file.handle = h;
+	/* Try a read on the directory */
+
+	status = smb2_read(tree, tree, &rd);
+	torture_assert_ntstatus_equal_goto(tctx,
+				status,
+				NT_STATUS_INVALID_DEVICE_REQUEST,
+				ret,
+				done,
+				talloc_asprintf(tctx,
+					"expected "
+					"NT_STATUS_INVALID_DEVICE_REQUEST got "
+					"%s", nt_errstr(status)));
+
+	/* Same test on the second tcon */
+	status = smb2_read(tree2, tree, &rd);
+
+	torture_assert_ntstatus_equal_goto(tctx,
+				status,
+				NT_STATUS_FILE_CLOSED,
+				ret,
+				done,
+				talloc_asprintf(tctx,
+					"expected NT_STATUS_FILE_CLOSED got "
+					"%s", nt_errstr(status)));
+	smb2_util_close(tree, h);
+
+	/* Try a normal file read on a second tcon */
+	status = torture_smb2_testfile_access(tree,
+				fname,
+				&h,
+				SEC_FILE_READ_ATTRIBUTE);
+
+	torture_assert_ntstatus_ok_goto(tctx,
+				status,
+				ret,
+				done,
+				"can't open file");
+
+	rd.in.file.handle = h;
+	status = smb2_read(tree2, tree, &rd);
+	smb2_util_close(tree, h);
+	torture_assert_ntstatus_equal_goto(tctx,
+				status,
+				NT_STATUS_FILE_CLOSED,
+				ret,
+				done,
+				talloc_asprintf(tctx,
+					"expected NT_STATUS_FILE_CLOSED got "
+					"%s", nt_errstr(status)));
+ done:
+	smb2_deltree(tree, dirname);
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
 static void torture_smb2_tree_disconnect_timer(struct tevent_context *ev,
 					       struct tevent_timer *te,
 					       struct timeval now,
@@ -173,6 +295,84 @@ done:
 	}
 	smb2_util_close(tree, h);
 	smb2_deltree(tree, BASEDIR);
+	return ret;
+}
+
+/* ported from samba3caseinsensitive */
+
+bool torture_smb2_samba3_caseinsensitive(struct torture_context *tctx,
+		struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = NULL;
+	const char *dirname = "insensitive";
+	const char *ucase_fname = "FooBaR*";
+	const char *fname = "foobarblah";
+	struct smb2_create io = {0};
+	struct smb2_find f = {0};
+	struct smb2_handle dir = {{0}};
+	union smb_search_data *d = NULL;
+	char *fpath = NULL;
+	unsigned int counter;
+	bool ret;
+	NTSTATUS status;
+
+	mem_ctx = talloc_init("torture_samba3_caseinsensitive");
+	torture_assert_goto(tctx,
+		mem_ctx != NULL, ret, done, "talloc_init failed");
+
+	torture_assert_goto(tctx,
+			smb2_util_setup_dir(tctx, tree, dirname),
+			ret,
+			done,
+			"failure creating test directory");
+
+	status = torture_smb2_testdir(tree, dirname, &dir);
+
+	torture_assert_ntstatus_ok_goto(tctx,
+		status, ret, done, "Error accessing test directory\n");
+
+	fpath = talloc_asprintf(mem_ctx, "%s\\%s", dirname, fname);
+	torture_assert_goto(tctx, fpath != NULL, ret, done, "no memory");
+
+	io.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
+	io.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	io.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	io.in.share_access = NTCREATEX_SHARE_ACCESS_NONE;
+	io.in.create_disposition = NTCREATEX_DISP_CREATE;
+	io.in.create_options = NTCREATEX_OPTIONS_NON_DIRECTORY_FILE;
+	io.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	io.in.fname = fpath;
+	status = smb2_create(tree, tctx, &io);
+
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+			talloc_asprintf(tctx,
+				"Could not create file %s: %s\n",
+				fpath,
+				nt_errstr(status)));
+
+	smb2_util_close(tree, io.out.file.handle);
+
+	f.in.file.handle        = dir;
+	f.in.pattern            = ucase_fname;
+	f.in.continue_flags     = SMB2_CONTINUE_FLAG_RESTART;
+	f.in.max_response_size  = 0x1000;
+	f.in.level              = SMB2_FIND_DIRECTORY_INFO;
+
+	status = smb2_find_level(tree, tctx, &f, &counter, &d);
+	torture_assert_ntstatus_ok_goto(tctx,
+			status,
+			ret,
+			done,
+			"search failed");
+
+	torture_assert_goto(tctx,
+			counter == 1,
+			ret,
+			done,
+			talloc_asprintf(tctx, "expected 1 entries, got %d", counter));
+	ret = true;
+ done:
+	talloc_free(mem_ctx);
 	return ret;
 }
 

@@ -36,14 +36,14 @@ ctdb_onnode "$first" "wipedb ${db}"
 
 echo
 echo "Create records in ${db}"
-for i in $(seq 1 10) ; do
+for i in $(seq 1 10); do
 	ctdb_onnode "$first" "writekey ${db} delete${i} value${i}"
 	ctdb_onnode "$first" "writekey ${db} keep${i} value${i}"
 done
 
 echo
 echo "Migrate record(s) to all nodes"
-for i in $(seq 1 10) ; do
+for i in $(seq 1 10); do
 	ctdb_onnode all "readkey ${db} delete${i}"
 	ctdb_onnode all "readkey ${db} keep${i}"
 done
@@ -54,7 +54,7 @@ check_cattdb_num_records "$db" 20 "$all_pnns"
 
 echo
 echo "Delete all 10 records from their lmaster node"
-for i in $(seq 1 10) ; do
+for i in $(seq 1 10); do
 	key="delete${i}"
 
 	testprog_onnode "$first" "ctdb-db-test get-lmaster ${key}"
@@ -65,9 +65,9 @@ for i in $(seq 1 10) ; do
 	echo
 	echo "Delete ${key} from lmaster node ${lmaster}"
 	testprog_onnode "$lmaster" \
-			     "ctdb-db-test fetch-local-delete $db ${key}"
+		"ctdb-db-test fetch-local-delete $db ${key}"
 
-	vacuum_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
+	db_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
 done
 
 echo "Do fast vacuuming run on all nodes"
@@ -87,7 +87,7 @@ check_cattdb_num_records "$db" 10 "$all_pnns"
 
 echo
 echo "Confirm  that remaining records still exist with expected values"
-for i in $(seq 1 10) ; do
+for i in $(seq 1 10); do
 	k="keep${i}"
 	v="value${i}"
 

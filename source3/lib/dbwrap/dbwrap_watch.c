@@ -226,6 +226,7 @@ static void db_watched_record_init(struct db_context *db,
 	*rec = (struct db_record) {
 		.db = db,
 		.key = dbwrap_record_get_key(backend_rec),
+		.flags = dbwrap_record_get_flags(backend_rec),
 		.storev = dbwrap_watched_storev,
 		.delete_rec = dbwrap_watched_delete,
 		.private_data = wrec,
@@ -365,6 +366,8 @@ static void db_watched_record_fini(struct db_watched_record *wrec)
 	struct db_context *backend = dbwrap_record_get_db(wrec->backend.rec);
 	struct db_record *rec = wrec->rec;
 	TDB_DATA key = dbwrap_record_get_key(wrec->backend.rec);
+	int flags = dbwrap_record_get_flags(wrec->backend.rec).persistent ?
+		DBWRAP_STORE_PERSISTENT : 0;
 	NTSTATUS status;
 
 	if (!wrec->force_fini_store) {
@@ -409,7 +412,10 @@ static void db_watched_record_fini(struct db_watched_record *wrec)
 		dbwrap_watched_watch_skip_alerting(rec);
 	}
 
-	status = dbwrap_watched_record_storev(wrec, state.dbufs, state.num_dbufs, 0);
+	status = dbwrap_watched_record_storev(wrec,
+					      state.dbufs,
+					      state.num_dbufs,
+					      flags);
 	TALLOC_FREE(state.frame);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("dbwrap_watched_record_storev failed: %s\n",
@@ -718,6 +724,31 @@ static int dbwrap_watched_traverse_read(struct db_context *db,
 	return ret;
 }
 
+static int dbwrap_watched_traverse_per_rec_persistent_read(
+		struct db_context *db,
+		int (*fn)(struct db_record *rec,
+			  void *private_data),
+		void *private_data)
+{
+	struct db_watched_ctx *ctx = talloc_get_type_abort(
+		db->private_data, struct db_watched_ctx);
+	struct dbwrap_watched_traverse_state state;
+	NTSTATUS status;
+	int ret;
+
+	state = (struct dbwrap_watched_traverse_state) {
+		.fn = fn,
+		.private_data = private_data,
+	};
+
+	status = dbwrap_traverse_per_rec_persistent_read(
+		ctx->backend, dbwrap_watched_traverse_fn, &state, &ret);
+	if (!NT_STATUS_IS_OK(status)) {
+		return -1;
+	}
+	return ret;
+}
+
 static int dbwrap_watched_get_seqnum(struct db_context *db)
 {
 	struct db_watched_ctx *ctx = talloc_get_type_abort(
@@ -883,6 +914,15 @@ static int dbwrap_watched_exists(struct db_context *db, TDB_DATA key)
 	return dbwrap_exists(ctx->backend, key);
 }
 
+static int dbwrap_watched_wipe(struct db_context *db,
+			       struct dbwrap_wipe_flags flags)
+{
+	struct db_watched_ctx *ctx = talloc_get_type_abort(
+		db->private_data, struct db_watched_ctx);
+
+	return dbwrap_wipe(ctx->backend, flags);
+}
+
 static size_t dbwrap_watched_id(struct db_context *db, uint8_t *id,
 				size_t idlen)
 {
@@ -920,6 +960,7 @@ struct db_context *db_open_watched(TALLOC_CTX *mem_ctx,
 	db->do_locked = dbwrap_watched_do_locked;
 	db->traverse = dbwrap_watched_traverse;
 	db->traverse_read = dbwrap_watched_traverse_read;
+	db->traverse_per_rec_persistent_read = dbwrap_watched_traverse_per_rec_persistent_read;
 	db->get_seqnum = dbwrap_watched_get_seqnum;
 	db->transaction_start = dbwrap_watched_transaction_start;
 	db->transaction_commit = dbwrap_watched_transaction_commit;
@@ -928,6 +969,7 @@ struct db_context *db_open_watched(TALLOC_CTX *mem_ctx,
 	db->parse_record_send = dbwrap_watched_parse_record_send;
 	db->parse_record_recv = dbwrap_watched_parse_record_recv;
 	db->exists = dbwrap_watched_exists;
+	db->wipe = dbwrap_watched_wipe;
 	db->id = dbwrap_watched_id;
 	db->name = dbwrap_name(ctx->backend);
 
@@ -970,7 +1012,7 @@ void dbwrap_watched_watch_remove_instance(struct db_record *rec, uint64_t instan
 		DBG_DEBUG("Watcher %s:%"PRIu64" reverted from adding\n",
 			  server_id_str_buf(clear_watcher.pid, &buf),
 			  clear_watcher.instance);
-		ZERO_STRUCT(wrec->added);
+		wrec->added = (struct dbwrap_watcher) { 0 };
 	}
 
 	for (i=0; i < wrec->watchers.count; i++) {

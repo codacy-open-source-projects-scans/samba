@@ -21,6 +21,7 @@
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "smbd/smbXsrv_open.h"
+#include "source3/lib/split_path_below.h"
 #include "libcli/security/security.h"
 #include "util_tdb.h"
 #include "lib/util/bitmap.h"
@@ -126,6 +127,8 @@ NTSTATUS fsp_bind_smb(struct files_struct *fsp, struct smb_request *req)
 	status = smbXsrv_open_create(req->xconn,
 				     req->session,
 				     fsp->conn->tcon,
+				     &fsp->file_id,
+				     fsp->name_hash,
 				     now,
 				     &op);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -924,10 +927,7 @@ fail:
 
 static bool full_path_extend(char **dir, const char *atname)
 {
-	talloc_asprintf_addbuf(dir,
-			       "%s%s",
-			       (*dir)[0] == '\0' ? "" : "/",
-			       atname);
+	talloc_asprintf_addsep(dir, "/", "%s", atname);
 	return (*dir) != NULL;
 }
 
@@ -936,7 +936,7 @@ static bool full_path_extend(char **dir, const char *atname)
  * the stat cache for the last component to be looked up. Cache
  * contents is the correctly capitalized translation of the parameter
  * "name" as it exists on disk. This is indexed by inode of the dirfsp
- * and name, and contrary to stat_cahce_lookup() it does not
+ * and name, and contrary to stat_cache_lookup() it does not
  * vfs_stat() the last component. This will be taken care of by an
  * attempt to do a openat_pathref_fsp().
  */
@@ -1794,8 +1794,9 @@ static int fsp_ref_no_close_destructor(struct smb_filename *smb_fname)
 	return 0;
 }
 
-NTSTATUS reference_smb_fname_fsp_link(struct smb_filename *smb_fname_dst,
-				      const struct smb_filename *smb_fname_src)
+static NTSTATUS reference_smb_fname_fsp_link(
+	struct smb_filename *smb_fname_dst,
+	const struct smb_filename *smb_fname_src)
 {
 	bool ok;
 
@@ -1980,11 +1981,12 @@ static struct files_struct *file_close_conn_fn(
 		return NULL;
 	}
 
-	if (fsp->op != NULL && fsp->op->global->durable) {
+	if (fsp->op != NULL) {
 		/*
-		 * A tree disconnect closes a durable handle
+		 * A tree disconnect closes a durable or persistent handle
 		 */
 		fsp->op->global->durable = false;
+		fsp->op->global->persistent = false;
 	}
 
 	did_close = close_file_in_loop(fsp, state->close_type);
@@ -2267,22 +2269,19 @@ struct files_struct *file_find_one_fsp_from_lease_key(
 
 bool file_find_subpath(files_struct *dir_fsp)
 {
+	struct split_path base = {};
 	files_struct *fsp;
-	size_t dlen;
-	char *d_fullname = NULL;
+	bool ok;
 
-	d_fullname = talloc_asprintf(talloc_tos(), "%s/%s",
-				     dir_fsp->conn->connectpath,
-				     dir_fsp->fsp_name->base_name);
-
-	if (!d_fullname) {
+	ok = split_path_init(dir_fsp->conn->connectpath,
+			     dir_fsp->fsp_name->base_name,
+			     &base);
+	if (!ok) {
 		return false;
 	}
 
-	dlen = strlen(d_fullname);
-
 	for (fsp=dir_fsp->conn->sconn->files; fsp; fsp=fsp->next) {
-		char *d1_fullname;
+		bool below;
 
 		if (fsp == dir_fsp) {
 			continue;
@@ -2293,25 +2292,39 @@ bool file_find_subpath(files_struct *dir_fsp)
 			continue;
 		}
 
-		d1_fullname = talloc_asprintf(talloc_tos(),
-					"%s/%s",
-					fsp->conn->connectpath,
-					fsp->fsp_name->base_name);
+		if (dir_fsp->conn == fsp->conn) {
+			const char *f_base = fsp->fsp_name->base_name;
 
-		/*
-		 * If the open file has a path that is a longer
-		 * component, then it's a subpath.
-		 */
-		if (strnequal(d_fullname, d1_fullname, dlen) &&
-				(d1_fullname[dlen] == '/')) {
-			TALLOC_FREE(d1_fullname);
-			TALLOC_FREE(d_fullname);
-			return true;
+			if (base.namelen == 0) {
+				/*
+				 * Everything is below the share root
+				 */
+				return true;
+			}
+
+			/*
+			 * base.namelen counts bytes
+			 */
+			below = strnequal_bytes(base.name,
+						f_base,
+						base.namelen);
+			if (!below) {
+				continue;
+			}
+			if (f_base[base.namelen] == '/') {
+				return true;
+			}
+		} else {
+			below = split_path_below(&base,
+						 fsp->conn->connectpath,
+						 fsp->fsp_name->base_name,
+						 false);
+			if (below) {
+				return true;
+			}
 		}
-		TALLOC_FREE(d1_fullname);
 	}
 
-	TALLOC_FREE(d_fullname);
 	return false;
 }
 
@@ -2711,5 +2724,14 @@ void fsp_apply_private_ntcreatex_flags(struct files_struct *fsp,
 		fsp->fsp_flags.ntcreatex_stream_baseopen = true;
 	} else {
 		fsp->fsp_flags.ntcreatex_stream_baseopen = false;
+	}
+	if (flags & NTCREATEX_FLAG_PERSISTENT_OPEN) {
+		/*
+		 * Dereferencing op would crash anyway if NULL, but the assert
+		 * makes it more clear that op is expected when getting
+		 * NTCREATEX_FLAG_PERSISTENT_OPEN.
+		 */
+		SMB_ASSERT(fsp->op);
+		fsp->op->global->persistent = true;
 	}
 }

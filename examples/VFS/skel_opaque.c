@@ -45,6 +45,14 @@ static void skel_disconnect(vfs_handle_struct *handle)
 	;
 }
 
+static int skel_open_share_root(struct vfs_handle_struct *handle,
+				struct files_struct *root_fsp,
+				const char *connectpath)
+{
+	errno = ENOSYS;
+	return -1;
+}
+
 static uint64_t skel_disk_free(vfs_handle_struct *handle,
 			       struct files_struct *fsp,
 			       uint64_t *bsize,
@@ -939,6 +947,7 @@ static NTSTATUS skel_durable_reconnect(struct vfs_handle_struct *handle,
 				       struct smb_request *smb1req,
 				       struct smbXsrv_open *op,
 				       const DATA_BLOB old_cookie,
+				       const struct smb2_lease *lease,
 				       TALLOC_CTX *mem_ctx,
 				       struct files_struct **fsp,
 				       DATA_BLOB *new_cookie)
@@ -953,6 +962,7 @@ static struct vfs_fn_pointers skel_opaque_fns = {
 
 	.connect_fn = skel_connect,
 	.disconnect_fn = skel_disconnect,
+	.open_share_root_fn = skel_open_share_root,
 	.disk_free_fn = skel_disk_free,
 	.get_quota_fn = skel_get_quota,
 	.set_quota_fn = skel_set_quota,

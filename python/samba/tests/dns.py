@@ -909,7 +909,7 @@ class TestComplexQueries(DNSTest):
         self.finish_name_packet(p, questions)
 
         (response, response_packet) =\
-            self.dns_transaction_udp(p, host=self.server_ip)
+            self.dns_transaction_tcp(p, host=self.server_ip)
 
         self.assertEqual(len(response.answers), num_recs_to_enter)
 
@@ -959,7 +959,7 @@ class TestComplexQueries(DNSTest):
         self.finish_name_packet(p, questions)
 
         (response, response_packet) =\
-            self.dns_transaction_udp(p, host=self.server_ip)
+            self.dns_transaction_tcp(p, host=self.server_ip)
 
         self.assertEqual(len(response.answers), num_recs_to_enter)
 
@@ -2248,7 +2248,7 @@ class TestRPCRoundtrip(DNSTest):
 class TestUDPTruncation(DNSTest):
     """
     Samba internal DNS (no EDNS0): if a UDP reply would exceed
-    DNS_MAX_UDP_PACKET_LENGTH (1232) bytes, server should return
+    DNS_MAX_UDP_PACKET_LENGTH (512) bytes, server should return
     a small (<512 bytes) truncated response containing only
     the question (no answers), with TC set.
     TCP must return the full response (no size limit).

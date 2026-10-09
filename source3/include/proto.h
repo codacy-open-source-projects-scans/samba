@@ -60,7 +60,6 @@ size_t pull_string_talloc(TALLOC_CTX *ctx,
 			const void *src,
 			size_t src_len,
 			int flags);
-size_t dos_PutUniCode(char *dst,const char *src, size_t len, bool null_terminate);
 int rpcstr_push_talloc(TALLOC_CTX *ctx, smb_ucs2_t **dest, const char *src);
 
 /* The following definitions come from lib/dmallocmsg.c  */
@@ -508,7 +507,7 @@ struct tevent_req *open_socket_out_send(TALLOC_CTX *mem_ctx,
 					void (*after_connect)(int fd, void *private_data),
 					void *private_data);
 NTSTATUS open_socket_out_recv(struct tevent_req *req, int *pfd);
-const char *get_peer_addr(int fd, char *addr, size_t addr_len);
+const char *get_peer_addr(int fd, struct ssaddr_buf *buf);
 
 struct tsocket_address;
 
@@ -664,8 +663,8 @@ bool lookup_wellknown_name(TALLOC_CTX *mem_ctx, const char *name,
 
 /* The following definitions come from lib/filename_util.c */
 
-NTSTATUS get_full_smb_filename(TALLOC_CTX *ctx, const struct smb_filename *smb_fname,
-			      char **full_name);
+char *get_full_smb_filename(TALLOC_CTX *ctx,
+			    const struct smb_filename *smb_fname);
 struct smb_filename *synthetic_smb_fname(TALLOC_CTX *mem_ctx,
 					 const char *base_name,
 					 const char *stream_name,

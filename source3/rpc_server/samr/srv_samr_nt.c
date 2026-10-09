@@ -723,6 +723,11 @@ NTSTATUS _samr_SetSecurity(struct pipes_struct *p,
 		return NT_STATUS_INVALID_HANDLE;
 	}
 
+	if (r->in.sdbuf->sd == NULL || r->in.sdbuf->sd->dacl == NULL) {
+		TALLOC_FREE(sampass);
+		return NT_STATUS_INVALID_SECURITY_DESCR;
+	}
+
 	dacl = r->in.sdbuf->sd->dacl;
 	for (i=0; i < dacl->num_aces; i++) {
 		if (dom_sid_equal(&uinfo->sid, &dacl->aces[i].trustee)) {
@@ -3896,6 +3901,9 @@ NTSTATUS _samr_CreateUser2(struct pipes_struct *p,
 	account = r->in.account_name->string;
 	if (account == NULL) {
 		return NT_STATUS_NO_MEMORY;
+	}
+	if (account[0] == '\0') {
+		return NT_STATUS_INVALID_ACCOUNT_NAME;
 	}
 
 	nt_status = can_create(p->mem_ctx, account);
@@ -7481,6 +7489,14 @@ NTSTATUS _samr_ValidatePassword(struct pipes_struct *p,
 	dcesrv_call_auth_info(dce_call, NULL, &auth_level);
 
 	if (auth_level != DCERPC_AUTH_LEVEL_PRIVACY) {
+		p->fault_state = DCERPC_FAULT_ACCESS_DENIED;
+		return NT_STATUS_ACCESS_DENIED;
+	}
+
+	if (lp_server_role() <= ROLE_DOMAIN_MEMBER) {
+		/*
+		 * We only want this on DCs
+		 */
 		p->fault_state = DCERPC_FAULT_ACCESS_DENIED;
 		return NT_STATUS_ACCESS_DENIED;
 	}

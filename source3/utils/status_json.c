@@ -185,6 +185,15 @@ static const struct mask2txt lease_mask[] = {
 	{0, NULL}
 };
 
+static const struct mask2txt flags_mask[] = {
+	{SHARE_ENTRY_FLAG_POSIX_OPEN, "posix"},
+	{SHARE_ENTRY_FLAG_STREAM_BASEOPEN, "baseopen"},
+	{SHARE_ENTRY_FLAG_DENY_DOS, "deny-dos"},
+	{SHARE_ENTRY_FLAG_DENY_FCB, "deny-fcb"},
+	{SHARE_ENTRY_FLAG_PERSISTENT_OPEN, "persistent"},
+	{0, NULL}
+};
+
 /* Add nested json key:value entry, up to 4 levels deep */
 static int add_nested_item_to_json(struct json_object *root_json,
 				   const char **subs,
@@ -318,7 +327,7 @@ failure:
 }
 
 static int add_channel_to_json(struct json_object *parent_json,
-			       const struct smbXsrv_channel_global0 *channel)
+			       const struct smbXsrv_channel_global *channel)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct json_object sub_json;
@@ -404,7 +413,7 @@ failure:
 }
 
 static int add_channels_to_json(struct json_object *parent_json,
-				const struct smbXsrv_session_global0 *global)
+				const struct smbXsrv_session_global *global)
 {
 	struct json_object sub_json;
 	uint32_t i;
@@ -416,7 +425,7 @@ static int add_channels_to_json(struct json_object *parent_json,
 	}
 
 	for (i = 0; i < global->num_channels; i++) {
-		const struct smbXsrv_channel_global0 *c = &global->channels[i];
+		const struct smbXsrv_channel_global *c = &global->channels[i];
 
 		result = add_channel_to_json(&sub_json, c);
 		if (result < 0) {
@@ -717,6 +726,49 @@ static int add_access_mode_to_json(struct json_object *parent_json,
 	return 0;
 failure:
 	json_free(&access_json);
+	TALLOC_FREE(tmp_ctx);
+	return -1;
+}
+
+static int add_flags_to_json(struct json_object *parent_json,
+			     uint16_t flags)
+{
+	struct json_object flags_json;
+	char *flags_hex = NULL;
+	int result;
+
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	if (tmp_ctx == NULL) {
+		return -1;
+	}
+
+	flags_json = json_new_object();
+	if (json_is_invalid(&flags_json)) {
+		goto failure;
+	}
+
+	flags_hex = talloc_asprintf(tmp_ctx, "0x%08x", flags);
+	if (flags_hex == NULL) {
+		  goto failure;
+	}
+	result = json_add_string(&flags_json, "hex", flags_hex);
+	if (result < 0) {
+		  goto failure;
+	}
+	result = map_mask_to_json(&flags_json, flags, flags_mask);
+	if (result < 0) {
+		goto failure;
+	}
+
+	result = json_add_object(parent_json, "flags_mask", &flags_json);
+	if (result < 0) {
+		goto failure;
+	}
+
+	TALLOC_FREE(tmp_ctx);
+	return 0;
+failure:
+	json_free(&flags_json);
 	TALLOC_FREE(tmp_ctx);
 	return -1;
 }
@@ -1064,6 +1116,10 @@ static int add_open_to_json(struct json_object *parent_json,
 	if (result < 0) {
 		goto failure;
 	}
+	result = add_flags_to_json(&sub_json, e->flags);
+	if (result < 0) {
+		goto failure;
+	}
 
 	timestr = timeval_str_buf(&e->time, true, true, &tv_buf);
 	if (timestr == NULL) {
@@ -1302,13 +1358,17 @@ int print_brl_json(struct traverse_state *state,
 	};
 	int result = 0;
 	char *key;
+	size_t sharepath_len = strlen(sharepath);
 
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	if (tmp_ctx == NULL) {
 		return -1;
 	}
 
-	if (sharepath[strlen(sharepath)-1] == '/') {
+	if (sharepath_len == 0) {
+		goto failure;
+	}
+	if (sharepath[sharepath_len - 1] == '/') {
 		key = talloc_asprintf(tmp_ctx, "%s%s", sharepath, filename);
 	} else {
 		key = talloc_asprintf(tmp_ctx, "%s/%s", sharepath, filename);

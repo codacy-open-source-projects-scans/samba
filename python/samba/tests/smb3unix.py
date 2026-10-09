@@ -446,7 +446,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             wire_mode = libsmb.unix_mode_to_wire(0o600)
             f,_,cc_out = c.create_ex('\\reparse',
-                                     DesiredAccess=security.SEC_STD_ALL,
+                                     DesiredAccess=security.SEC_FILE_WRITE_ATTRIBUTE,
                                      CreateDisposition=libsmb.FILE_CREATE,
                                      CreateContexts=[posix_context(wire_mode)])
 
@@ -460,7 +460,7 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
 
             wire_mode = libsmb.unix_mode_to_wire(0o600)
             f,_,cc_out = c.create_ex('\\reparse',
-                                     DesiredAccess=security.SEC_STD_ALL,
+                                     DesiredAccess=security.SEC_FILE_WRITE_ATTRIBUTE,
                                      CreateDisposition=libsmb.FILE_OPEN,
                                      CreateContexts=[posix_context(wire_mode)])
             c.close(f)
@@ -507,6 +507,58 @@ class Smb3UnixTests(samba.tests.libsmb.LibsmbTests):
         l = winconn.list('', mask='test_delete_on_close')
         found_files = {get_string(f['name']): f for f in l}
         self.assertFalse('test_delete_on_close' in found_files)
+
+    def test_delete_read_only_attr(self):
+        """
+        Test deleting a file with FILE_ATTRIBUTE_READONLY
+        """
+
+        testfile = 'test_delete_read_only_attr'
+        wc, c = self.connections()
+
+        self.clean_file(c, testfile)
+
+        wh,_,_ = wc.create_ex(
+            testfile,
+            DesiredAccess=security.SEC_STD_ALL,
+            ShareAccess=0x07,
+            CreateDisposition=libsmb.FILE_CREATE,
+            FileAttributes=libsmb.FILE_ATTRIBUTE_READONLY)
+
+        # First try to delete on a Windows handle, should fail
+        try:
+            wc.delete_on_close(wh, 1)
+        except Exception as e:
+            if e.args[0] != ntstatus.NT_STATUS_CANNOT_DELETE:
+                wc.close(wh)
+                raise e
+
+        wc.close(wh)
+
+        wire_mode = libsmb.unix_mode_to_wire(0o666)
+
+        h,_,_ = c.create_ex(
+            testfile,
+            DesiredAccess=security.SEC_STD_DELETE |
+                security.SEC_FILE_WRITE_ATTRIBUTE,
+            ShareAccess=0x07,
+            CreateDisposition=libsmb.FILE_OPEN,
+            FileAttributes=libsmb.FILE_ATTRIBUTE_READONLY,
+            CreateContexts=[posix_context(wire_mode)])
+
+        self.addCleanup(self.clean_file, c, testfile)
+
+        try:
+            c.delete_on_close(h, 1)
+        except Exception as e:
+            c.close(h)
+            raise e
+        c.close(h)
+
+        # The file should be deleted
+        l = c.list('', mask='*')
+        found_files = {get_string(f['name']): f for f in l}
+        self.assertFalse(testfile in found_files)
 
     def test_posix_fs_info(self):
         """

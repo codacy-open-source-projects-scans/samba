@@ -404,6 +404,7 @@
  * Version 53 - Change GET_QUOTA to take a fsp instead of a name
  * Version 53 - Add fsp to SET_QUOTA
  * Version 53 - Remove GETWD
+ * Version 53 - Add open_share_root
  */
 
 #define SMB_VFS_INTERFACE_VERSION 53
@@ -989,6 +990,9 @@ struct vfs_fn_pointers {
 
 	int (*connect_fn)(struct vfs_handle_struct *handle, const char *service, const char *user);
 	void (*disconnect_fn)(struct vfs_handle_struct *handle);
+	int (*open_share_root_fn)(struct vfs_handle_struct *handle,
+				  struct files_struct *root_fsp,
+				  const char *connectpath);
 	uint64_t (*disk_free_fn)(struct vfs_handle_struct *handle,
 				 struct files_struct *fsp,
 				 uint64_t *bsize,
@@ -1352,6 +1356,7 @@ struct vfs_fn_pointers {
 					 struct smb_request *smb1req,
 					 struct smbXsrv_open *op,
 					 const DATA_BLOB old_cookie,
+					 const struct smb2_lease *lease,
 					 TALLOC_CTX *mem_ctx,
 					 struct files_struct **fsp,
 					 DATA_BLOB *new_cookie);
@@ -1446,6 +1451,12 @@ void _smb_vfs_deny_pop(struct smb_vfs_deny_state *state, const char *location);
 int smb_vfs_call_connect(struct vfs_handle_struct *handle,
 			 const char *service, const char *user);
 void smb_vfs_call_disconnect(struct vfs_handle_struct *handle);
+int smb_vfs_call_open_share_root(struct vfs_handle_struct *handle,
+				 struct files_struct *root_fsp,
+				 const char *connectpath);
+int vfs_set_share_root(struct files_struct *root_fsp,
+		       const char *connectpath,
+		       const SMB_STRUCT_STAT *pst);
 uint64_t smb_vfs_call_disk_free(struct vfs_handle_struct *handle,
 				struct files_struct *fsp,
 				uint64_t *bsize,
@@ -1847,6 +1858,7 @@ NTSTATUS smb_vfs_call_durable_reconnect(struct vfs_handle_struct *handle,
 					struct smb_request *smb1req,
 					struct smbXsrv_open *op,
 					const DATA_BLOB old_cookie,
+					const struct smb2_lease *lease,
 					TALLOC_CTX *mem_ctx,
 					struct files_struct **fsp,
 					DATA_BLOB *new_cookie);
@@ -1879,6 +1891,9 @@ int vfs_not_implemented_connect(
 			const char *service,
 			const char *user);
 void vfs_not_implemented_disconnect(vfs_handle_struct *handle);
+int vfs_not_implemented_open_share_root(struct vfs_handle_struct *handle,
+					struct files_struct *root_fsp,
+					const char *connectpath);
 uint64_t vfs_not_implemented_disk_free(vfs_handle_struct *handle,
 				       struct files_struct *fsp,
 				       uint64_t *bsize,
@@ -2272,6 +2287,7 @@ NTSTATUS vfs_not_implemented_durable_reconnect(struct vfs_handle_struct *handle,
 					       struct smb_request *smb1req,
 					       struct smbXsrv_open *op,
 					       const DATA_BLOB old_cookie,
+					       const struct smb2_lease *lease,
 					       TALLOC_CTX *mem_ctx,
 					       struct files_struct **fsp,
 					       DATA_BLOB *new_cookie);

@@ -34,6 +34,8 @@
 #include "librpc/gen_ndr/ndr_dnsp.h"
 #include "librpc/ndr/libndr.h"
 #include "libcli/security/security.h"
+#include "librpc/ndr/ndr_nbt.h"
+#include "libcli/netlogon/netlogon_proto.h"
 #include "param/param.h"
 #include "../lib/util/asn1.h"
 #include "lib/util/smb_strtox.h"
@@ -269,7 +271,7 @@ static int ldif_write_objectGUID(struct ldb_context *ldb, void *mem_ctx,
 	return 0;
 }
 
-static bool ldif_comparision_objectGUID_isString(const struct ldb_val *v)
+static bool ldif_comparison_objectGUID_isString(const struct ldb_val *v)
 {
 	if (v->length != 36 && v->length != 38) return false;
 
@@ -314,10 +316,13 @@ static int extended_dn_read_GUID(struct ldb_context *ldb, void *mem_ctx,
 static int ldif_comparison_objectGUID(struct ldb_context *ldb, void *mem_ctx,
 				     const struct ldb_val *v1, const struct ldb_val *v2)
 {
-	if (ldif_comparision_objectGUID_isString(v1) && ldif_comparision_objectGUID_isString(v2)) {
+	if (ldif_comparison_objectGUID_isString(v1) &&
+	    ldif_comparison_objectGUID_isString(v2))
+	{
 		return ldb_comparison_binary(ldb, mem_ctx, v1, v2);
-	} else if (ldif_comparision_objectGUID_isString(v1)
-		   && !ldif_comparision_objectGUID_isString(v2)) {
+	} else if (ldif_comparison_objectGUID_isString(v1) &&
+		   !ldif_comparison_objectGUID_isString(v2))
+	{
 		struct ldb_val v;
 		int ret;
 		if (ldif_read_objectGUID(ldb, mem_ctx, v1, &v) != 0) {
@@ -327,8 +332,9 @@ static int ldif_comparison_objectGUID(struct ldb_context *ldb, void *mem_ctx,
 		ret = ldb_comparison_binary(ldb, mem_ctx, &v, v2);
 		talloc_free(v.data);
 		return ret;
-	} else if (!ldif_comparision_objectGUID_isString(v1)
-		   && ldif_comparision_objectGUID_isString(v2)) {
+	} else if (!ldif_comparison_objectGUID_isString(v1) &&
+		   ldif_comparison_objectGUID_isString(v2))
+	{
 		struct ldb_val v;
 		int ret;
 		if (ldif_read_objectGUID(ldb, mem_ctx, v2, &v) != 0) {
@@ -348,7 +354,7 @@ static int ldif_comparison_objectGUID(struct ldb_context *ldb, void *mem_ctx,
 static int ldif_canonicalise_objectGUID(struct ldb_context *ldb, void *mem_ctx,
 				       const struct ldb_val *in, struct ldb_val *out)
 {
-	if (ldif_comparision_objectGUID_isString(in)) {
+	if (ldif_comparison_objectGUID_isString(in)) {
 		if (ldif_read_objectGUID(ldb, mem_ctx, in, out) != 0) {
 			/* Perhaps it wasn't a valid string after all */
 			return ldb_handler_copy(ldb, mem_ctx, in, out);
@@ -713,17 +719,10 @@ static int ldif_write_prefixMap(struct ldb_context *ldb, void *mem_ctx,
 		goto failed;
 	}
 	string = talloc_strdup(mem_ctx, "");
-	if (string == NULL) {
-		goto failed;
-	}
 
 	for (i=0; i < blob->ctr.dsdb.num_mappings; i++) {
 		DATA_BLOB oid_blob;
 		char *partial_oid = NULL;
-
-		if (i > 0) {
-			talloc_asprintf_addbuf(&string, ";");
-		}
 
 		oid_blob = data_blob_const(blob->ctr.dsdb.mappings[i].oid.binary_oid,
 					   blob->ctr.dsdb.mappings[i].oid.length);
@@ -732,10 +731,16 @@ static int ldif_write_prefixMap(struct ldb_context *ldb, void *mem_ctx,
 				  blob->ctr.dsdb.mappings[i].id_prefix));
 			goto failed;
 		}
-		talloc_asprintf_addbuf(&string, "%u:%s",
+		talloc_asprintf_addsep(&string,
+				       ";",
+				       "%u:%s",
 				       blob->ctr.dsdb.mappings[i].id_prefix,
 				       partial_oid);
 		talloc_free(discard_const(partial_oid));
+	}
+
+	if (string == NULL) {
+		goto failed;
 	}
 
 	talloc_free(blob);
@@ -747,7 +752,7 @@ failed:
 	return -1;
 }
 
-static bool ldif_comparision_prefixMap_isString(const struct ldb_val *v)
+static bool ldif_comparison_prefixMap_isString(const struct ldb_val *v)
 {
 	if (v->length < 4) {
 		return true;
@@ -766,7 +771,7 @@ static bool ldif_comparision_prefixMap_isString(const struct ldb_val *v)
 static int ldif_canonicalise_prefixMap(struct ldb_context *ldb, void *mem_ctx,
 				       const struct ldb_val *in, struct ldb_val *out)
 {
-	if (ldif_comparision_prefixMap_isString(in)) {
+	if (ldif_comparison_prefixMap_isString(in)) {
 		return ldif_read_prefixMap(ldb, mem_ctx, in, out);
 	}
 	return ldb_handler_copy(ldb, mem_ctx, in, out);
@@ -1127,6 +1132,49 @@ static int ldif_write_partialAttributeSet(struct ldb_context *ldb, void *mem_ctx
 			      true);
 }
 
+/*
+  convert a NDR formatted blob to a ldif formatted NetLogon
+*/
+static int ldif_write_NetLogon(struct ldb_context *ldb, void *mem_ctx,
+			       const struct ldb_val *in, struct ldb_val *out)
+{
+	struct netlogon_samlogon_response *p = NULL;
+	NTSTATUS status;
+
+	if (!(ldb_get_flags(ldb) & LDB_FLG_SHOW_BINARY)) {
+		return ldb_handler_copy(ldb, mem_ctx, in, out);
+	}
+
+	p = talloc(mem_ctx, struct netlogon_samlogon_response);
+	if (p == NULL) {
+		ldb_oom(ldb);
+		return -1;
+	}
+
+	status = pull_netlogon_samlogon_response(in, p, p);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(p);
+		out->data = (uint8_t *)talloc_strdup(mem_ctx,
+					"<Unable to decode binary data>");
+		if (out->data == NULL) {
+			ldb_oom(ldb);
+			return -1;
+		}
+		out->length = strlen((const char *)out->data);
+		return 0;
+	}
+
+	out->data = (uint8_t *)ndr_print_struct_string(mem_ctx,
+			(ndr_print_fn_t)ndr_print_netlogon_samlogon_response,
+			"NDR",
+			p);
+	TALLOC_FREE(p);
+	if (out->data == NULL) {
+		return ldb_handler_copy(ldb, mem_ctx, in, out);
+	}
+	out->length = strlen((char *)out->data);
+	return 0;
+}
 
 static int extended_dn_write_hex(struct ldb_context *ldb, void *mem_ctx,
 				 const struct ldb_val *in, struct ldb_val *out)
@@ -1618,6 +1666,13 @@ static const struct ldb_schema_syntax samba_syntaxes[] = {
 		.comparison_fn	  = samba_ldb_comparison_binary,
 		.operator_fn      = samba_syntax_binary_operator_fn
 	},{
+		.name		  = LDB_SYNTAX_SAMBA_NETLOGON,
+		.ldif_read_fn	  = ldb_handler_copy,
+		.ldif_write_fn	  = ldif_write_NetLogon,
+		.canonicalise_fn  = ldb_handler_copy,
+		.comparison_fn	  = samba_ldb_comparison_binary,
+		.operator_fn      = samba_syntax_binary_operator_fn
+	},{
 		.name		  = LDB_SYNTAX_SAMBA_OCTET_STRING,
 		.ldif_read_fn	  = ldb_handler_copy,
 		.ldif_write_fn	  = ldb_handler_copy,
@@ -1767,7 +1822,8 @@ static const struct {
 	{ "dnsRecord",				LDB_SYNTAX_SAMBA_DNSRECORD },
 	{ "dNSProperty",			LDB_SYNTAX_SAMBA_DNSPROPERTY },
 	{ "supplementalCredentials",		LDB_SYNTAX_SAMBA_SUPPLEMENTALCREDENTIALS},
-	{ "partialAttributeSet",		LDB_SYNTAX_SAMBA_PARTIALATTRIBUTESET}
+	{ "partialAttributeSet",		LDB_SYNTAX_SAMBA_PARTIALATTRIBUTESET},
+	{ "NetLogon",				LDB_SYNTAX_SAMBA_NETLOGON},
 };
 
 const struct ldb_schema_syntax *ldb_samba_syntax_by_name(struct ldb_context *ldb, const char *name)

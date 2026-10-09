@@ -288,14 +288,6 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	domain->children = talloc_zero_array(domain,
-					     struct winbindd_child,
-					     lp_winbind_max_domain_connections());
-	if (domain->children == NULL) {
-		TALLOC_FREE(domain);
-		return NT_STATUS_NO_MEMORY;
-	}
-
 	domain->queue = tevent_queue_create(domain, "winbind_domain");
 	if (domain->queue == NULL) {
 		TALLOC_FREE(domain);
@@ -333,6 +325,8 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 	domain->domain_type = trust_type;
 	domain->domain_trust_attribs = trust_attribs;
 	domain->routing_domain = routing_domain;
+	domain->start_dc_time = timeval_zero();
+	reset_domain_failover_state(domain);
 	sid_copy(&domain->sid, sid);
 
 	/* Is this our primary domain ? */
@@ -996,7 +990,7 @@ static void terminate_child(struct tevent_req *subreq)
 	}
 
 	for (ci = 0; ci < talloc_array_length(d->children); ci++) {
-		c = &d->children[ci];
+		c = d->children[ci];
 
 		if (c->pid != 0) {
 			/*
@@ -1024,7 +1018,7 @@ static void terminate_domain(struct tevent_req *subreq)
 	subreq = NULL;
 
 	for (ci = 0; ci < talloc_array_length(d->children); ci++) {
-		struct winbindd_child *c = &d->children[ci];
+		struct winbindd_child *c = d->children[ci];
 
 		if (c->pid == 0) {
 			continue;
@@ -1110,7 +1104,7 @@ static bool remove_trusted_domains_dc(void)
 		}
 
 		for (ci = 0; ci < talloc_array_length(d->children); ci++) {
-			c = &d->children[ci];
+			c = d->children[ci];
 
 			if (c->pid == 0) {
 				continue;
@@ -1990,7 +1984,7 @@ bool parse_domain_user(TALLOC_CTX *ctx,
 		       char **pdomain,
 		       char **puser)
 {
-	char *p = NULL;
+	const char *p = NULL;
 	char *namespace = NULL;
 	char *domain = NULL;
 	char *user = NULL;
@@ -2696,4 +2690,15 @@ const char *find_dns_domain_name(const char *domain_name)
 	}
 
 	return wbdom->name;
+}
+
+bool winbind_s4u2self_krb5_api_support(void)
+{
+#ifdef HAVE_KRB5_GET_CREDS_OPT_SET_IMPERSONATE /* Heimdal */
+	return true;
+#elif defined(HAVE_KRB5_GET_CREDENTIALS_FOR_USER) /* MIT */
+	return true;
+#else
+	return false;
+#endif
 }

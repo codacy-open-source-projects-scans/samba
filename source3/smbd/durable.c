@@ -71,8 +71,15 @@ NTSTATUS vfs_default_durable_cookie(struct files_struct *fsp,
 		return NT_STATUS_NOT_SUPPORTED;
 	}
 
-	if (fsp->fsp_flags.is_directory) {
-		return NT_STATUS_NOT_SUPPORTED;
+	if (!S_ISREG(fsp->fsp_name->st.st_ex_mode)) {
+		/* We only support Durable Handles on regular files ... */
+		if (!S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
+			return NT_STATUS_NOT_SUPPORTED;
+		}
+		/* ... but we do support Persistent Handles on directories */
+		if (!fsp->op->global->persistent) {
+			return NT_STATUS_NOT_SUPPORTED;
+		}
 	}
 
 	if (fsp_is_alternate_stream(fsp)) {
@@ -98,6 +105,10 @@ NTSTATUS vfs_default_durable_cookie(struct files_struct *fsp,
 	cookie.initial_allocation_size = fsp->initial_allocation_size;
 	cookie.position_information = fh_get_position_information(fsp->fh);
 	cookie.write_time_forced = fsp->fsp_flags.write_time_forced;
+	if (fsp->op->global->persistent) {
+		cookie.initial_delete_on_close =
+			fsp->fsp_flags.initial_delete_on_close;
+	}
 
 	cookie.stat_info.st_ex_dev = fsp->fsp_name->st.st_ex_dev;
 	cookie.stat_info.st_ex_ino = fsp->fsp_name->st.st_ex_ino;
@@ -115,6 +126,10 @@ NTSTATUS vfs_default_durable_cookie(struct files_struct *fsp,
 	cookie.stat_info.st_ex_blksize = fsp->fsp_name->st.st_ex_blksize;
 	cookie.stat_info.st_ex_blocks = fsp->fsp_name->st.st_ex_blocks;
 	cookie.stat_info.st_ex_flags = fsp->fsp_name->st.st_ex_flags;
+
+	if (fsp->op->global->persistent) {
+		cookie.allow_reconnect = true;
+	}
 
 	if (CHECK_DEBUGLVL(DBGLVL_DEBUG)) {
 		DBG_DEBUG("Fresh cookie\n");
@@ -201,6 +216,14 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 
 	if (!file_id_equal(&fsp->file_id, &cookie.id)) {
 		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	if (fsp->op->global->persistent) {
+		new_cookie_blob = data_blob_dup_talloc(mem_ctx, old_cookie);
+		if (new_cookie_blob.data == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		goto do_close;
 	}
 
 	if ((fsp_lease_type(fsp) & SMB2_LEASE_HANDLE) == 0) {
@@ -293,6 +316,7 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 		NDR_PRINT_DEBUG(vfs_default_durable_cookie, &cookie);
 	}
 
+do_close:
 	status = fd_close(fsp);
 	if (!NT_STATUS_IS_OK(status)) {
 		data_blob_free(&new_cookie_blob);
@@ -314,6 +338,10 @@ static bool vfs_default_durable_reconnect_check_stat(
 {
 	SMB_STRUCT_STAT *fsp_st = &fsp->fsp_name->st;
 	bool equal;
+
+	if (fsp->op->global->persistent) {
+		return true;
+	}
 
 	if (cookie_st->st_ex_mode != fsp_st->st_ex_mode) {
 		DEBUG(1, ("vfs_default_durable_reconnect (%s): "
@@ -511,15 +539,44 @@ struct durable_reconnect_state {
 	struct share_mode_entry *e;
 };
 
-static bool durable_reconnect_fn(
+static bool share_mode_entry_durable_reconnect_cb(
 	struct share_mode_entry *e,
 	bool *modified,
 	void *private_data)
 {
 	struct durable_reconnect_state *state = private_data;
-	uint64_t id = state->op->global->open_persistent_id;
+	struct smbXsrv_open_global *global = state->op->global;
+	uint64_t id = global->open_persistent_id;
 
 	if (e->share_file_id != id) {
+		return false; /* Look at potential other entries */
+	}
+	if (state->e->share_file_id == id) {
+		DBG_INFO("Found more than one entry, invalidating previous\n");
+		*state->e = (struct share_mode_entry) { .pid = { .pid = 0, }};
+		return true;	/* end the loop through share mode entries */
+	}
+
+	if (global->persistent) {
+		if (!(e->flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN)) {
+			DBG_WARNING("Persistent not set on sharemode entry\n");
+			return false;
+		}
+		if (serverid_exists(&e->pid)) {
+			return false; /* Look at potential other entries */
+		}
+		if (!GUID_equal(&e->create_guid, &global->create_guid)) {
+			return false; /* Look at potential other entries */
+		}
+		if (GUID_equal(&state->e->create_guid, &global->create_guid)) {
+			DBG_INFO("Found more than one entry, "
+				 "invalidating previous\n");
+			*state->e = (struct share_mode_entry) {
+				.pid = { .pid = 0, },
+			};
+			return true; /* end the loop */
+		}
+		*state->e = *e;
 		return false; /* Look at potential other entries */
 	}
 
@@ -527,11 +584,6 @@ static bool durable_reconnect_fn(
 		return false; /* Look at potential other entries */
 	}
 
-	if (state->e->share_file_id == id) {
-		DBG_INFO("Found more than one entry, invalidating previous\n");
-		*state->e = (struct share_mode_entry) { .pid = { .pid = 0, }};
-		return true;	/* end the loop through share mode entries */
-	}
 	*state->e = *e;
 	return false;		/* Look at potential other entries */
 }
@@ -541,12 +593,179 @@ struct vfs_default_durable_reconnect_state {
 	TALLOC_CTX *mem_ctx;
 	struct smb_request *smb1req;
 	struct smbXsrv_open *op;
+	const struct smb2_lease *lease;
 	struct vfs_default_durable_cookie cookie;
 	struct files_struct *fsp;
 	struct files_struct *dirfsp;
 	struct smb_filename *rel_fname;
 	DATA_BLOB new_cookie_blob;
 };
+
+static NTSTATUS vfs_default_durable_reconnect_lease(
+	struct vfs_default_durable_reconnect_state *state,
+	struct share_mode_lock *lck,
+	struct share_mode_entry *e)
+{
+	struct files_struct *fsp = state->fsp;
+	struct smb2_lease lease;
+	uint32_t current_state = 0;
+	uint32_t breaking_to_requested = 0;
+	uint32_t breaking_to_required = 0;
+	uint16_t lease_version = 0, epoch = 0;
+	bool breaking = false;
+	NTSTATUS status;
+
+	if (fsp->oplock_type != LEASE_OPLOCK) {
+		return NT_STATUS_OK;
+	}
+
+	/*
+	 * Ensure the existing client guid matches the
+	 * stored one in the share_mode_entry.
+	 */
+	if (!GUID_equal(fsp_client_guid(fsp), &e->client_guid)) {
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+	}
+
+	status = leases_db_get(&e->client_guid,
+			       &e->lease_key,
+			       &fsp->file_id,
+			       &current_state,
+			       &breaking,
+			       &breaking_to_requested,
+			       &breaking_to_required,
+			       &lease_version,
+			       &epoch);
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND))
+	{
+		return status;
+	}
+
+	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		/*
+		 * The lease was lost due to a node failure, we have to recreate
+		 * it.
+		 */
+		if (!state->op->global->persistent) {
+			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		}
+		lease = *state->lease;
+		lease.lease_state &= fsp->conn->tcon->smb_max_lease_mask;
+
+		if (!(lease.lease_state & SMB2_LEASE_WRITE) &&
+		    !(fsp->conn->tcon->capabilities & SMB2_SHARE_CAP_SCALEOUT) &&
+		    file_has_brlocks(fsp))
+		{
+			/*
+			 * Shared leases (R and RH) are discarded when
+			 * reconnecting on a failover cluster
+			 * (SMB2_SHARE_CAP_SCALEOUT not set) if the file
+			 * has byterange locks.
+			 */
+			lease.lease_state = 0;
+		}
+
+		if (lease.lease_state == SMB2_LEASE_READ) {
+			/*
+			 * A pure R-lease is always "reacquired" and hence the
+			 * epoch is incremented. Other leases are "protected"
+			 * and the epoch must be taken unchanged from the client
+			 * lease request.
+			 */
+			lease.lease_epoch++;
+		}
+		return grant_new_fsp_lease(fsp,
+					   lck,
+					   fsp_client_guid(fsp),
+					   &lease,
+					   lease.lease_state,
+					   false);
+	}
+
+	if (!state->op->global->persistent) {
+		goto fsp_lease;
+	}
+
+	if (breaking) {
+		/*
+		 * Assert only a persistent open can trigger this "stored" lease
+		 * break codepath.
+		 */
+		SMB_ASSERT(state->op->global->persistent);
+
+		/*
+		 * A "saved" break from when the handle was disconnected, send
+		 * it out now. Assert that the current leases state is still
+		 * the same as breaking_to_requested.
+		 */
+		SMB_ASSERT(current_state == breaking_to_requested);
+		SMB_ASSERT(breaking_to_requested != breaking_to_required);
+
+		/*
+		 * process_oplock_break_message() will set
+		 * breaking_to_requested = breaking_to_required
+		 */
+		send_break_message(fsp->conn->sconn->msg_ctx,
+				   &fsp->file_id,
+				   e,
+				   breaking_to_required);
+
+		goto fsp_lease;
+	}
+
+	if (!(current_state & SMB2_LEASE_WRITE) &&
+	    !(fsp->conn->tcon->capabilities & SMB2_SHARE_CAP_SCALEOUT) &&
+	    file_has_brlocks(fsp))
+	{
+		/*
+		 * Shared leases (R and RH) are discarded when
+		 * reconnecting on a failover cluster
+		 * (SMB2_SHARE_CAP_SCALEOUT not set) if the file
+		 * has byterange locks.
+		 */
+		current_state = 0;
+	}
+	if (!(current_state & SMB2_LEASE_HANDLE)) {
+		/*
+		 * Without a H-lease the epoch is taken from the request as if a
+		 * new lease was granted.
+		 */
+		epoch = state->lease->lease_epoch;
+	}
+	if (current_state == SMB2_LEASE_READ) {
+		/*
+		 * A R-only lease is only handled as if freshly acquired, hence
+		 * the epoch is taken from the client request and incremented by
+		 * one.
+		 */
+		epoch++;
+	}
+
+	status = leases_db_set(&e->client_guid,
+			       &e->lease_key,
+			       current_state,
+			       breaking,
+			       breaking_to_requested,
+			       breaking_to_required,
+			       lease_version,
+			       epoch);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+fsp_lease:
+	fsp->lease = find_fsp_lease(fsp,
+				    &e->lease_key,
+				    current_state,
+				    lease_version,
+				    epoch);
+	if (fsp->lease == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	return NT_STATUS_OK;
+}
 
 static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 					     struct byte_range_lock *br_lck,
@@ -560,12 +779,15 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 	struct durable_reconnect_state rstate = { .op = state->op, .e = &e, };
 	struct vfs_open_how how = { .flags = 0, };
 	struct file_id file_id;
+	struct server_id old_pid;
 	bool have_share_mode_entry = false;
 	uint32_t dosmode;
 	int ret;
 	bool ok;
 
-	ok = share_mode_forall_entries(lck, durable_reconnect_fn, &rstate);
+	ok = share_mode_forall_entries(lck,
+				       share_mode_entry_durable_reconnect_cb,
+				       &rstate);
 	if (!ok) {
 		DBG_WARNING("share_mode_forall_entries failed\n");
 		state->status = NT_STATUS_INTERNAL_DB_ERROR;
@@ -574,24 +796,6 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 
 	if (e.pid.pid == 0) {
 		DBG_WARNING("Did not find a unique valid share mode entry\n");
-		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
-		goto fail;
-	}
-
-	if (!server_id_is_disconnected(&e.pid)) {
-		DEBUG(5, ("vfs_default_durable_reconnect: denying durable "
-			  "reconnect for handle that was not marked "
-			  "disconnected (e.g. smbd or cluster node died)\n"));
-		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
-		goto fail;
-	}
-
-	if (e.share_file_id != state->op->global->open_persistent_id) {
-		DBG_INFO("denying durable "
-			 "share_file_id changed %"PRIu64" != %"PRIu64" "
-			 "(e.g. another client had opened the file)\n",
-			 e.share_file_id,
-			 state->op->global->open_persistent_id);
 		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		goto fail;
 	}
@@ -606,66 +810,51 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 		goto fail;
 	}
 
+	if ((e.op_type == LEASE_OPLOCK) && (state->lease == NULL)) {
+		/*
+		 * The client didn't send a lease context when reconnecting,
+		 * although the handle did have a lease.
+		 */
+		DBG_WARNING("Trying to reconnect handle with lease without lease context on [%s]\n",
+			    fsp_str_dbg(fsp));
+		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		goto fail;
+	}
+
 	fsp_apply_share_entry_flags(fsp, e.flags);
 	fsp->open_time = e.time;
 	fsp->access_mask = e.access_mask;
-	fsp->fsp_flags.can_read = ((fsp->access_mask & FILE_READ_DATA) != 0);
-	fsp->fsp_flags.can_write = ((fsp->access_mask & (FILE_WRITE_DATA|FILE_APPEND_DATA)) != 0);
+	if (S_ISREG(fsp->fsp_name->st.st_ex_mode)) {
+		fsp->fsp_flags.can_read = ((fsp->access_mask & FILE_READ_DATA) != 0);
+		fsp->fsp_flags.can_write = ((fsp->access_mask & (FILE_WRITE_DATA|FILE_APPEND_DATA)) != 0);
+	} else {
+		fsp->fsp_flags.can_read = false;
+		fsp->fsp_flags.can_write = false;
+	}
 
 	fsp->oplock_type = e.op_type;
-
-	if (fsp->oplock_type == LEASE_OPLOCK) {
-		uint32_t current_state;
-		uint16_t lease_version, epoch;
-
-		/*
-		 * Ensure the existing client guid matches the
-		 * stored one in the share_mode_entry.
-		 */
-		if (!GUID_equal(fsp_client_guid(fsp),
-				&e.client_guid)) {
-			state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
-			goto fail;
-		}
-
-		state->status = leases_db_get(
-			&e.client_guid,
-			&e.lease_key,
-			&fsp->file_id,
-			&current_state, /* current_state */
-			NULL, /* breaking */
-			NULL, /* breaking_to_requested */
-			NULL, /* breaking_to_required */
-			&lease_version, /* lease_version */
-			&epoch); /* epoch */
-		if (!NT_STATUS_IS_OK(state->status)) {
-			goto fail;
-		}
-
-		fsp->lease = find_fsp_lease(
-			fsp,
-			&e.lease_key,
-			current_state,
-			lease_version,
-			epoch);
-		if (fsp->lease == NULL) {
-			state->status = NT_STATUS_NO_MEMORY;
-			goto fail;
-		}
-	}
 
 	fsp->initial_allocation_size = state->cookie.initial_allocation_size;
 	fh_set_position_information(fsp->fh, state->cookie.position_information);
 	fsp->fsp_flags.write_time_forced = state->cookie.write_time_forced;
+	if (state->op->global->persistent) {
+		fsp->fsp_flags.initial_delete_on_close =
+			state->cookie.initial_delete_on_close;
+		fsp->fsp_flags.delete_on_close = is_delete_on_close_set(
+			lck, fsp->name_hash);
+	}
 
 	state->op->compat = fsp;
 	fsp->op = state->op;
 
+	old_pid = e.pid;
+	e.pid = messaging_server_id(fsp->conn->sconn->msg_ctx);
+
 	ok = reset_share_mode_entry(
 		lck,
-		e.pid,
+		old_pid,
 		e.share_file_id,
-		messaging_server_id(fsp->conn->sconn->msg_ctx),
+		e.pid,
 		state->smb1req->mid);
 	if (!ok) {
 		DBG_DEBUG("Could not set new share_mode_entry values\n");
@@ -673,6 +862,12 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 		goto fail;
 	}
 	have_share_mode_entry = true;
+
+	state->status = vfs_default_durable_reconnect_lease(state, lck, &e);
+	if (!NT_STATUS_IS_OK(state->status)) {
+		DBG_WARNING("vfs_default_durable_reconnect_lease failed\n");
+		goto fail;
+	}
 
 	if (br_lck != NULL) {
 		ok = brl_reconnect_disconnected(fsp, br_lck);
@@ -687,7 +882,9 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 	/*
 	 * TODO: properly calculate open flags
 	 */
-	if (fsp->fsp_flags.can_write && fsp->fsp_flags.can_read) {
+	if (S_ISDIR(fsp->fsp_name->st.st_ex_mode)) {
+		how.flags = O_RDONLY | O_DIRECTORY;
+	} else if (fsp->fsp_flags.can_write && fsp->fsp_flags.can_read) {
 		how.flags = O_RDWR;
 	} else if (fsp->fsp_flags.can_write) {
 		how.flags = O_WRONLY;
@@ -719,7 +916,9 @@ static void vfs_default_durable_reconnect_fn(struct share_mode_lock *lck,
 		goto fail;
 	}
 
-	if (!S_ISREG(fsp->fsp_name->st.st_ex_mode)) {
+	if (!S_ISREG(fsp->fsp_name->st.st_ex_mode) &&
+	    !fsp->op->global->persistent)
+	{
 		state->status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		goto fail;
 	}
@@ -788,6 +987,7 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 				       struct smb_request *smb1req,
 				       struct smbXsrv_open *op,
 				       const DATA_BLOB old_cookie,
+				       const struct smb2_lease *lease,
 				       TALLOC_CTX *mem_ctx,
 				       files_struct **result,
 				       DATA_BLOB *new_cookie)
@@ -810,6 +1010,7 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 		.mem_ctx = mem_ctx,
 		.smb1req = smb1req,
 		.op = op,
+		.lease = lease,
 	};
 
 	/*
@@ -866,7 +1067,12 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 	}
 	if (!S_ISREG(smb_fname->st.st_ex_mode)) {
-		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		if (!S_ISDIR(smb_fname->st.st_ex_mode)) {
+			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		}
+		if (!op->global->persistent) {
+			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+		}
 	}
 
 	file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
@@ -897,14 +1103,11 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 	 * Do we need to store the modified flag in the DB?
 	 */
 	state.fsp->fsp_flags.modified = false;
-	/*
-	 * no durables for directories
-	 */
-	state.fsp->fsp_flags.is_directory = false;
+	state.fsp->fsp_flags.is_directory = S_ISDIR(smb_fname->st.st_ex_mode);
 	/*
 	 * For normal files, can_lock == !is_directory
 	 */
-	state.fsp->fsp_flags.can_lock = true;
+	state.fsp->fsp_flags.can_lock = !state.fsp->fsp_flags.is_directory;
 	/*
 	 * We do not support aio write behind for smb2
 	 */

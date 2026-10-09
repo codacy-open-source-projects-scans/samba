@@ -3982,35 +3982,8 @@ NTSTATUS cli_ftruncate(struct cli_state *cli, uint16_t fnum, uint64_t size)
 	return status;
 }
 
-static uint8_t *cli_lockingx_put_locks(
-	uint8_t *buf,
-	bool large,
-	uint16_t num_locks,
-	const struct smb1_lock_element *locks)
-{
-	uint16_t i;
-
-	for (i=0; i<num_locks; i++) {
-		const struct smb1_lock_element *e = &locks[i];
-		if (large) {
-			SSVAL(buf, 0, e->pid);
-			SSVAL(buf, 2, 0);
-			SOFF_T_R(buf, 4, e->offset);
-			SOFF_T_R(buf, 12, e->length);
-			buf += 20;
-		} else {
-			SSVAL(buf, 0, e->pid);
-			SIVAL(buf, 2, e->offset);
-			SIVAL(buf, 6, e->length);
-			buf += 10;
-		}
-	}
-	return buf;
-}
-
 struct cli_lockingx_state {
-	uint16_t vwv[8];
-	struct iovec bytes;
+	struct cli_state *cli;
 	struct tevent_req *subreq;
 };
 
@@ -4031,52 +4004,36 @@ struct tevent_req *cli_lockingx_create(
 	const struct smb1_lock_element *locks,
 	struct tevent_req **psmbreq)
 {
-	struct tevent_req *req = NULL, *subreq = NULL;
+	struct tevent_req *req = NULL;
 	struct cli_lockingx_state *state = NULL;
-	uint16_t *vwv;
-	uint8_t *p;
-	const bool large = (typeoflock & LOCKING_ANDX_LARGE_FILES);
-	const size_t element_len = large ? 20 : 10;
-
-	/* uint16->size_t, no overflow */
-	const size_t num_elements = (size_t)num_locks + (size_t)num_unlocks;
-
-	/* at most 20*2*65535 = 2621400, no overflow */
-	const size_t num_bytes = num_elements * element_len;
 
 	req = tevent_req_create(mem_ctx, &state, struct cli_lockingx_state);
 	if (req == NULL) {
 		return NULL;
 	}
-	vwv = state->vwv;
+	state->cli = cli;
 
-	SCVAL(vwv + 0, 0, 0xFF);
-	SCVAL(vwv + 0, 1, 0);
-	SSVAL(vwv + 1, 0, 0);
-	SSVAL(vwv + 2, 0, fnum);
-	SCVAL(vwv + 3, 0, typeoflock);
-	SCVAL(vwv + 3, 1, newoplocklevel);
-	SIVALS(vwv + 4, 0, timeout);
-	SSVAL(vwv + 6, 0, num_unlocks);
-	SSVAL(vwv + 7, 0, num_locks);
-
-	state->bytes.iov_len = num_bytes;
-	state->bytes.iov_base = talloc_array(state, uint8_t, num_bytes);
-	if (tevent_req_nomem(state->bytes.iov_base, req)) {
+	state->subreq = smb1cli_lockingx_create(state,
+						ev,
+						cli->conn,
+						cli->timeout,
+						cli->smb1.pid,
+						cli->smb1.tcon,
+						cli->smb1.session,
+						fnum,
+						typeoflock,
+						newoplocklevel,
+						timeout,
+						num_unlocks,
+						unlocks,
+						num_locks,
+						locks,
+						psmbreq);
+	if (tevent_req_nomem(state->subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
-
-	p = cli_lockingx_put_locks(
-		state->bytes.iov_base, large, num_unlocks, unlocks);
-	cli_lockingx_put_locks(p, large, num_locks, locks);
-
-	subreq = cli_smb_req_create(
-		state, ev, cli, SMBlockingX, 0, 0, 8, vwv, 1, &state->bytes);
-	if (tevent_req_nomem(subreq, req)) {
-		return tevent_req_post(req, ev);
-	}
-	tevent_req_set_callback(subreq, cli_lockingx_done, req);
-	*psmbreq = subreq;
+	tevent_req_set_callback(state->subreq, cli_lockingx_done, req);
+	tevent_req_set_cancel_fn(req, cli_lockingx_cancel);
 	return req;
 }
 
@@ -4093,48 +4050,60 @@ struct tevent_req *cli_lockingx_send(
 	uint16_t num_locks,
 	const struct smb1_lock_element *locks)
 {
-	struct tevent_req *req = NULL, *subreq = NULL;
+	struct tevent_req *req = NULL;
 	struct cli_lockingx_state *state = NULL;
-	NTSTATUS status;
 
-	req = cli_lockingx_create(
-		mem_ctx,
-		ev,
-		cli,
-		fnum,
-		typeoflock,
-		newoplocklevel,
-		timeout,
-		num_unlocks,
-		unlocks,
-		num_locks,
-		locks,
-		&subreq);
+	req = tevent_req_create(mem_ctx, &state, struct cli_lockingx_state);
 	if (req == NULL) {
 		return NULL;
 	}
-	state = tevent_req_data(req, struct cli_lockingx_state);
-	state->subreq = subreq;
+	state->cli = cli;
 
-	status = smb1cli_req_chain_submit(&subreq, 1);
-	if (tevent_req_nterror(req, status)) {
+	state->subreq = smb1cli_lockingx_send(state,
+					      ev,
+					      cli->conn,
+					      cli->timeout,
+					      cli->smb1.pid,
+					      cli->smb1.tcon,
+					      cli->smb1.session,
+					      fnum,
+					      typeoflock,
+					      newoplocklevel,
+					      timeout,
+					      num_unlocks,
+					      unlocks,
+					      num_locks,
+					      locks);
+	if (tevent_req_nomem(state->subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
+	tevent_req_set_callback(state->subreq, cli_lockingx_done, req);
 	tevent_req_set_cancel_fn(req, cli_lockingx_cancel);
 	return req;
 }
 
 static void cli_lockingx_done(struct tevent_req *subreq)
 {
-	NTSTATUS status = cli_smb_recv(
-		subreq, NULL, NULL, 0, NULL, NULL, NULL, NULL);
-	tevent_req_simple_finish_ntstatus(subreq, status);
+	struct tevent_req *req = tevent_req_callback_data(subreq,
+							  struct tevent_req);
+	struct cli_lockingx_state *state = tevent_req_data(
+		req, struct cli_lockingx_state);
+	NTSTATUS status;
+
+	status = smb1cli_lockingx_recv(subreq);
+	TALLOC_FREE(subreq);
+	state->subreq = NULL;
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	tevent_req_done(req);
 }
 
 static bool cli_lockingx_cancel(struct tevent_req *req)
 {
 	struct cli_lockingx_state *state = tevent_req_data(
 		req, struct cli_lockingx_state);
+
 	if (state->subreq == NULL) {
 		return false;
 	}
@@ -4143,7 +4112,23 @@ static bool cli_lockingx_cancel(struct tevent_req *req)
 
 NTSTATUS cli_lockingx_recv(struct tevent_req *req)
 {
-	return tevent_req_simple_recv_ntstatus(req);
+	struct cli_lockingx_state *state = tevent_req_data(
+		req, struct cli_lockingx_state);
+	NTSTATUS status;
+
+	if (!tevent_req_is_nterror(req, &status)) {
+		return NT_STATUS_OK;
+	}
+
+	if (NT_STATUS_IS_DOS(status) && state->cli->map_dos_errors) {
+		/*
+		 * Like cli_smb_recv() did before we used
+		 * smb1cli_lockingx
+		 */
+		status = dos_to_ntstatus(NT_STATUS_DOS_CLASS(status),
+					 NT_STATUS_DOS_CODE(status));
+	}
+	return status;
 }
 
 NTSTATUS cli_lockingx(
@@ -4213,6 +4198,184 @@ fail:
  send a lock with a specified locktype
  this is used for testing LOCKING_ANDX_CANCEL_LOCK
 ****************************************************************************/
+
+/*
+ * Protocol independent byte range locking with SMB2 style lock
+ * elements. For SMB1 this is mapped to a LockingX request: Unlock
+ * elements go into the unlock list. Shared and exclusive locks can't
+ * be mixed, LockingX has the lock type per request. The request waits
+ * forever unless all locks have SMB2_LOCK_FLAG_FAIL_IMMEDIATELY set.
+ */
+
+struct cli_lock_state {
+	uint8_t dummy;
+};
+
+static void cli_lock_smb2_done(struct tevent_req *subreq);
+static void cli_lock_smb1_done(struct tevent_req *subreq);
+
+static NTSTATUS cli_lock_smb1_elements(TALLOC_CTX *mem_ctx,
+				       struct cli_state *cli,
+				       uint16_t num_locks,
+				       const struct smb2_lock_element *locks,
+				       uint8_t *ptypeoflock,
+				       int32_t *ptimeout,
+				       uint16_t *pnum_ulocks,
+				       struct smb1_lock_element **pulocks,
+				       uint16_t *pnum_llocks,
+				       struct smb1_lock_element **pllocks)
+{
+	struct smb1_lock_element *ulocks = NULL;
+	struct smb1_lock_element *llocks = NULL;
+	uint16_t num_ulocks = 0;
+	uint16_t num_llocks = 0;
+	uint8_t typeoflock = LOCKING_ANDX_LARGE_FILES;
+	int32_t timeout = 0;
+	bool have_shared = false;
+	bool have_exclusive = false;
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
+	uint16_t i;
+
+	ulocks = talloc_array(mem_ctx, struct smb1_lock_element, num_locks);
+	llocks = talloc_array(mem_ctx, struct smb1_lock_element, num_locks);
+	if ((ulocks == NULL) || (llocks == NULL)) {
+		goto fail;
+	}
+
+	for (i = 0; i < num_locks; i++) {
+		struct smb1_lock_element l = {
+			.pid = cli_getpid(cli),
+			.offset = locks[i].offset,
+			.length = locks[i].length,
+		};
+		uint32_t flags = locks[i].flags;
+
+		if (flags & SMB2_LOCK_FLAG_UNLOCK) {
+			ulocks[num_ulocks++] = l;
+			continue;
+		}
+
+		llocks[num_llocks++] = l;
+
+		if (flags & SMB2_LOCK_FLAG_SHARED) {
+			have_shared = true;
+		} else {
+			have_exclusive = true;
+		}
+		if (!(flags & SMB2_LOCK_FLAG_FAIL_IMMEDIATELY)) {
+			/* wait forever */
+			timeout = -1;
+		}
+	}
+
+	if (have_shared && have_exclusive) {
+		DBG_DEBUG("SMB1 can't mix shared and exclusive locks\n");
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto fail;
+	}
+	if (have_shared) {
+		typeoflock |= LOCKING_ANDX_SHARED_LOCK;
+	}
+
+	*ptypeoflock = typeoflock;
+	*ptimeout = timeout;
+	*pnum_ulocks = num_ulocks;
+	*pulocks = ulocks;
+	*pnum_llocks = num_llocks;
+	*pllocks = llocks;
+	return NT_STATUS_OK;
+fail:
+	TALLOC_FREE(llocks);
+	TALLOC_FREE(ulocks);
+	return status;
+}
+
+struct tevent_req *cli_lock_send(TALLOC_CTX *mem_ctx,
+				 struct tevent_context *ev,
+				 struct cli_state *cli,
+				 uint16_t fnum,
+				 uint32_t lock_sequence,
+				 uint16_t num_locks,
+				 const struct smb2_lock_element *locks)
+{
+	struct tevent_req *req = NULL, *subreq = NULL;
+	struct cli_lock_state *state = NULL;
+	struct smb1_lock_element *ulocks = NULL;
+	struct smb1_lock_element *llocks = NULL;
+	uint16_t num_ulocks = 0;
+	uint16_t num_llocks = 0;
+	uint8_t typeoflock = 0;
+	int32_t timeout = 0;
+	NTSTATUS status;
+
+	req = tevent_req_create(mem_ctx, &state, struct cli_lock_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	if (num_locks == 0) {
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return tevent_req_post(req, ev);
+	}
+
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
+		subreq = cli_smb2_lock_send(
+			state, ev, cli, fnum, lock_sequence, num_locks, locks);
+		if (tevent_req_nomem(subreq, req)) {
+			return tevent_req_post(req, ev);
+		}
+		tevent_req_set_callback(subreq, cli_lock_smb2_done, req);
+		return req;
+	}
+
+	status = cli_lock_smb1_elements(state,
+					cli,
+					num_locks,
+					locks,
+					&typeoflock,
+					&timeout,
+					&num_ulocks,
+					&ulocks,
+					&num_llocks,
+					&llocks);
+	if (tevent_req_nterror(req, status)) {
+		return tevent_req_post(req, ev);
+	}
+
+	subreq = cli_lockingx_send(state,
+				   ev,
+				   cli,
+				   fnum,
+				   typeoflock,
+				   0,
+				   timeout,
+				   num_ulocks,
+				   ulocks,
+				   num_llocks,
+				   llocks);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, cli_lock_smb1_done, req);
+	return req;
+}
+
+static void cli_lock_smb2_done(struct tevent_req *subreq)
+{
+	NTSTATUS status = cli_smb2_lock_recv(subreq);
+	tevent_req_simple_finish_ntstatus(subreq, status);
+}
+
+static void cli_lock_smb1_done(struct tevent_req *subreq)
+{
+	NTSTATUS status = cli_lockingx_recv(subreq);
+	tevent_req_simple_finish_ntstatus(subreq, status);
+}
+
+NTSTATUS cli_lock_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_ntstatus(req);
+}
 
 NTSTATUS cli_locktype(struct cli_state *cli, uint16_t fnum,
 		      uint32_t offset, uint32_t len,

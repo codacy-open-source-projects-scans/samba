@@ -552,7 +552,7 @@ _PUBLIC_ int tdb_delete(struct tdb_context *tdb, TDB_DATA key)
  * See if we have a dead record around with enough space
  */
 tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
-			struct tdb_record *r, tdb_len_t length,
+			struct tdb_record *r, tdb_len_t payload_len,
 			tdb_off_t *p_last_ptr)
 {
 	tdb_off_t rec_ptr, last_ptr;
@@ -560,8 +560,9 @@ tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
 	tdb_off_t best_rec_ptr = 0;
 	tdb_off_t best_last_ptr = 0;
 	struct tdb_record best = { .rec_len = UINT32_MAX };
+	tdb_len_t rec_len = payload_len;
 
-	length += sizeof(tdb_off_t); /* tailer */
+	rec_len += sizeof(tdb_off_t); /* tailer */
 
 	last_ptr = TDB_HASH_TOP(hash);
 
@@ -578,7 +579,7 @@ tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
 		if (tdb_rec_read(tdb, rec_ptr, r) == -1)
 			return 0;
 
-		if (TDB_DEAD(r) && (r->rec_len >= length) &&
+		if (TDB_DEAD(r) && (r->rec_len >= rec_len) &&
 		    (r->rec_len < best.rec_len)) {
 			best_rec_ptr = rec_ptr;
 			best_last_ptr = last_ptr;
@@ -722,12 +723,6 @@ static int _tdb_storev(struct tdb_context *tdb, TDB_DATA key,
 	return ret;
 }
 
-static int _tdb_store(struct tdb_context *tdb, TDB_DATA key,
-		      TDB_DATA dbuf, int flag, uint32_t hash)
-{
-	return _tdb_storev(tdb, key, &dbuf, 1, flag, hash);
-}
-
 /* store an element in the database, replacing any existing element
    with the same key
 
@@ -749,7 +744,7 @@ _PUBLIC_ int tdb_store(struct tdb_context *tdb, TDB_DATA key, TDB_DATA dbuf, int
 	if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1)
 		return -1;
 
-	ret = _tdb_store(tdb, key, dbuf, flag, hash);
+	ret = _tdb_storev(tdb, key, &dbuf, 1, flag, hash);
 	tdb_trace_2rec_flag_ret(tdb, "tdb_store", key, dbuf, flag, ret);
 	tdb_unlock(tdb, BUCKET(hash), F_WRLCK);
 	return ret;
@@ -770,12 +765,15 @@ _PUBLIC_ int tdb_storev(struct tdb_context *tdb, TDB_DATA key,
 
 	/* find which hash bucket it is in */
 	hash = tdb->hash_fn(&key);
-	if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1)
+	if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1) {
+		tdb_trace_1plusn_rec_flag_ret(tdb, "tdb_storev", key,
+					      dbufs, num_dbufs, flag, -1);
 		return -1;
+	}
 
 	ret = _tdb_storev(tdb, key, dbufs, num_dbufs, flag, hash);
 	tdb_trace_1plusn_rec_flag_ret(tdb, "tdb_storev", key,
-				      dbufs, num_dbufs, flag, -1);
+				      dbufs, num_dbufs, flag, ret);
 	tdb_unlock(tdb, BUCKET(hash), F_WRLCK);
 	return ret;
 }
@@ -787,10 +785,17 @@ _PUBLIC_ int tdb_append(struct tdb_context *tdb, TDB_DATA key, TDB_DATA new_dbuf
 	TDB_DATA dbufs[2];
 	int ret = -1;
 
+	if (tdb->read_only || tdb->traverse_read) {
+		tdb->ecode = TDB_ERR_RDONLY;
+		tdb_trace_2rec_flag_ret(tdb, "tdb_append", key, new_dbuf, 0, -1);
+		return -1;
+	}
+
 	/* find which hash bucket it is in */
 	hash = tdb->hash_fn(&key);
-	if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1)
+	if (tdb_lock(tdb, BUCKET(hash), F_WRLCK) == -1) {
 		return -1;
+	}
 
 	dbufs[0] = _tdb_fetch(tdb, key);
 	dbufs[1] = new_dbuf;

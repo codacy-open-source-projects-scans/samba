@@ -1233,6 +1233,35 @@ void smb_vfs_call_disconnect(struct vfs_handle_struct *handle)
 	handle->fns->disconnect_fn(handle);
 }
 
+int smb_vfs_call_open_share_root(struct vfs_handle_struct *handle,
+				 struct files_struct *root_fsp,
+				 const char *connectpath)
+{
+	VFS_FIND(open_share_root);
+	return handle->fns->open_share_root_fn(handle, root_fsp, connectpath);
+}
+
+int vfs_set_share_root(struct files_struct *root_fsp,
+		       const char *connectpath,
+		       const SMB_STRUCT_STAT *pst)
+{
+	struct smb_filename fname = {
+		.base_name = discard_const_p(char, connectpath),
+		.st = *pst,
+	};
+	bool ok;
+
+	ok = fsp_set_smb_fname(root_fsp, &fname);
+	if (!ok) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	fsp_set_fd(root_fsp, AT_FDCWD);
+
+	return 0;
+}
+
 uint64_t smb_vfs_call_disk_free(struct vfs_handle_struct *handle,
 				struct files_struct *fsp,
 				uint64_t *bsize,
@@ -2472,13 +2501,14 @@ NTSTATUS smb_vfs_call_durable_reconnect(struct vfs_handle_struct *handle,
 					struct smb_request *smb1req,
 					struct smbXsrv_open *op,
 					const DATA_BLOB old_cookie,
+					const struct smb2_lease *lease,
 					TALLOC_CTX *mem_ctx,
 					struct files_struct **fsp,
 					DATA_BLOB *new_cookie)
 {
 	VFS_FIND(durable_reconnect);
 	return handle->fns->durable_reconnect_fn(handle, smb1req, op,
-					         old_cookie, mem_ctx, fsp,
+					         old_cookie, lease, mem_ctx, fsp,
 					         new_cookie);
 }
 

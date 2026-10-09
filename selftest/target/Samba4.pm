@@ -622,7 +622,7 @@ sub provision_raw_prepare($$$$$$$$$$$$$$)
 	$ctx->{nsswrap_hostname} = "$ctx->{hostname}.$ctx->{dnsname}";
 	if ($ENV{SAMBA_DNS_FAKING}) {
 		$ctx->{dns_host_file} = "$ENV{SELFTEST_PREFIX}/dns_host_file";
-		$ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate --configfile=$ctx->{smb_conf} --all-interfaces --use-file=$ctx->{dns_host_file}";
+		$ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate --configfile=$ctx->{smb_conf} --all-interfaces --sync-file=$ctx->{dns_host_file}";
 		$ctx->{samba_dnsupdate} = $python_cmd .  $ctx->{samba_dnsupdate};
 	} else {
 	        $ctx->{samba_dnsupdate} = "$ENV{SRCDIR_ABS}/source4/scripting/bin/samba_dnsupdate --configfile=$ctx->{smb_conf} --all-interfaces";
@@ -794,7 +794,7 @@ sub provision_raw_step1($$)
 	wins support = yes
 	server role = $ctx->{server_role}
 	server services = +echo $services
-        dcerpc endpoint servers = +winreg +srvsvc +rpcecho
+        dcerpc endpoint servers = +srvsvc +rpcecho
 	notify:inotify = false
 	ldb:nosync = true
 	ldap server require strong auth = yes
@@ -1279,7 +1279,6 @@ sub provision($$$$$$$$$$$)
 [simple]
 	path = $ctx->{share}
 	read only = no
-	ntvfs handler = simple
 
 [sysvol]
 	path = $ctx->{statedir}/sysvol
@@ -2088,7 +2087,7 @@ sub provision_ad_dc()
 	dos filemode = yes
 	check parent directory delete on close = yes
 
-        dcerpc endpoint servers = -winreg -srvsvc
+        dcerpc endpoint servers = +gkdi -srvsvc
 
 	printcap name = /dev/null
 
@@ -2840,7 +2839,7 @@ sub setup_rodc
 
 sub _setup_ad_dc
 {
-	my ($self, $path, $conf_opts, $server, $dom, $functional_level) = @_;
+	my ($self, $path, $conf_opts, $server, $dom, $functional_level, $netbios_domain) = @_;
 
 	# If we didn't build with ADS, pretend this env was never available
 	if (not $self->{target3}->have_ads()) {
@@ -2856,7 +2855,7 @@ sub _setup_ad_dc
 	if (!defined($dom)) {
 		$dom = "addom.samba.example.com";
 	}
-	my $env = $self->provision_ad_dc($path, $server, "ADDOMAIN",
+	my $env = $self->provision_ad_dc($path, $server, $netbios_domain,
 					 $dom,
 					 undef,
 					 $conf_opts,
@@ -2887,7 +2886,7 @@ sub setup_ad_dc
 	# breaking kerberos tests
 	my $conf_opts = "strong certificate binding enforcement = none\n";
 
-	return _setup_ad_dc($self, $path, $conf_opts, undef, undef);
+	return _setup_ad_dc($self, $path, $conf_opts, undef, undef, undef, "ADDOMAIN");
 }
 
 sub setup_ad_dc_smb1
@@ -2902,7 +2901,8 @@ sub setup_ad_dc_smb1
 	server require schannel:ADDCSMB1\$ = no
 	server schannel require seal:ADDCSMB1\$ = no
 ";
-	return _setup_ad_dc($self, $path, $conf_opts, "addcsmb1", "addom2.samba.example.com");
+	return _setup_ad_dc($self, $path, $conf_opts, "addcsmb1", "addom2.samba.example.com",
+			    undef, "ADDOMAIN2");
 }
 
 sub setup_ad_dc_smb1_done

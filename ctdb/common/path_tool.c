@@ -50,21 +50,44 @@ static int path_tool_config(TALLOC_CTX *mem_ctx,
 	return 0;
 }
 
-static int path_tool_pidfile(TALLOC_CTX *mem_ctx,
+static int path_tool_generic(TALLOC_CTX *mem_ctx,
 			     int argc,
 			     const char **argv,
-			     void *private_data)
+			     void *private_data,
+			     const char *cmd,
+			     const char *(*fn)(void))
+{
+	struct path_tool_context *ctx = talloc_get_type_abort(
+		private_data, struct path_tool_context);
+
+	if (argc != 0) {
+		cmdline_usage(ctx->cmdline, cmd);
+		return EINVAL;
+	}
+
+	printf("%s\n", fn());
+
+	return 0;
+}
+
+static int path_tool_append_generic(TALLOC_CTX *mem_ctx,
+				    int argc,
+				    const char **argv,
+				    void *private_data,
+				    const char *cmd,
+				    char *(*fn)(TALLOC_CTX *mem_ctx,
+						const char *name))
 {
 	struct path_tool_context *ctx = talloc_get_type_abort(
 		private_data, struct path_tool_context);
 	char *p;
 
 	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "pidfile");
+		cmdline_usage(ctx->cmdline, cmd);
 		return EINVAL;
 	}
 
-	p = path_pidfile(mem_ctx, argv[0]);
+	p = fn(mem_ctx, argv[0]);
 	if (p == NULL) {
 		D_ERR("Memory allocation error\n");
 		return 1;
@@ -73,6 +96,20 @@ static int path_tool_pidfile(TALLOC_CTX *mem_ctx,
 	printf("%s\n", p);
 
 	return 0;
+}
+
+static int path_tool_pidfile(TALLOC_CTX *mem_ctx,
+			     int argc,
+			     const char **argv,
+			     void *private_data)
+{
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "pidfile",
+					   path_pidfile);
+	return ret;
 }
 
 static int path_tool_socket(TALLOC_CTX *mem_ctx,
@@ -80,24 +117,13 @@ static int path_tool_socket(TALLOC_CTX *mem_ctx,
 			     const char **argv,
 			     void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-	char *p;
-
-	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "socket");
-		return EINVAL;
-	}
-
-	p = path_socket(mem_ctx, argv[0]);
-	if (p == NULL) {
-		D_ERR("Memory allocation error\n");
-		return 1;
-	}
-
-	printf("%s\n", p);
-
-	return 0;
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "socket",
+					   path_socket);
+	return ret;
 }
 
 static int path_tool_datadir(TALLOC_CTX *mem_ctx,
@@ -105,17 +131,13 @@ static int path_tool_datadir(TALLOC_CTX *mem_ctx,
 			     const char **argv,
 			     void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-
-	if (argc != 0) {
-		cmdline_usage(ctx->cmdline, "datadir");
-		return EINVAL;
-	}
-
-	printf("%s\n", path_datadir());
-
-	return 0;
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "datadir",
+				    path_datadir);
+	return ret;
 }
 
 static int path_tool_datadir_append(TALLOC_CTX *mem_ctx,
@@ -123,24 +145,13 @@ static int path_tool_datadir_append(TALLOC_CTX *mem_ctx,
 				    const char **argv,
 				    void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-	char *p;
-
-	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "datadir append");
-		return EINVAL;
-	}
-
-	p = path_datadir_append(mem_ctx, argv[0]);
-	if (p == NULL) {
-		D_ERR("Memory allocation error\n");
-		return 1;
-	}
-
-	printf("%s\n", p);
-
-	return 0;
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "datadir append",
+					   path_datadir_append);
+	return ret;
 }
 
 static int path_tool_etcdir(TALLOC_CTX *mem_ctx,
@@ -148,17 +159,13 @@ static int path_tool_etcdir(TALLOC_CTX *mem_ctx,
 			    const char **argv,
 			    void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-
-	if (argc != 0) {
-		cmdline_usage(ctx->cmdline, "etcdir");
-		return EINVAL;
-	}
-
-	printf("%s\n", path_etcdir());
-
-	return 0;
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "etcdir",
+				    path_etcdir);
+	return ret;
 }
 
 static int path_tool_etcdir_append(TALLOC_CTX *mem_ctx,
@@ -166,67 +173,97 @@ static int path_tool_etcdir_append(TALLOC_CTX *mem_ctx,
 				   const char **argv,
 				   void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-	char *p;
-
-	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "etcdir append");
-		return EINVAL;
-	}
-
-	p = path_etcdir_append(mem_ctx, argv[0]);
-	if (p == NULL) {
-		D_ERR("Memory allocation error\n");
-		return 1;
-	}
-
-	printf("%s\n", p);
-
-	return 0;
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "etcdir append",
+					   path_etcdir_append);
+	return ret;
 }
 
-static int path_tool_rundir(TALLOC_CTX *mem_ctx,
+static int path_tool_lockdir(TALLOC_CTX *mem_ctx,
+			     int argc,
+			     const char **argv,
+			     void *private_data)
+{
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "lockdir",
+				    path_lockdir);
+	return ret;
+}
+
+static int path_tool_lockdir_append(TALLOC_CTX *mem_ctx,
+				    int argc,
+				    const char **argv,
+				    void *private_data)
+{
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "lockdir append",
+					   path_lockdir_append);
+	return ret;
+}
+
+static int path_tool_piddir(TALLOC_CTX *mem_ctx,
 			    int argc,
 			    const char **argv,
 			    void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-
-	if (argc != 0) {
-		cmdline_usage(ctx->cmdline, "rundir");
-		return EINVAL;
-	}
-
-	printf("%s\n", path_rundir());
-
-	return 0;
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "piddir",
+				    path_piddir);
+	return ret;
 }
 
-static int path_tool_rundir_append(TALLOC_CTX *mem_ctx,
+static int path_tool_piddir_append(TALLOC_CTX *mem_ctx,
 				   int argc,
 				   const char **argv,
 				   void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-	char *p;
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "piddir append",
+					   path_piddir_append);
+	return ret;
+}
 
-	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "rundir append");
-		return EINVAL;
-	}
+static int path_tool_socketdir(TALLOC_CTX *mem_ctx,
+			       int argc,
+			       const char **argv,
+			       void *private_data)
+{
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "socketdir",
+				    path_socketdir);
+	return ret;
+}
 
-	p = path_rundir_append(mem_ctx, argv[0]);
-	if (p == NULL) {
-		D_ERR("Memory allocation error\n");
-		return 1;
-	}
-
-	printf("%s\n", p);
-
-	return 0;
+static int path_tool_socketdir_append(TALLOC_CTX *mem_ctx,
+				      int argc,
+				      const char **argv,
+				      void *private_data)
+{
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "socketdir append",
+					   path_socketdir_append);
+	return ret;
 }
 
 static int path_tool_vardir(TALLOC_CTX *mem_ctx,
@@ -234,17 +271,13 @@ static int path_tool_vardir(TALLOC_CTX *mem_ctx,
 			    const char **argv,
 			    void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-
-	if (argc != 0) {
-		cmdline_usage(ctx->cmdline, "vardir");
-		return EINVAL;
-	}
-
-	printf("%s\n", path_vardir());
-
-	return 0;
+	int ret = path_tool_generic(mem_ctx,
+				    argc,
+				    argv,
+				    private_data,
+				    "vardir",
+				    path_vardir);
+	return ret;
 }
 
 static int path_tool_vardir_append(TALLOC_CTX *mem_ctx,
@@ -252,49 +285,106 @@ static int path_tool_vardir_append(TALLOC_CTX *mem_ctx,
 				   const char **argv,
 				   void *private_data)
 {
-	struct path_tool_context *ctx = talloc_get_type_abort(
-		private_data, struct path_tool_context);
-	char *p;
-
-	if (argc != 1) {
-		cmdline_usage(ctx->cmdline, "vardir append");
-		return EINVAL;
-	}
-
-	p = path_vardir_append(mem_ctx, argv[0]);
-	if (p == NULL) {
-		D_ERR("Memory allocation error\n");
-		return 1;
-	}
-
-	printf("%s\n", p);
-
-	return 0;
+	int ret = path_tool_append_generic(mem_ctx,
+					   argc,
+					   argv,
+					   private_data,
+					   "vardir append",
+					   path_vardir_append);
+	return ret;
 }
 
 struct cmdline_command path_commands[] = {
-	{ "config", path_tool_config,
-	  "Get path of CTDB config file", NULL },
-	{ "pidfile", path_tool_pidfile,
-	  "Get path of CTDB daemon pidfile", "<daemon>" },
-	{ "socket", path_tool_socket,
-	  "Get path of CTDB daemon socket", "<daemon>" },
-	{ "datadir append", path_tool_datadir_append,
-	  "Get path relative to CTDB DATADIR", "<path>" },
-	{ "datadir", path_tool_datadir,
-	  "Get path of CTDB DATADIR", NULL },
-	{ "etcdir append", path_tool_etcdir_append,
-	  "Get path relative to CTDB ETCDIR", "<path>" },
-	{ "etcdir", path_tool_etcdir,
-	  "Get path of CTDB ETCDIR", NULL },
-	{ "rundir append", path_tool_rundir_append,
-	  "Get path relative to CTDB RUNDIR", "<path>" },
-	{ "rundir", path_tool_rundir,
-	  "Get path of CTDB RUNDIR", NULL },
-	{ "vardir append", path_tool_vardir_append,
-	  "Get path relative to CTDB VARDIR", "<path>" },
-	{ "vardir", path_tool_vardir,
-	  "Get path of CTDB VARDIR", NULL },
+	{
+		.name = "config",
+		.fn = path_tool_config,
+		.msg_help = "Get path of CTDB config file",
+		.msg_args = NULL,
+	},
+	{
+		.name = "pidfile",
+		.fn = path_tool_pidfile,
+		.msg_help = "Get path of CTDB daemon pidfile",
+		.msg_args = "<daemon>",
+	},
+	{
+		.name = "socket",
+		.fn = path_tool_socket,
+		.msg_help = "Get path of CTDB daemon socket",
+		.msg_args = "<daemon>",
+	},
+	{
+		.name = "datadir append",
+		.fn = path_tool_datadir_append,
+		.msg_help = "Get path relative to CTDB DATADIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "datadir",
+		.fn = path_tool_datadir,
+		.msg_help = "Get path of CTDB DATADIR",
+		.msg_args = NULL,
+	},
+	{
+		.name = "etcdir append",
+		.fn = path_tool_etcdir_append,
+		.msg_help = "Get path relative to CTDB ETCDIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "etcdir",
+		.fn = path_tool_etcdir,
+		.msg_help = "Get path of CTDB ETCDIR",
+		.msg_args = NULL,
+	},
+	{
+		.name = "lockdir append",
+		.fn = path_tool_lockdir_append,
+		.msg_help = "Get path relative to CTDB LOCKDIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "lockdir",
+		.fn = path_tool_lockdir,
+		.msg_help = "Get path of CTDB LOCKDIR",
+		.msg_args = NULL,
+	},
+	{
+		.name = "piddir append",
+		.fn = path_tool_piddir_append,
+		.msg_help = "Get path relative to CTDB PIDDIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "piddir",
+		.fn = path_tool_piddir,
+		.msg_help = "Get path of CTDB PIDDIR",
+		.msg_args = NULL,
+	},
+	{
+		.name = "socketdir append",
+		.fn = path_tool_socketdir_append,
+		.msg_help = "Get path relative to CTDB SOCKETDIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "socketdir",
+		.fn = path_tool_socketdir,
+		.msg_help = "Get path of CTDB SOCKETDIR",
+		.msg_args = NULL,
+	},
+	{
+		.name = "vardir append",
+		.fn = path_tool_vardir_append,
+		.msg_help = "Get path relative to CTDB VARDIR",
+		.msg_args = "<path>",
+	},
+	{
+		.name = "vardir",
+		.fn = path_tool_vardir,
+		.msg_help = "Get path of CTDB VARDIR",
+		.msg_args = NULL,
+	},
 	CMDLINE_TABLEEND
 };
 

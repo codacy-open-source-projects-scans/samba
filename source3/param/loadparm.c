@@ -209,6 +209,7 @@ static const struct loadparm_service _sDefault =
 	.available = true,
 	.read_only = true,
 	.spotlight = false,
+	.wsp = false,
 	.guest_only = false,
 	.administrative_share = false,
 	.guest_ok = false,
@@ -847,6 +848,7 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.winbind_refresh_tickets = false;
 	Globals.winbind_offline_logon = false;
 	Globals.winbind_scan_trusted_domains = false;
+	Globals.winbind_use_s4u2self = false;
 
 	Globals.idmap_cache_time = 86400 * 7; /* a week by default */
 	Globals.idmap_negative_cache_time = 120; /* 2 minutes by default */
@@ -1004,6 +1006,7 @@ void loadparm_s3_init_globals(struct loadparm_context *lp_ctx,
 	Globals.async_dns_timeout = 10;
 
 	Globals.client_smb_encrypt = SMB_ENCRYPTION_DEFAULT;
+	Globals.persistent_handles_durability = PH_DURABILITY_FULL_OUTAGE;
 
 	Globals._client_use_kerberos = CRED_USE_KERBEROS_DESIRED;
 
@@ -1646,7 +1649,7 @@ static bool hash_a_service(const char *name, int idx)
 
 	dbwrap_store_bystring(ServiceHash, canon_name,
 			      make_tdb_data((uint8_t *)&idx, sizeof(idx)),
-			      TDB_REPLACE);
+			      DBWRAP_REPLACE);
 
 	TALLOC_FREE(canon_name);
 

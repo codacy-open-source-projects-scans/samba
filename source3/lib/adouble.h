@@ -20,6 +20,7 @@
 #ifndef _ADOUBLE_H_
 #define _ADOUBLE_H_
 
+#include "includes.h"
 #include "MacExtensions.h"
 
 #define ADOUBLE_NAME_PREFIX "._"
@@ -186,10 +187,6 @@ int adouble_path(TALLOC_CTX *ctx,
 		 struct smb_filename **pp_smb_fname_out);
 struct smb_filename *adouble_name(TALLOC_CTX *mem_ctx,
 				  const struct smb_filename *base);
-
-AfpInfo *afpinfo_new(TALLOC_CTX *ctx);
-ssize_t afpinfo_pack(const AfpInfo *ai, char *buf);
-AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data, bool validate);
 
 struct adouble_buf {
 	uint32_t magic;

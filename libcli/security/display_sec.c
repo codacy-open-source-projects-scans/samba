@@ -65,88 +65,131 @@ char *get_sec_mask_str(TALLOC_CTX *ctx, uint32_t type)
 		talloc_asprintf_addbuf(&typestr, "DELETE_ACCESS ");
 	}
 
-	printf("\t\tSpecific bits: 0x%lx\n", (unsigned long)type&SEC_MASK_SPECIFIC);
-
 	return typestr;
 }
 
 /****************************************************************************
- display sec_access structure
+ get sec_access structure as a string
  ****************************************************************************/
-void display_sec_access(uint32_t *info)
+static char *get_sec_access_str(TALLOC_CTX *ctx, uint32_t info)
 {
-	char *mask_str = get_sec_mask_str(NULL, *info);
-	printf("\t\tPermissions: 0x%x: %s\n", *info, mask_str ? mask_str : "");
-	talloc_free(mask_str);
+	char *mask_str = get_sec_mask_str(ctx, info);
+	char *access_str = NULL;
+
+	access_str = talloc_asprintf(ctx,
+				     "\t\tSpecific bits: 0x%lx\n"
+				     "\t\tPermissions: 0x%x: %s\n",
+				     (unsigned long)(info & SEC_MASK_SPECIFIC),
+				     info,
+				     (mask_str != NULL) ? mask_str : "");
+
+	TALLOC_FREE(mask_str);
+	return access_str;
 }
 
 /****************************************************************************
  display sec_ace flags
  ****************************************************************************/
-void display_sec_ace_flags(uint8_t flags)
+static char *get_sec_ace_flags_str(TALLOC_CTX *ctx, uint8_t flags)
 {
-	if (flags & SEC_ACE_FLAG_OBJECT_INHERIT)
-		printf("SEC_ACE_FLAG_OBJECT_INHERIT ");
-	if (flags & SEC_ACE_FLAG_CONTAINER_INHERIT)
-		printf(" SEC_ACE_FLAG_CONTAINER_INHERIT ");
-	if (flags & SEC_ACE_FLAG_NO_PROPAGATE_INHERIT)
-		printf("SEC_ACE_FLAG_NO_PROPAGATE_INHERIT ");
-	if (flags & SEC_ACE_FLAG_INHERIT_ONLY)
-		printf("SEC_ACE_FLAG_INHERIT_ONLY ");
-	if (flags & SEC_ACE_FLAG_INHERITED_ACE)
-		printf("SEC_ACE_FLAG_INHERITED_ACE ");
-/*	if (flags & SEC_ACE_FLAG_VALID_INHERIT)
-		printf("SEC_ACE_FLAG_VALID_INHERIT "); */
-	if (flags & SEC_ACE_FLAG_SUCCESSFUL_ACCESS)
-		printf("SEC_ACE_FLAG_SUCCESSFUL_ACCESS ");
-	if (flags & SEC_ACE_FLAG_FAILED_ACCESS)
-		printf("SEC_ACE_FLAG_FAILED_ACCESS ");
+	char *flagstr = talloc_strdup(ctx, "");
 
-	printf("\n");
+	if (flags & SEC_ACE_FLAG_OBJECT_INHERIT) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_OBJECT_INHERIT");
+	}
+	if (flags & SEC_ACE_FLAG_CONTAINER_INHERIT) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_CONTAINER_INHERIT");
+	}
+	if (flags & SEC_ACE_FLAG_NO_PROPAGATE_INHERIT) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_NO_PROPAGATE_INHERIT");
+	}
+	if (flags & SEC_ACE_FLAG_INHERIT_ONLY) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_INHERIT_ONLY");
+	}
+	if (flags & SEC_ACE_FLAG_INHERITED_ACE) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_INHERITED_ACE");
+	}
+	/*	if (flags & SEC_ACE_FLAG_VALID_INHERIT)
+			talloc_asprintf_addsep(&flagstr, " ",
+			"SEC_ACE_FLAG_VALID_INHERIT"); */
+	if (flags & SEC_ACE_FLAG_SUCCESSFUL_ACCESS) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_SUCCESSFUL_ACCESS");
+	}
+	if (flags & SEC_ACE_FLAG_FAILED_ACCESS) {
+		talloc_asprintf_addsep(&flagstr,
+				       " ",
+				       "SEC_ACE_FLAG_FAILED_ACCESS");
+	}
+
+	return flagstr;
 }
 
 /****************************************************************************
  display sec_ace object
  ****************************************************************************/
-static void disp_sec_ace_object(struct security_ace_object *object)
+static char *get_sec_ace_object_str(TALLOC_CTX *ctx,
+				    const struct security_ace_object *object)
 {
 	struct GUID_txt_buf buf;
+	char *objstr = talloc_strdup(ctx, "");
 
 	if (object->flags & SEC_ACE_OBJECT_TYPE_PRESENT) {
-		printf("Object type: SEC_ACE_OBJECT_TYPE_PRESENT\n");
-		printf("Object GUID: %s\n",
-		       GUID_buf_string(&object->type.type, &buf));
+		talloc_asprintf_addbuf(
+			&objstr,
+			"Object type: SEC_ACE_OBJECT_TYPE_PRESENT\n"
+			"Object GUID: %s\n",
+			GUID_buf_string(&object->type.type, &buf));
 	}
 	if (object->flags & SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT) {
-		printf("Object type: SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT\n");
-		printf("Object GUID: %s\n",
-		       GUID_buf_string(&object->inherited_type.inherited_type,
-				       &buf));
+		talloc_asprintf_addbuf(
+			&objstr,
+			"Object type: SEC_ACE_INHERITED_OBJECT_TYPE_PRESENT\n"
+			"Object GUID: %s\n",
+			GUID_buf_string(&object->inherited_type.inherited_type,
+					&buf));
 	}
+
+	return objstr;
 }
 
 /****************************************************************************
  display sec_ace structure
  ****************************************************************************/
-void display_sec_ace(struct security_ace *ace)
+static char *get_sec_ace_str(TALLOC_CTX *ctx, const struct security_ace *ace)
 {
 	struct dom_sid_buf sid_str;
+	const char *type_str = NULL;
+	char *flags_str = NULL;
+	char *access_str = NULL;
+	char *obj_str = NULL;
+	char *acestr = NULL;
 
-	printf("\tACE\n\t\ttype: ");
 	switch (ace->type) {
 		case SEC_ACE_TYPE_ACCESS_ALLOWED:
-			printf("ACCESS ALLOWED");
+			type_str = "ACCESS ALLOWED";
 			break;
 		case SEC_ACE_TYPE_ACCESS_DENIED:
-			printf("ACCESS DENIED");
+			type_str = "ACCESS DENIED";
 			break;
 		case SEC_ACE_TYPE_SYSTEM_AUDIT:
-			printf("SYSTEM AUDIT");
+			type_str = "SYSTEM AUDIT";
 			break;
 		case SEC_ACE_TYPE_SYSTEM_ALARM:
-			printf("SYSTEM ALARM");
+			type_str = "SYSTEM ALARM";
 			break;
-#define ACE_CASE(x) case x: printf(#x); break
+#define ACE_CASE(x) case x: type_str = #x; break
 		ACE_CASE(SEC_ACE_TYPE_ALLOWED_COMPOUND);
 		ACE_CASE(SEC_ACE_TYPE_ACCESS_ALLOWED_OBJECT);
 		ACE_CASE(SEC_ACE_TYPE_ACCESS_DENIED_OBJECT);
@@ -162,112 +205,185 @@ void display_sec_ace(struct security_ace *ace)
 		ACE_CASE(SEC_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT);
 #undef ACE_CASE
 		default:
-			printf("????");
+			type_str = "????";
 			break;
 	}
 
-	printf(" (%d) flags: 0x%02x ", ace->type, ace->flags);
-	display_sec_ace_flags(ace->flags);
-	display_sec_access(&ace->access_mask);
-	printf("\t\tSID: %s\n\n", dom_sid_str_buf(&ace->trustee, &sid_str));
+	flags_str = get_sec_ace_flags_str(ctx, ace->flags);
+	access_str = get_sec_access_str(ctx, ace->access_mask);
+
+	acestr = talloc_asprintf(ctx,
+				 "\tACE\n\t\ttype: %s (%d) flags: 0x%02x %s\n"
+				 "%s"
+				 "\t\tSID: %s\n\n",
+				 type_str,
+				 ace->type,
+				 ace->flags,
+				 (flags_str != NULL) ? flags_str : "",
+				 (access_str != NULL) ? access_str : "",
+				 dom_sid_str_buf(&ace->trustee, &sid_str));
+
+	TALLOC_FREE(flags_str);
+	TALLOC_FREE(access_str);
 
 	if (sec_ace_object(ace->type)) {
-		disp_sec_ace_object(&ace->object.object);
+		obj_str = get_sec_ace_object_str(ctx, &ace->object.object);
+		talloc_asprintf_addbuf(&acestr,
+				       "%s",
+				       (obj_str != NULL) ? obj_str : "");
+		TALLOC_FREE(obj_str);
 	}
 
+	return acestr;
 }
 
 /****************************************************************************
  display sec_acl structure
  ****************************************************************************/
-void display_sec_acl(struct security_acl *sec_acl)
+static char *get_sec_acl_str(TALLOC_CTX *ctx,
+			     const struct security_acl *sec_acl)
 {
+	char *aclstr = NULL;
 	uint32_t i;
 
-	printf("\tACL\tNum ACEs:\t%" PRIu32 "\trevision:\t%x\n",
-	       sec_acl->num_aces,
-	       sec_acl->revision);
-	printf("\t---\n");
+	aclstr = talloc_asprintf(ctx,
+				 "\tACL\tNum ACEs:\t%" PRIu32
+				 "\trevision:\t%x\n"
+				 "\t---\n",
+				 sec_acl->num_aces,
+				 sec_acl->revision);
 
 	if (sec_acl->size != 0 && sec_acl->num_aces != 0) {
 		for (i = 0; i < sec_acl->num_aces; i++) {
-			display_sec_ace(&sec_acl->aces[i]);
+			char *ace_str = get_sec_ace_str(ctx,
+							&sec_acl->aces[i]);
+			talloc_asprintf_addbuf(&aclstr,
+					       "%s",
+					       (ace_str != NULL) ? ace_str
+								 : "");
+			TALLOC_FREE(ace_str);
 		}
 	}
+
+	return aclstr;
 }
 
-void display_acl_type(uint16_t type)
+static char *get_acl_type_str(TALLOC_CTX *ctx, uint16_t type)
 {
-	printf("type: 0x%04x: ", type);
+	char *typestr = talloc_asprintf(ctx, "type: 0x%04x:", type);
 
-	if (type & SEC_DESC_OWNER_DEFAULTED)	/* 0x0001 */
-		printf("SEC_DESC_OWNER_DEFAULTED ");
-	if (type & SEC_DESC_GROUP_DEFAULTED)	/* 0x0002 */
-		printf("SEC_DESC_GROUP_DEFAULTED ");
-	if (type & SEC_DESC_DACL_PRESENT) 	/* 0x0004 */
-		printf("SEC_DESC_DACL_PRESENT ");
-	if (type & SEC_DESC_DACL_DEFAULTED)	/* 0x0008 */
-		printf("SEC_DESC_DACL_DEFAULTED ");
-	if (type & SEC_DESC_SACL_PRESENT)	/* 0x0010 */
-		printf("SEC_DESC_SACL_PRESENT ");
-	if (type & SEC_DESC_SACL_DEFAULTED)	/* 0x0020 */
-		printf("SEC_DESC_SACL_DEFAULTED ");
-	if (type & SEC_DESC_DACL_TRUSTED)	/* 0x0040 */
-		printf("SEC_DESC_DACL_TRUSTED ");
-	if (type & SEC_DESC_SERVER_SECURITY)	/* 0x0080 */
-		printf("SEC_DESC_SERVER_SECURITY ");
-	if (type & SEC_DESC_DACL_AUTO_INHERIT_REQ) /* 0x0100 */
-		printf("SEC_DESC_DACL_AUTO_INHERIT_REQ ");
-	if (type & SEC_DESC_SACL_AUTO_INHERIT_REQ) /* 0x0200 */
-		printf("SEC_DESC_SACL_AUTO_INHERIT_REQ ");
-	if (type & SEC_DESC_DACL_AUTO_INHERITED) /* 0x0400 */
-		printf("SEC_DESC_DACL_AUTO_INHERITED ");
-	if (type & SEC_DESC_SACL_AUTO_INHERITED) /* 0x0800 */
-		printf("SEC_DESC_SACL_AUTO_INHERITED ");
-	if (type & SEC_DESC_DACL_PROTECTED)	/* 0x1000 */
-		printf("SEC_DESC_DACL_PROTECTED ");
-	if (type & SEC_DESC_SACL_PROTECTED)	/* 0x2000 */
-		printf("SEC_DESC_SACL_PROTECTED ");
-	if (type & SEC_DESC_RM_CONTROL_VALID)	/* 0x4000 */
-		printf("SEC_DESC_RM_CONTROL_VALID ");
-	if (type & SEC_DESC_SELF_RELATIVE)	/* 0x8000 */
-		printf("SEC_DESC_SELF_RELATIVE ");
+	if (type & SEC_DESC_OWNER_DEFAULTED) { /* 0x0001 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_OWNER_DEFAULTED");
+	}
+	if (type & SEC_DESC_GROUP_DEFAULTED) { /* 0x0002 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_GROUP_DEFAULTED");
+	}
+	if (type & SEC_DESC_DACL_PRESENT) { /* 0x0004 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_DACL_PRESENT");
+	}
+	if (type & SEC_DESC_DACL_DEFAULTED) { /* 0x0008 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_DACL_DEFAULTED");
+	}
+	if (type & SEC_DESC_SACL_PRESENT) { /* 0x0010 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_SACL_PRESENT");
+	}
+	if (type & SEC_DESC_SACL_DEFAULTED) { /* 0x0020 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_SACL_DEFAULTED");
+	}
+	if (type & SEC_DESC_DACL_TRUSTED) { /* 0x0040 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_DACL_TRUSTED");
+	}
+	if (type & SEC_DESC_SERVER_SECURITY) { /* 0x0080 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_SERVER_SECURITY");
+	}
+	if (type & SEC_DESC_DACL_AUTO_INHERIT_REQ) { /* 0x0100 */
+		talloc_asprintf_addbuf(&typestr,
+				       " SEC_DESC_DACL_AUTO_INHERIT_REQ");
+	}
+	if (type & SEC_DESC_SACL_AUTO_INHERIT_REQ) { /* 0x0200 */
+		talloc_asprintf_addbuf(&typestr,
+				       " SEC_DESC_SACL_AUTO_INHERIT_REQ");
+	}
+	if (type & SEC_DESC_DACL_AUTO_INHERITED) { /* 0x0400 */
+		talloc_asprintf_addbuf(&typestr,
+				       " SEC_DESC_DACL_AUTO_INHERITED");
+	}
+	if (type & SEC_DESC_SACL_AUTO_INHERITED) { /* 0x0800 */
+		talloc_asprintf_addbuf(&typestr,
+				       " SEC_DESC_SACL_AUTO_INHERITED");
+	}
+	if (type & SEC_DESC_DACL_PROTECTED) { /* 0x1000 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_DACL_PROTECTED");
+	}
+	if (type & SEC_DESC_SACL_PROTECTED) { /* 0x2000 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_SACL_PROTECTED");
+	}
+	if (type & SEC_DESC_RM_CONTROL_VALID) { /* 0x4000 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_RM_CONTROL_VALID");
+	}
+	if (type & SEC_DESC_SELF_RELATIVE) { /* 0x8000 */
+		talloc_asprintf_addbuf(&typestr, " SEC_DESC_SELF_RELATIVE");
+	}
 
-	printf("\n");
+	return typestr;
 }
 
 /****************************************************************************
  display sec_desc structure
  ****************************************************************************/
-void display_sec_desc(struct security_descriptor *sec)
+static char *get_sec_desc_str(TALLOC_CTX *ctx,
+			      const struct security_descriptor *sec)
 {
 	struct dom_sid_buf sid_str;
+	char *secstr = NULL;
+	char *type_str = NULL;
 
 	if (!sec) {
-		printf("NULL\n");
-		return;
+		return talloc_strdup(ctx, "NULL\n");
 	}
 
-	printf("revision: %d\n", sec->revision);
-	display_acl_type(sec->type);
+	type_str = get_acl_type_str(ctx, sec->type);
+	secstr = talloc_asprintf(ctx,
+				 "revision: %d\n"
+				 "%s\n",
+				 sec->revision,
+				 (type_str != NULL) ? type_str : "");
+	TALLOC_FREE(type_str);
 
 	if (sec->sacl) {
-		printf("SACL\n");
-		display_sec_acl(sec->sacl);
+		char *sacl_str = get_sec_acl_str(ctx, sec->sacl);
+		talloc_asprintf_addbuf(&secstr,
+				       "SACL\n%s",
+				       (sacl_str != NULL) ? sacl_str : "");
+		TALLOC_FREE(sacl_str);
 	}
-
 	if (sec->dacl) {
-		printf("DACL\n");
-		display_sec_acl(sec->dacl);
+		char *dacl_str = get_sec_acl_str(ctx, sec->dacl);
+		talloc_asprintf_addbuf(&secstr,
+				       "DACL\n%s",
+				       (dacl_str != NULL) ? dacl_str : "");
+		TALLOC_FREE(dacl_str);
 	}
 
 	if (sec->owner_sid) {
-		printf("\tOwner SID:\t%s\n",
-		       dom_sid_str_buf(sec->owner_sid, &sid_str));
+		talloc_asprintf_addbuf(&secstr,
+				       "\tOwner SID:\t%s\n",
+				       dom_sid_str_buf(sec->owner_sid,
+						       &sid_str));
+	}
+	if (sec->group_sid) {
+		talloc_asprintf_addbuf(&secstr,
+				       "\tGroup SID:\t%s\n",
+				       dom_sid_str_buf(sec->group_sid,
+						       &sid_str));
 	}
 
-	if (sec->group_sid) {
-		printf("\tGroup SID:\t%s\n",
-		       dom_sid_str_buf(sec->group_sid, &sid_str));
-	}
+	return secstr;
+}
+
+void display_sec_desc(const struct security_descriptor *sec)
+{
+	char *secstr = get_sec_desc_str(NULL, sec);
+	printf("%s", (secstr != NULL) ? secstr : "");
+	TALLOC_FREE(secstr);
 }

@@ -44,7 +44,7 @@ import samba.security
 import samba.auth
 from samba.auth import AUTH_SESSION_INFO_DEFAULT_GROUPS, AUTH_SESSION_INFO_AUTHENTICATED, AUTH_SESSION_INFO_SIMPLE_PRIVILEGES
 from samba.netcmd.common import netcmd_finddc
-from samba import policy
+from samba import policy, parse_unc
 from samba.samba3 import libsmb_samba_internal as libsmb
 from samba import NTSTATUSError
 import uuid
@@ -243,20 +243,6 @@ def del_gpo_link(samdb, container_dn, gpo):
         raise CommandError("Error removing GPO from container", e)
 
 
-def parse_unc(unc):
-    """Parse UNC string into a hostname, a service, and a filepath"""
-    tmp = []
-    if unc.startswith('\\\\'):
-        tmp = unc[2:].split('\\', 2)
-    elif unc.startswith('//'):
-        tmp = unc[2:].split('/', 2)
-
-    if len(tmp) != 3:
-        raise ValueError("Invalid UNC string: %s" % unc)
-
-    return tmp
-
-
 def find_parser(name, flags=re.IGNORECASE):
     if re.match(r'fdeploy1\.ini$', name, flags=flags):
         return GPFDeploy1IniParser()
@@ -416,7 +402,7 @@ class GPOCommand(Command):
         try:
             os.mkdir(gpodir)
         except (IOError, OSError) as e:
-            raise CommandError("Error creating teporary GPO directory", e)
+            raise CommandError("Error creating temporary GPO directory", e)
 
         return tmpdir, gpodir
 

@@ -185,11 +185,11 @@ static int dbwrap_tool_store_string(struct db_context *db,
 	if (dbwrap_is_persistent(db)) {
 		status = dbwrap_trans_store_bystring(db, keyname,
 						     tdbdata,
-						     TDB_REPLACE);
+						     DBWRAP_REPLACE);
 	} else {
 		status = dbwrap_store_bystring(db, keyname,
 					      tdbdata,
-					      TDB_REPLACE);
+					      DBWRAP_REPLACE);
 	}
 	if (!NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr,
@@ -225,11 +225,11 @@ static int dbwrap_tool_store_hex(struct db_context *db,
 	if (dbwrap_is_persistent(db)) {
 		status = dbwrap_trans_store_bystring(db, keyname,
 						     tdbdata,
-						     TDB_REPLACE);
+						     DBWRAP_REPLACE);
 	} else {
 		status = dbwrap_store_bystring(db, keyname,
 					       tdbdata,
-					       TDB_REPLACE);
+					       DBWRAP_REPLACE);
 	}
 	if (!NT_STATUS_IS_OK(status)) {
 		d_fprintf(stderr,
@@ -291,7 +291,7 @@ static int dbwrap_tool_erase(struct db_context *db,
 {
 	int ret;
 
-	ret = dbwrap_wipe(db);
+	ret = dbwrap_wipe(db, (struct dbwrap_wipe_flags){.wipe_default=true});
 
 	if (ret != 0) {
 		d_fprintf(stderr, "ERROR erasing the database\n");

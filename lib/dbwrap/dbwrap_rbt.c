@@ -18,6 +18,7 @@
 */
 
 #include "includes.h"
+#include <assert.h>
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_private.h"
 #include "dbwrap/dbwrap_rbt.h"
@@ -380,6 +381,7 @@ static struct db_record *db_rbt_fetch_locked(struct db_context *db_ctx,
 	rec_priv = (struct db_rbt_rec *)
 		((char *)result + DBWRAP_RBT_ALIGN(sizeof(struct db_record)));
 
+	result->flags = (struct db_record_flags) {};
 	result->storev = db_rbt_storev;
 	result->delete_rec = db_rbt_delete;
 	result->private_data = rec_priv;
@@ -406,11 +408,15 @@ static int db_rbt_exists(struct db_context *db, TDB_DATA key)
 	return db_rbt_search_internal(db, key, NULL);
 }
 
-static int db_rbt_wipe(struct db_context *db)
+static int db_rbt_wipe(struct db_context *db, struct dbwrap_wipe_flags flags)
 {
 	struct db_rbt_ctx *old_ctx = talloc_get_type_abort(
 		db->private_data, struct db_rbt_ctx);
-	struct db_rbt_ctx *new_ctx = talloc_zero(db, struct db_rbt_ctx);
+	struct db_rbt_ctx *new_ctx = NULL;
+
+	assert(dbwrap_wipe_flags_default(flags));
+
+	new_ctx = talloc_zero(db, struct db_rbt_ctx);
 	if (new_ctx == NULL) {
 		return -1;
 	}

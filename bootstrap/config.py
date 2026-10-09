@@ -103,6 +103,7 @@ PKGS = [
     ('libcups2-dev', 'cups-devel'),
     ('libpam0g-dev', 'pam-devel'),
     ('libgpgme11-dev', 'gpgme-devel'),
+    ('libcrypt-dev', 'libxcrypt-devel'),
     # NOTE: Debian 8+ and Ubuntu 14.04+
     ('libgnutls28-dev', 'gnutls-devel'),
     ('gnutls-bin', 'gnutls-utils'),
@@ -139,7 +140,7 @@ PKGS = [
     ('lsb-release', 'lsb-release'),  # we need lsb_release to show info
     ('', 'rpcgen'),  # required for test
     # refer: https://fedoraproject.org/wiki/Changes/SunRPCRemoval
-    ('', 'libtirpc-devel'),  # for <rpc/rpc.h> header on fedora
+    ('libtirpc-dev', 'libtirpc-devel'),  # for <rpc/rpc.h> header
     ('', 'rpcsvc-proto-devel'), # for <rpcsvc/rquota.h> header
     ('mawk', 'gawk'),
     ('shellcheck', 'ShellCheck'),
@@ -155,7 +156,6 @@ PKGS = [
     ('python3-dnspython', 'python3-dns'),
     ('python3-pyasn1', 'python3-pyasn1'), # for krb5 tests
     ('python3-setproctitle', 'python3-setproctitle'),
-    ('python3-requests', 'python3-requests'), # for cert auto enroll
 
     ('', 'python3-libsemanage'),
     ('', 'python3-policycoreutils'),
@@ -409,6 +409,7 @@ RUN [ -n $SHA1SUM ] && echo $SHA1SUM > /sha1sum.txt
 
 ADD *.sh /tmp/
 # need root permission, do it before USER samba
+{BEFORE_BOOTSTRAP_ACTIONS}
 RUN /tmp/bootstrap.sh && /tmp/locale.sh
 
 # if ld.gold exists, force link it to ld
@@ -494,11 +495,20 @@ DEB_DISTS = {
         'docker_image': 'ubuntu:22.04',
         'vagrant_box': 'ubuntu/jammy64',
         'replace': {
+            'libtirpc-dev': '',
         },
     },
     'ubuntu2404': {
         'docker_image': 'ubuntu:24.04',
         'vagrant_box': 'ubuntu/noble64',
+        'replace': {
+        },
+    },
+    'ubuntu2604': {
+        'docker_image': 'ubuntu:26.04',
+        'vagrant_box': 'ubuntu/resolute64',
+        # locales postinstall is broken if /etc/default/locale exists
+        'BEFORE_BOOTSTRAP_ACTIONS': 'RUN mv /etc/default/locale /etc/default/locale.before.bootstrap',
         'replace': {
         },
     },
@@ -546,9 +556,9 @@ RPM_DISTS = {
             'python3-varlink': '', # not available
         }
     },
-    'fedora43': {
-        'docker_image': 'quay.io/fedora/fedora-minimal:43',
-        'vagrant_box': 'fedora/43-cloud-base',
+    'fedora44': {
+        'docker_image': 'quay.io/fedora/fedora-minimal:44',
+        'vagrant_box': 'fedora/44-cloud-base',
         'bootstrap': DNF_BOOTSTRAP,
         'replace': {
             'lsb-release': 'redhat-lsb',
@@ -625,6 +635,8 @@ def expand_family_dists(family):
         config['home'] = join(OUT, name)
         config['family'] = family['name']
         config['GENERATED_MARKER'] = GENERATED_MARKER
+        if 'BEFORE_BOOTSTRAP_ACTIONS' not in config:
+            config['BEFORE_BOOTSTRAP_ACTIONS'] = '# no BEFORE_BOOTSTRAP_ACTIONS'
 
         # replace dist specific pkgs
         replace = config.get('replace', {})

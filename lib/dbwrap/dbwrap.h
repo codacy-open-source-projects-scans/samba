@@ -39,6 +39,15 @@ enum dbwrap_lock_order {
 
 #define DBWRAP_FLAG_NONE                     0x0000000000000000ULL
 #define DBWRAP_FLAG_OPTIMIZE_READONLY_ACCESS 0x0000000000000001ULL
+#define DBWRAP_FLAG_PER_REC_PERSISTENT       0x0000000000000002ULL
+
+/** Flags to dbwrap_store() */
+#define DBWRAP_REPLACE	TDB_REPLACE	/* Replace record */
+#define DBWRAP_INSERT	TDB_INSERT	/* Don't overwrite an existing entry */
+#define DBWRAP_MODIFY	TDB_MODIFY	/* Don't create an existing entry    */
+#define DBWRAP_STORE_PERSISTENT 0x100	/* Store a persistent record */
+
+#define DBWRAP_TDB_FLAGS (DBWRAP_REPLACE | DBWRAP_INSERT | DBWRAP_MODIFY)
 
 enum dbwrap_req_state {
 	/**
@@ -63,10 +72,15 @@ enum dbwrap_req_state {
 	DBWRAP_REQ_ERROR
 };
 
+struct db_record_flags {
+	bool persistent : 1;
+};
+
 /* The following definitions come from lib/dbwrap.c  */
 
 TDB_DATA dbwrap_record_get_key(const struct db_record *rec);
 TDB_DATA dbwrap_record_get_value(const struct db_record *rec);
+struct db_record_flags dbwrap_record_get_flags(struct db_record *rec);
 NTSTATUS dbwrap_record_store(struct db_record *rec, TDB_DATA data, int flags);
 NTSTATUS dbwrap_record_storev(struct db_record *rec,
 			      const TDB_DATA *dbufs, int num_dbufs, int flags);
@@ -114,6 +128,11 @@ NTSTATUS dbwrap_traverse_read(struct db_context *db,
 			      int (*f)(struct db_record*, void*),
 			      void *private_data,
 			      int *count);
+NTSTATUS dbwrap_traverse_per_rec_persistent_read(
+	struct db_context *db,
+	int (*f)(struct db_record*, void*),
+	void *private_data,
+	int *count);
 NTSTATUS dbwrap_parse_record(struct db_context *db, TDB_DATA key,
 			     void (*parser)(TDB_DATA key, TDB_DATA data,
 					    void *private_data),
@@ -150,7 +169,24 @@ struct tevent_req *dbwrap_parse_record_send(
 	void *private_data,
 	enum dbwrap_req_state *req_state);
 NTSTATUS dbwrap_parse_record_recv(struct tevent_req *req);
-int dbwrap_wipe(struct db_context *db);
+
+/**
+ * Wipe a database
+ *
+ * @param[in]  db           Database to wipe
+
+ * @param[in] flags         DBWRAP_DROP_PERSISTENT: On databases opened with
+ *                          DBWRAP_FLAG_PER_REC_PERSISTENT, wipe the persistent
+ *                          backup database.
+ *
+ * @return                  0 on success, -1 on error
+ **/
+struct dbwrap_wipe_flags {
+	bool wipe_default : 1;
+	bool wipe_persistent_backup_db : 1;
+};
+int dbwrap_wipe(struct db_context *db, struct dbwrap_wipe_flags flags);
+bool dbwrap_wipe_flags_default(struct dbwrap_wipe_flags flags);
 int dbwrap_check(struct db_context *db);
 int dbwrap_get_seqnum(struct db_context *db);
 /* Returns 0 if unknown. */
@@ -237,6 +273,8 @@ NTSTATUS dbwrap_unmarshall(struct db_context *db, const uint8_t *buf,
 
 NTSTATUS dbwrap_merge_dbufs(TDB_DATA *buf, TALLOC_CTX *mem_ctx,
 			    const TDB_DATA *dbufs, int num_dbufs);
+
+void dbwrap_log_key(const char *prefix, TDB_DATA key);
 
 
 /**

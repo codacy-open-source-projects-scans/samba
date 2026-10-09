@@ -72,6 +72,7 @@ parser.add_option("--all-interfaces", action="store_true")
 parser.add_option("--current-ip", action="append", help="IP address to update DNS to match (helpful if behind NAT, valid multiple times, defaults to values from interfaces=)")
 parser.add_option("--rpc-server-ip", type="string", help="IP address of server to use with samba-tool (defaults to first --current-ip)")
 parser.add_option("--use-file", type="string", help="Use a file, rather than real DNS calls")
+parser.add_option("--sync-file", type="string", help="sync to a file, in addition to real DNS calls")
 parser.add_option("--update-list", type="string", help="Add DNS names from the given file")
 parser.add_option("--update-cache", type="string", help="Cache database of already registered records")
 parser.add_option("--fail-immediately", action='store_true', help="Exit on first failure")
@@ -414,6 +415,44 @@ def get_subst_vars(samdb):
 
     return vars
 
+def update_file(write_file, d, op):
+    assert(op in ["add", "delete"])
+
+    try:
+        rfile = open(write_file, 'r+')
+    except IOError:
+        # Perhaps create it
+        open(write_file, 'w+').close()
+        # Open it for reading again, in case someone else got to it first
+        rfile = open(write_file, 'r+')
+    fcntl.lockf(rfile, fcntl.LOCK_EX)
+    (file_dir, file_name) = os.path.split(write_file)
+    (tmp_fd, tmpfile) = tempfile.mkstemp(dir=file_dir, prefix=file_name, suffix="XXXXXX")
+    wfile = os.fdopen(tmp_fd, 'a')
+    modified = False
+    for line in rfile:
+        l = parse_dns_line(line, {})
+        if str(l).lower() != str(d).lower():
+            wfile.write(line)
+            continue
+        if op == "delete":
+            modified = True
+            continue
+        if op == "add":
+            op = "skip_add"
+            wfile.write(line)
+            continue
+        continue
+    if op == "add":
+        wfile.write(str(d)+"\n")
+        modified = True
+    rfile.close()
+    wfile.close()
+    if modified:
+        os.rename(tmpfile, write_file)
+    else:
+        os.remove(tmpfile)
+    return
 
 def call_nsupdate(d, op="add"):
     """call nsupdate for an entry."""
@@ -425,28 +464,7 @@ def call_nsupdate(d, op="add"):
         if opts.verbose:
             print("Use File instead of nsupdate for %s (%s)" % (d, op))
 
-        try:
-            rfile = open(opts.use_file, 'r+')
-        except IOError:
-            # Perhaps create it
-            open(opts.use_file, 'w+').close()
-            # Open it for reading again, in case someone else got to it first
-            rfile = open(opts.use_file, 'r+')
-        fcntl.lockf(rfile, fcntl.LOCK_EX)
-        (file_dir, file_name) = os.path.split(opts.use_file)
-        (tmp_fd, tmpfile) = tempfile.mkstemp(dir=file_dir, prefix=file_name, suffix="XXXXXX")
-        wfile = os.fdopen(tmp_fd, 'a')
-        for line in rfile:
-            if op == "delete":
-                l = parse_dns_line(line, {})
-                if str(l).lower() == str(d).lower():
-                    continue
-            wfile.write(line)
-        if op == "add":
-            wfile.write(str(d)+"\n")
-        rfile.close()
-        wfile.close()
-        os.rename(tmpfile, opts.use_file)
+        update_file(opts.use_file, d, op)
         return
 
     if opts.verbose:
@@ -958,6 +976,16 @@ if rebuild_cache:
         wfile.write(str(d)+"\n")
     wfile.close()
     os.rename(tmpfile, dns_update_cache)
+
+if opts.sync_file is not None:
+    for d in delete_list:
+        if opts.verbose:
+            print("delete (sync file): %s" % d)
+        update_file(opts.sync_file, d, op="delete")
+    for d in dns_list:
+        if opts.verbose:
+            print("Add (sync file): %s" % d)
+        update_file(opts.sync_file, d, op="add")
 
 # delete the ccache if we created it
 if ccachename is not None:

@@ -592,6 +592,16 @@ int32_t ctdb_control_register_notify(struct ctdb_context *ctdb,
 int32_t ctdb_control_deregister_notify(struct ctdb_context *ctdb,
 				       uint32_t client_id, TDB_DATA indata);
 
+int32_t ctdb_control_push_record(struct ctdb_context *ctdb,
+				 struct ctdb_req_control_old *c,
+				 TDB_DATA indata,
+				 bool *async_reply);
+
+int32_t ctdb_control_push_record_store(struct ctdb_context *ctdb,
+				       struct ctdb_req_control_old *c,
+				       TDB_DATA indata,
+				       bool *async_reply);
+
 struct ctdb_client *ctdb_find_client_by_pid(struct ctdb_context *ctdb,
 					    pid_t pid);
 
@@ -770,13 +780,6 @@ void ctdb_persistent_finish_trans3_commits(struct ctdb_context *ctdb);
 int32_t ctdb_control_trans3_commit(struct ctdb_context *ctdb,
 				   struct ctdb_req_control_old *c,
 				   TDB_DATA recdata, bool *async_reply);
-
-int32_t ctdb_control_start_persistent_update(struct ctdb_context *ctdb,
-					     struct ctdb_req_control_old *c,
-					     TDB_DATA recdata);
-int32_t ctdb_control_cancel_persistent_update(struct ctdb_context *ctdb,
-					      struct ctdb_req_control_old *c,
-					      TDB_DATA recdata);
 
 int32_t ctdb_control_get_db_seqnum(struct ctdb_context *ctdb,
 				   TDB_DATA indata, TDB_DATA *outdata);

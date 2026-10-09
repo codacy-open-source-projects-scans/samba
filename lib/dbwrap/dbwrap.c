@@ -20,6 +20,7 @@
 */
 
 #include "replace.h"
+#include <assert.h>
 #include "lib/util/debug.h"
 #include "lib/util/fault.h"
 #include "lib/util/talloc_stack.h"
@@ -48,9 +49,14 @@ static int delete_record(struct db_record *rec, void *data)
  * Fallback wipe implementation using traverse and delete if no genuine
  * wipe operation is provided
  */
-static int dbwrap_fallback_wipe(struct db_context *db)
+static int dbwrap_fallback_wipe(struct db_context *db,
+				struct dbwrap_wipe_flags flags)
 {
-	NTSTATUS status = dbwrap_trans_traverse(db, delete_record, NULL);
+	NTSTATUS status;
+
+	assert(dbwrap_wipe_flags_default(flags));
+
+	status = dbwrap_trans_traverse(db, delete_record, NULL);
 	return NT_STATUS_IS_OK(status) ? 0 : -1;
 }
 
@@ -81,6 +87,11 @@ TDB_DATA dbwrap_record_get_value(const struct db_record *rec)
 {
 	SMB_ASSERT(rec->value_valid);
 	return rec->value;
+}
+
+struct db_record_flags dbwrap_record_get_flags(struct db_record *rec)
+{
+	return rec->flags;
 }
 
 NTSTATUS dbwrap_record_storev(struct db_record *rec,
@@ -445,6 +456,30 @@ NTSTATUS dbwrap_traverse_read(struct db_context *db,
 	return NT_STATUS_OK;
 }
 
+NTSTATUS dbwrap_traverse_per_rec_persistent_read(
+	struct db_context *db,
+	int (*f)(struct db_record*, void*),
+	void *private_data,
+	int *count)
+{
+	int ret;
+
+	if (db->traverse_per_rec_persistent_read == NULL) {
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	ret = db->traverse_per_rec_persistent_read(db, f, private_data);
+	if (ret < 0) {
+		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	}
+
+	if (count != NULL) {
+		*count = ret;
+	}
+
+	return NT_STATUS_OK;
+}
+
 static void dbwrap_null_parser(TDB_DATA key, TDB_DATA val, void* data)
 {
 	return;
@@ -613,12 +648,20 @@ NTSTATUS dbwrap_do_locked(struct db_context *db, TDB_DATA key,
 	return NT_STATUS_OK;
 }
 
-int dbwrap_wipe(struct db_context *db)
+int dbwrap_wipe(struct db_context *db, struct dbwrap_wipe_flags flags)
 {
 	if (db->wipe == NULL) {
-		return dbwrap_fallback_wipe(db);
+		return dbwrap_fallback_wipe(db, flags);
 	}
-	return db->wipe(db);
+	return db->wipe(db, flags);
+}
+
+bool dbwrap_wipe_flags_default(struct dbwrap_wipe_flags flags)
+{
+	struct dbwrap_wipe_flags def_flags = {
+		.wipe_default = true,
+	};
+	return memcmp(&flags, &def_flags, sizeof(flags)) == 0;
 }
 
 int dbwrap_check(struct db_context *db)

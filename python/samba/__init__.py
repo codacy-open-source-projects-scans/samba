@@ -376,6 +376,31 @@ def string_is_guid(string, lower_case_only=False):
     return True
 
 
+def parse_unc(unc):
+    r"""Parse UNC string into a hostname, a service, and a filepath.
+
+    For example,
+
+    "\\samba.example.com\sysvol\samba.example.com\Policies\{long-guid}"
+
+    becomes
+
+    ["samba.example.com",
+     "sysvol",
+     "samba.example.com\Policies\{long-guid}"]
+    """
+    tmp = []
+    if unc.startswith('\\\\'):
+        tmp = unc[2:].split('\\', 2)
+    elif unc.startswith('//'):
+        tmp = unc[2:].split('/', 2)
+
+    if len(tmp) != 3:
+        raise ValueError("Invalid UNC string: %s" % unc)
+
+    return tmp
+
+
 def enable_net_export_keytab():
     """This function modifies the samba.net.Net class to contain
     an export_keytab() method."""

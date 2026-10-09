@@ -32,6 +32,7 @@
 #include "librpc/gen_ndr/ndr_krb5pac.h"
 #include "../libcli/security/security.h"
 #include "util_tdb.h"
+#include "param/loadparm.h"
 
 #define NETSAMLOGON_TDB	"netsamlogon_cache.tdb"
 
@@ -91,6 +92,23 @@ clear:
 	}
 
 	goto again;
+}
+
+/***********************************************************************
+ Clear the whole cache
+***********************************************************************/
+
+void netsamlogon_cache_flush(void)
+{
+	if (!netsamlogon_cache_init()) {
+		DBG_ERR("cannot open %s for write!\n",
+			NETSAMLOGON_TDB);
+		return;
+	}
+
+	DBG_DEBUG("Wipe all!\n");
+
+	tdb_wipe_all(netsamlogon_tdb);
 }
 
 /***********************************************************************
@@ -240,6 +258,7 @@ struct netr_SamInfo3 *netsamlogon_cache_get(TALLOC_CTX *mem_ctx, const struct do
 	enum ndr_err_code ndr_err;
 	DATA_BLOB blob;
 	struct netsamlogoncache_entry r;
+	int ttl;
 
 	if (!netsamlogon_cache_init()) {
 		DEBUG(0,("netsamlogon_cache_get: cannot open %s for write!\n",
@@ -276,6 +295,15 @@ struct netr_SamInfo3 *netsamlogon_cache_get(TALLOC_CTX *mem_ctx, const struct do
 	}
 
 	NDR_PRINT_DEBUG_LEVEL(DBGLVL_DEBUG, netsamlogoncache_entry, &r);
+
+	ttl = lp_parm_int(-1, "netsamlogoncache", "timeout", 0);
+
+	if (ttl > 0 && r.timestamp + ttl < time(NULL)) {
+		DBG_DEBUG("netsamlogon cache entry expired\n");
+		tdb_delete_bystring(netsamlogon_tdb, keystr.buf);
+		TALLOC_FREE(info3);
+		goto done;
+	}
 
 	info3 = (struct netr_SamInfo3 *)talloc_memdup(mem_ctx, &r.info3,
 						      sizeof(r.info3));

@@ -117,7 +117,7 @@ static int upgrade_v2_to_v3(struct db_record *rec, void *priv)
 	status = dbwrap_store(share_db,
 				string_term_tdb_data(newkey),
 				value,
-				TDB_REPLACE);
+				DBWRAP_REPLACE);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("upgrade_v2_to_v3: Failed to store secdesc for "
@@ -395,7 +395,7 @@ NTSTATUS set_share_security(const char *share_name,
 	}
 
 	status = dbwrap_trans_store(share_db, string_term_tdb_data(key), blob,
-				    TDB_REPLACE);
+				    DBWRAP_REPLACE);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("set_share_security: Failed to store secdesc for "
 			  "%s: %s\n", share_name, nt_errstr(status)));

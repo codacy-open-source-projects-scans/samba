@@ -58,6 +58,13 @@
 #define SMB_VFS_NEXT_SET_QUOTA(handle, fsp, qtype, id, qt) \
 	smb_vfs_call_set_quota((handle)->next, (fsp), (qtype), (id), (qt))
 
+#define SMB_VFS_OPEN_SHARE_ROOT(conn, root_fsp, connectpath) \
+	smb_vfs_call_open_share_root((conn)->vfs_handles,    \
+				     (root_fsp),             \
+				     (connectpath))
+#define SMB_VFS_NEXT_OPEN_SHARE_ROOT(handle, root_fsp, connectpath) \
+	smb_vfs_call_open_share_root((handle)->next, (root_fsp), (connectpath))
+
 #define SMB_VFS_GET_SHADOW_COPY_DATA(fsp,shadow_copy_data,labels) \
 	smb_vfs_call_get_shadow_copy_data((fsp)->conn->vfs_handles, (fsp), (shadow_copy_data), (labels))
 #define SMB_VFS_NEXT_GET_SHADOW_COPY_DATA(handle, fsp, shadow_copy_data ,labels) \
@@ -593,13 +600,13 @@
 	smb_vfs_call_durable_disconnect((handle)->next, \
 					(fsp), (old_cookie), (mem_ctx), (new_cookie))
 
-#define SMB_VFS_DURABLE_RECONNECT(conn, smb1req, op, old_cookie, mem_ctx, fsp, new_cookie) \
+#define SMB_VFS_DURABLE_RECONNECT(conn, smb1req, op, old_cookie, lease, mem_ctx, fsp, new_cookie) \
 	smb_vfs_call_durable_reconnect((conn)->vfs_handles, \
-				       (smb1req), (op), (old_cookie), \
+				       (smb1req), (op), (old_cookie), (lease), \
 				       (mem_ctx), (fsp), (new_cookie))
-#define SMB_VFS_NEXT_DURABLE_RECONNECT(handle, smb1req, op, old_cookie, mem_ctx, fsp, new_cookie) \
+#define SMB_VFS_NEXT_DURABLE_RECONNECT(handle, smb1req, op, old_cookie, lease, mem_ctx, fsp, new_cookie) \
 	smb_vfs_call_durable_reconnect((handle)->next, \
-					(smb1req), (op), (old_cookie), \
+					(smb1req), (op), (old_cookie), (lease), \
 					(mem_ctx), (fsp), (new_cookie))
 
 #define SMB_VFS_FREADDIR_ATTR(fsp, mem_ctx, attr_data) \

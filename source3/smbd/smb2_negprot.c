@@ -230,7 +230,7 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 	uint16_t out_negotiate_context_count = 0;
 	uint16_t dialect = 0;
 	uint32_t capabilities;
-	DATA_BLOB out_guid_blob;
+	struct GUID_ndr_buf out_guid_buf;
 	struct GUID out_guid;
 	enum protocol_types protocol = PROTOCOL_NONE;
 	uint32_t max_limit;
@@ -385,14 +385,9 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 	in_transport_caps =  smb2_negotiate_context_find(&in_c,
 					SMB2_TRANSPORT_CAPABILITIES);
 
-	/* negprot_spnego() returns the server guid in the first 16 bytes */
 	negprot_spnego_blob = negprot_spnego(req, xconn);
 	if (negprot_spnego_blob.data == NULL) {
 		return smbd_smb2_request_error(req, NT_STATUS_NO_MEMORY);
-	}
-
-	if (negprot_spnego_blob.length < 16) {
-		return smbd_smb2_request_error(req, NT_STATUS_INTERNAL_ERROR);
 	}
 
 	security_mode = SMB2_NEGOTIATE_SIGNING_ENABLED;
@@ -419,11 +414,17 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		capabilities |= SMB2_CAP_ENCRYPTION;
 	}
 
-	if (protocol >= PROTOCOL_SMB3_00 &&
-	    in_capabilities & SMB2_CAP_DIRECTORY_LEASING &&
-	    lp_smb3_directory_leases())
-	{
-		capabilities |= SMB2_CAP_DIRECTORY_LEASING;
+	if (protocol >= PROTOCOL_SMB3_00) {
+		if (in_capabilities & SMB2_CAP_DIRECTORY_LEASING &&
+		    lp_smb3_directory_leases())
+		{
+			capabilities |= SMB2_CAP_DIRECTORY_LEASING;
+		}
+		if (in_capabilities & SMB2_CAP_PERSISTENT_HANDLES &&
+		    lp_persistent_handles())
+		{
+			capabilities |= SMB2_CAP_PERSISTENT_HANDLES;
+		}
 	}
 
 	/*
@@ -742,14 +743,7 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 
 	security_offset = SMB2_HDR_BODY + 0x40;
 
-#if 1
-	/* Try SPNEGO auth... */
-	security_buffer = data_blob_const(negprot_spnego_blob.data + 16,
-					  negprot_spnego_blob.length - 16);
-#else
-	/* for now we want raw NTLMSSP */
-	security_buffer = data_blob_const(NULL, 0);
-#endif
+	security_buffer = negprot_spnego_blob;
 
 	if (posix) {
 		/* Client correctly negotiated SMB2 unix extensions. */
@@ -812,11 +806,8 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		outdyn = security_buffer;
 	}
 
-	out_guid_blob = data_blob_const(negprot_spnego_blob.data, 16);
-	status = GUID_from_ndr_blob(&out_guid_blob, &out_guid);
-	if (!NT_STATUS_IS_OK(status)) {
-		return smbd_smb2_request_error(req, status);
-	}
+	smbd_server_guid(&out_guid);
+	GUID_to_ndr_buf(&out_guid, &out_guid_buf);
 
 	outbody = smbd_smb2_generate_outbody(req, 0x40);
 	if (outbody.data == NULL) {
@@ -830,7 +821,8 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 	SSVAL(outbody.data, 0x06,
 	      out_negotiate_context_count);	/* reserved/NegotiateContextCount */
 	memcpy(outbody.data + 0x08,
-	       out_guid_blob.data, 16);	/* server guid */
+	       out_guid_buf.buf,
+	       sizeof(out_guid_buf.buf));	/* server guid */
 	SIVAL(outbody.data, 0x18,
 	      capabilities);			/* capabilities */
 	SIVAL(outbody.data, 0x1C, max_trans);	/* max transact size */
@@ -1004,13 +996,7 @@ static void smbd_smb2_request_process_negprot_mc_done(struct tevent_req *subreq)
 DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
 {
 	DATA_BLOB blob = data_blob_null;
-	DATA_BLOB blob_out = data_blob_null;
-	nstring dos_name;
-	fstring unix_name;
 	NTSTATUS status;
-#ifdef DEVELOPER
-	size_t slen;
-#endif
 	struct gensec_security *gensec_security;
 
 	/* See if we can get an SPNEGO blob */
@@ -1041,10 +1027,6 @@ DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
 		TALLOC_FREE(gensec_security);
 	}
 
-#if defined(WITH_SMB1SERVER)
-	xconn->smb1.negprot.spnego = true;
-#endif
-
 	/* strangely enough, NT does not sent the single OID NTLMSSP when
 	   not a ADS member, it sends no OIDs at all
 
@@ -1062,32 +1044,32 @@ DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
 		return data_blob_null;
 	}
 
-	blob_out = data_blob_talloc(ctx, NULL, 16 + blob.length);
-	if (blob_out.data == NULL) {
-		data_blob_free(&blob);
-		return data_blob_null;
-	}
+	return blob;
+}
 
-	memset(blob_out.data, '\0', 16);
+void smbd_server_guid(struct GUID *server_guid)
+{
+	fstring unix_name = {};
+	nstring dos_name = {};
+	DATA_BLOB blob = {
+		.data = (uint8_t *)dos_name,
+		.length = sizeof(dos_name),
+	};
+	NTSTATUS status;
 
-	checked_strlcpy(unix_name, lp_netbios_name(), sizeof(unix_name));
+	/*
+	 * Strange way to create a GUID, but this is what
+	 * negprot_spnego() did.
+	 */
+	fstrcpy(unix_name, lp_netbios_name());
 	(void)strlower_m(unix_name);
 	push_ascii_nstring(dos_name, unix_name);
-	strlcpy((char *)blob_out.data, dos_name, 17);
 
-#ifdef DEVELOPER
-	/* Fix valgrind 'uninitialized bytes' issue. */
-	slen = strlen(dos_name);
-	if (slen < 16) {
-		memset(blob_out.data+slen, '\0', 16 - slen);
-	}
-#endif
-
-	memcpy(&blob_out.data[16], blob.data, blob.length);
-
-	data_blob_free(&blob);
-
-	return blob_out;
+	/*
+	 * "nstring" is 16 bytes, i.e. exactly a GUID
+	 */
+	status = GUID_from_ndr_blob(&blob, server_guid);
+	SMB_ASSERT(NT_STATUS_IS_OK(status));
 }
 
 /*

@@ -449,10 +449,9 @@ static const struct gensec_security_ops **gensec_security_by_sasl_list(
  */
 
 _PUBLIC_ const struct gensec_security_ops_wrapper *gensec_security_by_oid_list(
-					struct gensec_security *gensec_security,
-					TALLOC_CTX *mem_ctx,
-					const char * const *oid_strings,
-					const char *skip)
+	struct gensec_security *gensec_security,
+	TALLOC_CTX *mem_ctx,
+	const char *const *oid_strings)
 {
 	struct gensec_security_ops_wrapper *backends_out;
 	const struct gensec_security_ops **backends;
@@ -479,10 +478,6 @@ _PUBLIC_ const struct gensec_security_ops_wrapper *gensec_security_by_oid_list(
 			continue;
 		}
 		for (oid_idx = 0; oid_strings[oid_idx]; oid_idx++) {
-			if (strcmp(oid_strings[oid_idx], skip) == 0) {
-				continue;
-			}
-
 			for (j=0; backends[i]->oid[j]; j++) {
 				if (!backends[i]->oid[j] ||
 				    !(strcmp(backends[i]->oid[j],
@@ -526,8 +521,7 @@ _PUBLIC_ const struct gensec_security_ops_wrapper *gensec_security_by_oid_list(
 static const char **gensec_security_oids_from_ops(
 	struct gensec_security *gensec_security,
 	TALLOC_CTX *mem_ctx,
-	const struct gensec_security_ops * const *ops,
-	const char *skip)
+	const struct gensec_security_ops *const *ops)
 {
 	int i;
 	int j = 0;
@@ -541,21 +535,23 @@ static const char **gensec_security_oids_from_ops(
 		return NULL;
 	}
 
-	for (i=0; ops && ops[i]; i++) {
+	for (i=0; ops[i]; i++) {
 		if (!ops[i]->oid) {
 			continue;
 		}
 
 		for (k = 0; ops[i]->oid[k]; k++) {
-			if (skip && strcmp(skip, ops[i]->oid[k])==0) {
-			} else {
-				oid_list = talloc_realloc(mem_ctx, oid_list, const char *, j + 2);
-				if (!oid_list) {
-					return NULL;
-				}
-				oid_list[j] = ops[i]->oid[k];
-				j++;
+			const char **tmp = talloc_realloc(mem_ctx,
+							  oid_list,
+							  const char *,
+							  j + 2);
+			if (tmp == NULL) {
+				TALLOC_FREE(oid_list);
+				return NULL;
 			}
+			oid_list = tmp;
+			oid_list[j] = ops[i]->oid[k];
+			j++;
 		}
 	}
 	oid_list[j] = NULL;
@@ -609,15 +605,15 @@ _PUBLIC_ const char **gensec_security_oids_from_ops_wrapped(TALLOC_CTX *mem_ctx,
  *
  */
 
-_PUBLIC_ const char **gensec_security_oids(struct gensec_security *gensec_security,
-					   TALLOC_CTX *mem_ctx,
-					   const char *skip)
+_PUBLIC_ const char **gensec_security_oids(
+	struct gensec_security *gensec_security,
+	TALLOC_CTX *mem_ctx)
 {
 	const struct gensec_security_ops **ops;
 
 	ops = gensec_security_mechs(gensec_security, mem_ctx);
 
-	return gensec_security_oids_from_ops(gensec_security, mem_ctx, ops, skip);
+	return gensec_security_oids_from_ops(gensec_security, mem_ctx, ops);
 }
 
 static int gensec_security_destructor(struct gensec_security *gctx)
@@ -677,33 +673,58 @@ static NTSTATUS gensec_start(TALLOC_CTX *mem_ctx,
  * @note Used by SPNEGO in particular, for the actual implementation mechanism
  */
 
-_PUBLIC_ NTSTATUS gensec_subcontext_start(TALLOC_CTX *mem_ctx,
-				 struct gensec_security *parent,
-				 struct gensec_security **gensec_security)
+_PUBLIC_ NTSTATUS
+gensec_subcontext_start(TALLOC_CTX *mem_ctx,
+			struct gensec_security *parent,
+			struct gensec_security **_gensec_security)
 {
+	struct gensec_security *gensec_security = NULL;
+
 	if (parent->child_security != NULL) {
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 
-	(*gensec_security) = talloc_zero(mem_ctx, struct gensec_security);
-	NT_STATUS_HAVE_NO_MEMORY(*gensec_security);
+	gensec_security = talloc(mem_ctx, struct gensec_security);
+	if (gensec_security == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
-	(**gensec_security) = *parent;
-	(*gensec_security)->ops = NULL;
-	(*gensec_security)->private_data = NULL;
-	(*gensec_security)->update_busy_ptr = NULL;
+	*gensec_security = *parent;
+	gensec_security->ops = NULL;
+	gensec_security->private_data = NULL;
+	gensec_security->update_busy_ptr = NULL;
 
-	(*gensec_security)->subcontext = true;
-	(*gensec_security)->want_features = parent->want_features;
-	(*gensec_security)->max_update_size = parent->max_update_size;
-	(*gensec_security)->dcerpc_auth_level = parent->dcerpc_auth_level;
-	(*gensec_security)->auth_context = talloc_reference(*gensec_security, parent->auth_context);
-	(*gensec_security)->settings = talloc_reference(*gensec_security, parent->settings);
-	(*gensec_security)->auth_context = talloc_reference(*gensec_security, parent->auth_context);
-	(*gensec_security)->channel_bindings = talloc_reference(*gensec_security, parent->channel_bindings);
+	gensec_security->subcontext = true;
 
-	talloc_set_destructor((*gensec_security), gensec_security_destructor);
+	gensec_security->auth_context = talloc_reference(gensec_security,
+							 parent->auth_context);
+	if ((parent->auth_context != NULL) &&
+	    (gensec_security->auth_context == NULL))
+	{
+		goto nomem;
+	}
+
+	gensec_security->settings = talloc_reference(gensec_security,
+						     parent->settings);
+	if ((parent->settings != NULL) && (gensec_security->settings == NULL))
+	{
+		goto nomem;
+	}
+
+	gensec_security->channel_bindings = talloc_reference(
+		gensec_security, parent->channel_bindings);
+	if ((parent->channel_bindings != NULL) &&
+	    (gensec_security->channel_bindings == NULL))
+	{
+		goto nomem;
+	}
+
+	talloc_set_destructor(gensec_security, gensec_security_destructor);
+	*_gensec_security = gensec_security;
 	return NT_STATUS_OK;
+nomem:
+	TALLOC_FREE(gensec_security);
+	return NT_STATUS_NO_MEMORY;
 }
 
 _PUBLIC_ NTSTATUS gensec_child_ready(struct gensec_security *parent,

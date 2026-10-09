@@ -399,6 +399,8 @@ enum ctdb_controls {CTDB_CONTROL_PROCESS_EXISTS          = 0,
 		    CTDB_CONTROL_TCP_CLIENT_DISCONNECTED = 159,
 		    CTDB_CONTROL_TCP_CLIENT_PASSED       = 160,
 		    CTDB_CONTROL_START_IPREALLOCATE      = 161,
+		    CTDB_CONTROL_PUSH_RECORD             = 162,
+		    CTDB_CONTROL_PUSH_RECORD_STORE       = 163,
 };
 
 #define MAX_COUNT_BUCKETS 16
@@ -518,6 +520,8 @@ struct ctdb_ltdb_header {
 	uint32_t dmaster;
 	uint32_t reserved1;
 #define CTDB_REC_FLAG_DEFAULT			0x00000000
+#define CTDB_REC_FLAG_PERSISTENT		0x00000001
+#define CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS	0x00000002
 #define CTDB_REC_FLAG_MIGRATED_WITH_DATA	0x00010000
 #define CTDB_REC_FLAG_VACUUM_MIGRATED		0x00020000
 #define CTDB_REC_FLAG_AUTOMATIC			0x00040000
@@ -889,6 +893,14 @@ struct ctdb_echo_data {
 	TDB_DATA buf;
 };
 
+struct ctdb_push_record_data {
+	uint32_t generation;
+	uint32_t db_id;
+	struct ctdb_ltdb_header hdr;
+	TDB_DATA key;
+	TDB_DATA value;
+};
+
 struct ctdb_req_control_data {
 	uint32_t opcode;
 	union {
@@ -928,6 +940,7 @@ struct ctdb_req_control_data {
 		struct ctdb_pid_srvid *pid_srvid;
 		struct ctdb_db_vacuum *db_vacuum;
 		struct ctdb_echo_data *echo_data;
+		struct ctdb_push_record_data *push_record;
 	} data;
 };
 

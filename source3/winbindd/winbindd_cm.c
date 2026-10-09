@@ -109,6 +109,7 @@ static bool set_dc_type_and_flags_trustinfo( struct winbindd_domain *domain );
 static bool get_dcs(TALLOC_CTX *mem_ctx, struct winbindd_domain *domain,
 		    struct dc_name_ip **dcs, int *num_dcs,
 		    uint32_t request_flags);
+static const char *failover_reason_to_string(enum winbindd_failover_reason);
 
 void winbind_msg_domain_offline(struct messaging_context *msg_ctx,
 				void *private_data,
@@ -619,6 +620,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 				      struct smbXcli_transport **ptransport,
 				      const char *controller,
 				      struct cli_state **cli,
+				      bool *ignore_smb_disconnected,
 				      bool *retry)
 {
 	bool try_ipc_auth = false;
@@ -634,6 +636,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
 	NTSTATUS tmp_status;
 	NTSTATUS tcon_status = NT_STATUS_NETWORK_NAME_DELETED;
+	bool require_smb = true;
 
 	enum smb_signing_setting smb_sign_client_connections = lp_client_ipc_signing();
 
@@ -747,6 +750,24 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 		 * an anonymous IPC$ connection anyway.
 		 */
 		try_ipc_auth = false;
+
+		/*
+		 * Unless we have an NT4 trust we don't
+		 * need an smb connection.
+		 */
+		switch (domain->secure_channel_type) {
+		case SEC_CHAN_BDC:
+			if (!IS_AD_DC) {
+				break;
+			}
+			FALL_THROUGH;
+		case SEC_CHAN_RODC:
+		case SEC_CHAN_DNS_DOMAIN:
+			require_smb = false;
+			break;
+		default:
+			break;
+		}
 	}
 
 	if (try_ipc_auth) {
@@ -897,6 +918,25 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 		goto session_setup_done;
 	}
 
+	if (NT_STATUS_EQUAL(result, NT_STATUS_NOT_SUPPORTED) && !require_smb) {
+		/*
+		 * This likely means we're on a DC
+		 * and the peer has 'Require NTLMv2 session security'
+		 * which means anonymous NTLMSSP is not supported
+		 * or it disabled NTLMSSP completely.
+		 *
+		 * If the destination domain is an AD domain
+		 * we won't use the smb connection anyway
+		 * only ncacn_ip_tcp.
+		 *
+		 * So disconnect the smb connection and
+		 * pretent everything went fine.
+		 */
+		DBG_NOTICE("ignore unsupported anon session to %s\n",
+			   controller);
+		goto ignore_anon_error;
+	}
+
 	DEBUG(1, ("anonymous session setup to %s failed with %s\n",
 		  controller, nt_errstr(result)));
 
@@ -918,6 +958,23 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 	}
 
 	result = cli_tree_connect(*cli, "IPC$", "IPC", NULL);
+	if (NT_STATUS_EQUAL(result, NT_STATUS_ACCESS_DENIED) && !require_smb) {
+		/*
+		 * This likely means we're on a DC
+		 * and the peer is Samba with 'restrict anonymous = 2'
+		 * which means anonymous tree connect to IPC$ fails.
+		 *
+		 * If the destination domain is an AD domain
+		 * we won't use the smb connection anyway
+		 * only ncacn_ip_tcp.
+		 *
+		 * So disconnect the smb connection and
+		 * pretent everything went fine.
+		 */
+		DBG_NOTICE("ignore unsupported anon tcon to %s\n",
+			   controller);
+		goto ignore_anon_error;
+	}
 	if (!NT_STATUS_IS_OK(result)) {
 		DEBUG(1,("failed tcon_X with %s\n", nt_errstr(result)));
 		goto done;
@@ -925,7 +982,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 	tcon_status = result;
 
 	/* cache the server name for later connections */
-
+store_cache:
 	saf_store(domain->name, controller);
 	if (domain->alt_name) {
 		saf_store(domain->alt_name, controller);
@@ -957,6 +1014,13 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 	}
 
 	return result;
+
+ignore_anon_error:
+	smbXcli_conn_disconnect((*cli)->conn,
+				NT_STATUS_CANT_OPEN_ANONYMOUS);
+	*ignore_smb_disconnected = true;
+	result = tcon_status = NT_STATUS_OK;
+	goto store_cache;
 }
 
 /*******************************************************************
@@ -1330,10 +1394,10 @@ static bool get_dcs(TALLOC_CTX *mem_ctx, struct winbindd_domain *domain,
 	return True;
 }
 
-static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
-				 struct winbindd_domain *domain,
-				 uint32_t request_flags,
-				 struct smbXcli_transport **ptransport)
+static NTSTATUS connect_preferred_dc(TALLOC_CTX *mem_ctx,
+				     struct winbindd_domain *domain,
+				     uint32_t request_flags,
+				     struct smbXcli_transport **ptransport)
 {
 	char *saf_servername = NULL;
 	struct smb_transports ts =
@@ -1376,16 +1440,18 @@ static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
 						   saf_servername,
 						   AI_NUMERICHOST);
 			if (!ok) {
-				return false;
+				return NT_STATUS_INVALID_PARAMETER;
 			}
 		} else {
+			struct samba_sockaddr dcaddr;
 			ok = resolve_name(saf_servername,
-					  &domain->dcaddr,
+					  &dcaddr,
 					  0x20,
 					  true);
 			if (!ok) {
 				goto fail;
 			}
+			domain->dcaddr = dcaddr.u.ss;
 		}
 
 		TALLOC_FREE(domain->dcname);
@@ -1400,18 +1466,18 @@ static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
 	}
 
 	if (domain->dcname == NULL) {
-		return false;
+		return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 	}
 
 	has_entry = has_negative_conn_cache_entry(domain->name, domain->dcname);
 	if (has_entry) {
-		return false;
+		return NT_STATUS_HOST_UNREACHABLE;
 	}
 
 	lp_ctx = loadparm_init_s3(talloc_tos(), loadparm_s3_helpers());
 	if (lp_ctx == NULL) {
 		DBG_ERR("loadparm_init_s3 failed\n");
-		return false;
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	status = smbsock_connect(&domain->dcaddr, lp_ctx, &ts,
@@ -1420,18 +1486,17 @@ static bool connect_preferred_dc(TALLOC_CTX *mem_ctx,
 	if (!NT_STATUS_IS_OK(status)) {
 		winbind_add_failed_connection_entry(domain,
 						    domain->dcname,
-						    NT_STATUS_UNSUCCESSFUL);
-		return false;
+						    status);
+		return status;
 	}
 	talloc_reparent(NULL, mem_ctx, *ptransport);
-	return true;
+	return NT_STATUS_OK;
 
 fail:
 	winbind_add_failed_connection_entry(domain,
 					    saf_servername,
 					    NT_STATUS_UNSUCCESSFUL);
-	return false;
-
+	return NT_STATUS_UNSUCCESSFUL;
 }
 
 /*******************************************************************
@@ -1472,8 +1537,8 @@ static bool find_dc(TALLOC_CTX *mem_ctx,
 	D_NOTICE("First try to connect to the closest DC (using server "
 		 "affinity cache). If this fails, try to lookup the DC using "
 		 "DNS afterwards.\n");
-	ok = connect_preferred_dc(mem_ctx, domain, request_flags, &xtp);
-	if (ok) {
+	status = connect_preferred_dc(mem_ctx, domain, request_flags, &xtp);
+	if (NT_STATUS_IS_OK(status)) {
 		goto return_transport;
 	}
 
@@ -1481,16 +1546,31 @@ static bool find_dc(TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
+	/*
+	 * Preferred DC connection failed. We are now certain that
+	 * another DC will be selected. Set failover reason to
+	 * DC connectivity.
+	 */
+	set_domain_failover_state(domain,
+				  WINBINDD_FAILOVER_DC_CONNECTIVITY,
+				  status);
+	DBG_NOTICE("DC failover detected: Preferred DC failed, selecting alternative DC "
+		 "(reason: DC connectivity)\n");
+
 	lp_ctx = loadparm_init_s3(talloc_tos(), loadparm_s3_helpers());
 	if (lp_ctx == NULL) {
 		DBG_ERR("loadparm_init_s3 failed\n");
+		reset_domain_failover_state(domain);
 		return false;
 	}
 
  again:
 	D_DEBUG("Retrieving a list of IP addresses for DCs.\n");
-	if (!get_dcs(mem_ctx, domain, &dcs, &num_dcs, request_flags) || (num_dcs == 0))
+	if (!get_dcs(mem_ctx, domain, &dcs, &num_dcs, request_flags) || (num_dcs == 0)) {
+		/* No DCs found, reset failover state */
+		reset_domain_failover_state(domain);
 		return False;
+	}
 
 	D_DEBUG("Retrieved IP addresses for %d DCs.\n", num_dcs);
 	for (i=0; i<num_dcs; i++) {
@@ -1527,6 +1607,8 @@ static bool find_dc(TALLOC_CTX *mem_ctx,
 			winbind_add_failed_connection_entry(domain,
 				dcs[i].name, NT_STATUS_UNSUCCESSFUL);
 		}
+		/* All DCs failed, reset failover state */
+		reset_domain_failover_state(domain);
 		return False;
 	}
 	talloc_reparent(NULL, mem_ctx, xtp);
@@ -1581,6 +1663,14 @@ static bool find_dc(TALLOC_CTX *mem_ctx,
 return_transport:
 
 	*ptransport = talloc_move(mem_ctx, &xtp);
+
+	if (domain->failover_reason != WINBINDD_FAILOVER_NONE) {
+		DBG_DEBUG("DC connection successful after failover: %s -> %s "
+			"(reason: %s)\n",
+			domain->src_dc ? domain->src_dc : "unknown",
+			domain->dcname,
+			failover_reason_to_string(domain->failover_reason));
+	}
 
 	return true;
 }
@@ -1720,6 +1810,11 @@ static NTSTATUS cm_open_connection(struct winbindd_domain *domain,
 
 		found_dc = find_dc(mem_ctx, domain, request_flags, &xtp);
 		if (!found_dc) {
+			/* Failover is happening - no DC found. */
+			set_domain_failover_state(
+				domain,
+				WINBINDD_FAILOVER_DC_CONNECTIVITY,
+				NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND);
 			/* This is the one place where we will
 			   set the global winbindd offline state
 			   to true, if a "WINBINDD_OFFLINE" entry
@@ -1729,14 +1824,22 @@ static NTSTATUS cm_open_connection(struct winbindd_domain *domain,
 			break;
 		}
 
+		new_conn->ignore_smb_disconnected = false;
 		new_conn->cli = NULL;
 
 		result = cm_prepare_connection(domain, &xtp, domain->dcname,
-			&new_conn->cli, &retry);
+			&new_conn->cli,
+			&new_conn->ignore_smb_disconnected,
+			&retry);
 		TALLOC_FREE(xtp);
 		if (NT_STATUS_IS_OK(result)) {
 			break;
 		}
+		/* Connection preparation failed - failover is happening. */
+		set_domain_failover_state(domain,
+					  WINBINDD_FAILOVER_DC_CONNECTIVITY,
+					  result);
+
 		if (!retry) {
 			break;
 		}
@@ -1745,6 +1848,10 @@ static NTSTATUS cm_open_connection(struct winbindd_domain *domain,
 	if (!NT_STATUS_IS_OK(result)) {
 		/* Ensure we setup the retry handler. */
 		set_domain_offline(domain);
+		/* Failover is happening - connection failed after retries. */
+		set_domain_failover_state(domain,
+					  WINBINDD_FAILOVER_DC_CONNECTIVITY,
+					  result);
 		goto out;
 	}
 
@@ -1890,23 +1997,202 @@ void close_conns_after_fork(void)
 	}
 }
 
-static bool connection_ok(struct winbindd_domain *domain)
+static bool connection_ok(struct winbindd_domain *domain, NTSTATUS *p_status)
 {
-	bool ok;
+	bool ok = true;
+	bool ret = true;
+	NTSTATUS status = NT_STATUS_OK;
 
-	ok = cli_state_is_connected(domain->conn.cli);
+	if (!domain->conn.ignore_smb_disconnected) {
+		errno = 0;
+		ok = cli_state_is_connected(domain->conn.cli);
+	}
 	if (!ok) {
+		int err = errno;
+
 		DEBUG(3, ("connection_ok: Connection to %s for domain %s is not connected\n",
 			  domain->dcname, domain->name));
-		return False;
+
+		if (err > 0 && err != ECONNRESET && err != EPIPE) {
+			DBG_WARNING("connection_ok: Error detected: %s, "
+				    "connection to DC: %s for domain: %s is "
+				    "not connected\n",
+				    strerror(err),
+				    domain->dcname,
+				    domain->name);
+		}
+
+		/*
+		 * When cli_state_is_connected() returns false but errno is 0,
+		 * it indicates the connection was invalidated or uninitialized,
+		 * not a real socket error.
+		 */
+		if (err == 0) {
+			status = NT_STATUS_OK;
+		} else {
+			status = map_nt_error_from_unix(err);
+		}
+		ret = false;
+		goto out;
 	}
 
 	if (!domain->online) {
 		DEBUG(3, ("connection_ok: Domain %s is offline\n", domain->name));
-		return False;
+		status = NT_STATUS_CONNECTION_INVALID;
+		ret = false;
 	}
 
-	return True;
+out:
+	if (p_status) {
+		*p_status = status;
+	}
+	return ret;
+}
+
+/* Helper function to convert failover reason enum to string */
+static const char *failover_reason_to_string(enum winbindd_failover_reason reason)
+{
+	switch (reason) {
+	case WINBINDD_FAILOVER_NONE:
+		return "NONE";
+	case WINBINDD_FAILOVER_DC_CONNECTIVITY:
+		return "DC_CONNECTIVITY";
+	case WINBINDD_FAILOVER_KERBEROS:
+		return "KERBEROS";
+	case WINBINDD_FAILOVER_LDAP:
+		return "LDAP";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+/* Helper function to check if error is transient network error */
+static bool is_transient_network_error(NTSTATUS status)
+{
+	return NT_STATUS_EQUAL(status, NT_STATUS_CONNECTION_RESET) ||
+	       NT_STATUS_EQUAL(status, NT_STATUS_CONNECTION_DISCONNECTED);
+}
+
+/* Helper function to set failover state and reason */
+void set_domain_failover_state(struct winbindd_domain *domain,
+			       enum winbindd_failover_reason reason,
+			       NTSTATUS status)
+{
+	domain->failover_status = status;
+
+	/* Log a message if failure occur again */
+	if (domain->failover_reason != WINBINDD_FAILOVER_NONE) {
+		DBG_DEBUG("Error encountered during DC failover. "
+			  "Failed DC: %s "
+			  "Failure reason: %s "
+			  "Failure status: %s\n",
+			  domain->dcname ? domain->dcname : "UNKNOWN",
+			  failover_reason_to_string(reason),
+			  nt_errstr(status));
+	} else {
+		/*
+		 * Only set reason if it's not already set
+		 * (preserve existing reason)
+		 */
+		domain->failover_reason = reason;
+
+		/* Set src_dc to current DC name if not already set */
+		if (domain->dcname != NULL) {
+			domain->src_dc = talloc_strdup(domain, domain->dcname);
+			if (domain->src_dc == NULL) {
+				DBG_ERR("talloc_strdup failed\n");
+			}
+		}
+	}
+}
+
+/* Helper function to reset failover state */
+void reset_domain_failover_state(struct winbindd_domain *domain)
+{
+	domain->failover_reason = WINBINDD_FAILOVER_NONE;
+	domain->failover_status = NT_STATUS_OK;
+	TALLOC_FREE(domain->src_dc);
+}
+
+static void print_failover_log(struct winbindd_domain *domain, bool is_success)
+{
+	const char *failover_reason_str = NULL;
+	char *log_message = NULL;
+	struct timeval current_time = {};
+	double elapsed_seconds;
+
+	if (is_success) {
+		/* Logging very first DC information */
+		if (domain->failover_reason == WINBINDD_FAILOVER_NONE) {
+			DBG_NOTICE("Successfully connected to "
+				   "domain controller %s\n",
+				   domain->dcname);
+			return;
+		}
+
+		if (is_transient_network_error(domain->failover_status)) {
+			if (domain->src_dc != NULL && domain->dcname != NULL &&
+			    strcmp(domain->src_dc, domain->dcname) != 0)
+			{
+				DBG_NOTICE("DC transition from Source DC: %s "
+					   "to Destination DC: %s\n",
+					   domain->src_dc,
+					   domain->dcname);
+			} else {
+				DBG_DEBUG(
+					"Ignoring transient network error for "
+					"domain '%s' (DC: %s): detected "
+					"error: "
+					"%s \n",
+					domain->name,
+					domain->dcname ? domain->dcname
+						       : "unknown",
+					nt_errstr(domain->failover_status));
+			}
+			return;
+		}
+	}
+
+	current_time = timeval_current();
+	elapsed_seconds = timeval_elapsed(&domain->start_dc_time);
+	failover_reason_str = failover_reason_to_string(
+		domain->failover_reason);
+
+	log_message = talloc_asprintf(talloc_tos(),
+		"========================================\n"
+		"DC FAILOVER: %s\n"
+		"========================================\n"
+		"Domain Name: %s\n"
+		"Domain Alt Name: %s\n"
+		"Status: %s\n"
+		"Failover Reason: %s\n"
+		"Source DC (before failover): %s\n"
+		"Destination DC (after failover): %s\n"
+		"Current DC Name: %s\n"
+		"Failover Start Time: %ld.%06ld\n"
+		"Current Time: %ld.%06ld\n"
+		"Elapsed Time (seconds): %.6f\n"
+		"========================================\n",
+		is_success ? "SUCCESSFULLY FAILED OVER" : "ATTEMPTING TO CONNECT",
+		domain->name ? domain->name : "N/A",
+		domain->alt_name ? domain->alt_name : "N/A",
+		is_success ? "SUCCESS" : "FAILED (Still trying to connect)",
+		failover_reason_str,
+		domain->src_dc ? domain->src_dc : "UNKNOWN",
+		domain->dcname ? domain->dcname : "UNKNOWN",
+		domain->dcname ? domain->dcname : "UNKNOWN",
+		(long)domain->start_dc_time.tv_sec,
+		(long)domain->start_dc_time.tv_usec,
+		(long)current_time.tv_sec,
+		(long)current_time.tv_usec,
+		elapsed_seconds);
+	if (log_message == NULL) {
+		DBG_ERR("talloc_asprintf failed\n");
+		return;
+	}
+
+	DBG_WARNING("\n%s\n", log_message);
+	TALLOC_FREE(log_message);
 }
 
 /* Initialize a new connection up to the RPC BIND.
@@ -1914,8 +2200,10 @@ static bool connection_ok(struct winbindd_domain *domain)
 
 static NTSTATUS init_dc_connection_network(struct winbindd_domain *domain, bool need_rw_dc)
 {
-	NTSTATUS result;
+	NTSTATUS result = NT_STATUS_OK;
 	bool skip_connection = domain->internal;
+
+	domain->start_dc_time = timeval_current();
 	if (need_rw_dc && domain->rodc) {
 		skip_connection = false;
 	}
@@ -1926,13 +2214,20 @@ static NTSTATUS init_dc_connection_network(struct winbindd_domain *domain, bool 
 	}
 
 	/* Still ask the internal LSA and SAMR server about the local domain */
-	if (skip_connection || connection_ok(domain)) {
+	if (skip_connection || connection_ok(domain, &result)) {
 		if (!domain->initialized) {
 			set_dc_type_and_flags(domain);
 		}
 		return NT_STATUS_OK;
 	}
-
+	if (!NT_STATUS_IS_OK(result)) {
+		/*
+		 * Connection is not OK - failover will happen with actual error.
+		 */
+		set_domain_failover_state(domain,
+					  WINBINDD_FAILOVER_DC_CONNECTIVITY,
+					  result);
+	}
 	invalidate_cm_connection(domain);
 
 	if (!domain->primary && !domain->initialized) {
@@ -1949,6 +2244,15 @@ static NTSTATUS init_dc_connection_network(struct winbindd_domain *domain, bool 
 		set_dc_type_and_flags(domain);
 	}
 
+	if (NT_STATUS_IS_OK(result)) {
+		print_failover_log(domain, true);
+		/* Reset failover state on successful connection */
+		if (domain->failover_reason != WINBINDD_FAILOVER_NONE) {
+			reset_domain_failover_state(domain);
+		}
+	} else {
+		print_failover_log(domain, false);
+	}
 	return result;
 }
 
@@ -2045,7 +2349,7 @@ static bool set_dc_type_and_flags_trustinfo( struct winbindd_domain *domain )
 
 	if (our_domain->internal) {
 		result = wb_open_internal_pipe(mem_ctx, &ndr_table_netlogon, &cli);
-	} else if (!connection_ok(our_domain)) {
+	} else if (!connection_ok(our_domain, NULL)) {
 		DEBUG(3,("set_dc_type_and_flags_trustinfo: "
 			 "No connection to our domain!\n"));
 		TALLOC_FREE(mem_ctx);
@@ -2135,7 +2439,7 @@ static void set_dc_type_and_flags_connect( struct winbindd_domain *domain )
 	};
 	uint32_t out_version = 0;
 
-	if (!domain->internal && !connection_ok(domain)) {
+	if (!domain->internal && !connection_ok(domain, NULL)) {
 		return;
 	}
 
@@ -2828,7 +3132,7 @@ static NTSTATUS cm_connect_lsa_tcp(struct winbindd_domain *domain,
 
 	DEBUG(10,("cm_connect_lsa_tcp\n"));
 
-	status = init_dc_connection_rpc(domain, false);
+	status = init_dc_connection(domain, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -3166,6 +3470,24 @@ NTSTATUS cm_connect_lsat(struct winbindd_domain *domain,
 			return status;
 		}
 
+		if (domain->secure_channel_type != SEC_CHAN_NULL) {
+			/*
+			 * We tried to connect via ncan_ip_tcp and schannel and
+			 * failed - this is either a trusted domain we can't
+			 * connect to or a firewall blocking access.
+			 *
+			 * This also prevents LSA over TCP
+			 */
+			DBG_ERR("Unable to connect to DC %s of domain %s over "
+				"TCP/IP: %s.\nPlease check your firewall if it "
+				"allows connections to port 135 and port "
+				"range 49152-65535 over TCP/IP!\n",
+				domain->dcname,
+				domain->name,
+				nt_errstr(status));
+			return status;
+		}
+
 		/*
 		 * we tried twice to connect via ncan_ip_tcp and schannel and
 		 * failed - maybe it is a trusted domain we can't connect to ?
@@ -3210,9 +3532,16 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 		}
 	}
 
-	result = init_dc_connection_rpc(domain, domain->rodc);
-	if (!NT_STATUS_IS_OK(result)) {
-		return result;
+	if (transport == NCACN_NP) {
+		result = init_dc_connection_rpc(domain, domain->rodc);
+		if (!NT_STATUS_IS_OK(result)) {
+			return result;
+		}
+	} else {
+		result = init_dc_connection(domain, domain->rodc);
+		if (!NT_STATUS_IS_OK(result)) {
+			return result;
+		}
 	}
 
 	conn = &domain->conn;
@@ -3314,8 +3643,7 @@ NTSTATUS cm_connect_netlogon(struct winbindd_domain *domain,
 			     struct rpc_pipe_client **cli)
 {
 	NTSTATUS status;
-
-	status = init_dc_connection_rpc(domain, domain->rodc);
+	status = init_dc_connection(domain, domain->rodc);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -3329,6 +3657,24 @@ NTSTATUS cm_connect_netlogon(struct winbindd_domain *domain,
 			status = cm_connect_netlogon_transport(domain, NCACN_IP_TCP, cli);
 		}
 		if (NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+
+		if (domain->secure_channel_type != SEC_CHAN_NULL) {
+			/*
+			 * We tried to connect via ncan_ip_tcp and schannel and
+			 * failed - this is either a trusted domain we can't
+			 * connect to or a firewall blocking access.
+			 *
+			 * This also prevents LSA over TCP
+			 */
+			DBG_ERR("Unable to connect to DC %s of domain %s over "
+				"TCP/IP: %s.\nPlease check your firewall if it "
+				"allows connections to port 135 and port "
+				"range 49152-65535 over TCP/IP!\n",
+				domain->dcname,
+				domain->name,
+				nt_errstr(status));
 			return status;
 		}
 

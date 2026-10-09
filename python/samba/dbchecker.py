@@ -20,9 +20,11 @@
 import ldb
 import samba
 import time
+import re
 from base64 import b64decode, b64encode
 from samba import dsdb
 from samba import common
+from samba import parse_unc
 from samba.dcerpc import misc
 from samba.dcerpc import drsuapi
 from samba.ndr import ndr_unpack, ndr_pack
@@ -62,8 +64,10 @@ class dbcheck(object):
                  yes=False, quiet=False, in_transaction=False,
                  quick_membership_checks=False,
                  reset_well_known_acls=False,
+                 reset_object_categories=False,
                  check_expired_tombstones=False,
-                 colour=False):
+                 colour=False,
+                 check_gpo_links=False):
         self.samdb = samdb
         self.dict_oid_name = None
         self.samdb_schema = (samdb_schema or samdb)
@@ -72,48 +76,58 @@ class dbcheck(object):
         self.yes = yes
         self.quiet = quiet
         self.colour = colour
-        self.remove_all_unknown_attributes = False
-        self.remove_all_empty_attributes = False
-        self.fix_all_normalisation = False
-        self.fix_all_duplicates = False
-        self.fix_all_DN_GUIDs = False
-        self.fix_all_binary_dn = False
-        self.remove_implausible_deleted_DN_links = False
-        self.remove_plausible_deleted_DN_links = False
-        self.fix_all_string_dn_component_mismatch = False
-        self.fix_all_GUID_dn_component_mismatch = False
-        self.fix_all_SID_dn_component_mismatch = False
-        self.fix_all_SID_dn_component_missing = False
-        self.fix_all_old_dn_string_component_mismatch = False
-        self.fix_all_metadata = False
-        self.fix_time_metadata = False
-        self.fix_undead_linked_attributes = False
-        self.fix_all_missing_backlinks = False
-        self.fix_all_orphaned_backlinks = False
-        self.fix_all_missing_forward_links = False
+        self.check_gpo_links = check_gpo_links
         self.duplicate_link_cache = dict()
-        self.recover_all_forward_links = False
-        self.fix_rmd_flags = False
-        self.fix_ntsecuritydescriptor = False
-        self.fix_ntsecuritydescriptor_owner_group = False
-        self.seize_fsmo_role = False
-        self.move_to_lost_and_found = False
-        self.fix_instancetype = False
-        self.fix_replmetadata_zero_invocationid = False
-        self.fix_replmetadata_duplicate_attid = False
-        self.fix_replmetadata_wrong_attid = False
-        self.fix_replmetadata_unsorted_attid = False
-        self.fix_deleted_deleted_objects = False
-        self.fix_dn = False
-        self.fix_base64_userparameters = False
-        self.fix_utf8_userparameters = False
-        self.fix_doubled_userparameters = False
-        self.fix_sid_rid_set_conflict = False
+        self.confirmation_options = {
+            "remove_all_unknown_attributes": None,
+            "remove_all_empty_attributes": None,
+            "fix_all_normalisation": None,
+            "fix_all_duplicates": None,
+            "fix_all_DN_GUIDs": None,
+            "fix_all_binary_dn": None,
+            "remove_implausible_deleted_DN_links": None,
+            "remove_plausible_deleted_DN_links": None,
+            "fix_all_string_dn_component_mismatch": None,
+            "fix_all_GUID_dn_component_mismatch": None,
+            "fix_all_SID_dn_component_mismatch": None,
+            "fix_all_SID_dn_component_missing": None,
+            "fix_all_old_dn_string_component_mismatch": None,
+            "fix_all_metadata": None,
+            "fix_time_metadata": None,
+            "fix_undead_linked_attributes": None,
+            "fix_all_missing_backlinks": None,
+            "fix_all_orphaned_backlinks": None,
+            "fix_all_missing_forward_links": None,
+            "recover_all_forward_links": None,
+            "fix_rmd_flags": None,
+            "fix_ntsecuritydescriptor": None,
+            "fix_ntsecuritydescriptor_owner_group": None,
+            "seize_fsmo_role": None,
+            "move_to_lost_and_found": None,
+            "fix_instancetype": None,
+            "fix_replmetadata_zero_invocationid": None,
+            "fix_replmetadata_duplicate_attid": None,
+            "fix_replmetadata_wrong_attid": None,
+            "fix_replmetadata_unsorted_attid": None,
+            "fix_deleted_deleted_objects": None,
+            "fix_dn": None,
+            "fix_base64_userparameters": None,
+            "fix_utf8_userparameters": None,
+            "fix_doubled_userparameters": None,
+            "fix_sid_rid_set_conflict": None,
+            "reset_all_well_known_acls": None,
+            "fix_all_missing_objectclass": None,
+            "fix_missing_deleted_objects": None,
+            "fix_replica_locations": None,
+            "fix_missing_rid_set_master": None,
+            "fix_changes_after_deletion_bug": None,
+        }
+
         self.quick_membership_checks = quick_membership_checks
         self.reset_well_known_acls = reset_well_known_acls
+        self.reset_object_categories = reset_object_categories
         self.check_expired_tombstones = check_expired_tombstones
         self.expired_tombstones = 0
-        self.reset_all_well_known_acls = False
         self.in_transaction = in_transaction
         self.infrastructure_dn = ldb.Dn(samdb, "CN=Infrastructure," + samdb.domain_dn())
         self.naming_dn = ldb.Dn(samdb, "CN=Partitions,%s" % samdb.get_config_basedn())
@@ -122,11 +136,13 @@ class dbcheck(object):
         self.ntds_dsa = ldb.Dn(samdb, samdb.get_dsServiceName())
         self.class_schemaIDGUID = {}
         self.wellknown_sds = get_wellknown_sds(self.samdb)
-        self.fix_all_missing_objectclass = False
-        self.fix_missing_deleted_objects = False
-        self.fix_replica_locations = False
-        self.fix_missing_rid_set_master = False
-        self.fix_changes_after_deletion_bug = False
+        # Rather than asking once whether to fix all gplinks, we ask
+        # once for each domain we see.
+        self.fixable_wrong_domains_in_gplinks = {}
+        self.fixable_wrong_hosts_in_gpo_file_path = {}
+        self.fixable_wrong_directories_in_gpo_file_path = {}
+        self.fixable_wrong_hosts_in_gpc_wql_filter = {}
+        self.fixable_wrong_schema_dn_in_object_categories = {}
 
         self.dn_set = set()
         self.link_id_cache = {}
@@ -436,28 +452,47 @@ systemFlags: -1946157056%s""" % (dn, sec_desc_b64, guid_suffix),
             forced = True
         return common.confirm(msg, forced=forced, allow_all=allow_all)
 
-    ################################################################
-    # a local confirm function with support for 'all'
-    def confirm_all(self, msg, all_attr):
-        """confirm a change with support for "all" """
+    def confirm_and_remember(self, msg, mapping, key, fail_if_missing=False):
+        """Confirm a change, with support for 'all' and 'none'
+        options. The all and none options work by storing a flag in
+        mapping[key].
+        """
         if not self.fix:
             return False
-        if getattr(self, all_attr) == 'NONE':
+
+        try:
+            v = mapping[key]
+        except KeyError as e:
+            if fail_if_missing:
+                raise
+            v = None
+
+        if v == 'NONE':
             return False
-        if getattr(self, all_attr) == 'ALL':
+        if v == 'ALL':
             forced = True
         else:
             forced = self.yes
         if self.quiet:
             return forced
+
         c = common.confirm(msg, forced=forced, allow_all=True)
         if c == 'ALL':
-            setattr(self, all_attr, 'ALL')
+            mapping[key] = 'ALL'
             return True
         if c == 'NONE':
-            setattr(self, all_attr, 'NONE')
+            mapping[key] = 'NONE'
             return False
         return c
+
+    ################################################################
+    # a local confirm function with support for 'all'
+    def confirm_all(self, msg, all_attr):
+        """confirm a change with support for "all" """
+        return self.confirm_and_remember(msg,
+                                         self.confirmation_options,
+                                         all_attr,
+                                         fail_if_missing=True)
 
     def do_delete(self, dn, controls, msg):
         """delete dn with optional verbose output"""
@@ -795,11 +830,21 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
         """handle a DN string being incorrect"""
         self.report("ERROR: incorrect DN %s component for %s in object %s - %s" % (mismatch_type, attrname, dn, val))
         dsdb_dn.dn = correct_dn
+        confirmation_map = {
+            'string_dn': 'fix_all_string_dn_component_mismatch',
+            'GUID_dn': 'fix_all_GUID_dn_component_mismatch',
+            'SID_dn': 'fix_all_SID_dn_component_mismatch'
+        }
+        try:
+            confirmation_option = confirmation_map[mismatch_type]
+        except KeyError:
+            self.report(f"ERROR: {mismatch_type} is an unknown dn component type")
+            return
 
-        if not self.confirm_all('Change DN to %s?' % str(dsdb_dn),
-                                'fix_all_%s_dn_component_mismatch' % mismatch_type):
+        if not self.confirm_all(f'Change DN to {dsdb_dn}?', confirmation_option):
             self.report("Not fixing %s component mismatch" % mismatch_type)
             return
+
         m = ldb.Message()
         m.dn = dn
         m['old_value'] = ldb.MessageElement(val, ldb.FLAG_MOD_DELETE, attrname)
@@ -2343,6 +2388,259 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
 
         return attrs, lc_attrs
 
+    def check_object_category(self, obj, attrname):
+        """Make sure that objectCategory or DefaultObjectCategory
+        point to our schema_dn.
+
+        We confirm for each wrong DN suffix."""
+        dn = ldb.Dn(self.samdb, str(obj[attrname]))
+        old_schema_dn = dn.parent()
+        if old_schema_dn == self.schema_dn:
+            # we are fine.
+            return 0
+        new_dn = dn.copy()
+        new_dn.remove_base_components(len(new_dn) - 1)
+        new_dn += self.schema_dn
+
+        replace = self.confirm_and_remember(
+            (f'replace {attrname} "{dn}" with "{new_dn}" '
+             f'("all" for all object categories ending in "{old_schema_dn}")'),
+            self.fixable_wrong_schema_dn_in_object_categories,
+            str(old_schema_dn).lower())
+
+        if replace:
+            obj[attrname] = str(new_dn)
+            msg = ldb.Message()
+            msg.dn = obj.dn
+            msg[attrname] = ldb.MessageElement(str(new_dn),
+                                               ldb.FLAG_MOD_REPLACE,
+                                               attrname)
+            self.do_modify(msg, [],
+                           f"resetting {attrname} {dn} to {new_dn}")
+
+        return 1
+
+    def check_gplink(self, obj, attrname):
+        """parse a gPLink into an array of dn and options"""
+        val = str(obj[attrname]).strip()
+        if val == '':
+            return 0
+        base_dn = self.samdb.get_default_basedn()
+        policies_dn = base_dn.copy()
+        policies_dn.add_child(ldb.Dn(self.samdb, "CN=Policies,CN=System"))
+        error_count = 0
+        new_values = []
+        changed = False
+        for dnstr, flags in re.findall(r'\[LDAP://([^[;]+);(\d)\]', val, re.I):
+            dn = ldb.Dn(self.samdb, dnstr)
+            newdn = dn.copy()
+            bdn = newdn.parent()
+            if bdn != policies_dn:
+                self.report(f"WARNING: gPLink {dn} does not have base DN "
+                            f"{base_dn}, which may be due to a domain rename")
+                error_count += 1
+                newdn.remove_base_components(len(bdn))
+                newdn += policies_dn
+                replace = self.confirm_and_remember(
+                    (f'replace gplink "{dn}" with "{newdn}" '
+                     f'("all" for all in "{bdn}")'),
+                    self.fixable_wrong_domains_in_gplinks,
+                    str(bdn).lower())
+                if replace:
+                    dn = newdn
+                    changed = True
+            new_values.append((dn, flags))
+
+        if changed:
+            val = ''.join(f"[LDAP://{dn};{flags}]" for dn, flags in new_values)
+            obj[attrname] = val
+            msg = ldb.Message()
+            msg.dn = obj.dn
+            msg[attrname] = ldb.MessageElement(val,
+                                                ldb.FLAG_MOD_REPLACE,
+                                                attrname)
+            self.do_modify(msg, [],
+                           f"resetting gplink {dn} to {newdn}")
+
+        return error_count
+
+    def check_gpcfilesyspath(self, obj, attrname):
+        """Check the dns-like portions of a GPO gPCFileSysPath"""
+        if attrname.lower() != 'gpcfilesyspath':
+            return 0
+
+        # gPCFileSysPath looks like
+        # "\\example.com\sysvol\example.com\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}".
+        # The parts that look like DNS names should *probably* be our
+        # domain's DNS name, but there might be situations where we
+        # don't want that. That's why we query on each instance. This
+        # is likely to have gone awry with a domain rename (from a
+        # backup), and the situation may not be entirely fixed by
+        # this, as the files themselves might contain references
+        # pertaining to the old domain.
+        file_sys_path = str(obj['gPCFileSysPath'])
+
+        dnsname = self.samdb.domain_dns_name().lower()
+        error_count = 0
+        host_changed = False
+        dir_changed = False
+
+        if not file_sys_path.startswith('\\\\'):
+            # Technically an UNC can use forward slashes, which makes
+            # reconstruction annoying (not impossible, but as this is
+            # not expected we will ignore it for now).
+            self.report(
+                "WARNING: "
+                f"fixing gPCFileSysPath like '{file_sys_path}' not supported")
+            return 0
+
+        try:
+            host, service, path = parse_unc(file_sys_path)
+        except ValueError as e:
+            # This is a problem we can't guess our way out of
+            self.report(
+                "ERROR: "
+                f"couldn't parse gPCFileSysPath: '{file_sys_path}' ({e})")
+            return 1
+
+        if service.lower() != 'sysvol':
+            # we don't know what we're dealing with here
+            self.report(
+                "WARNING: "
+                f"gPCFileSysPath is not sysvol: '{file_sys_path}'")
+            return 0
+
+        if host != host.lower():
+            self.report(
+                "WARNING: "
+                f"gPCFileSysPath host not lower case: '{file_sys_path}'")
+
+        if host != dnsname:
+            h = '\\\\' + host
+            error_count += 1
+            self.report(f"WARNING: gPCFileSysPath {file_sys_path} host "
+                        f"does not match domain DNS name {dnsname}, "
+                        "which may be due to a domain rename")
+
+            replace = self.confirm_and_remember(
+                (f'replace host "{h}" at start of gPCFileSysPath "{file_sys_path}" '
+                 f'with "\\\\{dnsname}" ("all" for all "{h}")?'),
+                self.fixable_wrong_hosts_in_gpo_file_path,
+                host)
+            if replace:
+                host_changed = True
+
+        try:
+            topdir, subpath = path.split('\\', 1)
+        except ValueError:
+            # there was only a topdir
+            topdir = path
+            subpath = ''
+
+        if topdir.lower() != dnsname:
+            self.report(f"WARNING: gPCFileSysPath {file_sys_path} directory "
+                        f"does not match domain DNS name {dnsname}, "
+                        "which may be due to a domain rename.")
+
+            replace = self.confirm_and_remember(
+                (f'rename directory "{topdir}" in gPCFileSysPath "{file_sys_path}" '
+                 f'to "{dnsname}" ("all" for all "{topdir}" directories)?\n'
+                 "(This WON'T move or create directories)"),
+                self.fixable_wrong_directories_in_gpo_file_path,
+                topdir)
+            if replace:
+                dir_changed = True
+
+        if host_changed:
+            host = dnsname
+        if dir_changed:
+            topdir = dnsname
+
+        if host_changed or dir_changed:
+            val = f"\\\\{host}\\sysvol\\{topdir}\\{subpath}"
+            obj[attrname] = val
+            msg = ldb.Message()
+            msg.dn = obj.dn
+            msg[attrname] = ldb.MessageElement(val,
+                                               ldb.FLAG_MOD_REPLACE,
+                                               attrname)
+            self.do_modify(msg, [],
+                           f"resetting  gPCFileSysPath {file_sys_path} to {val}")
+
+        return error_count
+
+    def check_gpcwqlfilter(self, obj, attrname):
+        """Check the dns-like portions of a GPO gPCWQLFilter, which
+        may have become misaligned following a domain rename."""
+
+        if attrname.lower() != 'gpcwqlfilter':
+            return 0
+
+        # gPCWQLFilter looks like
+        # "[example.com;{D6539382-0485-4C58-A5DF-5CE317299716};0]".
+        # Almost certainly the dns-like portions should be our
+        # domain's name, but we ask for each instance. There are not
+        # likely to be many -- this only occurs on Group Policy
+        # Containers.
+        #
+        # This could be wrong due to a domain rename in a lab domain
+        # based on a live domain backup.
+        oldfilter = str(obj[attrname])
+
+        filter_match = re.compile(r'^\[([^;]+);({[0-9-a-fA-F]{36}});0\]$')
+
+        m = filter_match.match(oldfilter)
+        if not m:
+            self.report(
+                "WARNING: "
+                f"ignoring unrecognisable gPCWQLFilter: '{oldfilter}'.")
+            return 1
+
+        oldhost = m.group(1)
+        oldguid = m.group(2)
+
+        dnsname = self.samdb.domain_dns_name().lower()
+
+        if oldhost != oldhost.lower():
+            self.report(
+                "WARNING: "
+                f"gPCWQLFilter dns host not lower case: '{oldfilter}'")
+
+        if oldhost == dnsname:
+            # nothing to do
+            return 0
+
+        self.report(f"WARNING: gPCWQLFilter {oldfilter} host "
+                    f"does not match domain DNS name {dnsname}, "
+                    "which may be due to a domain rename")
+
+        replace = self.confirm_and_remember(
+            (f'replace host "{oldhost}" in gPCWQLFilter "{oldfilter}" '
+             f'with "{dnsname}" ("all" for all "{oldhost}")?'),
+            self.fixable_wrong_hosts_in_gpc_wql_filter,
+            oldhost)
+        if not replace:
+            return 0
+
+        newfilter = f"[{dnsname};{oldguid};0]"
+        if not filter_match.match(newfilter):
+            # programmer error, or perhaps dnsname contains ';'.
+            self.report(f"ERROR: new gPCWQLFilter '{newfilter}' "
+                        "seems invalid. Not fixing.")
+            self.unfixable_errors += 1
+            return 0
+
+        obj[attrname] = newfilter
+        msg = ldb.Message()
+        msg.dn = obj.dn
+        msg[attrname] = ldb.MessageElement(newfilter,
+                                           ldb.FLAG_MOD_REPLACE,
+                                           attrname)
+        self.do_modify(msg, [],
+                       f"resetting gPCWQLFilter {oldfilter} to {newfilter}")
+
+        return 1
+
     def check_object(self, dn, requested_attrs=None):
         """check one object"""
         if self.verbose:
@@ -2582,6 +2880,20 @@ newSuperior: %s""" % (str(from_dn), str(to_rdn), str(to_base)))
                                 % (attrname, obj.dn, obj[attrname][0]))
                 else:
                     self.attribute_or_class_ids.add(obj[attrname][0])
+
+            if self.reset_object_categories:
+                if attrname.lower() in ("objectcategory", "defaultobjectcategory"):
+                    self.check_object_category(obj, attrname)
+
+            if self.check_gpo_links:
+                if attrname.lower() == 'gplink':
+                    self.check_gplink(obj, attrname)
+
+                elif attrname.lower() == 'gpcfilesyspath':
+                    self.check_gpcfilesyspath(obj, attrname)
+
+                elif attrname.lower() == 'gpcwqlfilter':
+                    self.check_gpcwqlfilter(obj, attrname)
 
             # check for empty attributes
             for val in obj[attrname]:

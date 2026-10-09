@@ -140,9 +140,8 @@ NTSTATUS gensec_magic_check_krb5_oid(struct gensec_security *unused,
 {
 	if (gensec_gssapi_check_oid(blob, GENSEC_OID_KERBEROS5)) {
 		return NT_STATUS_OK;
-	} else {
-		return NT_STATUS_INVALID_PARAMETER;
 	}
+	return NT_STATUS_INVALID_PARAMETER;
 }
 
 void gensec_child_want_feature(struct gensec_security *gensec_security,
@@ -353,7 +352,7 @@ char *gensec_get_unparsed_target_principal(struct gensec_security *gensec_securi
 	} else if (service != NULL && hostname != NULL) {
 		return talloc_asprintf(mem_ctx, "%s/%s", service, hostname);
 	} else if (hostname != NULL) {
-		return talloc_strdup(mem_ctx, target_principal);
+		return talloc_strdup(mem_ctx, hostname);
 	}
 
 	return NULL;
@@ -401,8 +400,7 @@ NTSTATUS gensec_kerberos_possible(struct gensec_security *gensec_security)
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-#define STAR_SMBSERVER "*SMBSERVER"
-	if (strcmp(hostname, STAR_SMBSERVER) == 0) {
+	if (strcmp(hostname, "*SMBSERVER") == 0) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 

@@ -5,7 +5,7 @@
 
 if [ $# -lt 4 ]; then
 	cat <<EOF
-Usage: $0 SERVER SHARE USER PASS
+Usage: $0 SERVER SHARE USER PASS [S4U2SELF]
 EOF
 	exit 1
 fi
@@ -14,6 +14,10 @@ SERVER=$1
 SHARE=$2
 USER=$3
 PASS=$4
+EXTRA=""
+if [ $# -eq 5 ]; then
+	EXTRA=$5
+fi
 smbclient=$BINDIR/smbclient
 
 failed=0
@@ -21,6 +25,9 @@ failed=0
 incdir=$(dirname $0)/../../../testprogs/blackbox
 . $incdir/subunit.sh
 . $incdir/common_test_fns.inc
+
+# Ensure samlogon cache is empty
+testit "net cache samlogon flush" $BINDIR/net cache samlogon flush || failed=$(expr $failed + 1)
 
 # Ensure the samlogon cache is primed
 test_smbclient "Prime samlogon cache" 'exit' //$SERVER/$SHARE -U$USER%$PASS || failed=$(expr $failed + 1)
@@ -39,5 +46,30 @@ testit "net cache samlogon ndrdump $usersid" $BINDIR/net cache samlogon ndrdump 
 tmp=$($BINDIR/net cache samlogon ndrdump $usersid | head -n 1 | grep "netr_SamInfo3: struct netr_SamInfo3")
 retval=$?
 testit "net cache samlogon ndrdump returns netr_SamInfo3 structure" test $retval -eq 0 || failed=$(expr $failed + 1)
+
+# Test that we can expire a samlogon cache entry
+timeout=1
+sleep $(($timeout + 1 ))
+
+testit_expect_failure "net cache samlogon show $usersid --option=netsamlogoncache:timeout=$timeout" \
+	$BINDIR/net cache samlogon show $usersid \
+	--option=netsamlogoncache:timeout=$timeout ||
+	failed=$(expr $failed + 1)
+# Make sure samlogon cache entry for $usersid is removed even without
+# timeout
+testit_expect_failure "net cache samlogon show $usersid" \
+	$BINDIR/net cache samlogon show $usersid ||
+	failed=$(expr $failed + 1)
+
+# try to fill it up via winbind s4u2self feature and
+# check again for the entry
+test x"$EXTRA" = x"S4U2SELF" && {
+	testit "wbinfo --user-domgroups=$usersid" \
+		$BINDIR/wbinfo --user-domgroups=$usersid || \
+		failed=$(expr $failed + 1)
+	testit "net cache samlogon show $usersid" \
+		$BINDIR/net cache samlogon show $usersid || \
+		failed=$(expr $failed + 1)
+}
 
 testok $0 $failed

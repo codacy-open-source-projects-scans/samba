@@ -838,6 +838,7 @@ int ctdb_statistics_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			      size_t *npull)
 {
 	struct ctdb_statistics_list *val;
+	struct ctdb_statistics dummy = {};
 	size_t offset = 0, np;
 	int ret, i;
 
@@ -861,6 +862,11 @@ int ctdb_statistics_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->stats = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_statistics_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->stats = talloc_array(val, struct ctdb_statistics, val->num);
@@ -925,6 +931,7 @@ int ctdb_vnn_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	struct ctdb_vnn_map *val;
 	size_t offset = 0, np;
 	uint32_t i;
+	uint32_t dummy = 0;
 	int ret;
 
 	val = talloc(mem_ctx, struct ctdb_vnn_map);
@@ -948,6 +955,11 @@ int ctdb_vnn_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->size == 0) {
 		val->map = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->size * ctdb_uint32_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->map = talloc_array(val, uint32_t, val->size);
@@ -1082,6 +1094,7 @@ int ctdb_dbid_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 		       struct ctdb_dbid_map **out, size_t *npull)
 {
 	struct ctdb_dbid_map *val;
+	struct ctdb_dbid dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -1100,6 +1113,11 @@ int ctdb_dbid_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->dbs = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_dbid_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->dbs = talloc_array(val, struct ctdb_dbid, val->num);
@@ -2362,6 +2380,7 @@ int ctdb_connection_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			      struct ctdb_connection_list **out, size_t *npull)
 {
 	struct ctdb_connection_list *val;
+	struct ctdb_connection dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -2380,6 +2399,11 @@ int ctdb_connection_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->conn = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_connection_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->conn = talloc_array(val, struct ctdb_connection, val->num);
@@ -3399,6 +3423,7 @@ int ctdb_tickle_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			   struct ctdb_tickle_list **out, size_t *npull)
 {
 	struct ctdb_tickle_list *val;
+	struct ctdb_connection dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -3424,6 +3449,11 @@ int ctdb_tickle_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->conn = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_connection_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->conn = talloc_array(val, struct ctdb_connection, val->num);
@@ -3744,6 +3774,7 @@ int ctdb_public_ip_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			     struct ctdb_public_ip_list **out, size_t *npull)
 {
 	struct ctdb_public_ip_list *val;
+	struct ctdb_public_ip dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -3762,6 +3793,11 @@ int ctdb_public_ip_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->ip = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_public_ip_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->ip = talloc_array(val, struct ctdb_public_ip, val->num);
@@ -3899,6 +3935,7 @@ int ctdb_node_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 		       struct ctdb_node_map **out, size_t *npull)
 {
 	struct ctdb_node_map *val;
+	struct ctdb_node_and_flags dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -3917,6 +3954,12 @@ int ctdb_node_map_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->node = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_node_and_flags_len(&dummy) >
+	    buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->node = talloc_array(val, struct ctdb_node_and_flags, val->num);
@@ -4099,6 +4142,7 @@ int ctdb_script_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			  struct ctdb_script_list **out, size_t *npull)
 {
 	struct ctdb_script_list *val;
+	struct ctdb_script dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -4130,6 +4174,12 @@ int ctdb_script_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num_scripts == 0) {
 		val->script = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num_scripts * ctdb_script_len(&dummy)
+	    > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->script = talloc_array(val, struct ctdb_script, val->num_scripts);
@@ -4375,6 +4425,7 @@ int ctdb_iface_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 			 struct ctdb_iface_list **out, size_t *npull)
 {
 	struct ctdb_iface_list *val;
+	struct ctdb_iface dummy = {};
 	size_t offset = 0, np;
 	uint32_t i;
 	int ret;
@@ -4393,6 +4444,11 @@ int ctdb_iface_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	if (val->num == 0) {
 		val->iface = NULL;
 		goto done;
+	}
+
+	if ((uint64_t)val->num * ctdb_iface_len(&dummy) > buflen - offset) {
+		ret = EMSGSIZE;
+		goto fail;
 	}
 
 	val->iface = talloc_array(val, struct ctdb_iface, val->num);
@@ -5322,6 +5378,10 @@ int ctdb_g_lock_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 
 	val->num = buflen / ctdb_g_lock_len(&lock);
 
+	/*
+	 * No array count pre-check needed because val->num is
+	 * calculated from buflen
+	 */
 	val->lock = talloc_array(val, struct ctdb_g_lock, val->num);
 	if (val->lock == NULL) {
 		ret = ENOMEM;
@@ -5338,6 +5398,97 @@ int ctdb_g_lock_list_pull(uint8_t *buf, size_t buflen, TALLOC_CTX *mem_ctx,
 	}
 
 done:
+	*out = val;
+	*npull = offset;
+	return 0;
+
+fail:
+	talloc_free(val);
+	return ret;
+}
+
+size_t ctdb_push_record_data_len(struct ctdb_push_record_data *in)
+{
+	return ctdb_uint32_len(&in->generation) +
+		ctdb_uint32_len(&in->db_id) +
+		ctdb_ltdb_header_len(&in->hdr) +
+		ctdb_tdb_datan_len(&in->key) +
+		ctdb_tdb_datan_len(&in->value);
+}
+
+void ctdb_push_record_data_push(struct ctdb_push_record_data *in,
+				uint8_t *buf,
+				size_t *npush)
+{
+	size_t offset = 0;
+	size_t np = 0;
+
+	ctdb_uint32_push(&in->generation, buf+offset, &np);
+	offset += np;
+
+	ctdb_uint32_push(&in->db_id, buf+offset, &np);
+	offset += np;
+
+	ctdb_ltdb_header_push(&in->hdr, buf+offset, &np);
+	offset += np;
+
+	ctdb_tdb_datan_push(&in->key, buf+offset, &np);
+	offset += np;
+
+	ctdb_tdb_datan_push(&in->value, buf+offset, &np);
+	offset += np;
+
+	*npush = offset;
+}
+
+int ctdb_push_record_data_pull(uint8_t *buf,
+			       size_t buflen,
+			       TALLOC_CTX *mem_ctx,
+			       struct ctdb_push_record_data **out,
+			       size_t *npull)
+{
+	struct ctdb_push_record_data *val;
+	size_t offset = 0;
+	size_t np = 0;
+	int ret = 0;
+
+	val = talloc(mem_ctx, struct ctdb_push_record_data);
+	if (val == NULL) {
+		return ENOMEM;
+	}
+
+	ret = ctdb_uint32_pull(buf+offset, buflen-offset, &val->generation, &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
+	ret = ctdb_uint32_pull(buf+offset, buflen-offset, &val->db_id, &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
+	ret = ctdb_ltdb_header_pull(buf+offset, buflen-offset, &val->hdr, &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
+	ret = ctdb_tdb_datan_pull(buf+offset, buflen-offset, val, &val->key,
+				  &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
+	ret = ctdb_tdb_datan_pull(buf+offset, buflen-offset, val, &val->value,
+				  &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
 	*out = val;
 	*npull = offset;
 	return 0;

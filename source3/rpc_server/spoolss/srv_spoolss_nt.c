@@ -538,9 +538,9 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 {
 	int snum;
 	int n_services=lp_numservices();
-	char *aprinter;
+	char *aprinter = NULL;
 	const char *printername;
-	const char *servername = NULL;
+	char *servername = NULL;
 	fstring sname;
 	bool found = false;
 	struct spoolss_PrinterInfo2 *info2 = NULL;
@@ -558,28 +558,51 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 	DEBUG(4,("Setting printer name=%s (len=%lu)\n", handlename,
 		(unsigned long)strlen(handlename)));
 
-	aprinter = discard_const_p(char, handlename);
+	aprinter = talloc_strdup(mem_ctx, handlename);
+	if (aprinter == NULL) {
+		result = WERR_NOT_ENOUGH_MEMORY;
+		goto out;
+	}
+
 	if ( *handlename == '\\' ) {
-		servername = canon_servername(handlename);
-		if ( (aprinter = strchr_m( servername, '\\' )) != NULL ) {
-			*aprinter = '\0';
-			aprinter++;
+		servername = talloc_strdup(mem_ctx,
+					   canon_servername(handlename));
+		if (servername == NULL) {
+			result = WERR_NOT_ENOUGH_MEMORY;
+			goto out;
+		}
+
+		p = strchr_m(servername, '\\');
+
+		if (p != NULL) {
+			TALLOC_FREE(aprinter);
+			*p = '\0';
+			p++;
+			aprinter = talloc_strdup(mem_ctx, p);
+			if (aprinter == NULL) {
+				result = WERR_NOT_ENOUGH_MEMORY;
+				goto out;
+			}
 		}
 		if (!is_myname_or_ipaddr(servername)) {
-			return WERR_INVALID_PRINTER_NAME;
+			result = WERR_INVALID_PRINTER_NAME;
+			goto out;
 		}
 		Printer->servername = talloc_asprintf(Printer, "\\\\%s", servername);
 		if (Printer->servername == NULL) {
-			return WERR_NOT_ENOUGH_MEMORY;
+			result = WERR_NOT_ENOUGH_MEMORY;
+			goto out;
 		}
 	}
 
 	if (Printer->printer_type == SPLHND_SERVER) {
-		return WERR_OK;
+		result = WERR_OK;
+		goto out;
 	}
 
 	if (Printer->printer_type != SPLHND_PRINTER) {
-		return WERR_INVALID_HANDLE;
+		result = WERR_INVALID_HANDLE;
+		goto out;
 	}
 
 	DEBUGADD(5, ("searching for [%s]\n", aprinter));
@@ -616,7 +639,8 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 
 	cache_key = talloc_asprintf(talloc_tos(), "PRINTERNAME/%s", aprinter);
 	if (cache_key == NULL) {
-		return WERR_NOT_ENOUGH_MEMORY;
+		result = WERR_NOT_ENOUGH_MEMORY;
+		goto out;
 	}
 
 	/*
@@ -630,7 +654,8 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 		if (!found) {
 			DEBUG(4, ("Printer %s not found\n", aprinter));
 			TALLOC_FREE(tmp);
-			return WERR_INVALID_PRINTER_NAME;
+			result = WERR_INVALID_PRINTER_NAME;
+			goto out;
 		}
 		fstrcpy(sname, tmp);
 		TALLOC_FREE(tmp);
@@ -699,7 +724,8 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 			     time(NULL) + 300);
 		TALLOC_FREE(cache_key);
 		DEBUGADD(4,("Printer not found\n"));
-		return WERR_INVALID_PRINTER_NAME;
+		result = WERR_INVALID_PRINTER_NAME;
+		goto out;
 	}
 
 	gencache_set(cache_key, sname, time(NULL) + 300);
@@ -709,7 +735,11 @@ static WERROR set_printer_hnd_name(TALLOC_CTX *mem_ctx,
 
 	strlcpy(Printer->sharename, sname, sizeof(Printer->sharename));
 
-	return WERR_OK;
+	result = WERR_OK;
+out:
+	TALLOC_FREE(aprinter);
+	TALLOC_FREE(servername);
+	return result;
 }
 
 /****************************************************************************
@@ -2460,7 +2490,7 @@ static bool spoolss_connect_to_client(struct rpc_pipe_client **pp_pipe, struct c
 				      struct sockaddr_storage *client_ss, const char *remote_machine)
 {
 	NTSTATUS ret;
-	struct sockaddr_storage rm_addr;
+	struct samba_sockaddr rm_addr;
 	char addr[INET6_ADDRSTRLEN];
 	struct cli_credentials *anon_creds = NULL;
 	struct smb_transports ts =
@@ -2474,10 +2504,10 @@ static bool spoolss_connect_to_client(struct rpc_pipe_client **pp_pipe, struct c
 			DEBUG(2,("spoolss_connect_to_client: Can't resolve address for %s\n", remote_machine));
 			return false;
 		}
-		print_sockaddr(addr, sizeof(addr), &rm_addr);
+		print_sockaddr(addr, sizeof(addr), &rm_addr.u.ss);
 	} else {
-		rm_addr = *client_ss;
-		print_sockaddr(addr, sizeof(addr), &rm_addr);
+		sockaddr_storage_to_samba_sockaddr(&rm_addr, client_ss);
+		print_sockaddr(addr, sizeof(addr), &rm_addr.u.ss);
 		DEBUG(5,("spoolss_connect_to_client: Using address %s (no name resolution necessary)\n",
 			addr));
 	}
@@ -2499,7 +2529,7 @@ static bool spoolss_connect_to_client(struct rpc_pipe_client **pp_pipe, struct c
 					pp_cli,
 					lp_netbios_name(),
 					remote_machine,
-					&rm_addr,
+					&rm_addr.u.ss,
 					&ts,
 					"IPC$",
 					"IPC",
@@ -10164,7 +10194,7 @@ WERROR _spoolss_SetPrinterDataEx(struct pipes_struct *p,
 
 	/* check for OID in valuename */
 
-	oid_string = strchr(r->in.value_name, ',');
+	oid_string = discard_const_p(char, strchr_m(r->in.value_name, ','));
 	if (oid_string) {
 		*oid_string = '\0';
 		oid_string++;

@@ -1,10 +1,10 @@
 #!/bin/sh
 
-if [ $# -lt 1 ]; then
-cat <<EOF
-Usage: test_update_keytab.sh DOMAIN CONFIGURATION
+if [ $# -lt 2 ]; then
+	cat <<EOF
+Usage: test_update_keytab_clustered.sh DOMAIN CONFIGURATION
 EOF
-exit 1
+	exit 1
 fi
 
 incdir="$(dirname "$0")/../../../testprogs/blackbox"
@@ -17,13 +17,10 @@ shift 2
 
 samba_wbinfo="$BINDIR/wbinfo"
 samba_net="$BINDIR/net $CONFIGURATION"
-samba_rpcclient="$BINDIR/rpcclient $CONFIGURATION"
+# Used by test_smbclient() from common_test_fns.inc
+# shellcheck disable=SC2034
 smbclient="${BINDIR}/smbclient"
 smbcontrol="$BINDIR/smbcontrol"
-
-keytabs_sync_kvno="keytab0k keytab1k keytab2k keytab3k"
-keytabs_nosync_kvno="keytab0 keytab1 keytab2 keytab3"
-keytabs_all="$keytabs_sync_kvno $keytabs_nosync_kvno"
 
 check_net_ads_testjoin()
 {
@@ -35,14 +32,14 @@ check_net_ads_testjoin()
 get_biggest_vno()
 {
 	keytab="$1"
-	local cmd="UID_WRAPPER_ROOT=1 UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $samba_net ads keytab list $keytab"
-	eval echo "$cmd"
-	out=$(eval "$cmd")
+	net_cmd="UID_WRAPPER_ROOT=1 UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $samba_net ads keytab list $keytab"
+	eval echo "$net_cmd"
+	out=$(eval "$net_cmd")
 	ret=$?
 
 	echo "$out"
 
-	if [ $ret != 0 ] ; then
+	if [ $ret != 0 ]; then
 		echo "command failed"
 		return 1
 	fi
@@ -50,7 +47,7 @@ get_biggest_vno()
 	#global variable vno
 	vno=$(echo "$out" | sort -n | tail -1 | awk '{printf $1}')
 
-	if [ -z "$vno" ] ; then
+	if [ -z "$vno" ]; then
 		echo "There is no key with vno in the keytab list above."
 		return 1
 	fi
@@ -58,36 +55,64 @@ get_biggest_vno()
 	return 0
 }
 
-test_pwd_change()
+# Check that VNOs for nodes in $changed are the same and those nodes,
+# if any, in $unchanged are less by 1
+get_and_check_vnos()
 {
-	testname="$1"
-	shift
-	# command to change the password
-	local cmd="$*";
+	changed="$1"
+	unchanged="$2"
 
-	# get biggest vno before password change
-	get_biggest_vno "$PREFIX/clusteredmember/node.0/keytab0"
-	old_vno_node0=$vno
-	get_biggest_vno "$PREFIX/clusteredmember/node.1/keytab0"
-	old_vno_node1=$vno
-	get_biggest_vno "$PREFIX/clusteredmember/node.2/keytab0"
-	old_vno_node2=$vno
-
-	if [ ! "$old_vno_node0" -gt 0 ] ; then
-		echo "There is no key with vno in the keytab list above."
+	if [ -z "$changed" ]; then
+		echo "ERROR: expect some changed VNOs"
 		return 1
 	fi
-	if [ "$old_vno_node0" -ne "$old_vno_node1" ] || [ "$old_vno_node0" -ne "$old_vno_node2" ] ; then
-		echo "VNOs differs on nodes!"
-		return 1
-	fi
+
+	first_vno=""
+	first_node=""
+	for n in $changed; do
+		keytab_file="$PREFIX/clusteredmember/node.${n}/keytab0"
+		get_biggest_vno "$keytab_file"
+
+		if [ -z "$first_vno" ]; then
+			if [ ! "$vno" -gt 0 ]; then
+				echo "No key with vno in ${keytab_file}"
+				return 1
+			fi
+			first_vno="$vno"
+			first_node="$n"
+			continue
+		fi
+
+		if [ "$first_vno" -ne "$vno" ]; then
+			echo "VNOs differ between nodes ${first_node}, ${n}"
+			return 1
+		fi
+	done
+
+	for n in $unchanged; do
+		keytab_file="$PREFIX/clusteredmember/node.${n}/keytab0"
+		get_biggest_vno "$keytab_file"
+
+		if [ "$vno" -eq "$first_vno" ]; then
+			echo "VNOs same between node ${first_node}, ${n}"
+			return 1
+		fi
+	done
+
+	vno="$first_vno"
+	return 0
+}
+
+do_pwd_change_test_join()
+{
+	cmd="$*"
 
 	# change the password
 	eval echo "$cmd"
 	out=$(eval "$cmd")
 	ret=$?
 
-	if [ $ret != 0 ] ; then
+	if [ $ret != 0 ]; then
 		echo "$out"
 		echo "command failed"
 		return 1
@@ -99,26 +124,88 @@ test_pwd_change()
 	out=$(eval "$cmd")
 	ret=$?
 
-	if [ $ret != 0 ] ; then
+	if [ $ret != 0 ]; then
 		echo "$out"
 		echo "command failed"
 		return 1
 	fi
 
-	# if keytab was updated the bigest vno should be incremented by one
-	get_biggest_vno "$PREFIX/clusteredmember/node.0/keytab0"
-	new_vno_node0=$vno
-	get_biggest_vno "$PREFIX/clusteredmember/node.0/keytab0"
-	new_vno_node1=$vno
-	get_biggest_vno "$PREFIX/clusteredmember/node.0/keytab0"
-	new_vno_node2=$vno
+	return 0
+}
 
-	if [ ! "$new_vno_node0" -eq $((old_vno_node0 + 1)) ] ; then
-		echo "Old vno=$old_vno_node0, new vno=$new_vno_node0. Increment by one failed."
+test_pwd_change_all_active()
+{
+	# command to change the password
+	cmd="$*"
+
+	get_and_check_vnos "0 1 2" "" || return 1
+	old_vno="$vno"
+
+	do_pwd_change_test_join "$cmd" || return 1
+
+	get_and_check_vnos "0 1 2" "" || return 1
+
+	if [ ! "$vno" -eq $((old_vno + 1)) ]; then
+		echo "Old vno=$old_vno, new vno=$vno. Increment by one failed."
 		return 1
 	fi
-	if [ "$new_vno_node0" -ne "$new_vno_node1" ] || [ "$new_vno_node0" -ne "$new_vno_node2" ] ; then
-		echo "VNOs differs on nodes!"
+
+	return 0
+}
+
+ctdb_onnode()
+{
+	pnn="$1"
+	ctdb_cmd="$2"
+	(
+		# The testenv has CTDB_SOCKET pointing to the first
+		# node as a default, which isn't wanted here.  Note
+		# that the unset is contained within the surrounding
+		# sub-shell.
+		unset CTDB_SOCKET
+		./ctdb/tests/local_daemons.sh "$PREFIX/clusteredmember" \
+			onnode "$pnn" "ctdb ${ctdb_cmd}"
+	)
+}
+
+test_pwd_change_one_stopped()
+{
+	# command to change the password
+	cmd="$*"
+
+	get_and_check_vnos "0 1 2" "" || return 1
+	old_vno="$vno"
+
+	if ! ctdb_onnode 1 stop; then
+		echo "Failed to stop node 1"
+		return 1
+	fi
+
+	do_pwd_change_test_join "$cmd" || return 1
+
+	# Node 1 is inactive so we don't expect the keytab to have
+	# been regenerated there
+	get_and_check_vnos "0 2" "1" || return 1
+
+	if [ ! "$vno" -eq $((old_vno + 1)) ]; then
+		echo "Old vno=$old_vno, new vno=$vno. Increment by one failed."
+		return 1
+	fi
+
+	current_vno="$vno"
+
+	# Recovery should cause the keytab on node 1 (and others) to
+	# be regenerated.  However, no machine password change, so no
+	# vno change.
+	if ! ctdb_onnode 1 continue; then
+		echo "Failed to continue node 1"
+		return 1
+	fi
+
+	get_and_check_vnos "0 1 2" "" || return 1
+
+	if [ ! "$vno" -eq "$current_vno" ]; then
+		echo "vno changed from $current_vno to $vno"
 		return 1
 	fi
 
@@ -135,20 +222,28 @@ DC_DNSNAME="${DC_SERVER}.${REALM}"
 SMBCLIENT_UNC="//${DC_DNSNAME}/tmp"
 
 install source3/script/updatekeytab_test.sh "$PREFIX/clusteredmember/updatekeytab.sh"
-global_inject_conf=$(dirname $SMB_CONF_PATH)/global_inject.conf
-echo "sync machine password script = $PREFIX/clusteredmember/updatekeytab.sh" >$global_inject_conf
+global_inject_conf=$(dirname "$SMB_CONF_PATH")/global_inject.conf
+echo "sync machine password script = $PREFIX/clusteredmember/updatekeytab.sh" >"$global_inject_conf"
 UID_WRAPPER_ROOT=1 $smbcontrol winbindd reload-config
+src="ctdb/config/events/legacy/46.update-keytabs.script"
+for n in 0 1 2; do
+	node_dir="${PREFIX}/clusteredmember/node.${n}"
+	event_script_dir="${node_dir}/events/legacy"
+	install "$src" "${event_script_dir}/"
+	conf="CTDB_UPDATE_KEYTABS_SMB_CONF=\"${node_dir}/lib/server.conf\""
+	echo "$conf" >"${event_script_dir}/46.update-keytabs.options"
+done
 
 testit "net_ads_testjoin_initial" check_net_ads_testjoin || failed=$((failed + 1))
 
 # To have both old and older password we do one unnecessary password change:
 testit "wbinfo_change_secret_initial" \
-	"$samba_wbinfo" --change-secret --domain="${DOMAIN}" \
-	|| failed=$((failed + 1))
+	"$samba_wbinfo" --change-secret --domain="${DOMAIN}" ||
+	failed=$((failed + 1))
 
 testit "wbinfo_check_secret_initial" \
-	"$samba_wbinfo" --check-secret --domain="${DOMAIN}" \
-	|| failed=$((failed + 1))
+	"$samba_wbinfo" --check-secret --domain="${DOMAIN}" ||
+	failed=$((failed + 1))
 
 # Create/sync all keytabs
 testit "net_ads_keytab_sync" test_keytab_create || failed=$((failed + 1))
@@ -156,22 +251,42 @@ testit "net_ads_keytab_sync" test_keytab_create || failed=$((failed + 1))
 testit "net_ads_testjoin_after_sync" check_net_ads_testjoin || failed=$((failed + 1))
 
 testit "wbinfo_change_secret_after_sync" \
-	test_pwd_change "wbinfo_changesecret" \
-	"$samba_wbinfo --change-secret --domain=${DOMAIN}" \
-	|| failed=$((failed + 1))
+	test_pwd_change_all_active \
+	"$samba_wbinfo --change-secret --domain=${DOMAIN}" ||
+	failed=$((failed + 1))
 
 testit "wbinfo_check_secret_after_sync" \
-	"$samba_wbinfo" --check-secret --domain="${DOMAIN}" \
-	|| failed=$((failed + 1))
+	"$samba_wbinfo" --check-secret --domain="${DOMAIN}" ||
+	failed=$((failed + 1))
 
 test_smbclient "Test machine login with the changed secret" \
 	"ls" "${SMBCLIENT_UNC}" \
 	--machine-pass ||
 	failed=$((failed + 1))
 
+testit "wbinfo_change_secret_one_stopped" \
+	test_pwd_change_one_stopped \
+	"$samba_wbinfo --change-secret --domain=${DOMAIN}" ||
+	failed=$((failed + 1))
+
+testit "wbinfo_check_secret_after_one_stopped" \
+	"$samba_wbinfo" --check-secret --domain="${DOMAIN}" ||
+	failed=$((failed + 1))
+
+test_smbclient "Test machine login with the changed secret after one stopped" \
+	"ls" "${SMBCLIENT_UNC}" \
+	--machine-pass ||
+	failed=$((failed + 1))
+
 testit "net_ads_testjoin_final" check_net_ads_testjoin || failed=$((failed + 1))
 
-echo "" >$global_inject_conf
+echo "" >"$global_inject_conf"
 UID_WRAPPER_ROOT=1 $smbcontrol winbindd reload-config
+for n in 0 1 2; do
+	node_dir="${PREFIX}/clusteredmember/node.${n}"
+	event_script_dir="${node_dir}/events/legacy"
+	rm -f "${event_script_dir}/46.update-keytabs.script"
+	rm -f "${event_script_dir}/46.update-keytabs.options"
+done
 
 testok "$0" "$failed"

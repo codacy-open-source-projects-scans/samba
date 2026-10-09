@@ -614,10 +614,10 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		return ctdb_control_get_capabilities(ctdb, outdata);
 
 	case CTDB_CONTROL_START_PERSISTENT_UPDATE:
-		return ctdb_control_start_persistent_update(ctdb, c, indata);
+		return control_not_implemented("START_PERSISTENT_UPDATE", NULL);
 
 	case CTDB_CONTROL_CANCEL_PERSISTENT_UPDATE:
-		return ctdb_control_cancel_persistent_update(ctdb, c, indata);
+		return control_not_implemented("CANCEL_PERSISTENT_UPDATE", NULL);
 
 	case CTDB_CONTROL_TRANS2_COMMIT:
 	case CTDB_CONTROL_TRANS2_COMMIT_RETRY:
@@ -880,6 +880,15 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		CHECK_CONTROL_DATA_SIZE(0);
 		return ctdb_control_start_ipreallocate(ctdb, c, async_reply);
 
+	case CTDB_CONTROL_PUSH_RECORD:
+		return ctdb_control_push_record(ctdb, c, indata, async_reply);
+
+	case CTDB_CONTROL_PUSH_RECORD_STORE:
+		return ctdb_control_push_record_store(ctdb,
+						     c,
+						     indata,
+						     async_reply);
+
 	default:
 		DEBUG(DEBUG_CRIT,(__location__ " Unknown CTDB control opcode %u\n", opcode));
 		return -1;
@@ -933,10 +942,19 @@ void ctdb_request_control_reply(struct ctdb_context *ctdb, struct ctdb_req_contr
 void ctdb_request_control(struct ctdb_context *ctdb, struct ctdb_req_header *hdr)
 {
 	struct ctdb_req_control_old *c = (struct ctdb_req_control_old *)hdr;
+	size_t req_control_header_len = offsetof(struct ctdb_req_control_old,
+						 data);
+	size_t buf_len = hdr->length;
 	TDB_DATA data, *outdata;
 	int32_t status;
 	bool async_reply = false;
 	const char *errormsg = NULL;
+
+	if (buf_len < req_control_header_len ||
+	    c->datalen > buf_len - req_control_header_len) {
+		DBG_WARNING("Invalid packet\n");
+		return;
+	}
 
 	data.dptr = &c->data[0];
 	data.dsize = c->datalen;
@@ -957,9 +975,19 @@ void ctdb_request_control(struct ctdb_context *ctdb, struct ctdb_req_header *hdr
 void ctdb_reply_control(struct ctdb_context *ctdb, struct ctdb_req_header *hdr)
 {
 	struct ctdb_reply_control_old *c = (struct ctdb_reply_control_old *)hdr;
+	size_t reply_control_header_len = offsetof(struct ctdb_reply_control_old,
+						   data);
+	size_t buf_len = hdr->length;
 	TDB_DATA data;
 	struct ctdb_control_state *state;
 	const char *errormsg = NULL;
+
+	if (buf_len < reply_control_header_len ||
+	    c->datalen > buf_len - reply_control_header_len ||
+	    c->errorlen > buf_len - reply_control_header_len - c->datalen) {
+		DBG_WARNING("Invalid packet\n");
+		return;
+	}
 
 	state = reqid_find(ctdb->idr, hdr->reqid, struct ctdb_control_state);
 	if (state == NULL) {

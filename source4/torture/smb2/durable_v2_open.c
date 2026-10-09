@@ -5633,3 +5633,4068 @@ struct torture_suite *torture_smb2_durable_v2_regressions_init(TALLOC_CTX *ctx)
 
 	return suite;
 }
+
+static struct {
+	const char *req_lease;
+	const char *exp_granted_fo_win;
+	const char *exp_granted_so_win;
+	const char *exp_granted_fo_samba;
+	const char *exp_granted_fo_max_rwh_samba;
+	const char *exp_granted_so_samba;
+} ph_lease_tests[] = {
+	/*      Windows         Samba             */
+	/* Req  FO      SO      FO(R)   FO(RWH) SO */
+	{"",    "",     "",     "",     "",     "",},
+	{"R",   "R",    "R",    "R",    "R",    "R"},
+	{"RW",  "RW",   "R",    "R",    "RW",   "R"},
+	{"RH",  "RH",   "R",    "R",    "RH",   "R"},
+	{"RWH", "RWH",  "R",    "R",    "RWH",  "R"},
+};
+
+/*
+ * Basic testing of reconnecting persistent opens with various lease levels
+ *
+ * This demonstrates that you don't need a lease for a persistent open.
+ *
+ * Windows only grants R leases on SO-shares. On non-SO shares (FO), Windows
+ * grants RWH, Samba defaults to only grant R, as true active/passive failover
+ * is currently not tested in our CI, where the lease state is lost and in
+ * theory recreated when reconnecting. We have the option "smb3 ca:max lease
+ * mask" to allow changing this, which is what this test uses to check both
+ * behaviours.
+ */
+static bool test_persistent_leaselevels_share(struct torture_context *tctx,
+					      struct smb2_tree *_tree,
+					      const char *share)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_tree *tree = NULL;
+	struct smb2_create io;
+	struct smb2_lease ls;
+	struct smb2_handle h1 = {};
+	uint32_t tcon_caps;
+	int i;
+	bool share_is_so;
+	NTSTATUS status;
+	bool ret = true;
+
+	for (i = 0; i < ARRAY_SIZE(ph_lease_tests); i++) {
+		char *fname = NULL;
+		const char *lease = ph_lease_tests[i].req_lease;
+		uint64_t previous_session_id;
+		struct smbcli_options options =
+			_tree->session->transport->options;
+		uint64_t lease1 = random();
+		struct GUID create_guid = GUID_random();
+		struct smb2_lease *_ls = NULL;
+		uint16_t expected_granted;
+		const char *exp_granted_str = NULL;
+
+		fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+		torture_assert_not_null_goto(tctx, fname, ret, done,
+					     "talloc_asprintf failed\n");
+
+		options.client_guid = GUID_random();
+
+		ret = torture_smb2_connection_share_ext(
+			tctx, share, 0, &options, &tree);
+		torture_assert_goto(tctx, ret, ret, done,
+				    "torture_smb2_connection_ext failed\n");
+		previous_session_id = smb2cli_session_current_id(
+			tree->session->smbXcli);
+
+		tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+		if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+			torture_fail(tctx, "Expect CA\n");
+		}
+		share_is_so = (tcon_caps & SMB2_SHARE_CAP_SCALEOUT);
+		if (share_is_so) {
+			torture_comment(tctx, "SMB2_SHARE_CAP_SCALEOUT\n");
+		}
+
+		if (TARGET_IS_SAMBA3(tctx)) {
+			if (share_is_so) {
+				exp_granted_str = ph_lease_tests[i].
+					exp_granted_so_samba;
+			} else {
+				if (strequal(share, "ca_fo_max_rwh")) {
+					exp_granted_str = ph_lease_tests[i].
+						exp_granted_fo_max_rwh_samba;
+				} else {
+					exp_granted_str = ph_lease_tests[i].
+						exp_granted_fo_samba;
+				}
+			}
+		} else {
+			if (share_is_so) {
+				exp_granted_str = ph_lease_tests[i].
+					exp_granted_so_win;
+			} else {
+				exp_granted_str = ph_lease_tests[i].
+					exp_granted_fo_win;
+			}
+		}
+
+		expected_granted = smb2_util_lease_state(exp_granted_str);
+
+		torture_comment(tctx, "%2d: Request PH with [%-4s] lease, "
+				"granted lease level [%-4s]\n",
+				i+1, lease, exp_granted_str);
+
+		/*
+		 * Grab durable open
+		 */
+		if (lease[0] != '\0') {
+			_ls = &ls;
+		}
+
+		ZERO_STRUCT(io);
+		smb2_lease_create_share(&io, _ls, false, fname,
+					smb2_util_share_access("RWD"), lease1,
+					smb2_util_lease_state(lease));
+		io.in.durable_open_v2 = true;
+		io.in.persistent_open = true;
+		io.in.create_guid = create_guid;
+		status = smb2_create(tree, mem_ctx, &io);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h1 = io.out.file.handle;
+
+		if (_ls != NULL) {
+			torture_assert_int_equal_goto(
+				tctx, io.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done, "Bad lease level\n");
+			torture_assert_int_equal_goto(
+				tctx, io.out.lease_response.lease_state,
+				expected_granted,
+				ret, done, "Bad lease level\n");
+		}
+
+		/*
+		 * Now disconnect
+		 */
+		TALLOC_FREE(tree);
+		sleep(1);
+
+		/*
+		 * Now reconnect the session and the persistent handle
+		 */
+		ret = torture_smb2_connection_share_ext(tctx,
+							share,
+							previous_session_id,
+							&options,
+							&tree);
+		torture_assert_goto(tctx, ret, ret, done,
+				    "torture_smb2_connection_ext failed\n");
+		tree->session->transport->lease.handler	= torture_lease_handler;
+		tree->session->transport->lease.private_data = tree;
+
+		ZERO_STRUCT(io);
+		smb2_lease_create(&io, _ls, false, fname, lease1,
+				  smb2_util_lease_state(lease));
+		h1.data[1] = 0;
+		io.in.durable_handle_v2 = &h1;
+		io.in.create_guid = create_guid;
+		io.in.persistent_open = true;
+		status = smb2_create(tree, mem_ctx, &io);
+
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"reconnect failed\n");
+		h1 = io.out.file.handle;
+
+		if (_ls != NULL) {
+			torture_assert_goto(
+				tctx,
+				io.out.oplock_level == SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done, "Bad oplock level\n");
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.lease_response.lease_state,
+				expected_granted,
+				ret, done, "Bad lease level\n");
+		}
+		smb2_util_close(tree, h1);
+		ZERO_STRUCT(h1);
+
+		status = smb2_util_unlink(_tree, fname);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"unlink failed\n");
+		TALLOC_FREE(tree);
+		TALLOC_FREE(fname);
+	}
+
+ done:
+	if (!smb2_util_handle_empty(h1) && tree != NULL) {
+		smb2_util_close(tree, h1);
+	}
+
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
+static bool test_persistent_leaselevels(struct torture_context *tctx,
+					struct smb2_tree *_tree)
+{
+	const char *share = torture_setting_string(tctx, "share", NULL);
+
+	return test_persistent_leaselevels_share(tctx, _tree, share);
+}
+
+static bool test_persistent_leaselevels_fo(struct torture_context *tctx,
+					   struct smb2_tree *_tree)
+{
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx, "Runs against standalone, "
+			     "skip against SO\n");
+	}
+
+	ret = test_persistent_leaselevels_share(tctx, _tree, "ca_fo");
+	return ret;
+}
+
+static bool test_persistent_leaselevels_fo_max_rwh(struct torture_context *tctx,
+						   struct smb2_tree *_tree)
+{
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx, "Runs against standalone, "
+			     "skip against SO\n");
+	}
+
+	ret = test_persistent_leaselevels_share(tctx, _tree, "ca_fo_max_rwh");
+	return ret;
+}
+
+static bool test_persistent_leaselevels_so(struct torture_context *tctx,
+					   struct smb2_tree *_tree)
+{
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_SCALEOUT)) {
+		torture_skip(tctx, "Runs against SO, "
+			     "skip against standalone\n");
+	}
+
+	ret = test_persistent_leaselevels_share(tctx, _tree, "ca_so");
+	return ret;
+}
+
+struct persistent_reconnect_contend_results {
+	/* Parameters for the first client's persistent open */
+	const char *held_lease;
+	const char *share_mode;
+	bool do_brlck;
+	const char *reconnect_lease;
+	const char *broken_to_lease;
+
+	/* Parameters for the second client's contending open */
+	uint32_t desired_access;
+	bool overwrite;
+	NTSTATUS status;
+	bool async;
+	const char *new_lease;
+	const char *new_granted;
+};
+
+#define RO (SEC_RIGHTS_FILE_READ)
+#define RW (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE)
+#define RWD (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE|SEC_STD_DELETE)
+
+static struct persistent_reconnect_contend_results contend_results_fo[] = {
+	/* L,	SM,	brlck,	RL,	BL,	DA,	DO,	status,				async,	NL,	NG */
+	{"",	"",	false,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RO,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RO,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	false,	"RH",	"RH",	RO,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"R",	false,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	false,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RW",	false,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"RH",	RO,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RW",	false,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RO,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	false,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RO,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RO,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	false,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"",	RO,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RW",	false,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"",	RO,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RO,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RO,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	false,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	false,	"RH",	"R",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"R",	false,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	false,	"RWH",	"RW",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"RH",	RW,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RW",	false,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"RH",	RW,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RW,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RW,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	false,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	false,	"RH",	"R",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"R",	false,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	false,	"RWH",	"RW",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"",	RW,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RW",	false,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"",	RW,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RW,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RW,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	false,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	false,	"RH",	"R",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"R",	false,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	false,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"R",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"RW",	false,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RWD,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RWD,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	false,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	false,	"RH",	"R",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"",	false,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	false,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	false,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	false,	"RH",	"R",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"R",	false,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	false,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	false,	"RH",	"R",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"RW",	"RW",	false,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	false,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RWD,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RWD,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{"",	"",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RO,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	true,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RO,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	/*
+	 * The next one has two bugs in Windows: return
+	 * STATUS_OBJECT_NAME_NOT_FOUND and breaks to RH instead of RW.
+	{"RWH",	"R",	true,	"RWH",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	 */
+	{"",	"RW",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"",	RO,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RO,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	true,	"RWH",	"RW",	RW,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"RH",	RW,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RW,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	true,	"RWH",	"RW",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"",	RW,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RW,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	true,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"RW",	RWD,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RWD,	false,	NT_STATUS_OK,			true,	"RWH",	""},
+	{"",	"",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"",	true,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"",	true,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"R",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"R",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"R",	true,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"R",	true,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RW",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RW",	true,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RW",	true,	"RWH",	"RW",	RWD,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RWD,	true,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+
+	{NULL,	NULL,	false,	NULL,	NULL,	0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+static struct persistent_reconnect_contend_results contend_results_fo_win_broken[] = {
+	/*
+	 * The next one has a bug in Windows: it returns
+	 * STATUS_OBJECT_NAME_NOT_FOUND.
+	 */
+	{"RH",	"R",	false,	"RH",	"R",	RO,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	/*
+	 * The next one has two bugs in Windows: return
+	 * STATUS_OBJECT_NAME_NOT_FOUND and breaks to RH instead of NONE.
+	 */
+	{"RWH",	"R",	false,	"RWH",	"RW",	RO,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"RWH",	""},
+	{NULL,	NULL,	false,	NULL,	NULL,	0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+
+/*
+ * On a share with SMB2_SHARE_CAP_SCALEOUT the server doesn't grant W or H
+ * leases.
+ */
+static struct persistent_reconnect_contend_results contend_results_so[] = {
+	{"",	"",	false,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	false,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	false,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	false,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	false,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	false,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	false,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	false,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	false,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	false,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	false,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+
+	{"",	"",	true,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	true,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	true,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	true,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	true,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"",	true,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"",	true,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"R",	true,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RW",	true,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+
+	{NULL,	NULL,	false,	NULL,	NULL,   0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+static struct persistent_reconnect_contend_results contend_results_so_failover[] = {
+	{"R",	"R",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"R",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RW",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+
+	{NULL,	NULL,	false,	NULL,	NULL,   0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+#undef RO
+#undef RW
+#undef RWD
+
+/*
+ * This tests trying to open a file with a disconnected persistent handle
+ * with various different lease levels, sharemodes and create disposition
+ * combinations.
+ *
+ * The client then disconnects and we try to open (contend) the now disconnected
+ * Persistent Handle from the first client. This will either fail with
+ * NT_STATUS_FILE_NOT_AVAILABLE or trigger a lease break which gets dispatched
+ * once the first client reconnects.
+ *
+ * The client must always be able to reconnect the disconnected open and the
+ * server guarantees that any operations which break W or H leases are blocked.
+ *
+ * The bottom line is:
+ *
+ * - incompatible opens without H-lease are blocked with
+ *   NT_STATUS_FILE_NOT_AVAILABLE
+ *
+ * - incompatible opens with a H lease trigger a lease break and are deferred
+ *   until the first client reconnects the handle
+ *
+ * - in addition to that, if the file has byterange locks the lease must include
+ *   W, otherwise contending opens are also blocked with
+ *   NT_STATUS_FILE_NOT_AVAILABLE
+ * */
+static bool test_persistent_reconnect_contended_do_one(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct persistent_reconnect_contend_results *table,
+		int testnum,
+		bool node_failure)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smbcli_options options1 = _tree->session->transport->options;
+	struct smbcli_options options2 = _tree->session->transport->options;
+	struct smb2_tree *tree1 = NULL;
+	struct smb2_tree *tree2 = NULL;
+	uint8_t pnn;
+	bool stopped = false;
+	struct smb2_request *req = NULL;
+	struct smb2_create io;
+	struct smb2_create io2;
+	struct smb2_lease ls1;
+	struct smb2_lease ls2;
+	struct smb2_lease *ls = NULL;
+	struct smb2_handle h1 = {};
+	struct smb2_handle rh = {};
+	struct smb2_handle h2 = {};
+	struct smb2_lock lck = {};
+	struct smb2_lock_element el[1];
+	uint64_t previous_session_id;
+	uint64_t lease1 = 1;
+	uint64_t lease2 = 2;
+	struct GUID create_guid = GUID_random();
+	char *fname = NULL;
+	int rc;
+	bool expect_break = false;
+	bool expect_acquire = false;
+	bool expect_block = false;
+	NTSTATUS status;
+	bool ret = true;
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	fname = talloc_asprintf(mem_ctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	status = torture_setup_simple_file(tctx, _tree, fname);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_setup_simple_file failed\n");
+
+	torture_comment(tctx,
+			"%2d: "
+			"Lease [%-3s] "
+			"Sharemode [%-3s] "
+			"Brl [%s]. "
+			"Contend access [0x%0"PRIX32"] "
+			"Overwrite [%s] "
+			"Result [%18s]. "
+			"Reconnect [%-3s] "
+			"Break [%-3s]\n",
+			testnum,
+			table->held_lease,
+			table->share_mode,
+			table->do_brlck ? "yes" : "no ",
+			table->desired_access,
+			table->overwrite ? "yes" : "no ",
+			nt_errstr(table->status) + 10,
+			table->reconnect_lease,
+			table->broken_to_lease);
+
+	options1.client_guid = GUID_random();
+	options2.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	previous_session_id = smb2cli_session_current_id(
+		tree1->session->smbXcli);
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+
+	if (smb2_util_lease_state(table->held_lease) == SMB2_LEASE_READ &&
+	    smb2_util_lease_state(table->reconnect_lease) == SMB2_LEASE_READ)
+	{
+		expect_acquire = true;
+	}
+
+	if (smb2_util_lease_state(table->reconnect_lease) !=
+	    smb2_util_lease_state(table->broken_to_lease))
+	{
+		expect_break = true;
+	}
+
+	if (NT_STATUS_EQUAL(table->status, NT_STATUS_FILE_NOT_AVAILABLE)) {
+		expect_block = true;
+	}
+
+	/*
+	 * Get persistent open
+	 */
+	if (table->held_lease[0] != '\0') {
+		ls = &ls1;
+	} else {
+		ls = NULL;
+	}
+	smb2_lease_v2_create_share(&io,
+				   ls,
+				   false,
+				   fname,
+				   smb2_util_share_access(table->share_mode),
+				   lease1,
+				   NULL,
+				   smb2_util_lease_state(table->held_lease),
+				   0);
+	io.in.durable_open_v2 = true;
+	io.in.persistent_open = true;
+	io.in.create_guid = create_guid;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+	rh = h1;
+
+	torture_assert_goto(
+		tctx, io.out.persistent_open == true,
+		ret, done, "Persistent open not granted\n");
+
+	if (io.in.lease_request_v2 != NULL) {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->held_lease),
+			ret, done,
+			"Bad lease level\n");
+	}
+
+	if (table->do_brlck) {
+		ZERO_ARRAY(el);
+		ZERO_STRUCT(lck);
+		el[0].offset = 0;
+		el[0].length = 1;
+		el[0].flags = SMB2_LOCK_FLAG_EXCLUSIVE |
+			SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+		lck.in.locks = el;
+		lck.in.lock_count = 1;
+		lck.in.file.handle = h1;
+
+		status = smb2_lock(tree1, &lck);
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, NT_STATUS_OK,
+			ret, done, "smb2_lock failed\n");
+	}
+
+	/*
+	 * Now disconnect
+	 */
+	ZERO_STRUCT(h1);
+	if (!node_failure) {
+		TALLOC_FREE(tree1);
+	} else {
+		ret = torture_stop_ctdb_node(tctx, &tree1, &pnn);
+		torture_assert_goto(tctx, ret, ret, done,
+				    "torture_ctdb_stop_node failed\n");
+		stopped = true;
+	}
+	smb_msleep(1000);
+
+	/*
+	 * Contend durable open with second open from second client
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_lease_v2_create(&io2, &ls2, false, fname,
+			     lease2, NULL,
+			     smb2_util_lease_state(table->new_lease), 0);
+	io2.in.desired_access = table->desired_access;
+	if (table->overwrite) {
+		io2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+	}
+
+	req = smb2_create_send(tree2, &io2);
+	torture_assert_not_null_goto(tctx, req, ret, done,
+				     "smb2_create_send failed\n");
+
+	while (!req->cancel.can_cancel &&
+	       (req->state < SMB2_REQUEST_DONE))
+	{
+		rc = tevent_loop_once(req->transport->ev);
+		torture_assert_goto(tctx, rc == 0, ret, done,
+				    "tevent_loop_once failed\n");
+	}
+
+	if (table->async) {
+		torture_assert_goto(tctx, req->state < SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected async interim response\n");
+	} else {
+		torture_assert_goto(tctx, req->state == SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected response\n");
+	}
+
+	/*
+	 * Now reconnect first client and the persistent handle
+	 */
+	ret = torture_smb2_connection_ext(tctx, previous_session_id,
+					  &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+
+	if (table->held_lease[0] != '\0') {
+		ls = &ls1;
+	} else {
+		ls = NULL;
+	}
+	smb2_lease_v2_create_share(&io,
+				   ls,
+				   false,
+				   fname,
+				   smb2_util_share_access(table->share_mode),
+				   lease1,
+				   NULL,
+				   smb2_util_lease_state(table->held_lease),
+				   128);
+	io.in.durable_handle_v2 = &rh;
+	io.in.create_guid = create_guid;
+	io.in.persistent_open = true;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+
+	if (io.in.lease_request_v2 != NULL) {
+		int expect_epoch;
+
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->reconnect_lease),
+			ret, done,
+			"Bad lease level\n");
+
+		if (expect_break) {
+			expect_epoch = 1;
+		} else if (expect_acquire) {
+			expect_epoch = 129;
+		} else if (expect_block) {
+			expect_epoch = 128;
+		} else {
+			expect_epoch = 1;
+		}
+
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_epoch,
+			expect_epoch,
+			ret,
+			done,
+			"Bad lease epoch\n");
+
+		if (expect_break) {
+			CHECK_BREAK_INFO_V2(tree1->session->transport,
+					    table->held_lease,
+					    table->broken_to_lease,
+					    lease1,
+					    2);
+		} else {
+			CHECK_NO_BREAK(tctx);
+		}
+	}
+
+	status = smb2_create_recv(req, tctx, &io2);
+	if (!NT_STATUS_IS_OK(table->status)) {
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, table->status,
+			ret, done, "smb2_create failed\n");
+	} else {
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h2 = io2.out.file.handle;
+
+		if (io2.in.lease_request_v2 != NULL) {
+			torture_assert_int_equal_goto(
+				tctx,
+				io2.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done,
+				"Bad lease level\n");
+			torture_assert_int_equal_goto(
+				tctx,
+				io2.out.lease_response_v2.lease_state,
+				smb2_util_lease_state(table->new_granted),
+				ret, done,
+				"Bad lease level\n");
+		}
+
+		status = smb2_util_close(tree2, h2);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_close failed\n");
+		ZERO_STRUCT(h2);
+	}
+
+	if ((smb2_util_share_access(table->share_mode) &
+	    NTCREATEX_SHARE_ACCESS_READ) &&
+	    table->do_brlck)
+	{
+		status = torture_smb2_testfile_access(
+			tree2, fname, &h2,
+			SEC_RIGHTS_FILE_READ);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+
+		ZERO_ARRAY(el);
+		ZERO_STRUCT(lck);
+		el[0].offset = 0;
+		el[0].length = 1;
+		el[0].flags = SMB2_LOCK_FLAG_SHARED |
+			SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+		lck.in.locks = el;
+		lck.in.lock_count = 1;
+		lck.in.file.handle = h2;
+
+		status = smb2_lock(tree2, &lck);
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, NT_STATUS_LOCK_NOT_GRANTED,
+			ret, done, "smb2_lock failed\n");
+
+		status = smb2_util_close(tree2, h2);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_close failed\n");
+		ZERO_STRUCT(h2);
+	}
+
+	status = smb2_util_close(tree1, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h1);
+
+done:
+	/*
+	 * Restart the node from here only. Doing it on the success path as
+	 * well restarted it twice whenever that attempt failed, as the jump
+	 * to done: left stopped set. Don't assign to ret either: a failure
+	 * in the test body must not be overwritten by a successful restart.
+	 */
+	if (stopped) {
+		bool started;
+
+		started = torture_start_ctdb_node(tctx, _tree, pnn);
+		if (!started) {
+			torture_fail(tctx, "torture_ctdb_start_node failed");
+		}
+		stopped = false;
+	}
+
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree1, h1);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree2, h2);
+	}
+	if (tree1 != NULL) {
+		smb2_util_unlink(tree1, fname);
+	} else if (tree2 != NULL) {
+		smb2_util_unlink(tree2, fname);
+	}
+	TALLOC_FREE(tree1);
+	TALLOC_FREE(tree2);
+	TALLOC_FREE(mem_ctx);
+	return ret;
+}
+
+static bool test_persistent_reconnect_contended_do_table(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct persistent_reconnect_contend_results *table,
+		bool failover)
+{
+	int i;
+	bool single;
+	bool ok;
+
+	i = torture_setting_int(tctx, "subtest", 0);
+	single = torture_setting_bool(tctx, "single", false);
+
+	for (; table[i].held_lease != NULL; i++) {
+		ok = test_persistent_reconnect_contended_do_one(
+			tctx, _tree, &table[i], i, failover);
+		if (!ok) {
+			return false;
+		}
+		if (single) {
+			return true;
+		}
+	}
+	return true;
+}
+
+static bool test_persistent_reconnect_contended(struct torture_context *tctx,
+						struct smb2_tree *_tree)
+{
+	struct persistent_reconnect_contend_results *table = NULL;
+	uint32_t caps;
+	uint32_t tcon_caps;
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		table = contend_results_so;
+	} else {
+		table = contend_results_fo;
+	}
+
+	return test_persistent_reconnect_contended_do_table(
+		tctx, _tree, table, false);
+}
+
+static bool test_persistent_reconnect_contended_win_broken(
+	struct torture_context *tctx,
+	struct smb2_tree *_tree)
+{
+	uint32_t caps;
+	uint32_t tcon_caps;
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx, "SMB2_SHARE_CAP_SCALEOUT\n");
+	}
+
+	if (!TARGET_IS_SAMBA3(tctx)) {
+		torture_skip(tctx, "Broken on Windows\n");
+	}
+
+	return test_persistent_reconnect_contended_do_table(
+		tctx, _tree, contend_results_fo_win_broken, false);
+}
+
+#define RO (SEC_RIGHTS_FILE_READ)
+#define RW (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE)
+#define RWD (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE|SEC_STD_DELETE)
+
+static struct persistent_reconnect_contend_results contend_results_two_fo[] = {
+	/* L,	SM,	brlck,	RL,	BL,	DA,	DO,	status,				async,	NL,	NG */
+	{"",	"RWD",	false,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RO,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RO,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RO,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RW,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RW,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RW,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"RH",	RWD,	false,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"RH",	RWD,	false,	NT_STATUS_OK,			true,	"RWH",	"RH"},
+	{"",	"RWD",	false,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	false,	"RH",	"",	RWD,	true,	NT_STATUS_OK,			false,	"RWH",	"RH"},
+	{"RW",	"RWD",	false,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	false,	"RWH",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"RH",	RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RH",	"RWD",	true,	"",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RW",	"RWD",	true,	"RW",	"RW",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"RWH",	"RWD",	true,	"RWH",	"",	RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	true,	"RWH",	""},
+
+	{NULL,	NULL,	false,	NULL,	NULL,	0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+/*
+ * On a share with SMB2_SHARE_CAP_SCALEOUT the server doesn't grant W or H
+ * leases.
+ */
+static struct persistent_reconnect_contend_results contend_results_two_so[] = {
+	{"",	"RWD",	false,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	false,	"",	"",     RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	false,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RO,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"",	"RWD",	true,	"",	"",     RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RWD,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+	{"R",	"RWD",	true,	"R",	"R",    RWD,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"RWH",	""},
+
+	{NULL,	NULL,	false,	NULL,	NULL,   0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+#undef RO
+#undef RW
+#undef RWD
+
+static bool test_persistent_reconnect_contended_do_two(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct persistent_reconnect_contend_results *table,
+		int testnum)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smbcli_options options1 = _tree->session->transport->options;
+	struct smbcli_options options2 = _tree->session->transport->options;
+	struct smb2_tree *tree1 = NULL;
+	struct smb2_tree *tree2 = NULL;
+	struct smb2_request *req = NULL;
+	struct smb2_create io;
+	struct smb2_create io2;
+	struct smb2_lease ls1;
+	struct smb2_lease ls2;
+	struct smb2_lease *ls = NULL;
+	struct smb2_handle h1 = {};
+	struct smb2_handle h2 = {};
+	struct smb2_handle h3 = {};
+	struct smb2_handle rh = {};
+	struct smb2_handle rh2 = {};
+	struct smb2_lock lck = {0};
+	struct smb2_lock_element el[1];
+	uint64_t previous_session_id;
+	uint64_t lease1 = 1;
+	uint64_t lease2 = 2;
+	struct GUID create_guid1 = GUID_random();
+	struct GUID create_guid2 = GUID_random();
+	char *fname = NULL;
+	int rc;
+	bool expect_break = false;
+	bool expect_acquire = false;
+	bool expect_block = false;
+	int expect_epoch = 0;
+	NTSTATUS status;
+	bool ret = true;
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	fname = talloc_asprintf(mem_ctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	torture_comment(tctx,
+			"%2d: "
+			"Lease [%-3s] "
+			"Sharemode [%-3s] "
+			"Brl [%s]. "
+			"Contend access [0x%0"PRIX32"] "
+			"Overwrite [%s] "
+			"Result [%18s]. "
+			"Reconnect [%-3s] "
+			"Break [%-3s]\n",
+			testnum,
+			table->held_lease,
+			table->share_mode,
+			table->do_brlck ? "yes" : "no ",
+			table->desired_access,
+			table->overwrite ? "yes" : "no ",
+			nt_errstr(table->status) + 10,
+			table->reconnect_lease,
+			table->broken_to_lease);
+
+	options1.client_guid = GUID_random();
+	options2.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done, "torture_smb2_connection_ext failed\n");
+	previous_session_id = smb2cli_session_current_id(tree1->session->smbXcli);
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+
+	if (smb2_util_lease_state(table->held_lease) == SMB2_LEASE_READ &&
+	    smb2_util_lease_state(table->reconnect_lease) == SMB2_LEASE_READ)
+	{
+		expect_acquire = true;
+	}
+
+	if (smb2_util_lease_state(table->reconnect_lease) !=
+	    smb2_util_lease_state(table->broken_to_lease))
+	{
+		expect_break = true;
+	}
+
+	if (NT_STATUS_EQUAL(table->status, NT_STATUS_FILE_NOT_AVAILABLE)) {
+		expect_block = true;
+	}
+
+	status = torture_setup_simple_file(tctx, tree1, fname);
+	torture_assert_ntstatus_ok(tctx, status, "setup file failed\n");
+
+	/*
+	 * Get persistent open
+	 */
+	if (table->held_lease[0] != '\0') {
+		ls = &ls1;
+	} else {
+		ls = NULL;
+	}
+	smb2_lease_v2_create_share(&io,
+				   ls,
+				   false,
+				   fname,
+				   smb2_util_share_access(table->share_mode),
+				   lease1,
+				   NULL,
+				   smb2_util_lease_state(table->held_lease),
+				   0);
+	io.in.durable_open_v2 = true;
+	io.in.persistent_open = true;
+	io.in.create_guid = create_guid1;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+	rh = h1;
+
+	torture_assert_goto(
+		tctx, io.out.persistent_open == true,
+		ret, done, "Persistent open not granted\n");
+
+	if (io.in.lease_request_v2 != NULL) {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->held_lease),
+			ret, done,
+			"Bad lease level\n");
+	}
+
+	/*
+	 * Get a second persistent open
+	 */
+	io.in.create_guid = create_guid2;
+
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h2 = io.out.file.handle;
+	rh2 = h2;
+
+	torture_assert_goto(
+		tctx, io.out.persistent_open == true,
+		ret, done, "Persistent open not granted\n");
+
+	if (io.in.lease_request_v2 != NULL) {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->held_lease),
+			ret, done,
+			"Bad lease level\n");
+	}
+
+	if (table->do_brlck) {
+		ZERO_ARRAY(el);
+		ZERO_STRUCT(lck);
+		el[0].offset = 0;
+		el[0].length = 1;
+		el[0].flags = SMB2_LOCK_FLAG_EXCLUSIVE|SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+		lck.in.locks = el;
+		lck.in.lock_count = 1;
+		lck.in.file.handle = h1;
+
+		status = smb2_lock(tree1, &lck);
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, NT_STATUS_OK,
+			ret, done, "smb2_lock failed\n");
+	}
+
+	/*
+	 * Now disconnect
+	 */
+	TALLOC_FREE(tree1);
+	ZERO_STRUCT(h1);
+	ZERO_STRUCT(h2);
+	smb_msleep(100);
+
+	/*
+	 * Contend durable open with second open from second client
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_lease_v2_create(&io2, &ls2, false, fname,
+			     lease2, NULL,
+			     smb2_util_lease_state(table->new_lease), 0);
+	io2.in.desired_access = table->desired_access;
+	if (table->overwrite) {
+		io2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+	}
+
+	req = smb2_create_send(tree2, &io2);
+	torture_assert_not_null_goto(tctx, req, ret, done,
+				     "smb2_create_send failed\n");
+
+	while (!req->cancel.can_cancel &&
+	       (req->state < SMB2_REQUEST_DONE))
+	{
+		rc = tevent_loop_once(req->transport->ev);
+		torture_assert_goto(tctx, rc == 0, ret, done,
+				    "tevent_loop_once failed\n");
+	}
+
+	if (table->async) {
+		torture_assert_goto(tctx, req->state < SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected async interim response\n");
+	} else {
+		torture_assert_goto(tctx, req->state == SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected response\n");
+	}
+
+	/*
+	 * Now reconnect first client and the persistent handle
+	 */
+	ret = torture_smb2_connection_ext(tctx, previous_session_id,
+					  &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+
+	if (table->held_lease[0] != '\0') {
+		ls = &ls1;
+	} else {
+		ls = NULL;
+	}
+	smb2_lease_v2_create_share(&io,
+				   ls,
+				   false,
+				   fname,
+				   smb2_util_share_access(table->share_mode),
+				   lease1,
+				   NULL,
+				   smb2_util_lease_state(table->held_lease),
+				   128);
+	io.in.durable_handle_v2 = &rh;
+	io.in.create_guid = create_guid1;
+	io.in.persistent_open = true;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+
+	if (io.in.lease_request_v2 != NULL) {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->reconnect_lease),
+			ret, done,
+			"Bad lease level\n");
+
+		if (expect_break) {
+			expect_epoch = 1;
+		} else if (expect_acquire) {
+			expect_epoch = 129;
+		} else if (expect_block) {
+			expect_epoch = 128;
+		} else {
+			expect_epoch = 1;
+		}
+
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_epoch,
+			expect_epoch,
+			ret,
+			done,
+			"Bad lease epoch\n");
+
+		if (expect_break) {
+			CHECK_BREAK_INFO_V2(tree1->session->transport,
+					    table->held_lease,
+					    table->broken_to_lease,
+					    lease1,
+					    2);
+		} else {
+			CHECK_NO_BREAK(tctx);
+		}
+	}
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	io.in.durable_handle_v2 = &rh2;
+	io.in.create_guid = create_guid2;
+	ls1.lease_epoch = expect_epoch + 1;
+	ls1.lease_state = lease_break_info.lease_break.new_lease_state;
+
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h2 = io.out.file.handle;
+
+	if (io.in.lease_request_v2 != NULL) {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			SMB2_OPLOCK_LEVEL_LEASE,
+			ret, done,
+			"Bad lease level\n");
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_state,
+			smb2_util_lease_state(table->broken_to_lease),
+			ret, done,
+			"Bad lease level\n");
+
+		if (expect_break) {
+			expect_epoch = 2;
+		} else if (expect_acquire) {
+			expect_epoch = 129;
+		} else if (expect_block) {
+			expect_epoch = 128;
+		} else {
+			expect_epoch = 1;
+		}
+
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.lease_response_v2.lease_epoch,
+			expect_epoch,
+			ret,
+			done,
+			"Bad lease epoch\n");
+	}
+	CHECK_NO_BREAK(tctx);
+
+	status = smb2_create_recv(req, tctx, &io2);
+	if (!NT_STATUS_IS_OK(table->status)) {
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, table->status,
+			ret, done, "smb2_create failed\n");
+	} else {
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h3 = io2.out.file.handle;
+
+		if (io2.in.lease_request_v2 != NULL) {
+			torture_assert_int_equal_goto(
+				tctx,
+				io2.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done,
+				"Bad lease level\n");
+			torture_assert_int_equal_goto(
+				tctx,
+				io2.out.lease_response_v2.lease_state,
+				smb2_util_lease_state(table->new_granted),
+				ret, done,
+				"Bad lease level\n");
+		}
+
+		status = smb2_util_close(tree2, h3);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_close failed\n");
+		ZERO_STRUCT(h3);
+	}
+
+	if ((smb2_util_share_access(table->share_mode) &
+	     NTCREATEX_SHARE_ACCESS_READ) &&
+	    table->do_brlck)
+	{
+		status = torture_smb2_testfile_access(
+			tree2, fname, &h3,
+			SEC_RIGHTS_FILE_READ);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+
+		ZERO_ARRAY(el);
+		ZERO_STRUCT(lck);
+		el[0].offset = 0;
+		el[0].length = 1;
+		el[0].flags = SMB2_LOCK_FLAG_SHARED |
+			SMB2_LOCK_FLAG_FAIL_IMMEDIATELY;
+		lck.in.locks = el;
+		lck.in.lock_count = 1;
+		lck.in.file.handle = h3;
+
+		status = smb2_lock(tree2, &lck);
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, NT_STATUS_LOCK_NOT_GRANTED,
+			ret, done, "smb2_lock failed\n");
+
+		status = smb2_util_close(tree2, h3);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_close failed\n");
+		ZERO_STRUCT(h3);
+	}
+
+	status = smb2_util_close(tree1, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h1);
+
+	status = smb2_util_close(tree1, h2);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h2);
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree1, h1);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree1, h2);
+	}
+	if (tree1 != NULL) {
+		smb2_util_unlink(tree1, fname);
+	} else if (tree2 != NULL) {
+		smb2_util_unlink(tree2, fname);
+	}
+	TALLOC_FREE(tree1);
+	TALLOC_FREE(tree2);
+	TALLOC_FREE(mem_ctx);
+	return ret;
+}
+
+static bool test_persistent_reconnect_contended_two_do_table(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct persistent_reconnect_contend_results *table)
+{
+	int i;
+	bool single;
+	bool ok;
+
+	i = torture_setting_int(tctx, "subtest", 0);
+	single = torture_setting_bool(tctx, "single", false);
+
+	for (; table[i].held_lease != NULL; i++) {
+		ok = test_persistent_reconnect_contended_do_two(
+			tctx, _tree, &table[i], i);
+		if (!ok) {
+			return false;
+		}
+		if (single) {
+			return true;
+		}
+	}
+	return true;
+}
+
+static bool test_persistent_reconnect_contended_two(
+	struct torture_context *tctx,
+	struct smb2_tree *_tree)
+{
+	struct persistent_reconnect_contend_results *table = NULL;
+	uint32_t caps;
+	uint32_t tcon_caps;
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		table = contend_results_two_so;
+	} else {
+		table = contend_results_two_fo;
+	}
+
+	return test_persistent_reconnect_contended_two_do_table(
+		tctx, _tree, table);
+}
+
+struct oplock_persistent_reconnect_contend_results {
+	/* Parameters for the first client's persistent open */
+	const char *oplock;
+	const char *share_mode;
+	const char *reconnect_oplock;
+	const char *broken_to_oplock;
+
+	/* Parameters for the second client's contending open */
+	uint32_t desired_access;
+	bool overwrite;
+	NTSTATUS status;
+	bool async;
+	const char *new_oplock;
+	const char *new_granted_oplock;
+};
+
+#define RO (SEC_RIGHTS_FILE_READ)
+#define RW (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE)
+#define RWD (SEC_RIGHTS_FILE_READ|SEC_RIGHTS_FILE_WRITE|SEC_STD_DELETE)
+
+static struct oplock_persistent_reconnect_contend_results oplock_contend_results_fo[] = {
+	{"",	"",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"",	"x",	"x",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"",	"b",	"s",	RO,	false,	NT_STATUS_SHARING_VIOLATION,	true,	"b",	""},
+	{"",	"R",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"R",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"R",	"x",	"x",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"R",	"b",	"s",	RO,	false,	NT_STATUS_OK,			true,	"b",	"s"},
+	{"",	"RW",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"RW",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"RW",	"x",	"x",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"RW",	"b",	"s",	RO,	false,	NT_STATUS_OK,			true,	"b",	"s"},
+	{"",	"RWD",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"RWD",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"RWD",	"x",	"x",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"RWD",	"b",	"s",	RO,	false,	NT_STATUS_OK,			true,	"b",	"s"},
+	{"",	"",	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"",	"s",	"s",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"",	"x",	"x",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"",	"b",	"s",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"b",	""},
+	{"",	"R",	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"R",	"s",	"s",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"R",	"x",	"x",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"R",	"b",	"s",	RW,	true,	NT_STATUS_SHARING_VIOLATION,	true,	"b",	""},
+	{"",	"RW",	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"RW",	"s",	"s",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"RW",	"x",	"x",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"RW",	"b",	"",	RW,	true,	NT_STATUS_OK,			true,	"b",	"s"},
+	{"",	"RWD",	"",	"",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"RWD",	"s",	"s",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"RWD",	"x",	"x",	RW,	true,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"RWD",	"b",	"",	RW,	true,	NT_STATUS_OK,			true,	"b",	"s"},
+
+	{NULL,	NULL,	NULL,	NULL,	0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+/*
+ * On a share with SMB2_SHARE_CAP_SCALEOUT the server doesn't grant exclusive or
+ * batch oplocks.
+ */
+static struct oplock_persistent_reconnect_contend_results oplock_contend_results_so[] = {
+	{"",	"",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"",	"R",	"",	"",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"R",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"R",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"R",	"s",	"s",	RO,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"",	"",	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"",	"RW",	"",	"",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"s",	"RW",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"x",	"RW",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+	{"b",	"RW",	"s",	"s",	RW,	false,	NT_STATUS_FILE_NOT_AVAILABLE,	false,	"b",	""},
+
+	{NULL,	NULL,	NULL,	NULL,	0,	false,	NT_STATUS_INTERNAL_ERROR,	false,	 NULL,	NULL}
+};
+
+#undef RO
+#undef RW
+#undef RWD
+
+static void ph_oplock_break_callback(struct smb2_request *req)
+{
+	NTSTATUS status;
+	struct smb2_break br;
+
+	ZERO_STRUCT(br);
+	status = smb2_break_recv(req, &br);
+	if (!NT_STATUS_IS_OK(status))
+		lease_break_info.oplock_failures++;
+
+	return;
+}
+
+/* a oplock break request handler */
+static bool ph_oplock_handler(struct smb2_transport *transport,
+			      const struct smb2_handle *handle,
+			      uint8_t level, void *private_data)
+{
+	struct smb2_tree *tree = private_data;
+	struct smb2_request *req;
+	struct smb2_break br;
+
+	lease_break_info.oplock_handle = *handle;
+	lease_break_info.oplock_level	= level;
+	lease_break_info.oplock_count++;
+
+	ZERO_STRUCT(br);
+	br.in.file.handle = *handle;
+	br.in.oplock_level = level;
+
+	if (lease_break_info.held_oplock_level > SMB2_OPLOCK_LEVEL_NONE) {
+		req = smb2_break_send(tree, &br);
+		req->async.fn = ph_oplock_break_callback;
+		req->async.private_data = NULL;
+	}
+	lease_break_info.held_oplock_level = level;
+
+	return true;
+}
+
+static bool test_persistent_reconnect_contended_oplock_do_one(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct oplock_persistent_reconnect_contend_results *table,
+		int testnum)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	uint32_t tcon_caps;
+	struct smbcli_options options1 = _tree->session->transport->options;
+	struct smbcli_options options2 = _tree->session->transport->options;
+	struct smb2_tree *tree1 = NULL;
+	struct smb2_tree *tree2 = NULL;
+	struct smb2_request *req = NULL;
+	struct smb2_create io;
+	struct smb2_create io2;
+	struct smb2_handle h1 = {{0}};
+	struct smb2_handle h2 = {{0}};
+	uint64_t previous_session_id;
+	struct GUID create_guid = GUID_random();
+	char *fname = NULL;
+	int rc;
+	NTSTATUS status;
+	bool ret = true;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+
+	fname = talloc_asprintf(mem_ctx, "%s-%ld.dat", __FUNCTION__, random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	torture_comment(tctx,
+			"%2d: Hold [%s] "
+			"Sharemode [%-3s] "
+			"Reconnect [%s] "
+			"Break [%s]. "
+			"Contend [%0"PRIX32"] "
+			"Overwrite [%s] "
+			"Result [%18s]\n",
+			testnum,
+			table->oplock,
+			table->share_mode,
+			table->reconnect_oplock,
+			table->broken_to_oplock,
+			table->desired_access,
+			table->overwrite ? "yes" : "no ",
+			nt_errstr(table->status) + 10);
+
+	options1.client_guid = GUID_random();
+	options2.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+	previous_session_id = smb2cli_session_current_id(
+		tree1->session->smbXcli);
+
+	/*
+	 * Get persistent open
+	 */
+
+	status = torture_setup_simple_file(tctx, tree1, fname);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	smb2_oplock_create_share(&io,
+				 fname,
+				 smb2_util_share_access(table->share_mode),
+				 smb2_util_oplock_level(table->oplock));
+	io.in.durable_open_v2 = true;
+	io.in.persistent_open = true;
+	io.in.create_guid = create_guid;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	torture_assert_goto(
+		tctx, io.out.persistent_open == true,
+		ret, done, "Persistent open not granted\n");
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		if (smb2_util_oplock_level(table->oplock) >
+		    SMB2_OPLOCK_LEVEL_II)
+		{
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_II,
+				ret, done, "Bad oplock level\n");
+		} else {
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.oplock_level,
+				smb2_util_oplock_level(table->oplock),
+				ret, done, "Bad oplock level\n");
+		}
+	} else {
+		torture_assert_int_equal_goto(
+			tctx,
+			io.out.oplock_level,
+			smb2_util_oplock_level(table->oplock),
+			ret, done, "Bad oplock level\n");
+	}
+
+	/*
+	 * Now disconnect
+	 */
+	TALLOC_FREE(tree1);
+	sleep(1);
+
+	/*
+	 * Contend durable open with second open from second client
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_oplock_create(&io2,
+			   fname,
+			   smb2_util_oplock_level(table->new_oplock));
+	io2.in.desired_access = table->desired_access;
+	if (table->overwrite) {
+		io2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+	}
+
+	req = smb2_create_send(tree2, &io2);
+	torture_assert_not_null_goto(tctx, req, ret, done,
+				     "smb2_create_send failed\n");
+
+	while (!req->cancel.can_cancel &&
+	       (req->state < SMB2_REQUEST_DONE))
+	{
+		rc = tevent_loop_once(req->transport->ev);
+		torture_assert_goto(tctx, rc == 0, ret, done,
+				    "tevent_loop_once failed\n");
+	}
+
+	if (table->async) {
+		torture_assert_goto(tctx, req->state < SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected async interim response\n");
+	} else {
+		torture_assert_goto(tctx, req->state == SMB2_REQUEST_DONE,
+				    ret, done,
+				    "Expected response\n");
+	}
+
+	/*
+	 * Now reconnect first client and the persistent handle
+	 */
+	ret = torture_smb2_connection_ext(tctx, previous_session_id,
+					  &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+	tree1->session->transport->oplock.handler = ph_oplock_handler;
+	tree1->session->transport->oplock.private_data = tree1;
+
+	smb2_oplock_create_share(&io,
+				 fname,
+				 smb2_util_share_access(table->share_mode),
+				 smb2_util_oplock_level(table->oplock));
+	io.in.durable_handle_v2 = &h1;
+	io.in.create_guid = create_guid;
+	io.in.persistent_open = true;
+	status = smb2_create(tree1, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+	lease_break_info.held_oplock_level = io.out.oplock_level;
+
+	if (io.in.oplock_level != SMB2_OPLOCK_LEVEL_NONE) {
+		torture_assert_goto(
+			tctx,
+			io.out.oplock_level == smb2_util_oplock_level(
+				table->reconnect_oplock),
+			ret, done,
+			"Bad oplock level\n");
+
+		if (smb2_util_oplock_level(table->reconnect_oplock) !=
+		    smb2_util_oplock_level(table->broken_to_oplock))
+		{
+			CHECK_OPLOCK_BREAK(table->broken_to_oplock);
+		} else {
+			CHECK_NO_BREAK(tctx);
+		}
+	}
+
+	status = smb2_create_recv(req, tctx, &io2);
+	if (!NT_STATUS_IS_OK(table->status)) {
+		torture_assert_ntstatus_equal_goto(
+			tctx, status, table->status,
+			ret, done, "smb2_create failed\n");
+	} else {
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h2 = io2.out.file.handle;
+
+		if (io2.in.oplock_level != SMB2_OPLOCK_LEVEL_NONE) {
+			torture_assert_goto(
+				tctx,
+				io2.out.oplock_level == smb2_util_oplock_level(
+					table->new_granted_oplock),
+				ret, done,
+				"Bad lease state\n");
+		}
+
+		status = smb2_util_close(tree2, h2);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_close failed\n");
+		ZERO_STRUCT(h2);
+	}
+
+	status = smb2_util_close(tree1, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h1);
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree1, h1);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree2, h2);
+	}
+	if (tree1 != NULL) {
+		smb2_util_unlink(tree1, fname);
+	}
+	TALLOC_FREE(tree1);
+	TALLOC_FREE(tree2);
+	TALLOC_FREE(mem_ctx);
+	return ret;
+}
+
+static bool test_persistent_reconnect_contended_oplock_do_table(
+		struct torture_context *tctx,
+		struct smb2_tree *_tree,
+		struct oplock_persistent_reconnect_contend_results *table)
+{
+	int i;
+	bool single;
+	bool ok;
+
+	i = torture_setting_int(tctx, "subtest", 0);
+	single = torture_setting_bool(tctx, "single", false);
+
+	for (; table[i].oplock != NULL; i++) {
+		ok = test_persistent_reconnect_contended_oplock_do_one(
+			tctx, _tree, &table[i], i);
+		if (!ok) {
+			return false;
+		}
+		if (single) {
+			return true;
+		}
+	}
+	return true;
+}
+
+static bool test_persistent_reconnect_contended_oplock(
+	struct torture_context *tctx,
+	struct smb2_tree *_tree)
+{
+	struct oplock_persistent_reconnect_contend_results *table = NULL;
+	uint32_t tcon_caps;
+
+	/*
+	 * Persistent Handles together with oplocks are broken on Windows:
+	 * oplocks are "silently" downgraded from B to S when reconnecting a PH,
+	 * instead of sending an oplock break with the downgraded oplock level
+	 * (eg --option=torture:subtest=7).
+	 *
+	 * Samba doesn't grant Persistent Handles with oplocks at all, only with
+	 * leases or without an oplock or lease.
+	 *
+	 * Skip these tests altogether, they're merely kept for historical
+	 * reference and in case this subject needs furthter exploration in the
+	 * future.
+	 */
+
+	torture_skip(tctx, "Broken on Windows\n");
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		table = oplock_contend_results_so;
+	} else {
+		table = oplock_contend_results_fo;
+	}
+
+	return test_persistent_reconnect_contended_oplock_do_table(
+		tctx, _tree, table);
+}
+
+/*
+ * This tests verifies, that a
+ *
+ * - contending open on a disconnected persistent open that triggers a lease
+ *   break is blocked,
+ *
+ * - a replay of the create that caused the lease break fails with
+ *   NT_STATUS_FILE_NOT_AVAILABLE as long the the persistent open is still
+ *   disconnected,
+ *
+ * - after the persistent open is reconnected the second replay of the
+ *   contending open succeeds
+ *
+ * - the client with the persistent open receives a lease break
+ */
+static bool test_persistent_reconnect_contended_replay(
+	struct torture_context *tctx,
+	struct smb2_tree *_tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_tree *tree1 = NULL;
+	struct smb2_tree *tree2 = NULL;
+	struct smb2_request *req = NULL;
+	struct smb2_create io1;
+	struct smb2_create io2;
+	struct smb2_lease ls1;
+	struct smb2_handle h1 = {0};
+	struct smb2_handle h2 = {0};
+	uint32_t caps;
+	uint32_t tcon_caps;
+	struct smbcli_options options1 = _tree->session->transport->options;
+	struct smbcli_options options2 = _tree->session->transport->options;
+	uint64_t lease1 = random();
+	uint64_t lease2 = random();
+	struct GUID create_guid1 = GUID_random();
+	struct GUID create_guid2 = GUID_random();
+	char *fname = NULL;
+	int rc;
+	NTSTATUS status;
+	bool ret = true;
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx,
+			     "SO share, test requires RWH lease, skipping\n");
+	}
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	options1.client_guid = GUID_random();
+	options1.request_timeout = 240;
+	options2.client_guid = GUID_random();
+	options2.request_timeout = 240;
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	/*
+	 * Get persistent open
+	 */
+	smb2_lease_v2_create_share(&io1, &ls1, false, fname,
+				   smb2_util_share_access("RWD"),
+				   lease1, NULL,
+				   smb2_util_lease_state("RWH"), 1);
+	io1.in.durable_open_v2 = true;
+	io1.in.persistent_open = true;
+	io1.in.create_guid = create_guid1;
+	status = smb2_create(tree1, mem_ctx, &io1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io1.out.file.handle;
+	torture_assert_goto(tctx, io1.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.oplock_level,
+				      SMB2_OPLOCK_LEVEL_LEASE,
+				      ret, done,
+				      "Bad oplock level\n");
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.lease_response_v2.lease_state,
+				      smb2_util_lease_state("RWH"),
+				      ret, done,
+				      "Bad lease state\n");
+
+	TALLOC_FREE(tree1);
+	sleep(1);
+
+	/*
+	 * Contend disconnected durable open with second open from second client
+	 */
+	smb2_lease_v2_create(&io2, NULL, false, fname, lease2, NULL,
+			     smb2_util_lease_state("none"), 1);
+	io2.in.durable_open_v2 = true;
+	io2.in.create_guid = create_guid2;
+	req = smb2_create_send(tree2, &io2);
+	torture_assert_not_null_goto(tctx, req, ret, done,
+				     "smb2_create_send failed\n");
+
+	/*
+	 * Wait til the interim response for the create arrives and then
+	 * disconnect
+	 */
+	while (!req->cancel.can_cancel) {
+		rc = tevent_loop_once(req->transport->ev);
+		torture_assert_goto(tctx, rc == 0, ret, done,
+				    "tevent_loop_once failed\n");
+	}
+
+	TALLOC_FREE(req);
+	TALLOC_FREE(tree2);
+	sleep(1);
+
+	/*
+	 * Reconnect second client and send a create replay. As the first create
+	 * did not finish before we disconnected, there is no open on the server
+	 * and no replay cache entry, so this second create is handled as a
+	 * "normal" create, again getting STATUS_PENDING.
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0,
+					  &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2cli_session_start_replay(tree2->session->smbXcli);
+
+	req = smb2_create_send(tree2, &io2);
+	torture_assert_not_null_goto(tctx, req, ret, done,
+				     "smb2_create_send failed\n");
+	smb2cli_session_stop_replay(tree2->session->smbXcli);
+
+	/*
+	 * Wait til the interim response for the create arrives and then
+	 * disconnect
+	 */
+	while (!req->cancel.can_cancel) {
+		rc = tevent_loop_once(req->transport->ev);
+		torture_assert_goto(tctx, rc == 0, ret, done,
+				    "tevent_loop_once failed\n");
+	}
+	TALLOC_FREE(req);
+	TALLOC_FREE(tree2);
+
+	/*
+	 * Now reconnect the first client and reconnect the persistent open
+	 */
+	ret = torture_smb2_connection_ext(tctx, 0, &options1, &tree1);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	tree1->session->transport->lease.handler = torture_lease_handler;
+	tree1->session->transport->lease.private_data = tree1;
+
+	ZERO_STRUCT(io1);
+	smb2_lease_v2_create(&io1, &ls1, false, fname, lease1, NULL,
+			     smb2_util_lease_state("RWH"), 1);
+	io1.in.durable_handle_v2 = &h1;
+	io1.in.create_guid = create_guid1;
+	io1.in.persistent_open = true;
+	status = smb2_create(tree1, mem_ctx, &io1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io1.out.file.handle;
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.oplock_level,
+				      SMB2_OPLOCK_LEVEL_LEASE,
+				      ret, done,
+				      "Bad lease level\n");
+
+	torture_wait_for_lease_break(tctx);
+
+	CHECK_BREAK_INFO_V2(tree1->session->transport,
+			    "RWH", "RH",
+			    lease1,
+			    ls1.lease_epoch+2);
+
+	/*
+	 * Second client replays open, passes now. Note that this will not have
+	 * been a replay on the server, but there's no way to verify this, just
+	 * expect success.
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options2, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2cli_session_start_replay(tree2->session->smbXcli);
+	status = smb2_create(tree2, mem_ctx, &io2);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	smb2cli_session_stop_replay(tree2->session->smbXcli);
+	h2 = io2.out.file.handle;
+
+	status = smb2_util_close(tree1, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(h1);
+
+	status = smb2_util_close(tree2, h2);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(h2);
+
+done:
+	if (!smb2_util_handle_empty(h1) && (tree1 != NULL)) {
+		smb2_util_close(tree1, h1);
+	}
+	if (!smb2_util_handle_empty(h2) && (tree2 != NULL)) {
+		smb2_util_close(tree2, h2);
+	}
+	if (fname != NULL) {
+		smb2_util_unlink(_tree, fname);
+		TALLOC_FREE(fname);
+	}
+
+	TALLOC_FREE(tree1);
+	TALLOC_FREE(tree2);
+	TALLOC_FREE(mem_ctx);
+	return ret;
+}
+
+/*
+ * Verify that a disconnected Persistent Handle with a timeout of 5 seconds is
+ * reaped by the scavenger after the timeout expires, so another client can then
+ * open the file.
+ */
+static bool test_persistent_timeout_do(struct torture_context *tctx,
+				       struct smb2_tree *_tree,
+				       int requested,
+				       int expected)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct smb2_tree *tree = NULL;
+	struct smb2_create c;
+	struct smb2_handle h = {0};
+	uint32_t caps;
+	uint32_t tcon_caps;
+	struct smbcli_options options = _tree->session->transport->options;
+	struct GUID create_guid1 = GUID_random();
+	struct GUID create_guid2 = GUID_random();
+	char *fname = NULL;
+	struct timespec ts1;
+	struct timespec ts2;
+	NTSTATUS status;
+	bool ret = true;
+
+	torture_comment(tctx,
+			"requested [%d] expected [%d]\n",
+			requested,
+			expected);
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	fname = talloc_asprintf(frame, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	options.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	/*
+	 * Get persistent open
+	 */
+	smb2_lease_v2_create_share(&c, NULL, false, fname,
+				   smb2_util_share_access("RWD"),
+				   0, NULL, 0, 1);
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid1;
+	c.in.timeout = requested * 1000;
+	status = smb2_create(tree, frame, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = c.out.file.handle;
+	torture_assert_goto(tctx, c.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+	torture_assert_int_equal_goto(tctx, c.out.timeout, expected * 1000,
+				      ret, done, "bad timeout\n");
+
+	TALLOC_FREE(tree);
+	ZERO_STRUCT(h);
+	clock_gettime_mono(&ts1);
+
+	sleep(1);
+
+	/*
+	 * Retry open until it succeeds and then check elapsed time
+	 */
+	options.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_lease_v2_create(&c, NULL, false, fname, 0, NULL,
+			     0, 1);
+	c.in.durable_open_v2 = true;
+	c.in.create_guid = create_guid2;
+
+	ZERO_STRUCT(h);
+	while (true) {
+		clock_gettime_mono(&ts2);
+		if (timespec_elapsed2(&ts1, &ts2) > expected + 10) {
+			break;
+		}
+		status = smb2_create(tree, frame, &c);
+		if (NT_STATUS_IS_OK(status)) {
+			h = c.out.file.handle;
+			break;
+		}
+		torture_assert_ntstatus_equal_goto(tctx, status,
+						   NT_STATUS_FILE_NOT_AVAILABLE,
+						   ret, done,
+						   "wrong error\n");
+		torture_comment(tctx, ".");
+		smb_msleep(1000);
+	}
+	torture_comment(tctx, "\n");
+
+	if (timespec_elapsed2(&ts1, &ts2) < expected - 1) {
+		ret = false;
+		torture_fail_goto(tctx, done,
+				  "Open succeeded to early\n");
+	}
+
+	if (smb2_util_handle_empty(h)) {
+		ret = false;
+		torture_fail_goto(tctx, done,
+				  "Failed to open file in time\n");
+	}
+
+	status = smb2_util_close(tree, h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h);
+
+done:
+	if (!smb2_util_handle_empty(h)) {
+		smb2_util_close(tree, h);
+	}
+	if (fname != NULL) {
+		smb2_util_unlink(_tree, fname);
+		TALLOC_FREE(fname);
+	}
+
+	TALLOC_FREE(tree);
+	TALLOC_FREE(frame);
+	return ret;
+}
+
+static bool test_persistent_timeout_5(struct torture_context *tctx,
+				      struct smb2_tree *tree)
+{
+	bool ok;
+
+	ok = test_persistent_timeout_do(tctx, tree, 5, 5);
+	torture_assert_goto(tctx, ok, ok, done,
+			    "test_persistent_timeout_do failed\n");
+
+done:
+	return ok;
+}
+
+/*
+ * Verifies rename a directory containing a disconnected Persistent Handle
+ * fails.
+ */
+static bool test_persistent_rename_dir_open_files(struct torture_context *tctx,
+						  struct smb2_tree *tree1)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_tree *tree2 = NULL;
+	struct smb2_handle testdirh;
+	struct smb2_create c;
+	union smb_setfileinfo sinfo;
+	struct smb2_handle h1 = {{0}};
+	struct smb2_handle ph = {{0}};
+	uint32_t tcon_caps;
+	struct smbcli_options options = tree1->session->transport->options;
+	struct GUID create_guid1 = GUID_random();
+	const char *dname = __func__;
+	const char *fname = NULL;
+	const char *newname = NULL;
+	NTSTATUS status;
+	bool ret = true;
+
+	tcon_caps = smb2cli_tcon_capabilities(tree1->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	fname = talloc_asprintf(mem_ctx, "%s\\file", dname);
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	newname = talloc_asprintf(mem_ctx, "%s_renamed", dname);
+	torture_assert_not_null_goto(tctx, newname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	smb2_deltree(tree1, dname);
+
+	options.client_guid = GUID_random();
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree2);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	status = torture_smb2_testdir(tree2, dname, &testdirh);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir failed");
+	smb2_util_close(tree2, testdirh);
+
+	/*
+	 * Get persistent handle
+	 */
+
+	ZERO_STRUCT(c);
+	smb2_lease_v2_create(&c, NULL, false, fname, 0, NULL, 0, 0);
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid1;
+
+	status = smb2_create(tree2, mem_ctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	ph = c.out.file.handle;
+
+	torture_assert_goto(tctx, c.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+
+	/*
+	 * Disconnect session
+	 */
+	TALLOC_FREE(tree2);
+
+	/*
+	 * Now try to rename parent directory of file with the disconnected
+	 * persistent handle.
+	 */
+
+	ZERO_STRUCT(c);
+	c.in.desired_access = SEC_FILE_ALL;
+	c.in.create_options = NTCREATEX_OPTIONS_DIRECTORY;
+	c.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	c.in.share_access = NTCREATEX_SHARE_ACCESS_MASK;
+	c.in.create_disposition = NTCREATEX_DISP_OPEN_IF;
+	c.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	c.in.fname = dname;
+
+	status = smb2_create(tree1, tctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	h1 = c.out.file.handle;
+
+	ZERO_STRUCT(sinfo);
+	sinfo.rename_information.level = RAW_SFILEINFO_RENAME_INFORMATION;
+	sinfo.rename_information.in.file.handle = h1;
+	sinfo.rename_information.in.new_name = newname;
+
+	status = smb2_setinfo_file(tree1, &sinfo);
+	torture_assert_ntstatus_equal_goto(
+		tctx, status, NT_STATUS_ACCESS_DENIED, ret, done,
+		"smb2_setinfo_file failed\n");
+
+	status = smb2_util_close(tree1, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(h1);
+
+	/* Reconnect PH so we can delete it */
+
+	ZERO_STRUCT(c);
+	smb2_lease_v2_create(&c, NULL, false, fname, 0, NULL, 0, 0);
+	c.in.durable_handle_v2 = &ph;
+	c.in.create_guid = create_guid1;
+	c.in.persistent_open = true;
+	status = smb2_create(tree1, tree1, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	ph = c.out.file.handle;
+
+	status = smb2_util_close(tree1, ph);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(ph);
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree1, h1);
+	}
+	if (!smb2_util_handle_empty(ph)) {
+		smb2_util_close(tree1, ph);
+	}
+	smb2_deltree(tree1, dname);
+	talloc_free(mem_ctx);
+	return ret;
+}
+
+/*
+ * Get a persistent handle, then
+ * - disconnect
+ * - reconnect
+ * - replay
+ * - use reconnected handle by writing to it
+ */
+static bool test_persistent_replay_reconnect(struct torture_context *tctx,
+					     struct smb2_tree *tree)
+{
+	struct smb2_create io1;
+	struct smb2_lease ls1;
+	struct smb2_handle h1 = {0};
+	uint32_t caps;
+	struct smbcli_options options = tree->session->transport->options;
+	uint64_t lease1 = random();
+	struct GUID create_guid1 = GUID_random();
+	char *fname = NULL;
+	struct smb2_write wrt;
+	NTSTATUS status;
+	bool ret = true;
+
+	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+	caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	/*
+	 * Get a durable open
+	 */
+	smb2_lease_v2_create_share(&io1, &ls1, false, fname,
+				   smb2_util_share_access("RWD"),
+				   lease1, NULL,
+				   smb2_util_lease_state("R"), 1);
+	io1.in.durable_open_v2 = true;
+	io1.in.persistent_open = true;
+	io1.in.create_guid = create_guid1;
+	status = smb2_create(tree, tree, &io1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	torture_assert_goto(tctx, io1.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.oplock_level,
+				      SMB2_OPLOCK_LEVEL_LEASE,
+				      ret, done,
+				      "Bad oplock level\n");
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.lease_response_v2.lease_state,
+				      smb2_util_lease_state("R"),
+				      ret, done,
+				      "Bad lease state\n");
+
+	TALLOC_FREE(tree);
+	sleep(1);
+
+	/*
+	 * Reconnect, then
+	 * - replay, should work
+	 * - use handle by writing to it, should work
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io1.out.file.handle;
+
+	CHECK_VAL(io1.out.create_action, NTCREATEX_ACTION_CREATED);
+
+	ZERO_STRUCT(wrt);
+	wrt.in.file.handle = h1;
+	wrt.in.offset = 0;
+	wrt.in.data = data_blob_string_const("data");
+
+	status = smb2_write(tree, &wrt);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_write failed\n");
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	if (fname != NULL && tree != NULL) {
+		smb2_util_unlink(tree, fname);
+	}
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+/*
+ * Verify a create can be replayed multiple times and that a replay on a
+ * Persistent Handle fails after it has been used.
+ */
+static bool test_persistent_replay_multi(struct torture_context *tctx,
+					 struct smb2_tree *tree)
+{
+	struct smb2_create io1;
+	struct smb2_lease ls1;
+	struct smb2_handle h1 = {0};
+	uint32_t caps;
+	struct smbcli_options options = tree->session->transport->options;
+	uint64_t lease1 = random();
+	struct GUID create_guid1 = GUID_random();
+	char *fname = NULL;
+	struct smb2_write wrt;
+	NTSTATUS status;
+	bool ret = true;
+
+	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+	if (!(caps & SMB2_CAP_PERSISTENT_HANDLES)) {
+		torture_skip(tctx, "PH's are not supported");
+	}
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	/*
+	 * Get a persistent open
+	 */
+	smb2_lease_v2_create_share(&io1, &ls1, false, fname,
+				   smb2_util_share_access("RWD"),
+				   lease1, NULL,
+				   smb2_util_lease_state("R"), 1);
+	io1.in.durable_open_v2 = true;
+	io1.in.persistent_open = true;
+	io1.in.create_guid = create_guid1;
+
+	status = smb2_create(tree, tree, &io1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	torture_assert_goto(tctx, io1.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.oplock_level,
+				      SMB2_OPLOCK_LEVEL_LEASE,
+				      ret, done,
+				      "Bad oplock level\n");
+	torture_assert_int_equal_goto(tctx,
+				      io1.out.lease_response_v2.lease_state,
+				      smb2_util_lease_state("R"),
+				      ret, done,
+				      "Bad lease state\n");
+
+	TALLOC_FREE(tree);
+	sleep(1);
+
+	/*
+	 * Reconnect SMB, then replay create
+	 */
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2cli_session_increment_channel_sequence(tree->session->smbXcli);
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io1.out.file.handle;
+
+	CHECK_VAL(io1.out.create_action, NTCREATEX_ACTION_CREATED);
+
+	/*
+	 * Replay again
+	 */
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	/*
+	 * Replay again
+	 */
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	/*
+	 * Replay again
+	 */
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	/*
+	 * Verify the handle is usable
+	 */
+
+	ZERO_STRUCT(wrt);
+	wrt.in.file.handle = h1;
+	wrt.in.offset = 0;
+	wrt.in.data = data_blob_string_const("data");
+
+	status = smb2_write(tree, &wrt);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_write failed\n");
+
+	/*
+	 * Verify replay fails once the handle has been used.
+	 */
+
+	smb2cli_session_start_replay(tree->session->smbXcli);
+	status = smb2_create(tree, tree, &io1);
+	smb2cli_session_stop_replay(tree->session->smbXcli);
+
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_FILE_NOT_AVAILABLE,
+					   ret, done,
+					   "smb2_create failed\n");
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	if (fname != NULL && tree != NULL) {
+		smb2_util_unlink(tree, fname);
+	}
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+static struct {
+	const char *requested_lease;
+	const char *expected_granted_fo_win;
+	const char *expected_granted_fo_ca_win;
+	const char *expected_granted_so_win;
+	const char *expected_granted_so_ca_win;
+	const char *expected_granted_fo_samba;
+	const char *expected_granted_fo_ca_samba;
+	const char *expected_granted_so_samba;
+	const char *expected_granted_so_ca_samba;
+} ph_dirlease_tests[] = {
+	/*      Windows behaviour               Samba behaviour */
+	/*      FO      FO_CA   SO      SO_CA   FO      FO_CA   SO      SO_CA */
+	{"",    "",     "",     "",     "",     "",     "",     "",     ""},
+	{"R",   "R",    "R",    "",     "",     "R",    "",     "R",    ""},
+	{"RW",  "R",    "R",    "",     "",     "R",    "",     "R",    ""},
+	{"RH",  "RH",   "RH",   "",     "",     "RH",   "",     "RH",   ""},
+	{"RWH", "RH",   "RH",   "",     "",     "RH",   "",     "RH",   ""},
+};
+
+/*
+ * Basic testing of Persistent Handles and various lease levels on directories
+ *
+ * Windows doesn't grant leases on SO. Samba differs and doesn't grant leases on
+ * CA. See smbd_smb2_tree_connect() for an explanation.
+ */
+static bool test_directory_leaselevels(struct torture_context *tctx,
+				       struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	char *dname = NULL;
+	struct smb2_create io;
+	struct smb2_lease ls;
+	struct smb2_handle h1 = {};
+	uint32_t tcon_caps;
+	int i;
+	bool share_is_so;
+	bool share_is_ca;
+	NTSTATUS status;
+	bool ret = true;
+
+	if (TARGET_IS_SAMBA3(tctx)) {
+		torture_comment(tctx, "Target is Samba\n");
+	} else {
+		torture_comment(tctx, "Target is Windows\n");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CLUSTER)) {
+		torture_skip(tctx, "Supposed to be run against a cluster\n");
+	}
+	torture_comment(tctx, "SMB2_SHARE_CAP_CLUSTER\n");
+
+	share_is_so = (tcon_caps & SMB2_SHARE_CAP_SCALEOUT);
+	if (share_is_so) {
+		torture_comment(tctx, "SMB2_SHARE_CAP_SCALEOUT\n");
+	}
+	share_is_ca = (tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY);
+	if (share_is_ca) {
+		torture_comment(tctx,
+				"SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(ph_dirlease_tests); i++) {
+		const char *lease = ph_dirlease_tests[i].requested_lease;
+		uint64_t lease1 = random();
+		struct smb2_lease *_ls = NULL;
+		uint16_t expected_granted;
+		const char *exp_granted_str = NULL;
+
+		if (!TARGET_IS_SAMBA3(tctx)) {
+			if (share_is_so) {
+				if (share_is_ca) {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_so_ca_win;
+				} else {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_so_win;
+				}
+			} else {
+				if (share_is_ca) {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_fo_ca_win;
+				} else {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_fo_win;
+				}
+			}
+		} else {
+			if (share_is_so) {
+				if (share_is_ca) {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_so_ca_samba;
+				} else {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_so_samba;
+				}
+			} else {
+				if (share_is_ca) {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_fo_ca_samba;
+				} else {
+					exp_granted_str = ph_dirlease_tests[i].
+						expected_granted_fo_samba;
+				}
+			}
+		}
+
+		expected_granted = smb2_util_lease_state(exp_granted_str);
+
+		torture_comment(tctx, "%2d: Request PH with [%-4s] lease, "
+				"granted lease level [%-4s]\n",
+				i+1, lease, exp_granted_str);
+
+		dname = talloc_asprintf(tctx, "lease_break-%ld.dir", random());
+		torture_assert_not_null_goto(tctx, dname, ret, done,
+					     "talloc_asprintf failed\n");
+
+		if (lease[0] != '\0') {
+			_ls = &ls;
+		}
+
+		ZERO_STRUCT(io);
+		smb2_lease_v2_create_share(&io,
+					   _ls,
+					   true,
+					   dname,
+					   smb2_util_share_access("RWD"),
+					   lease1,
+					   NULL,
+					   smb2_util_lease_state(lease),
+					   0);
+		status = smb2_create(tree, mem_ctx, &io);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h1 = io.out.file.handle;
+
+		if (_ls != NULL) {
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done,
+				"Bad lease level\n");
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.lease_response_v2.lease_state,
+				expected_granted,
+				ret, done,
+				"Bad lease level\n");
+		}
+
+		status = smb2_util_close(tree, h1);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"close failed\n");
+		ZERO_STRUCT(h1);
+
+		/*
+		 * Try the same again requesting a PH if the share is CA, should
+		 * grant the same lease level as without a PH.
+		 */
+
+		if (!share_is_ca) {
+			goto cleanup;
+		}
+
+		io.in.durable_open_v2 = true;
+		io.in.persistent_open = true;
+		io.in.create_guid = GUID_random();
+
+		status = smb2_create(tree, mem_ctx, &io);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+		h1 = io.out.file.handle;
+
+		if (_ls != NULL) {
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.oplock_level,
+				SMB2_OPLOCK_LEVEL_LEASE,
+				ret, done,
+				"Bad lease level\n");
+			torture_assert_int_equal_goto(
+				tctx,
+				io.out.lease_response_v2.lease_state,
+				expected_granted,
+				ret, done,
+				"Bad lease level\n");
+		}
+
+		status = smb2_util_close(tree, h1);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"close failed\n");
+		ZERO_STRUCT(h1);
+
+cleanup:
+		status = smb2_util_rmdir(tree, dname);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"unlink failed\n");
+
+		TALLOC_FREE(dname);
+	}
+
+done:
+	TALLOC_FREE(dname);
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
+static bool test_directory_leaselevels_fo(struct torture_context *tctx,
+					  struct smb2_tree *_tree)
+{
+	struct smb2_tree *tree = NULL;
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx, "Runs against standalone, "
+			     "skip against SO\n");
+	}
+
+	ret = torture_smb2_con_share(tctx, "fo", &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY) {
+		torture_fail(tctx, "Expect no CA\n");
+	}
+
+	ret = test_directory_leaselevels(tctx, tree);
+
+done:
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+static bool test_directory_leaselevels_fo_ca(struct torture_context *tctx,
+					     struct smb2_tree *_tree)
+{
+	struct smb2_tree *tree = NULL;
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_SCALEOUT) {
+		torture_skip(tctx, "Runs against standalone, "
+			     "skip against SO\n");
+	}
+
+	ret = torture_smb2_con_share(tctx, "ca_fo", &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_fail(tctx, "Expect CA\n");
+	}
+
+	ret = test_directory_leaselevels(tctx, tree);
+
+done:
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+static bool test_directory_leaselevels_so(struct torture_context *tctx,
+					  struct smb2_tree *_tree)
+{
+	struct smb2_tree *tree = NULL;
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_SCALEOUT)) {
+		torture_skip(tctx, "Need SO\n");
+	}
+
+	ret = torture_smb2_con_share(tctx, "so", &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY) {
+		torture_fail(tctx, "Expect no CA\n");
+	}
+
+	ret = test_directory_leaselevels(tctx, tree);
+
+done:
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+static bool test_directory_leaselevels_so_ca(struct torture_context *tctx,
+					     struct smb2_tree *_tree)
+{
+	struct smb2_tree *tree = NULL;
+	uint32_t tcon_caps;
+	bool ret;
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_SCALEOUT)) {
+		torture_skip(tctx, "Need SO\n");
+	}
+
+	ret = torture_smb2_con_share(tctx, "ca_so", &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_fail(tctx, "Expect CA\n");
+	}
+
+	ret = test_directory_leaselevels(tctx, tree);
+
+done:
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+/*
+ * Verifies a disconnected Persistent Handle on a directory adheres to the same
+ * basic rule as a file.
+ */
+static bool test_directory_disconnect(struct torture_context *tctx,
+				      struct smb2_tree *tree)
+{
+	struct smbcli_options options = tree->session->transport->options;
+	uint64_t previous_session_id;
+	struct smb2_create c;
+	struct smb2_handle h1 = {};
+	struct smb2_handle ph= {};
+	char *dname = NULL;
+	struct GUID create_guid = GUID_random();
+	NTSTATUS status;
+	bool ret = true;
+
+	previous_session_id = smb2cli_session_current_id(tree->session->smbXcli);
+
+	dname = talloc_asprintf(tctx, "lease_break-%ld.dir", random());
+	torture_assert_not_null_goto(tctx, dname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	smb2_lease_v2_create_share(&c,
+				   NULL,
+				   true,
+				   dname,
+				   smb2_util_share_access(""),
+				   0,
+				   NULL,
+				   smb2_util_lease_state(""),
+				   0);
+	c.in.desired_access = SEC_RIGHTS_FILE_READ;
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid;
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = c.out.file.handle;
+
+	/*
+	 * A second open must fail with STATUS_SHARING_VIOLATION
+	 */
+	c.in.durable_open_v2 = false;
+	c.in.persistent_open = false;
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_SHARING_VIOLATION,
+					   ret, done,
+					   "smb2_create failed\n");
+
+	/*
+	 * Now disconnect
+	 */
+	TALLOC_FREE(tree);
+	ph = h1;
+	ZERO_STRUCT(h1);
+	sleep(1);
+
+	/*
+	 * Now reconnect the session
+	 */
+	ret = torture_smb2_connection_ext(tctx, previous_session_id,
+					  &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_lease_v2_create_share(&c,
+				   NULL,
+				   true,
+				   dname,
+				   smb2_util_share_access("RWD"),
+				   0,
+				   NULL,
+				   smb2_util_lease_state(""),
+				   0);
+
+	c.in.desired_access = SEC_RIGHTS_FILE_READ;
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_FILE_NOT_AVAILABLE,
+					   ret, done,
+					   "smb2_create failed\n");
+
+	smb2_lease_v2_create_share(&c,
+				   NULL,
+				   true,
+				   dname,
+				   smb2_util_share_access(""),
+				   0,
+				   NULL,
+				   smb2_util_lease_state(""),
+				   0);
+
+	c.in.desired_access = SEC_RIGHTS_FILE_READ;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid;
+	c.in.durable_handle_v2 = &ph;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+
+	h1 = c.out.file.handle;
+
+	status = smb2_util_close(tree, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(h1);
+
+	status = smb2_util_rmdir(tree, dname);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"unlink failed\n");
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	if (tree != NULL) {
+		smb2_util_rmdir(tree, dname);
+	}
+	TALLOC_FREE(dname);
+	TALLOC_FREE(tree);
+
+	return ret;
+}
+
+struct deleteonclose_test {
+	bool initial;
+	bool expire;
+};
+
+static struct deleteonclose_test deleteonclose_test_reconnect[] = {
+	{false, false},
+	{true, false},
+};
+
+static struct deleteonclose_test deleteonclose_test_expire[] = {
+	{false, true},
+	{true, true},
+};
+
+static bool test_persistent_deleteonclose_do(struct torture_context *tctx,
+					     struct smb2_tree *_tree,
+					     bool initial,
+					     bool expire)
+{
+	struct smbcli_options options = _tree->session->transport->options;
+	struct smb2_tree *tree = NULL;
+	struct smb2_create c = {};
+	struct smb2_handle ph = {};
+	struct smb2_handle h = {};
+	union smb_setfileinfo sfinfo = {};
+	struct GUID create_guid1 = GUID_random();
+	char *fname = NULL;
+	NTSTATUS status;
+	bool ret = true;
+
+	torture_comment(tctx, "initial=%s expire=%s\n",
+			initial ? "yes":"no",
+			expire ? "yes":"no");
+
+	options.client_guid = GUID_random();
+
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	/*
+	 * Get persistent open
+	 */
+	c.in.fname = fname;
+	c.in.create_disposition = NTCREATEX_DISP_CREATE;
+	c.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	c.in.share_access = NTCREATEX_SHARE_ACCESS_MASK;
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid1;
+	c.in.timeout = 1000;
+	if (initial) {
+		c.in.create_options = NTCREATEX_OPTIONS_DELETE_ON_CLOSE;
+	}
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = c.out.file.handle;
+	torture_assert_goto(tctx, c.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+	torture_assert_int_equal_goto(tctx, c.out.timeout, 1000,
+				      ret, done, "bad timeout\n");
+
+	if (!initial) {
+		sfinfo.disposition_info.in.delete_on_close = 1;
+		sfinfo.generic.level = RAW_SFILEINFO_DISPOSITION_INFORMATION;
+		sfinfo.generic.in.file.handle = h;
+
+		status = smb2_setinfo_file(tree, &sfinfo);
+		torture_assert_ntstatus_ok_goto(
+			tctx, status, ret, done,
+			"Set DELETE_ON_CLOSE disposition "
+			"returned un expected status.\n");
+	}
+
+	TALLOC_FREE(tree);
+	ph = h;
+	ZERO_STRUCT(h);
+
+	if (expire) {
+		sleep(10);
+	}
+
+	/*
+	 * Reconnect
+	 */
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	if (!expire) {
+		c.in.durable_handle_v2 = &ph;
+	}
+
+	c.in.create_options = 0;
+	c.in.durable_open_v2 = false;
+	c.in.create_disposition = NTCREATEX_DISP_OPEN;
+
+	status = smb2_create(tree, tree, &c);
+	if (expire) {
+		/*
+		 * If expired, the file should have been deleted (sic!)
+		 */
+		torture_assert_ntstatus_equal_goto(
+			tctx,
+			status,
+			NT_STATUS_OBJECT_NAME_NOT_FOUND,
+			ret, done,
+			"file still there?\n");
+		goto done;
+	}
+
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"reconnect failed\n");
+	h = c.out.file.handle;
+
+	/*
+	 * If not expired, we should have just reconnected the handle.
+	 */
+	torture_assert_int_equal_goto(tctx,
+				      c.out.create_action,
+				      NTCREATEX_ACTION_EXISTED,
+				      ret, done,
+				      "Bad create_action\n");
+
+	status = smb2_util_close(tree, h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"close failed\n");
+	ZERO_STRUCT(h);
+
+	/*
+	 * The close should have deleted the file, verify it is gone
+	 */
+
+	c.in.create_disposition = NTCREATEX_DISP_OPEN;
+	c.in.durable_handle_v2 = NULL;
+	c.in.create_options = 0;
+	c.in.durable_open_v2 = false;
+	c.in.persistent_open = false;
+
+	status = smb2_create(tree, tree, &c);
+	if (NT_STATUS_IS_OK(status)) {
+		h = c.out.file.handle;
+	}
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_OBJECT_NAME_NOT_FOUND,
+					   ret, done,
+					   "file still there?\n");
+
+done:
+	if (!smb2_util_handle_empty(h)) {
+		smb2_util_close(tree, h);
+	}
+	if (fname != NULL && tree != NULL) {
+		smb2_util_unlink(tree, fname);
+		TALLOC_FREE(fname);
+	}
+
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+
+/*
+ * This verifies PH reconnect with delete-on-close pending
+ *
+ * 1a. SMB2-CREATE + PH + initial-delete-on-close, or
+ * 1b. SMB2-CREATE + PH + SMB2-SETINFO(delete-on-close), then
+ * 2. Disconnect TCP
+ * 3. Reconnect TCP and handle
+ * 4. SMB2-CLOSE -> should delete the file
+ * 5. Try to open -> should fail with NT_STATUS_OBJECT_NAME_NOT_FOUND
+ */
+static bool test_persistent_deleteonclose_reconnect(struct torture_context *tctx,
+						    struct smb2_tree *tree)
+{
+	uint32_t tcon_caps;
+	int i;
+	bool ok;
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(deleteonclose_test_reconnect); i++) {
+		ok = test_persistent_deleteonclose_do(
+			tctx,
+			tree,
+			deleteonclose_test_reconnect[i].initial,
+			deleteonclose_test_reconnect[i].expire);
+		if (!ok) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * This verifies PH expiration deletes the file
+ *
+ * 1. SMB2-CREATE + PH + initial-delete-on-close, or
+ * 1. SMB2-CREATE + PH + SMB2-SETINFO(delete-on-close)
+ * 2. Disconnect TCP
+ * 3. Wait until handle expires
+ * 4. Reconnect TCP and handle
+ * 5. Try to open -> should fail with NT_STATUS_OBJECT_NAME_NOT_FOUND
+ *
+ * This fails against Samba, but works against Windows. The reason is current
+ * lack of support for accessing our VFS from the scavenger. Note that the same
+ * problem applies to Durable Handles, not just Persistent Handles.
+ */
+static bool test_persistent_deleteonclose_expire(struct torture_context *tctx,
+						 struct smb2_tree *tree)
+{
+	uint32_t tcon_caps;
+	int i;
+	bool ok;
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(deleteonclose_test_expire); i++) {
+		ok = test_persistent_deleteonclose_do(
+			tctx,
+			tree,
+			deleteonclose_test_expire[i].initial,
+			deleteonclose_test_expire[i].expire);
+		if (!ok) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Verifies cleanup of stale delete-on-close token. This only works against
+ * Samba where we have to implement DoC token expiration instead of fully
+ * deleting the file (and the token).
+ *
+ * 1. Open file with PH an handle-timeout of 1s
+ * 2. Open file a second time with PH an handle-timeout of 10s
+ * 3. Set Doc on handle from (1)
+ * 4. Set Doc on handle from (2)
+ * 5. Disconnect
+ * 6. Sleep 2s, handle from (1) should expire, scavenger should not
+ *    cleanup DoC token as that is from (3)
+ * 7. Reconnect session and handle from (3)
+ * 8. Close file, should now get removed as Doc should still be set
+ * 9. Verify file is gone
+ */
+static bool test_persistent_deleteonclose_twice(struct torture_context *tctx,
+						struct smb2_tree *tree)
+{
+	struct smbcli_options options = tree->session->transport->options;
+	struct smb2_create c = {};
+	struct smb2_handle h1 = {};
+	struct smb2_handle h2 = {};
+	struct smb2_handle ph = {};
+	union smb_setfileinfo sfinfo = {};
+	struct GUID create_guid1 = GUID_random();
+	struct GUID create_guid2 = GUID_random();
+	char *fname = NULL;
+	NTSTATUS status;
+	bool ret = true;
+
+	options.client_guid = GUID_random();
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	/*
+	 * 1. Get persistent open
+	 */
+	c.in.fname = fname;
+	c.in.create_disposition = NTCREATEX_DISP_OPEN_IF;
+	c.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	c.in.share_access = NTCREATEX_SHARE_ACCESS_MASK;
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid1;
+	c.in.timeout = 1000;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = c.out.file.handle;
+	torture_assert_goto(tctx, c.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+	torture_assert_int_equal_goto(tctx, c.out.timeout, 1000,
+				      ret, done, "bad timeout\n");
+
+	/* 2. Second open with timeout=10s */
+	c.in.timeout = 10000;
+	c.in.create_guid = create_guid2;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h2 = c.out.file.handle;
+	torture_assert_goto(tctx, c.out.persistent_open == true,
+			    ret, done, "Persistent open not granted\n");
+	torture_assert_int_equal_goto(tctx, c.out.timeout, 10000,
+				      ret, done, "bad timeout\n");
+
+	/* 3. Set delete_on_close */
+	sfinfo.disposition_info.in.delete_on_close = 1;
+	sfinfo.generic.level = RAW_SFILEINFO_DISPOSITION_INFORMATION;
+	sfinfo.generic.in.file.handle = h1;
+
+	status = smb2_setinfo_file(tree, &sfinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"Set DELETE_ON_CLOSE disposition "
+					"returned un expected status.\n");
+
+	/* 4. Set delete_on_close */
+	sfinfo.generic.in.file.handle = h2;
+
+	status = smb2_setinfo_file(tree, &sfinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"Set DELETE_ON_CLOSE disposition "
+					"returned un expected status.\n");
+
+	/* 5. */
+	TALLOC_FREE(tree);
+	ph = h2;
+	ZERO_STRUCT(h1);
+	ZERO_STRUCT(h2);
+
+	/* 6. */
+	sleep(2);
+
+	/* 7. Reconnect */
+	ret = torture_smb2_connection_ext(tctx, 0, &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	c.in.durable_handle_v2 = &ph;
+	c.in.durable_open_v2 = false;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"reconnect failed\n");
+	h1 = c.out.file.handle;
+
+	/* 8. */
+	status = smb2_util_close(tree, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"close failed\n");
+	ZERO_STRUCT(h1);
+
+	/*
+	 * 9. The close should have deleted the file, verify it is gone
+	 */
+
+	c.in.create_disposition = NTCREATEX_DISP_OPEN;
+	c.in.durable_handle_v2 = NULL;
+	c.in.create_options = 0;
+	c.in.durable_open_v2 = false;
+	c.in.persistent_open = false;
+
+	status = smb2_create(tree, tree, &c);
+	if (NT_STATUS_IS_OK(status)) {
+		h1 = c.out.file.handle;
+	}
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_OBJECT_NAME_NOT_FOUND,
+					   ret, done,
+					   "file still there?\n");
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree, h2);
+	}
+	if (fname != NULL && tree != NULL) {
+		smb2_util_unlink(tree, fname);
+		TALLOC_FREE(fname);
+	}
+
+	TALLOC_FREE(tree);
+	return ret;
+}
+
+struct torture_suite *torture_smb2_persistent_open_init(TALLOC_CTX *ctx)
+{
+	struct torture_suite *suite =
+	    torture_suite_create(ctx, "persistent-open");
+
+	suite->description = talloc_strdup(suite, "SMB2-PERSISTENT-OPEN tests");
+
+	torture_suite_add_1smb2_test(suite, "leaselevels", test_persistent_leaselevels);
+	torture_suite_add_1smb2_test(suite, "leaselevels_fo", test_persistent_leaselevels_fo);
+	torture_suite_add_1smb2_test(suite, "leaselevels_fo_max_rwh", test_persistent_leaselevels_fo_max_rwh);
+	torture_suite_add_1smb2_test(suite, "leaselevels_so", test_persistent_leaselevels_so);
+	torture_suite_add_1smb2_test(suite, "timeout_5", test_persistent_timeout_5);
+	torture_suite_add_1smb2_test(suite, "rename-dir-open-files", test_persistent_rename_dir_open_files);
+	torture_suite_add_1smb2_test(suite, "replay-reconnect", test_persistent_replay_reconnect);
+	torture_suite_add_1smb2_test(suite, "replay-multi", test_persistent_replay_multi);
+	torture_suite_add_1smb2_test(suite, "directory-leaselevels", test_directory_leaselevels);
+	torture_suite_add_1smb2_test(suite, "directory-leaselevels-fo", test_directory_leaselevels_fo);
+	torture_suite_add_1smb2_test(suite, "directory-leaselevels-fo-ca", test_directory_leaselevels_fo_ca);
+	torture_suite_add_1smb2_test(suite, "directory-leaselevels-so", test_directory_leaselevels_so);
+	torture_suite_add_1smb2_test(suite, "directory-leaselevels-so-ca", test_directory_leaselevels_so_ca);
+	torture_suite_add_1smb2_test(suite, "directory-disconnect", test_directory_disconnect);
+	torture_suite_add_1smb2_test(suite, "deleteonclose-reconnect", test_persistent_deleteonclose_reconnect);
+	torture_suite_add_1smb2_test(suite, "deleteonclose-expire", test_persistent_deleteonclose_expire);
+	torture_suite_add_1smb2_test(suite, "deleteonclose-twice", test_persistent_deleteonclose_twice);
+
+	return suite;
+}
+
+static bool test_persistent_failover_reconnect(struct torture_context *tctx,
+					       struct smb2_tree *tree)
+{
+	struct smbcli_options options = tree->session->transport->options;
+	char *fname = NULL;
+	uint64_t previous_session_id;
+	struct GUID create_guid = GUID_random();
+	struct smb2_create c;
+	struct smb2_lease ls;
+	struct smb2_handle h1 = {};
+	struct smb2_handle ph = {};
+	uint32_t tcon_caps;
+	bool share_is_so;
+	uint8_t pnn;
+	bool stopped = false;
+	NTSTATUS status;
+	bool ret = true;
+
+	tcon_caps = smb2cli_tcon_capabilities(tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	share_is_so = (tcon_caps & SMB2_SHARE_CAP_SCALEOUT);
+	if (!share_is_so) {
+		torture_skip(tctx, "Need SO share\n");
+	}
+
+	previous_session_id = smb2cli_session_current_id(tree->session->smbXcli);
+
+	fname = talloc_asprintf(tctx, "lease_break-%ld.dat", random());
+	torture_assert_not_null_goto(tctx, fname, ret, done,
+				     "talloc_asprintf failed\n");
+
+	smb2_lease_v2_create_share(&c,
+				   &ls,
+				   false,
+				   fname,
+				   smb2_util_share_access("RWD"),
+				   1,
+				   NULL,
+				   smb2_util_lease_state("RWH"),
+				   0);
+
+	c.in.durable_open_v2 = true;
+	c.in.persistent_open = true;
+	c.in.create_guid = create_guid;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+						"smb2_create failed\n");
+	h1 = c.out.file.handle;
+	ph = h1;
+
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.oplock_level,
+		SMB2_OPLOCK_LEVEL_LEASE,
+		ret, done,
+		"Bad lease level\n");
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.lease_response_v2.lease_state,
+		smb2_util_lease_state("R"),
+		ret, done,
+		"Bad lease level\n");
+
+	/*
+	 * Trigger a node shutdown
+	 */
+
+	ZERO_STRUCT(h1);
+	ret = torture_stop_ctdb_node(tctx, &tree, &pnn);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_ctdb_stop_node failed\n");
+	stopped = true;
+	sleep(1);
+
+	/*
+	 * Now reconnect the session and the persistent handle
+	 */
+	ret = torture_smb2_connection_ext(tctx, previous_session_id,
+					  &options, &tree);
+	torture_assert_goto(tctx, ret, ret, done,
+			    "torture_smb2_connection_ext failed\n");
+
+	smb2_lease_v2_create_share(&c,
+				   &ls,
+				   false,
+				   fname,
+				   smb2_util_share_access("RWD"),
+				   1,
+				   NULL,
+				   smb2_util_lease_state("RWH"),
+				   100);
+
+	c.in.durable_handle_v2 = &ph;
+	c.in.create_guid = create_guid;
+	c.in.persistent_open = true;
+
+	status = smb2_create(tree, tree, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"reconnect failed\n");
+	h1 = c.out.file.handle;
+
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.oplock_level,
+		SMB2_OPLOCK_LEVEL_LEASE,
+		ret, done,
+		"Bad lease level\n");
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.lease_response_v2.lease_state,
+		smb2_util_lease_state("R"),
+		ret, done,
+		"Bad lease level\n");
+	torture_assert_int_equal_goto(
+		tctx,
+		c.out.lease_response_v2.lease_epoch,
+		101,
+		ret, done,
+		"Bad lease level\n");
+
+	status = smb2_util_close(tree, h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_close failed\n");
+	ZERO_STRUCT(h1);
+
+done:
+	/*
+	 * Restart the node from here only. Doing it on the success path as
+	 * well restarted it twice whenever that attempt failed, as the jump
+	 * to done: left stopped set. Don't assign to ret either: a failure
+	 * in the test body must not be overwritten by a successful restart.
+	 */
+	if (stopped && tree != NULL) {
+		bool started;
+
+		started = torture_start_ctdb_node(tctx, tree, pnn);
+		if (!started) {
+			torture_fail(tctx, "torture_ctdb_start_node failed");
+		}
+		stopped = false;
+	}
+
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+
+	if (tree != NULL && fname != NULL) {
+		smb2_util_unlink(tree, fname);
+	}
+
+	TALLOC_FREE(tree);
+	TALLOC_FREE(fname);
+	return ret;
+}
+
+static bool test_persistent_reconnect_contended_failover(
+	struct torture_context *tctx,
+	struct smb2_tree *_tree)
+{
+	uint32_t caps;
+	uint32_t tcon_caps;
+
+	caps = smb2cli_conn_server_capabilities(_tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	tcon_caps = smb2cli_tcon_capabilities(_tree->smbXcli);
+	if (!(tcon_caps & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY)) {
+		torture_skip(tctx, "PH are not supported\n");
+	}
+
+	if (!(tcon_caps & SMB2_SHARE_CAP_SCALEOUT)) {
+		torture_skip(tctx, "Need SO");
+	}
+
+	return test_persistent_reconnect_contended_do_table(
+		tctx, _tree, contend_results_so_failover, true);
+}
+
+struct torture_suite *torture_smb2_persistent_open_failover_init(TALLOC_CTX *ctx)
+{
+	struct torture_suite *suite =
+	    torture_suite_create(ctx, "persistent-open-failover");
+
+	suite->description = talloc_strdup(suite, "SMB3-Persistent-Open Failover Tests");
+
+	torture_suite_add_1smb2_test(suite, "failover-reconnect", test_persistent_failover_reconnect);
+
+	return suite;
+}
+
+struct torture_suite *torture_smb2_persistent_reconnect_contended_init(TALLOC_CTX *ctx)
+{
+	struct torture_suite *suite =
+	    torture_suite_create(ctx, "persistent-open-reconnect-contended");
+
+	suite->description = talloc_strdup(suite, "SMB2-PERSISTENT-OPEN-RECONNECT-CONTENDED tests");
+
+	torture_suite_add_1smb2_test(suite, "reconnect-contended", test_persistent_reconnect_contended);
+	torture_suite_add_1smb2_test(suite, "reconnect-contended-win-broken", test_persistent_reconnect_contended_win_broken);
+	torture_suite_add_1smb2_test(suite, "reconnect-contended-two", test_persistent_reconnect_contended_two);
+	torture_suite_add_1smb2_test(suite, "reconnect-contended-oplock", test_persistent_reconnect_contended_oplock);
+	torture_suite_add_1smb2_test(suite, "reconnect-contended-replay", test_persistent_reconnect_contended_replay);
+	torture_suite_add_1smb2_test(suite, "reconnect-contended-failover", test_persistent_reconnect_contended_failover);
+
+	return suite;
+}

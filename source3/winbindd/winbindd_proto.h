@@ -203,6 +203,10 @@ void winbind_msg_domain_online(struct messaging_context *msg_ctx,
 
 void set_domain_offline(struct winbindd_domain *domain);
 void set_domain_online_request(struct winbindd_domain *domain);
+void set_domain_failover_state(struct winbindd_domain *domain,
+			       enum winbindd_failover_reason reason,
+			       NTSTATUS status);
+void reset_domain_failover_state(struct winbindd_domain *domain);
 void winbind_add_failed_connection_entry(
 	const struct winbindd_domain *domain,
 	const char *server,
@@ -311,7 +315,9 @@ struct tevent_req *wb_domain_request_send(TALLOC_CTX *mem_ctx,
 int wb_domain_request_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			   struct winbindd_response **presponse, int *err);
 
-void setup_child(struct winbindd_domain *domain, struct winbindd_child *child,
+void setup_child(struct winbindd_domain *domain,
+		 TALLOC_CTX *mem_ctx,
+		 struct winbindd_child **_child,
 		 const char *logprefix,
 		 const char *logname);
 void winbind_child_died(pid_t pid);
@@ -460,6 +466,7 @@ struct winbindd_domain *find_auth_domain(uint8_t flags,
 					 const char *domain_name);
 struct pipes_struct;
 struct wbint_PamAuth;
+struct PAC_DATA;
 NTSTATUS _wbint_PamAuth(struct pipes_struct *p,
 			struct wbint_PamAuth *r);
 NTSTATUS _wbint_PamAuthCrap(struct pipes_struct *p,
@@ -470,6 +477,11 @@ NTSTATUS _wbint_PamLogOff(struct pipes_struct *p,
 			  struct wbint_PamLogOff *r);
 NTSTATUS _wbint_PamAuthCrapChangePassword(struct pipes_struct *p,
 					  struct wbint_PamAuthCrapChangePassword *r);
+NTSTATUS winbindd_pam_auth_pac_validate(TALLOC_CTX *mem_ctx,
+					struct PAC_DATA *pac_data,
+					bool is_trusted,
+					uint16_t *p_validation_level,
+					union netr_Validation **p_validation);
 NTSTATUS winbindd_pam_auth_pac_verify(struct winbindd_cli_state *state,
 				      TALLOC_CTX *mem_ctx,
 				      bool *p_is_trusted,
@@ -611,6 +623,7 @@ bool parse_sidlist(TALLOC_CTX *mem_ctx, const char *sidstr,
 bool parse_xidlist(TALLOC_CTX *mem_ctx, const char *xidstr,
 		   struct unixid **pxids, uint32_t *pnum_xids);
 const char *find_dns_domain_name(const char *domain_name);
+bool winbind_s4u2self_krb5_api_support(void);
 
 /* The following definitions come from winbindd/winbindd_wins.c  */
 
@@ -720,7 +733,9 @@ NTSTATUS winbindd_getsidaliases_recv(struct tevent_req *req,
 				     struct winbindd_response *response);
 struct tevent_req *wb_lookupusergroups_send(TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
-					    const struct dom_sid *sid);
+					    const struct dom_sid *sid,
+					    const char *domain_name,
+					    const char *acct_name);
 NTSTATUS wb_lookupusergroups_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 				  uint32_t *num_sids, struct dom_sid **sids);
 

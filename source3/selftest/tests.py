@@ -94,6 +94,7 @@ have_ldwrap = ("HAVE_LDWRAP" in config_hash)
 with_pthreadpool = ("WITH_PTHREADPOOL" in config_hash)
 
 have_cluster_support = "CLUSTER_SUPPORT" in config_hash
+have_jansson = "HAVE_JANSSON" in config_hash
 
 quic_ko_wrapper = ("QUIC_KO_WRAPPER" in config_hash)
 ngtcp2_environ = {'SOCKET_WRAPPER_ALLOW_DGRAM_SEQPACKET_FALLBACK': '1'}
@@ -143,6 +144,9 @@ for t in fileserver_tests:
     fileserver_env = "fileserver_smb1"
     if "SMB2" in t:
         fileserver_env = "fileserver"
+    if t == "OWNER-RIGHTS":
+        plantestsuite("samba3.smbtorture_s3.plain.%s" % t, fileserver_env, [os.path.join(samba3srcdir, "script/tests/test_smbtorture_s3.sh"), t, '//$SERVER_IP/acl_xattr_ign_sysacl_windows', '$USERNAME', '$PASSWORD', smbtorture3, "", "-l $LOCAL_PATH"])
+        continue
     plantestsuite("samba3.smbtorture_s3.plain.%s" % t, fileserver_env, [os.path.join(samba3srcdir, "script/tests/test_smbtorture_s3.sh"), t, '//$SERVER_IP/tmp', '$USERNAME', '$PASSWORD', smbtorture3, "", "-l $LOCAL_PATH"])
     plantestsuite("samba3.smbtorture_s3.crypt_client.%s" % t, "nt4_dc_smb1", [os.path.join(samba3srcdir, "script/tests/test_smbtorture_s3.sh"), t, '//$SERVER_IP/tmp', '$USERNAME', '$PASSWORD', smbtorture3, "-e", "-l $LOCAL_PATH"])
     if t == "TORTURE":
@@ -589,6 +593,7 @@ local_tests = [
     "LOCAL-IDMAP-CACHE1",
     "LOCAL-TDB-VALIDATE",
     "LOCAL-hex_encode_buf",
+    "LOCAL-DBWRAP-PER-REC-PERSISTENCY",
     "LOCAL-remove_duplicate_addrs2"]
 
 for t in local_tests:
@@ -798,6 +803,7 @@ for env in ["fileserver"]:
     plantestsuite("samba3.blackbox.netshareenum", env, [os.path.join(samba3srcdir, "script/tests/test_shareenum.sh"), '$SERVER', '$USERNAME', '$PASSWORD', rpcclient])
     plantestsuite("samba3.blackbox.acl_xattr.NT1", env + "_smb1_done", [os.path.join(samba3srcdir, "script/tests/test_acl_xattr.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, '-mNT1'])
     plantestsuite("samba3.blackbox.acl_xattr.SMB3", env, [os.path.join(samba3srcdir, "script/tests/test_acl_xattr.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, '-mSMB3'])
+    planpythontestsuite(env, "samba.tests.ntacl_resource_attr_ace")
     plantestsuite("samba3.blackbox.worm.NT1", env + "_smb1_done", [os.path.join(samba3srcdir, "script/tests/test_worm.sh"), '$SERVER', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$LOCAL_PATH/worm', '$PREFIX', smbclient3, '-mNT1'])
     plantestsuite("samba3.blackbox.worm.SMB3", env, [os.path.join(samba3srcdir, "script/tests/test_worm.sh"), '$SERVER', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$LOCAL_PATH/worm', '$PREFIX', smbclient3, '-mSMB3'])
     plantestsuite("samba3.blackbox.smb2.not_casesensitive", env, [os.path.join(samba3srcdir, "script/tests/test_smb2_not_casesensitive.sh"), '//$SERVER/tmp', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$LOCAL_PATH', smbclient3])
@@ -1208,7 +1214,14 @@ for t in tests:
     elif t == "raw.chkpath":
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/tmpcase -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "ad_dc_smb1", '//$SERVER_IP/tmpcase -U$USERNAME%$PASSWORD')
-    elif t == "raw.samba3hide" or t == "raw.samba3checkfsp" or t == "raw.samba3closeerr":
+    elif t in ["raw.samba3checkfsp", "smb2.samba3checkfsp"]:
+        modifier = ""
+        if t == "raw.samba3checkfsp":
+            modifier = "_smb1_done"
+        plansmbtorture4testsuite(t, "nt4_dc" + modifier, '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+        plansmbtorture4testsuite(t, "fileserver" + modifier, '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+        plansmbtorture4testsuite(t, "ad_dc" + modifier, '//$SERVER/tmp -U$USERNAME%$PASSWORD')
+    elif t == "raw.samba3hide" or t == "raw.samba3closeerr":
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "fileserver_smb1", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "ad_dc_smb1", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
@@ -1241,6 +1254,8 @@ for t in tests:
         creds = " --option=torture:user2name=user1 --option=torture:user2password=$PASSWORD"
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/durable -U$USERNAME%$PASSWORD' + creds)
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER_IP/durable -U$USERNAME%$PASSWORD')
+    elif t.startswith("smb2.persistent"):
+        plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/ca_fo_max_rwh -U$USERNAME%$PASSWORD')
     elif t == "base.rw1":
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/valid-users-tmp -U$USERNAME%$PASSWORD')
@@ -1384,6 +1399,10 @@ for t in tests:
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
     elif t == "smb2.fileid":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit_xattr -U$USERNAME%$PASSWORD')
+    elif t == "smb2.acls-with-sysacl":
+        plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+    elif t == "smb2.acls-ignore-sysacl":
+        plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/acl_xattr_ign_sysacl_windows -U$USERNAME%$PASSWORD')
     elif t == "smb2.acls_non_canonical":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/acls_non_canonical -U$USERNAME%$PASSWORD')
     elif t == "smb2.async_dosmode":
@@ -1413,7 +1432,7 @@ for t in tests:
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
     elif t == "rpc.spoolss.notify":
         plansmbtorture4testsuite(t, "ad_member", '//$SERVER_IP/tmp -U$DC_USERNAME%$DC_PASSWORD')
-    elif (t in base and t != "base.charset") \
+    elif (t in base and t not in ["base.charset", "base.samba3error"]) \
         or (t in rap and t != "rap.printing") \
         or (t in unix) \
         or (t in ["rpc.authcontext",
@@ -1434,7 +1453,6 @@ for t in tests:
                   "raw.rename",
                   "raw.samba3badnameblob",
                   "raw.samba3badpath",
-                  "raw.samba3caseinsensitive",
                   "raw.samba3oplocklogoff",
                   "raw.samba3posixtimedlock",
                   "raw.samba3rootdirfid",
@@ -1443,12 +1461,11 @@ for t in tests:
                   "raw.sfileinfo.bug",
                   "raw.sfileinfo.end-of-file",
                   "raw.sfileinfo.rename",
-                  "raw.streams",
                   "raw.unlink",
                   "raw.write",]) :
         plansmbtorture4testsuite(t, "nt4_dc_smb1", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "ad_dc_smb1", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
-    elif t in ["base.mangle", "base.tcon", "raw.mkdir"]:
+    elif t in ["base.mangle", "base.tcon", "raw.mkdir", "raw.streams", "base.samba3error", "smb2.samba3error", "raw.samba3caseinsensitive"]:
         plansmbtorture4testsuite(t, "nt4_dc_smb1_done", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "ad_dc_smb1_done", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
     elif t == "rpc.samr.passwords.validate":
@@ -1726,6 +1743,9 @@ plantestsuite("samba3.blackbox.durable_v2_delay", "simpleserver:local",
 plantestsuite("samba3.blackbox.net_cache_samlogon", "ad_member:local",
               [os.path.join(samba3srcdir, "script/tests/test_net_cache_samlogon.sh"),
                '$SERVER', 'tmp', '$DC_USERNAME', '$DC_PASSWORD'])
+plantestsuite("samba3.blackbox.net_cache_samlogon", "ad_member_idmap_rid:local",
+              [os.path.join(samba3srcdir, "script/tests/test_net_cache_samlogon.sh"),
+               '$SERVER', 'tmp', '$DC_USERNAME', '$DC_PASSWORD', "S4U2SELF"])
 
 plantestsuite("samba3.blackbox.net_rpc_share_allowedusers", "nt4_dc",
               [os.path.join(samba3srcdir, "script/tests/test_net_rpc_share_allowedusers.sh"),
@@ -1794,6 +1814,11 @@ if have_cluster_support:
                    configuration,
                    '$CTDB_IFACE_IP',
                    "tmp"])
+    if have_jansson:
+        plantestsuite("samba3.blackbox.clusterlevel_json", "clusteredmember:local",
+                      [os.path.join(samba3srcdir,
+                                    "script/tests/test_clusterlevel_json.sh"),
+                       net, configuration])
     plantestsuite("samba3.blackbox.registry_share", "clusteredmember",
                   [os.path.join(samba3srcdir,
                                 "script/tests/test_registry_share.sh"),
@@ -1993,10 +2018,8 @@ plantestsuite("samba3.blackbox.list_nt4_trusts",
               "ad_member_idmap_ad",
               [os.path.join(samba3srcdir, "script/tests/test_list_nt4_trust.sh")])
 
-def planclusteredmembertestsuite(tname, prefix):
+def planclusteredmembertestsuite(tname, prefix, tshare='tmp'):
     '''Define a clustered test for the clusteredmember environment'''
-
-    tshare = 'tmp'
 
     autharg = '-U${DOMAIN}/${DC_USERNAME}%${DC_PASSWORD}'
     namearg = 'clustered.%s' % tname
@@ -2023,9 +2046,16 @@ if have_cluster_support:
     for test in CLUSTERED_TESTS:
         planclusteredmembertestsuite(test, "$PREFIX")
 
+    CLUSTERED_PERSISTENT_TESTS = smbtorture4_testsuites("smb2.persistent")
+
+    for test in CLUSTERED_PERSISTENT_TESTS:
+        planclusteredmembertestsuite(test, '$PREFIX', 'ca_so')
+
     CLUSTERED_LOCAL_TESTS = [
         "ctdbd-conn1",
-        "local-dbwrap-ctdb1"
+        "local-dbwrap-ctdb1",
+        "LOCAL-DBWRAP-PER-REC-PERSISTENCY",
+        "LOCAL-CLUSTER-LEVEL-DB"
     ]
 
     for t in CLUSTERED_LOCAL_TESTS:
@@ -2044,3 +2074,4 @@ planpythontestsuite("fileserver_smb1", "samba.tests.smb3unix")
 planpythontestsuite("fileserver_smb1", "samba.tests.reparsepoints")
 planpythontestsuite("fileserver_smb1", "samba.tests.smb2symlink")
 planpythontestsuite("fileserver_smb1", "samba.tests.smb1posix")
+planpythontestsuite("fileserver_smb1", "samba.tests.libsmb_lock")

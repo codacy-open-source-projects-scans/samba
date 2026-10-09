@@ -418,11 +418,11 @@ static int transaction_expand_file(struct tdb_context *tdb, tdb_off_t size,
 }
 
 static const struct tdb_methods transaction_methods = {
-	transaction_read,
-	transaction_write,
-	transaction_next_hash_chain,
-	transaction_oob,
-	transaction_expand_file,
+	.tdb_read = transaction_read,
+	.tdb_write = transaction_write,
+	.next_hash_chain = transaction_next_hash_chain,
+	.tdb_oob = transaction_oob,
+	.tdb_expand_file = transaction_expand_file,
 };
 
 /*
@@ -480,7 +480,7 @@ static int _tdb_transaction_start(struct tdb_context *tdb,
 	}
 
 	tdb->transaction = (struct tdb_transaction *)
-		calloc(sizeof(struct tdb_transaction), 1);
+		calloc(1, sizeof(struct tdb_transaction));
 	if (tdb->transaction == NULL) {
 		tdb->ecode = TDB_ERR_OOM;
 		return -1;

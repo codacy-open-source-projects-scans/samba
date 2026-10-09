@@ -162,7 +162,7 @@ static void get_real_name(TALLOC_CTX *mem_ctx, struct smbcli_state *cli,
 		*long_name = strlower_talloc(mem_ctx, last_hit.long_name);
 	}
 
-	if (*short_name[0] == '\0') {
+	if (*short_name == NULL || (*short_name)[0] == '\0') {
 		*short_name = talloc_strdup(mem_ctx, *long_name);
 	}
 }
@@ -397,7 +397,7 @@ int main(int argc, const char *argv[])
 	lpcfg_smbcli_options(lp_ctx, &options);
 	lpcfg_smbcli_session_options(lp_ctx, &session_options);
 
-	cli = connect_one(lp_ctx, lpcfg_resolve_context(lp_ctx),
+	cli = connect_one(lp_ctx, lpcfg_resolve_context(lp_ctx, mem_ctx),
 			  ev, mem_ctx, share,
 			  lpcfg_socket_options(lp_ctx),
 			  &options, &session_options,

@@ -293,7 +293,7 @@ static bool open_smb2_connection_no_level2_oplocks(struct torture_context *tctx,
 
 	status = smb2_connect(tctx, host, share,
 			      tctx->lp_ctx,
-			      lpcfg_resolve_context(tctx->lp_ctx),
+			      lpcfg_resolve_context(tctx->lp_ctx, tctx),
 			      samba_cmdline_get_creds(),
 			      tree, tctx->ev, &options,
 			      lpcfg_socket_options(tctx->lp_ctx),
@@ -4200,9 +4200,12 @@ static bool test_smb2_oplock_statopen1(struct torture_context *tctx,
 		}
 		torture_result(tctx, TORTURE_FAIL,
 			       "test %zu: access_mask: %s, "
+			       "specific bits: 0x%lx, "
 			       "expect_stat_open: %s\n",
 			       i,
 			       get_sec_mask_str(tree, tests[i].access_mask),
+			       (unsigned long)(tests[i].access_mask &
+					       SEC_MASK_SPECIFIC),
 			       tests[i].expect_stat_open ? "yes" : "no");
 		goto done;
 	}

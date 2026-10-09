@@ -27,6 +27,8 @@
 struct g_lock_ctx;
 struct g_lock_lock_cb_state;
 struct messaging_context;
+struct tevent_context;
+struct ctdbd_connection;
 
 enum g_lock_type {
 	G_LOCK_READ,
@@ -41,6 +43,10 @@ struct g_lock_ctx *g_lock_ctx_init_backend(
 	struct db_context **backend);
 void g_lock_set_lock_order(struct g_lock_ctx *ctx,
 			   enum dbwrap_lock_order lock_order);
+struct g_lock_ctx *g_lock_ctx_init_ex(TALLOC_CTX *mem_ctx,
+				      struct messaging_context *msg,
+				      struct tevent_context *ev_ctx_ex,
+				      struct ctdbd_connection *ctdb_conn_ex);
 struct g_lock_ctx *g_lock_ctx_init(TALLOC_CTX *mem_ctx,
 				   struct messaging_context *msg);
 
@@ -57,7 +63,8 @@ NTSTATUS g_lock_lock_cb_dump(struct g_lock_lock_cb_state *glck,
 			     void *private_data);
 NTSTATUS g_lock_lock_cb_writev(struct g_lock_lock_cb_state *glck,
 			       const TDB_DATA *dbufs,
-			       size_t num_dbufs);
+			       size_t num_dbufs,
+			       int flags);
 void g_lock_lock_cb_unlock(struct g_lock_lock_cb_state *glck);
 struct tevent_req *g_lock_lock_cb_watch_data_send(
 	TALLOC_CTX *mem_ctx,
@@ -88,7 +95,8 @@ NTSTATUS g_lock_writev_data(
 	struct g_lock_ctx *ctx,
 	TDB_DATA key,
 	const TDB_DATA *dbufs,
-	size_t num_dbufs);
+	size_t num_dbufs,
+	int flags);
 NTSTATUS g_lock_write_data(struct g_lock_ctx *ctx, TDB_DATA key,
 			   const uint8_t *buf, size_t buflen);
 
@@ -133,5 +141,7 @@ NTSTATUS g_lock_watch_data_recv(
 	bool *blockerdead,
 	struct server_id *blocker);
 void g_lock_wake_watchers(struct g_lock_ctx *ctx, TDB_DATA key);
+
+NTSTATUS g_lock_wipe(struct g_lock_ctx *ctx, struct dbwrap_wipe_flags flags);
 
 #endif

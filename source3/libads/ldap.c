@@ -448,15 +448,14 @@ again:
 	num_requests = 0;
 
 	for (i = 0; i < count; i++) {
-		char server[INET6_ADDRSTRLEN];
+		struct ssaddr_buf server_buf;
+		char *server = ssaddr_str_buf(&sa_list[i], &server_buf);
 		bool has_entry = false;
 		int ret;
 
 		if (is_zero_addr(&sa_list[i].u.ss)) {
 			continue;
 		}
-
-		print_sockaddr(server, sizeof(server), &sa_list[i].u.ss);
 
 		has_entry = has_negative_conn_cache_entry(domain, server);
 		if (has_entry) {
@@ -519,9 +518,8 @@ again:
 
 	for (i = 0; i < num_requests; i++) {
 		struct NETLOGON_SAM_LOGON_RESPONSE_EX *cldap_reply = NULL;
-		char server[INET6_ADDRSTRLEN];
-
-		print_sockaddr(server, sizeof(server), &req_sa_list[i]->u.ss);
+		struct ssaddr_buf server_buf;
+		char *server = ssaddr_str_buf(req_sa_list[i], &server_buf);
 
 		if (responses[i] == NULL) {
 			add_failed_connection_entry(
@@ -644,10 +642,10 @@ static NTSTATUS resolve_and_ping_netbios(ADS_STRUCT *ads,
 	   the corresponding DNS method */
 	if (*realm) {
 		for (i = 0; i < count; ++i) {
-			char server[INET6_ADDRSTRLEN];
+			struct ssaddr_buf server_buf;
+			char *server = ssaddr_str_buf(&sa_list[i],
+						      &server_buf);
 			bool has_entry;
-
-			print_sockaddr(server, sizeof(server), &sa_list[i].u.ss);
 
 			has_entry = has_negative_conn_cache_entry(
 					realm,
@@ -913,7 +911,7 @@ static ADS_STATUS ads_connect_internal(ADS_STRUCT *ads,
 
 	if (ads->server.ldap_server) {
 		bool ok = false;
-		struct sockaddr_storage ss;
+		struct samba_sockaddr ss;
 
 		DBG_DEBUG("Resolving name of LDAP server '%s'.\n",
 			  ads->server.ldap_server);
@@ -925,12 +923,12 @@ static ADS_STATUS ads_connect_internal(ADS_STRUCT *ads,
 			goto out;
 		}
 
-		if (is_zero_addr(&ss)) {
+		if (is_zero_addr(&ss.u.ss)) {
 			status = ADS_ERROR_NT(NT_STATUS_NOT_FOUND);
 			goto out;
 		}
 
-		ok = ads_try_connect(ads, ads->server.gc, &ss);
+		ok = ads_try_connect(ads, ads->server.gc, &ss.u.ss);
 		if (ok) {
 			goto got_connection;
 		}
@@ -1851,9 +1849,9 @@ ADS_STATUS ads_do_search_all_fn(ADS_STRUCT *ads, const char *bind_path,
  * @param dn the dn to return the parent from
  * @return parent dn string
  **/
-char *ads_parent_dn(const char *dn)
+const char *ads_parent_dn(const char *dn)
 {
-	char *p;
+	const char *p = NULL;
 
 	if (dn == NULL) {
 		return NULL;
@@ -2932,7 +2930,7 @@ ADS_STATUS ads_move_machine_acct(ADS_STRUCT *ads, const char *machine_name,
 	LDAPMessage *res = NULL;
 	char *filter = NULL;
 	char *computer_dn = NULL;
-	char *parent_dn;
+	const char *parent_dn = NULL;
 	char *computer_rdn = NULL;
 	bool need_move = False;
 

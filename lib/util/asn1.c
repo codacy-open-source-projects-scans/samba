@@ -80,30 +80,44 @@ off_t asn1_current_ofs(const struct asn1_data *data)
 }
 
 /* write to the ASN1 buffer, advancing the buffer pointer */
-bool asn1_write(struct asn1_data *data, const void *p, int len)
+bool asn1_write(struct asn1_data *data, const void *p, int _len)
 {
+	size_t len, ofs, newlen;
+
 	if (data->has_error) return false;
 
-	if ((len < 0) || (data->ofs + (size_t)len < data->ofs)) {
-		data->has_error = true;
-		return false;
+	if (_len < 0) {
+		goto error;
+	}
+	len = _len;
+
+	if (data->ofs < 0) {
+		goto error;
+	}
+	ofs = data->ofs;
+
+	newlen = ofs + len;
+	if (newlen < ofs) {
+		goto error;
 	}
 
-	if (data->length < data->ofs+len) {
+	if (data->length < newlen) {
 		uint8_t *newp;
-		newp = talloc_realloc(data, data->data, uint8_t, data->ofs+len);
+		newp = talloc_realloc(data, data->data, uint8_t, newlen);
 		if (!newp) {
-			data->has_error = true;
-			return false;
+			goto error;
 		}
 		data->data = newp;
-		data->length = data->ofs+len;
+		data->length = newlen;
 	}
 	if (len > 0) {
 		memcpy(data->data + data->ofs, p, len);
 		data->ofs += len;
 	}
 	return true;
+error:
+	data->has_error = true;
+	return false;
 }
 
 /* useful fn for writing a uint8_t */
@@ -260,18 +274,22 @@ bool asn1_write_implicit_Integer(struct asn1_data *data, int i)
 /* write an integer */
 bool asn1_write_Integer(struct asn1_data *data, int i)
 {
-	if (!asn1_push_tag(data, ASN1_INTEGER)) return false;
-	if (!asn1_write_implicit_Integer(data, i)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_INTEGER);
+	ok = ok && asn1_write_implicit_Integer(data, i);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 /* write a BIT STRING */
 bool asn1_write_BitString(struct asn1_data *data, const void *p, size_t length, uint8_t padding)
 {
-	if (!asn1_push_tag(data, ASN1_BIT_STRING)) return false;
-	if (!asn1_write_uint8(data, padding)) return false;
-	if (!asn1_write(data, p, length)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_BIT_STRING);
+	ok = ok && asn1_write_uint8(data, padding);
+	ok = ok && asn1_write(data, p, length);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 bool ber_write_OID_String(TALLOC_CTX *mem_ctx, DATA_BLOB *blob, const char *OID)
@@ -394,9 +412,11 @@ bool asn1_write_OID(struct asn1_data *data, const char *OID)
 /* write an octet string */
 bool asn1_write_OctetString(struct asn1_data *data, const void *p, size_t length)
 {
-	if (!asn1_push_tag(data, ASN1_OCTET_STRING)) return false;
-	if (!asn1_write(data, p, length)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_OCTET_STRING);
+	ok = ok && asn1_write(data, p, length);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 /* write a LDAP string */
@@ -414,24 +434,30 @@ bool asn1_write_DATA_BLOB_LDAPString(struct asn1_data *data, const DATA_BLOB *s)
 /* write a general string */
 bool asn1_write_GeneralString(struct asn1_data *data, const char *s)
 {
-	if (!asn1_push_tag(data, ASN1_GENERAL_STRING)) return false;
-	if (!asn1_write_LDAPString(data, s)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_GENERAL_STRING);
+	ok = ok && asn1_write_LDAPString(data, s);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 bool asn1_write_ContextSimple(struct asn1_data *data, uint8_t num, DATA_BLOB *blob)
 {
-	if (!asn1_push_tag(data, ASN1_CONTEXT_SIMPLE(num))) return false;
-	if (!asn1_write(data, blob->data, blob->length)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_CONTEXT_SIMPLE(num));
+	ok = ok && asn1_write(data, blob->data, blob->length);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 /* write a BOOLEAN */
 bool asn1_write_BOOLEAN(struct asn1_data *data, bool v)
 {
-	if (!asn1_push_tag(data, ASN1_BOOLEAN)) return false;
-	if (!asn1_write_uint8(data, v ? 0xFF : 0)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_BOOLEAN);
+	ok = ok && asn1_write_uint8(data, v ? 0xFF : 0);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 bool asn1_read_BOOLEAN(struct asn1_data *data, bool *v)
@@ -449,9 +475,11 @@ bool asn1_read_BOOLEAN(struct asn1_data *data, bool *v)
 /* write a BOOLEAN in a simple context */
 bool asn1_write_BOOLEAN_context(struct asn1_data *data, bool v, int context)
 {
-	if (!asn1_push_tag(data, ASN1_CONTEXT_SIMPLE(context))) return false;
-	if (!asn1_write_uint8(data, v ? 0xFF : 0)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_CONTEXT_SIMPLE(context));
+	ok = ok && asn1_write_uint8(data, v ? 0xFF : 0);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 bool asn1_read_BOOLEAN_context(struct asn1_data *data, bool *v, int context)
@@ -493,27 +521,44 @@ bool asn1_load(struct asn1_data *data, DATA_BLOB blob)
 	 */
 	unsigned max_depth = data->max_depth;
 
-	ZERO_STRUCTP(data);
-	data->data = (uint8_t *)talloc_memdup(data, blob.data, blob.length);
-	if (!data->data) {
+	*data = (struct asn1_data){
+		.data = talloc_memdup(data, blob.data, blob.length),
+		.length = blob.length,
+		.max_depth = max_depth,
+	};
+
+	if (data->data == NULL) {
 		data->has_error = true;
 		return false;
 	}
-	data->length = blob.length;
-	data->max_depth = max_depth;
+
 	return true;
 }
 
 /* Peek into an ASN1 buffer, not advancing the pointer */
-bool asn1_peek(struct asn1_data *data, void *p, int len)
+static bool asn1_peek(struct asn1_data *data, void *p, int len)
 {
+	size_t ofs, end;
+
 	if (data->has_error)
 		return false;
 
-	if (len < 0 || data->ofs + len < data->ofs || data->ofs + len < len)
+	if (len < 0) {
 		return false;
+	}
 
-	if (data->ofs + len > data->length) {
+	if (data->ofs < 0) {
+		data->has_error = true;
+		return false;
+	}
+	ofs = data->ofs;
+
+	end = ofs + len;
+	if (end < ofs) {
+		return false;
+	}
+
+	if (end > data->length) {
 		/* we need to mark the buffer as consumed, so the caller knows
 		   this was an out of data error, and not a decode error */
 		data->ofs = data->length;
@@ -742,25 +787,40 @@ bool asn1_end_tag(struct asn1_data *data)
 /* work out how many bytes are left in this nested tag */
 int asn1_tag_remaining(struct asn1_data *data)
 {
-	int remaining;
+	size_t consumed, remaining_tag, remaining_data;
 	if (data->has_error) {
 		return -1;
 	}
 
 	if (!data->nesting) {
-		data->has_error = true;
-		return -1;
+		goto error;
 	}
-	remaining = data->nesting->taglen - (data->ofs - data->nesting->start);
-	if (remaining > (data->length - data->ofs)) {
-		data->has_error = true;
-		return -1;
+
+	if (data->ofs < data->nesting->start) {
+		goto error;
 	}
-	if (remaining < 0) {
-		data->has_error = true;
-		return -1;
+	consumed = data->ofs - data->nesting->start;
+
+	if (data->nesting->taglen < consumed) {
+		goto error;
 	}
-	return remaining;
+	remaining_tag = data->nesting->taglen - consumed;
+
+	if ((data->ofs < 0) || (data->length < (size_t)data->ofs)) {
+		goto error;
+	}
+	remaining_data = data->length - data->ofs;
+
+	if (remaining_tag > remaining_data) {
+		goto error;
+	}
+	if (remaining_tag > INT_MAX) {
+		goto error;
+	}
+	return remaining_tag;
+error:
+	data->has_error = true;
+	return -1;
 }
 
 /**
@@ -875,7 +935,11 @@ bool asn1_read_OID(struct asn1_data *data, TALLOC_CTX *mem_ctx, char **OID)
 		return false;
 	}
 
-	if (!asn1_read(data, blob.data, len)) return false;
+	if (!asn1_read(data, blob.data, len)) {
+		data_blob_free(&blob);
+		return false;
+	}
+
 	if (!asn1_end_tag(data)) {
 		data_blob_free(&blob);
 		return false;
@@ -908,46 +972,72 @@ bool asn1_check_OID(struct asn1_data *data, const char *OID)
 }
 
 /* read a LDAPString from a ASN1 buffer */
-bool asn1_read_LDAPString(struct asn1_data *data, TALLOC_CTX *mem_ctx, char **s)
+bool asn1_read_LDAPString(struct asn1_data *data,
+			  TALLOC_CTX *mem_ctx,
+			  char **_s)
 {
 	int len;
+	char *s = NULL;
+	bool ok;
+
 	len = asn1_tag_remaining(data);
 	if (len < 0) {
 		data->has_error = true;
 		return false;
 	}
-	*s = talloc_array(mem_ctx, char, len+1);
-	if (! *s) {
+	s = talloc_array(mem_ctx, char, len + 1);
+	if (s == NULL) {
 		data->has_error = true;
 		return false;
 	}
-	(*s)[len] = 0;
-	return asn1_read(data, *s, len);
+	s[len] = 0;
+
+	ok = asn1_read(data, s, len);
+	if (!ok) {
+		TALLOC_FREE(s);
+		return false;
+	}
+
+	*_s = s;
+	return true;
 }
 
 
 /* read a GeneralString from a ASN1 buffer */
-bool asn1_read_GeneralString(struct asn1_data *data, TALLOC_CTX *mem_ctx, char **s)
+bool asn1_read_GeneralString(struct asn1_data *data,
+			     TALLOC_CTX *mem_ctx,
+			     char **_s)
 {
+	char *s = NULL;
+	bool ok = false;
+
 	if (!asn1_start_tag(data, ASN1_GENERAL_STRING)) return false;
-	if (!asn1_read_LDAPString(data, mem_ctx, s)) return false;
-	return asn1_end_tag(data);
+	if (!asn1_read_LDAPString(data, mem_ctx, &s)) return false;
+
+	ok = asn1_end_tag(data);
+	if (!ok) {
+		TALLOC_FREE(s);
+		return false;
+	}
+
+	*_s = s;
+	return true;
 }
 
 
-/* read a octet string blob */
-bool asn1_read_OctetString(struct asn1_data *data, TALLOC_CTX *mem_ctx, DATA_BLOB *blob)
+static bool asn1_read_blob_tag(struct asn1_data *data, TALLOC_CTX *mem_ctx,
+			       uint8_t tag, DATA_BLOB *blob)
 {
 	int len;
 	ZERO_STRUCTP(blob);
-	if (!asn1_start_tag(data, ASN1_OCTET_STRING)) return false;
+	if (!asn1_start_tag(data, tag)) return false;
 	len = asn1_tag_remaining(data);
 	if (len < 0) {
 		data->has_error = true;
 		return false;
 	}
 	*blob = data_blob_talloc(mem_ctx, NULL, len+1);
-	if (!blob->data || blob->length < len) {
+	if (!blob->data || blob->length < (unsigned)len) {
 		data->has_error = true;
 		return false;
 	}
@@ -963,26 +1053,16 @@ bool asn1_read_OctetString(struct asn1_data *data, TALLOC_CTX *mem_ctx, DATA_BLO
 	return false;
 }
 
+/* read a octet string blob */
+bool asn1_read_OctetString(struct asn1_data *data, TALLOC_CTX *mem_ctx, DATA_BLOB *blob)
+{
+	return asn1_read_blob_tag(data, mem_ctx, ASN1_OCTET_STRING, blob);
+}
+
 bool asn1_read_ContextSimple(struct asn1_data *data, TALLOC_CTX *mem_ctx, uint8_t num,
 			     DATA_BLOB *blob)
 {
-	int len;
-	ZERO_STRUCTP(blob);
-	if (!asn1_start_tag(data, ASN1_CONTEXT_SIMPLE(num))) return false;
-	len = asn1_tag_remaining(data);
-	if (len < 0) {
-		data->has_error = true;
-		return false;
-	}
-	*blob = data_blob_talloc(mem_ctx, NULL, len + 1);
-	if ((len != 0) && (!blob->data)) {
-		data->has_error = true;
-		return false;
-	}
-	if (!asn1_read(data, blob->data, len)) return false;
-	blob->length--;
-	blob->data[len] = 0;
-	return asn1_end_tag(data);
+	return asn1_read_blob_tag(data, mem_ctx, ASN1_CONTEXT_SIMPLE(num), blob);
 }
 
 /* read an integer without tag*/
@@ -1034,7 +1114,7 @@ bool asn1_read_BitString(struct asn1_data *data, TALLOC_CTX *mem_ctx, DATA_BLOB 
 	if (!asn1_read_uint8(data, padding)) return false;
 
 	*blob = data_blob_talloc(mem_ctx, NULL, len+1);
-	if (!blob->data || blob->length < len) {
+	if (!blob->data || blob->length < (unsigned)len) {
 		data->has_error = true;
 		return false;
 	}
@@ -1091,9 +1171,11 @@ bool asn1_read_enumerated(struct asn1_data *data, int *v)
 /* write an enumerated value to the stream */
 bool asn1_write_enumerated(struct asn1_data *data, uint8_t v)
 {
-	if (!asn1_push_tag(data, ASN1_ENUMERATED)) return false;
-	if (!asn1_write_uint8(data, v)) return false;
-	return asn1_pop_tag(data);
+	bool ok = !asn1_has_error(data);
+	ok = ok && asn1_push_tag(data, ASN1_ENUMERATED);
+	ok = ok && asn1_write_uint8(data, v);
+	ok = ok && asn1_pop_tag(data);
+	return ok;
 }
 
 /*
@@ -1121,8 +1203,10 @@ bool asn1_extract_blob(struct asn1_data *asn1, TALLOC_CTX *mem_ctx,
 		return false;
 	}
 
-	*pblob = (DATA_BLOB) { .length = blob.length };
-	pblob->data = talloc_move(mem_ctx, &blob.data);
+	*pblob = (DATA_BLOB){
+		.length = blob.length,
+		.data = talloc_move(mem_ctx, &blob.data),
+	};
 
 	/*
 	 * Stop access from here on
@@ -1141,21 +1225,21 @@ void asn1_load_nocopy(struct asn1_data *data, uint8_t *buf, size_t len)
 	 * Save max_depth
 	 */
 	unsigned max_depth = data->max_depth;
-	ZERO_STRUCTP(data);
-	data->data = buf;
-	data->length = len;
-	data->max_depth = max_depth;
+
+	*data = (struct asn1_data) {
+		.data = buf,
+		.length = len,
+		.max_depth = max_depth,
+	};
 }
 
 int asn1_peek_full_tag(DATA_BLOB blob, uint8_t tag, size_t *packet_size)
 {
-	struct asn1_data asn1;
+	struct asn1_data asn1 = {};
 	size_t size;
 	bool ok;
 
-	ZERO_STRUCT(asn1);
-	asn1.data = blob.data;
-	asn1.length = blob.length;
+	asn1_load_nocopy(&asn1, blob.data, blob.length);
 
 	ok = asn1_peek_tag_needed_size(&asn1, tag, &size);
 	if (!ok) {

@@ -181,6 +181,12 @@ struct samr_Password *cli_credentials_get_nt_hash(struct cli_credentials *cred,
 						  TALLOC_CTX *mem_ctx);
 struct samr_Password *cli_credentials_get_old_nt_hash(struct cli_credentials *cred,
 						      TALLOC_CTX *mem_ctx);
+struct samr_Password *cli_credentials_get_older_nt_hash(
+						struct cli_credentials *cred,
+						TALLOC_CTX *mem_ctx);
+struct samr_Password *cli_credentials_get_next_nt_hash(
+						struct cli_credentials *cred,
+						TALLOC_CTX *mem_ctx);
 bool cli_credentials_set_realm(struct cli_credentials *cred,
 			       const char *val,
 			       enum credentials_obtained obtained);
@@ -198,6 +204,19 @@ NTSTATUS cli_credentials_set_stored_principal(struct cli_credentials *cred,
 					      const char *serviceprincipal);
 NTSTATUS cli_credentials_set_machine_account(struct cli_credentials *cred,
 					     struct loadparm_context *lp_ctx);
+/*
+ * There would be a dependency loop if
+ * secrets_fetch_or_upgrade_domain_info() would be
+ * called directly, so it needs to be registered
+ * first.
+ */
+struct secrets_domain_info1;
+typedef NTSTATUS (*cli_credentials_secrets_domain_info_cb)(
+					const char *domain,
+					TALLOC_CTX *mem_ctx,
+					struct secrets_domain_info1 **pinfo);
+void cli_credentials_set_global_secrets_domain_info_cb(
+		cli_credentials_secrets_domain_info_cb cb);
 /**
  * Fill in credentials for the machine trust account, from the
  * secrets.ldb or passed in handle to secrets.tdb (perhaps in CTDB).
@@ -232,6 +251,10 @@ bool cli_credentials_set_utf16_password(struct cli_credentials *cred,
 					enum credentials_obtained obtained);
 bool cli_credentials_set_old_utf16_password(struct cli_credentials *cred,
 					    const DATA_BLOB *password_utf16);
+bool cli_credentials_set_older_utf16_password(struct cli_credentials *cred,
+					      const DATA_BLOB *password_utf16);
+bool cli_credentials_set_next_utf16_password(struct cli_credentials *cred,
+					     const DATA_BLOB *password_utf16);
 void cli_credentials_set_password_will_be_nt_hash(struct cli_credentials *cred,
 						  bool val);
 bool cli_credentials_is_password_nt_hash(struct cli_credentials *cred);
@@ -306,8 +329,13 @@ char *cli_credentials_get_principal_and_obtained(struct cli_credentials *cred, T
  */
 const char *cli_credentials_get_old_password(struct cli_credentials *cred);
 bool cli_credentials_set_old_password(struct cli_credentials *cred,
-				      const char *val,
-				      enum credentials_obtained obtained);
+				      const char *val);
+const char *cli_credentials_get_older_password(struct cli_credentials *cred);
+bool cli_credentials_set_older_password(struct cli_credentials *cred,
+				        const char *val);
+const char *cli_credentials_get_next_password(struct cli_credentials *cred);
+bool cli_credentials_set_next_password(struct cli_credentials *cred,
+				       const char *val);
 bool cli_credentials_set_domain_callback(struct cli_credentials *cred,
 					 const char *(*domain_cb) (struct cli_credentials *));
 bool cli_credentials_set_realm_callback(struct cli_credentials *cred,

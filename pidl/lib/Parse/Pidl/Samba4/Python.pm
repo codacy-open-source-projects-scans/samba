@@ -92,6 +92,7 @@ sub EnumAndBitmapConsts($$$)
 sub FromUnionToPythonFunction($$$$)
 {
 	my ($self, $mem_ctx, $type, $switch, $name) = @_;
+	my $has_default = 0;
 
 	$self->pidl("PyObject *ret;");
 	$self->pidl("");
@@ -101,7 +102,7 @@ sub FromUnionToPythonFunction($$$$)
 
 	foreach my $e (@{$type->{ELEMENTS}}) {
 		$self->pidl("$e->{CASE}:");
-
+		if ($e->{CASE} eq "default") { $has_default = 1; }
 		$self->indent;
 
 		if ($e->{NAME}) {
@@ -110,18 +111,22 @@ sub FromUnionToPythonFunction($$$$)
 			$self->pidl("ret = Py_None;");
 			$self->pidl("Py_INCREF(ret);");
 		}
-
-		$self->pidl("return ret;");
+		$self->pidl("break;");
+		$self->deindent;
 		$self->pidl("");
+	}
 
+	if (!$has_default) {
+		$self->pidl("default:");
+		$self->indent;
+		$self->pidl("PyErr_SetString(PyExc_TypeError, \"unknown union level\");");
+		$self->pidl("ret = NULL;");
 		$self->deindent;
 	}
 
 	$self->deindent;
 	$self->pidl("}");
-
-	$self->pidl("PyErr_SetString(PyExc_TypeError, \"unknown union level\");");
-	$self->pidl("return NULL;");
+	$self->pidl("return ret;");
 }
 
 sub FromPythonToUnionFunction($$$$$)
@@ -2183,24 +2188,26 @@ sub ConvertObjectFromPythonLevel($$$$$$$$$)
 		if (is_charset_array($e, $l)) {
 		        $self->ConvertStringFromPythonData($mem_ctx, $py_var, $var_name, $fail);
 		} else {
+			my $size = "$e->{NAME}_size_$l->{LEVEL_INDEX}";
 			my $counter = "$e->{NAME}_cntr_$l->{LEVEL_INDEX}";
 			$self->pidl("PY_CHECK_TYPE(&PyList_Type, $py_var, $fail);");
 			$self->pidl("{");
 			$self->indent;
-			$self->pidl("int $counter;");
+			$self->pidl("ssize_t $size = PyList_GET_SIZE($py_var);");
+			$self->pidl("ssize_t $counter;");
 			if (ArrayDynamicallyAllocated($e, $l)) {
-				$self->pidl("$var_name = talloc_array_ptrtype($mem_ctx, $var_name, PyList_GET_SIZE($py_var));");
+				$self->pidl("$var_name = talloc_array_ptrtype($mem_ctx, $var_name, $size);");
 				$self->pidl("if (!$var_name) { $fail }");
 				$self->pidl("talloc_set_name_const($var_name, \"ARRAY: $var_name\");");
 			} else {
-				$self->pidl("if (ARRAY_SIZE($var_name) != PyList_GET_SIZE($py_var)) {");
+				$self->pidl("if (ARRAY_SIZE($var_name) != $size) {");
 				$self->indent;
 				$self->pidl("PyErr_Format(PyExc_TypeError, \"Expected list of type %s, length %zu, got %zd\", Py_TYPE($py_var)->tp_name, ARRAY_SIZE($var_name),  PyList_GET_SIZE($py_var));");
 				$self->pidl("$fail");
 				$self->deindent;
 				$self->pidl("}");
 			}
-			$self->pidl("for ($counter = 0; $counter < PyList_GET_SIZE($py_var); $counter++) {");
+			$self->pidl("for ($counter = 0; $counter < $size; $counter++) {");
 			$self->indent;
 			if (ArrayDynamicallyAllocated($e, $l)) {
 				$self->ConvertObjectFromPythonLevel($env, $var_name, "PyList_GET_ITEM($py_var, $counter)", $e, $nl, "($var_name)"."[$counter]", $fail, 0);

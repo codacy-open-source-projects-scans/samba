@@ -812,6 +812,12 @@ def SAMBA_CONFIG_H(conf, path=None):
                         testflags=True)
         conf.ADD_CFLAGS('-Werror=old-style-definition -Wold-style-definition',
                         testflags=True)
+        conf.ADD_CFLAGS('-Werror=array-bounds',
+                        testflags=True)
+        conf.ADD_CFLAGS('-Werror=stringop-overflow',
+                        testflags=True)
+        conf.ADD_CFLAGS('-Werror=tautological-compare',
+                        testflags=True)
 
         conf.ADD_CFLAGS('-Wformat=2 -Wno-format-y2k', testflags=True)
         conf.ADD_CFLAGS('-Wno-format-zero-length', testflags=True)
@@ -846,7 +852,6 @@ int main(void) {
 
         if not Options.options.disable_warnings_as_errors:
             conf.ADD_NAMED_CFLAGS('PICKY_CFLAGS', '-Werror -Wno-error=deprecated-declarations', testflags=True)
-            conf.ADD_NAMED_CFLAGS('PICKY_CFLAGS', '-Wno-error=tautological-compare', testflags=True)
             conf.ADD_NAMED_CFLAGS('PICKY_CFLAGS', '-Wno-error=cast-align', testflags=True)
 
     if Options.options.fatal_errors:
@@ -1039,6 +1044,7 @@ def SAMBA_CHECK_UNDEFINED_SYMBOL_FLAGS(conf):
         # resolution of symbols
         conf.env.undefined_ldflags = conf.ADD_LDFLAGS('-Wl,-no-undefined', testflags=True)
 
-        if (conf.env.undefined_ignore_ldflags == [] and
+        if (sys.platform == 'darwin' and
+            conf.env.undefined_ignore_ldflags == [] and
             conf.CHECK_LDFLAGS(['-Wl,-undefined,dynamic_lookup'])):
             conf.env.undefined_ignore_ldflags = ['-Wl,-undefined,dynamic_lookup']

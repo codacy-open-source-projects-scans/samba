@@ -73,6 +73,7 @@ dnf install -y \
     libunwind-devel \
     liburing-devel \
     libuuid-devel \
+    libxcrypt-devel \
     libxslt \
     lmdb \
     lmdb-devel \
@@ -105,7 +106,6 @@ dnf install -y \
     python3-markdown \
     python3-policycoreutils \
     python3-pyasn1 \
-    python3-requests \
     python3-setproctitle \
     quota-devel \
     readline-devel \

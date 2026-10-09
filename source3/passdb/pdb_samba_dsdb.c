@@ -107,6 +107,9 @@ static struct pdb_domain_info *pdb_samba_dsdb_get_domain_info(
 	}
 
 	info->guid = samdb_result_guid(dom_res->msgs[0], "objectGUID");
+	if (GUID_all_zero(&info->guid)) {
+		goto fail;
+	}
 
 	domain_sid = samdb_result_dom_sid(state, dom_res->msgs[0], "objectSid");
 	if (!domain_sid) {
@@ -117,6 +120,10 @@ static struct pdb_domain_info *pdb_samba_dsdb_get_domain_info(
 	TALLOC_FREE(dom_res);
 
 	info->name = talloc_strdup(info, lpcfg_sam_name(state->lp_ctx));
+	if (info->name == NULL) {
+		goto fail;
+	}
+
 	info->dns_domain = ldb_dn_canonical_string(info, domain_dn);
 
 	if (!info->dns_domain) {
@@ -144,7 +151,6 @@ static struct pdb_domain_info *pdb_samba_dsdb_get_domain_info(
 	return info;
 
 fail:
-	TALLOC_FREE(dom_res);
 	TALLOC_FREE(info);
 	return NULL;
 }
@@ -887,6 +893,10 @@ static NTSTATUS pdb_samba_dsdb_update_sam_account(struct pdb_methods *m,
 	struct ldb_message *msg = pdb_samba_dsdb_get_samu_private(
 		m, sam);
 	int ret;
+
+	if (msg == NULL) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
 
 	ret = pdb_samba_dsdb_replace_by_sam(state, pdb_element_is_changed, msg->dn,
 					sam);
@@ -1912,6 +1922,7 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 				     struct pdb_samba_dsdb_search_state **pstate,
 				     const char *exp_fmt, ...)
 {
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
 		m->private_data, struct pdb_samba_dsdb_state);
 	struct pdb_samba_dsdb_search_state *sstate;
@@ -1923,32 +1934,26 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 	va_list ap;
 	char *expression = NULL;
 
-	TALLOC_CTX *tmp_ctx = talloc_stackframe();
-	if (!tmp_ctx) {
-		return false;
-	}
+	bool ret = false;
 
 	va_start(ap, exp_fmt);
 	expression = talloc_vasprintf(tmp_ctx, exp_fmt, ap);
 	va_end(ap);
 
 	if (!expression) {
-		talloc_free(tmp_ctx);
-		return LDB_ERR_OPERATIONS_ERROR;
+		goto fail;
 	}
 
 	sstate = talloc_zero(tmp_ctx, struct pdb_samba_dsdb_search_state);
 	if (sstate == NULL) {
-		talloc_free(tmp_ctx);
-		return false;
+		goto fail;
 	}
 
 	rc = dsdb_search(state->ldb, tmp_ctx, &res, ldb_get_default_basedn(state->ldb), LDB_SCOPE_SUBTREE, attrs, 0, "%s", expression);
 	if (rc != LDB_SUCCESS) {
-		talloc_free(tmp_ctx);
 		DEBUG(10, ("dsdb_search failed: %s\n",
 			   ldb_errstring(state->ldb)));
-		return false;
+		goto fail;
 	}
 
 	num_users = res->count;
@@ -1956,9 +1961,8 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 	sstate->entries = talloc_array(sstate, struct samr_displayentry,
 				       num_users);
 	if (sstate->entries == NULL) {
-		talloc_free(tmp_ctx);
 		DEBUG(10, ("talloc failed\n"));
-		return false;
+		goto fail;
 	}
 
 	sstate->num_entries = 0;
@@ -1972,9 +1976,8 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 		e->idx = sstate->num_entries;
 		sid = samdb_result_dom_sid(tmp_ctx, res->msgs[i], "objectSid");
 		if (!sid) {
-			talloc_free(tmp_ctx);
 			DEBUG(10, ("Could not pull SID\n"));
-			return false;
+			goto fail;
 		}
 		sid_peek_rid(sid, &e->rid);
 
@@ -1982,8 +1985,7 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 		e->account_name = ldb_msg_find_attr_as_string(
 			res->msgs[i], "sAMAccountName", NULL);
 		if (e->account_name == NULL) {
-			talloc_free(tmp_ctx);
-			return false;
+			goto fail;
 		}
 		e->fullname = ldb_msg_find_attr_as_string(
                         res->msgs[i], "displayName", "");
@@ -2000,8 +2002,10 @@ static bool pdb_samba_dsdb_search_filter(struct pdb_methods *m,
 	search->next_entry = pdb_samba_dsdb_next_entry;
 	search->search_end = pdb_samba_dsdb_search_end;
 	*pstate = sstate;
+	ret = true;
+fail:
 	talloc_free(tmp_ctx);
-	return true;
+	return ret;
 }
 
 static bool pdb_samba_dsdb_search_users(struct pdb_methods *m,

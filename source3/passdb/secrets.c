@@ -69,6 +69,9 @@ bool secrets_init_path(const char *private_dir)
 		return False;
 	}
 
+	cli_credentials_set_global_secrets_domain_info_cb(
+		secrets_fetch_or_upgrade_domain_info);
+
 	TALLOC_FREE(frame);
 	return True;
 }
@@ -150,7 +153,7 @@ bool secrets_store(const char *key, const void *data, size_t size)
 
 	status = dbwrap_trans_store(db_ctx, string_tdb_data(key),
 				    make_tdb_data((const uint8_t *)data, size),
-				    TDB_REPLACE);
+				    DBWRAP_REPLACE);
 	return NT_STATUS_IS_OK(status);
 }
 

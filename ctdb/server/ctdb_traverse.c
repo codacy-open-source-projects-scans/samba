@@ -331,16 +331,17 @@ struct traverse_start_state {
 
 
 /*
-  setup a cluster-wide non-blocking traverse of a ctdb. The
-  callback function will be called on every record in the local
-  ltdb. To stop the traverse, talloc_free() the traverse_handle.
-
-  The traverse is finished when the callback is called with tdb_null
-  for key and data
+ * Setup a cluster-wide non-blocking traverse of a ctdb. The callback
+ * function will be called on every record in the local ltdb. To stop
+ * the traverse, talloc_free() the traverse_handle.
+ *
+ * The traverse is finished when the callback is called with tdb_null
+ * for key and data.
  */
-static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(struct ctdb_db_context *ctdb_db,
-								 ctdb_traverse_fn_t callback,
-								 struct traverse_start_state *start_state)
+static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(
+	struct ctdb_db_context *ctdb_db,
+	ctdb_traverse_fn_t callback,
+	struct traverse_start_state *start_state)
 {
 	struct ctdb_traverse_all_handle *state;
 	struct ctdb_context *ctdb = ctdb_db->ctdb;
@@ -348,7 +349,7 @@ static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(struct ctdb_db_
 	TDB_DATA data;
 	struct ctdb_traverse_all r;
 	struct ctdb_traverse_all_ext r_ext;
-	uint32_t destination;
+	uint32_t destination = CTDB_UNKNOWN_PNN;
 
 	state = talloc(start_state, struct ctdb_traverse_all_handle);
 	if (state == NULL) {
@@ -362,7 +363,7 @@ static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(struct ctdb_db_
 	state->private_data = start_state;
 	state->null_count   = 0;
 	state->timedout     = false;
-	
+
 	talloc_set_destructor(state, ctdb_traverse_all_destructor);
 
 	if (start_state->withemptyrecords) {
@@ -387,31 +388,61 @@ static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(struct ctdb_db_
 	}
 
 	if (ctdb_db_volatile(ctdb_db)) {
-		/* volatile database, traverse all active nodes */
+		/* Volatile database: traverse all active nodes */
 		destination = CTDB_BROADCAST_ACTIVE;
 	} else {
-		unsigned int i;
-		/* persistent database, traverse one node, preferably
+		struct ctdb_node *node = NULL;
+		unsigned int i = 0;
+
+		/*
+		 * Persistent database: traverse an active node, preferably
 		 * the local one
 		 */
-		destination = ctdb->pnn;
-		/* check we are in the vnnmap */
-		for (i=0; i < ctdb->vnn_map->size; i++) {
-			if (ctdb->vnn_map->map[i] == ctdb->pnn) {
-				break;
+		node = ctdb_find_node(ctdb, CTDB_CURRENT_NODE);
+		if ((node->flags & NODE_FLAGS_INACTIVE) == 0) {
+			/* Local/current node is active */
+			destination = ctdb->pnn;
+			goto found;
+		}
+
+		/*
+		 * Local node is inactive.
+		 */
+
+		/*
+		 * Try for the first node in the VNN map.  This avoids
+		 * a node with the lmaster capability disabled, which
+		 * is more likely to be remote.  VNN map size of 0
+		 * should not happen but be defensive.
+		 */
+		if (ctdb->vnn_map->size > 0) {
+			destination = ctdb->vnn_map->map[0];
+			goto found;
+		}
+
+		/*
+		 * Try to find another active node, which will have
+		 * the lmaster capability disabled
+		 */
+		destination = CTDB_UNKNOWN_PNN;
+		for (i = 0; i < ctdb->num_nodes; i++) {
+			node = ctdb->nodes[i];
+			if ((node->flags & NODE_FLAGS_INACTIVE) == 0) {
+				destination = node->pnn;
+				goto found;
 			}
 		}
-		/* if we are not in the vnn map we just pick the first
-		 * node instead
-		 */
-		if (i == ctdb->vnn_map->size) {
-			destination = ctdb->vnn_map->map[0];
-		}
-	}
 
-	/* tell all the nodes in the cluster to start sending records to this
-	 * node, or if it is a persistent database, just tell the local
-	 * node
+		DBG_ERR("No active node for persistent traverse\n");
+		talloc_free(state);
+		return NULL;
+	}
+found:
+
+	/*
+	 * Tell all the nodes in the cluster to start sending records
+	 * to this node, or if it is a persistent database, just tell
+	 * the selected node.
 	 */
 
 	if (start_state->withemptyrecords) {
@@ -429,10 +460,11 @@ static struct ctdb_traverse_all_handle *ctdb_daemon_traverse_all(struct ctdb_db_
 		return NULL;
 	}
 
-	DEBUG(DEBUG_NOTICE,("Starting traverse on DB %s (id %d)\n",
-			    ctdb_db->db_name, state->reqid));
+	D_NOTICE("Starting traverse on DB %s (id %d)\n",
+		 ctdb_db->db_name,
+		 state->reqid);
 
-	/* timeout the traverse */
+	/* Timeout for traverse */
 	tevent_add_timer(ctdb->ev, state,
 			 timeval_current_ofs(ctdb->tunable.traverse_timeout, 0),
 			 ctdb_traverse_all_timeout, state);
@@ -561,13 +593,17 @@ int32_t ctdb_control_traverse_all(struct ctdb_context *ctdb, TDB_DATA data, TDB_
 int32_t ctdb_control_traverse_data(struct ctdb_context *ctdb, TDB_DATA data, TDB_DATA *outdata)
 {
 	struct ctdb_rec_data_old *d = (struct ctdb_rec_data_old *)data.dptr;
+	size_t rec_data_header_len = offsetof(struct ctdb_rec_data_old, data);
 	struct ctdb_traverse_all_handle *state;
 	TDB_DATA key;
 	ctdb_traverse_fn_t callback;
 	void *private_data;
 
-	if (data.dsize < sizeof(uint32_t) || data.dsize != d->length) {
-		DEBUG(DEBUG_ERR,("Bad record size in ctdb_control_traverse_data\n"));
+	if (data.dsize < rec_data_header_len ||
+	    data.dsize != d->length ||
+	    d->keylen > d->length - rec_data_header_len ||
+	    d->datalen > d->length - rec_data_header_len - d->keylen) {
+		DBG_ERR("Invalid packet\n");
 		return -1;
 	}
 

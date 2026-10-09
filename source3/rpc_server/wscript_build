@@ -21,7 +21,9 @@ bld.SAMBA_BINARY('samba-dcerpcd',
 bld.SAMBA_LIBRARY('RPC_WORKER',
                   private_library=True,
                   source='''
-                  rpc_worker.c
+                  rpc_worker_internal.c
+                  rpc_worker_dcerpc.c
+                  rpc_worker_nps.c
                   ''',
                   deps='''
                   smbd_base
@@ -31,6 +33,14 @@ bld.SAMBA_LIBRARY('RPC_WORKER',
                   RPC_NCACN_NP
                   npa_tstream
                   ''')
+
+bld.SAMBA3_BINARY('npsd_echo_server',
+                  source='npsd_echo_server.c',
+                  deps='''
+                  RPC_WORKER
+                  ''',
+                  for_selftest=True,
+                  install_path='${SAMBA_LIBEXECDIR}')
 
 bld.SAMBA3_BINARY('rpcd_rpcecho',
                   source='rpcd_rpcecho.c',
@@ -86,6 +96,17 @@ bld.SAMBA3_BINARY('rpcd_spoolss',
                   ''',
                   install_path='${SAMBA_LIBEXECDIR}')
 
+bld.SAMBA3_BINARY('rpcd_spoolss_notify_test',
+                  source='rpcd_spoolss_notify_test.c',
+                  deps='''
+                  CMDLINE_S3
+                  RPC_WORKER
+                  NDR_SPOOLSS
+                  smbd_base
+                  ''',
+                  for_selftest=True,
+                  install_path='${SAMBA_LIBEXECDIR}')
+
 bld.SAMBA3_BINARY('rpcd_epmapper',
                   source='rpcd_epmapper.c',
                   deps='''
@@ -139,6 +160,38 @@ bld.SAMBA3_LIBRARY('RPC_SERVER_LOOP',
 bld.SAMBA3_SUBSYSTEM('SRV_ACCESS_CHECK',
                     source='srv_access_check.c',
                     deps='samba-util')
+
+wsp_backends_sources = '''
+                       wsp/wsp_backend.c
+                       wsp/wspd_db.c
+                       '''
+if bld.env.wsp_backend_es:
+    wsp_backends_sources += '''
+                            wsp/wsp_es_conv.c
+                            wsp/wsp_es_abs_if.c
+                            '''
+    bld.INSTALL_FILES(bld.env.SAMBA_DATADIR,
+                      'wsp/elasticsearch_mappings.json')
+
+bld.SAMBA3_SUBSYSTEM('WSP_BACKEND',
+                    source=wsp_backends_sources,
+                    deps='ELASTIC-UTIL',
+                    enabled=bld.env.with_wsp)
+
+bld.SAMBA3_SUBSYSTEM('WSP_GSS',
+                    source='''wsp/wsp_gss.c''',
+                    enabled=bld.env.with_wsp)
+
+bld.SAMBA3_BINARY('npsd_wsp_server',
+                  source='npsd_wsp_server.c',
+                  deps='''
+                  RPC_WORKER
+                  WSP_GSS
+                  WSP_UTIL
+                  WSP_BACKEND
+                  ''',
+                  install_path='${SAMBA_LIBEXECDIR}',
+                  enabled=bld.env.with_wsp)
 
 bld.SAMBA3_SUBSYSTEM('RPC_SERVER',
                     source='',
@@ -256,7 +309,7 @@ if bld.env.spotlight_backend_es:
                           mdssvc/es_parser.y
                           mdssvc/es_lexer.l
                           '''
-    rpc_mdssvc_deps += ' http jansson'
+    rpc_mdssvc_deps += ' ELASTIC-UTIL http jansson'
 
     bld.INSTALL_FILES(bld.env.SAMBA_DATADIR,
                       'mdssvc/elasticsearch_mappings.json')

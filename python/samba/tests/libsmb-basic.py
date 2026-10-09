@@ -25,6 +25,7 @@ from samba.credentials import SMB_ENCRYPTION_REQUIRED
 import samba.tests.libsmb
 import threading
 import sys
+import os
 import random
 
 
@@ -193,6 +194,36 @@ class LibsmbTestCase(samba.tests.libsmb.LibsmbTests):
         finally:
             c.deltree(testdir)
 
+    def test_rename_replace_case(self):
+        """
+        Regression test for bug 16261: Rename with ReplaceIfExists to a
+        target differing only in case must replace the existing file,
+        not create a second directory entry.
+        """
+        c = libsmb.Conn(self.server_ip, "tmp", self.lp, self.creds)
+        basedir = "test_rename_replace_case"
+
+        try:
+            c.deltree(basedir)
+        except NTSTATUSError:
+            pass
+        c.mkdir(basedir)
+
+        try:
+            c.savefile(basedir + "\\dzdz.lnk", b"old")
+            c.savefile(basedir + "\\tmpfile.tmp", b"new")
+
+            c.rename(basedir + "\\tmpfile.tmp",
+                     basedir + "\\DZDZ.lnk",
+                     replace=True)
+
+            names = [f['name'] for f in c.list(basedir)
+                     if f['name'] not in (".", "..")]
+            self.assertEqual(names, ["dzdz.lnk"])
+            self.assertEqual(c.loadfile(basedir + "\\dzdz.lnk"), b"new")
+        finally:
+            c.deltree(basedir)
+
     def test_libsmb_TortureDirCaseSensitive(self):
         c = libsmb.Conn(self.server_ip, "lowercase", self.lp, self.creds)
         c.mkdir("subdir")
@@ -262,6 +293,227 @@ class LibsmbTestCase(samba.tests.libsmb.LibsmbTests):
             self.fail()
 
         c.deltree("teststreams")
+
+    def test_fruit_rename_long_to_short_name(self):
+        """
+        Test renaming a long src name to a short one where the
+        long name pushes the ._ sidecar file over the ENAMETOOLONG
+        error. This can only happen when there is no ._ sidecar, but
+        the rename syscall will still return ENAMETOOLONG. Handle that
+        properly for the src filename to allow the base rename.
+        """
+        c = libsmb.Conn(self.server_ip, "vfs_fruit", self.lp, self.creds)
+
+        srcname = "s" * 254
+        dstname = "d" * 10
+
+        self.clean_file(c, srcname)
+        self.clean_file(c, dstname)
+
+        try:
+            fnum = c.create(srcname,
+                             DesiredAccess=security.SEC_FILE_ALL,
+                             CreateDisposition=libsmb.FILE_CREATE)
+            c.close(fnum)
+
+            c.rename(srcname, dstname)
+
+            ls = [f['name'] for f in c.list("\\")]
+            self.assertNotIn(srcname, ls)
+            self.assertIn(dstname, ls)
+        finally:
+            self.clean_file(c, srcname)
+            self.clean_file(c, dstname)
+
+    def create_appledouble(self, c, filename):
+        """Make vfs_fruit create a real "._<filename>" AppleDouble
+        file for filename on disk.
+        """
+        finder_info = b'\x00' * 31 + b'\x01'
+        c.savefile(filename + libsmb.AFPINFO_STREAM_NAME,
+                   libsmb.afpinfo_pack(finder_info))
+
+        rsrc_fnum = c.create(filename + libsmb.AFPRESOURCE_STREAM_NAME,
+                             DesiredAccess=security.SEC_FILE_ALL,
+                             CreateDisposition=libsmb.FILE_OPEN_IF)
+        c.write(rsrc_fnum, b'\x01' * 16, 0)
+        c.close(rsrc_fnum)
+
+    def test_fruit_rename_short_to_long_name(self):
+        """
+        Rename a short file with ._ sidecar file to a long file name
+        driving the ._ sidecar over ENAMETOOLONG. Make sure that the
+        base file rename did not happen at all.
+        """
+        c = libsmb.Conn(self.server_ip, "vfs_fruit", self.lp, self.creds)
+
+        srcname = "s" * 10
+        dstname = "d" * 254
+
+        self.clean_file(c, srcname)
+        self.clean_file(c, dstname)
+
+        try:
+            fnum = c.create(srcname,
+                             DesiredAccess=security.SEC_FILE_ALL,
+                             CreateDisposition=libsmb.FILE_CREATE)
+            c.close(fnum)
+
+            # Force creation of a real "._<srcname>" AppleDouble file
+            self.create_appledouble(c, srcname)
+
+            with self.assertRaises(NTSTATUSError) as cm:
+                c.rename(srcname, dstname)
+            self.assertEqual(cm.exception.args[0],
+                              ntstatus.NT_STATUS_OBJECT_NAME_INVALID)
+
+            ls = [f['name'] for f in c.list("\\")]
+            self.assertIn(srcname, ls)
+            self.assertNotIn(dstname, ls)
+        finally:
+            self.clean_file(c, srcname)
+            self.clean_file(c, dstname)
+
+    def fruit_trailing_setup(self):
+        c = libsmb.Conn(self.server_ip, "vfs_fruit", self.lp, self.creds)
+        testdir = "test_fruit_trailing_dot_space"
+
+        try:
+            c.deltree(testdir)
+        except NTSTATUSError:
+            pass
+        c.mkdir(testdir)
+        self.addCleanup(c.deltree, testdir)
+
+        localdir = os.path.join(
+            samba.tests.env_get_var_value("LOCAL_PATH"), testdir)
+        return (c, testdir, localdir)
+
+    def test_fruit_trailing_dot_space_create(self):
+        """
+        With fruit:encoding = native, a trailing dot or space is
+        sent over SMB as U+F029 or U+F028, and must end up as a
+        real "." or " " on disk. Only the last character gets this
+        treatment.
+        """
+        (c, testdir, localdir) = self.fruit_trailing_setup()
+
+        cases = [
+            ("dot\uf029", "dot."),
+            ("space\uf028", "space "),
+            ("a\uf022b\uf029", "a:b."),
+            ("mid\uf029dle", "mid\uf029dle"),
+            ("mid\uf028dle", "mid\uf028dle"),
+        ]
+
+        for (wire, local) in cases:
+            fnum = c.create(testdir + "\\" + wire,
+                            DesiredAccess=security.SEC_FILE_ALL,
+                            CreateDisposition=libsmb.FILE_CREATE)
+            c.close(fnum)
+
+        ondisk = os.listdir(localdir)
+        for (wire, local) in cases:
+            self.assertIn(local, ondisk)
+        self.assertNotIn("mid.dle", ondisk)
+        self.assertNotIn("mid dle", ondisk)
+
+        ls = [f['name'] for f in c.list(testdir)]
+        for (wire, local) in cases:
+            self.assertIn(wire, ls)
+
+        # Every path component gets its trailing character mapped
+        c.mkdir(testdir + "\\dir\uf029")
+        fnum = c.create(testdir + "\\dir\uf029\\file\uf028",
+                        DesiredAccess=security.SEC_FILE_ALL,
+                        CreateDisposition=libsmb.FILE_CREATE)
+        c.close(fnum)
+        self.assertTrue(
+            os.path.isfile(os.path.join(localdir, "dir.", "file ")))
+
+    def test_fruit_trailing_dot_space_list(self):
+        """
+        Files created locally with a trailing dot or space must be
+        listed over SMB with U+F029 or U+F028 as last character, and
+        be accessible under that name.
+        """
+        (c, testdir, localdir) = self.fruit_trailing_setup()
+
+        cases = [
+            ("dot.", "dot\uf029"),
+            ("space ", "space\uf028"),
+            ("dots..", "dots.\uf029"),
+            ("a b.c", "a b.c"),
+        ]
+
+        for (local, wire) in cases:
+            with open(os.path.join(localdir, local), "wb") as f:
+                f.write(b"x")
+
+        ls = [f['name'] for f in c.list(testdir)]
+        for (local, wire) in cases:
+            self.assertIn(wire, ls)
+            self.assertEqual(c.loadfile(testdir + "\\" + wire), b"x")
+
+        os.mkdir(os.path.join(localdir, "dir "))
+        with open(os.path.join(localdir, "dir ", "file."), "wb") as f:
+            f.write(b"y")
+        ls = [f['name'] for f in c.list(testdir + "\\dir\uf028")]
+        self.assertIn("file\uf029", ls)
+        self.assertEqual(
+            c.loadfile(testdir + "\\dir\uf028\\file\uf029"), b"y")
+
+    def test_unique_content_epoch(self):
+        """smbd caches share_mode_data and reuses it if the
+        unique_content_epoch in locking.tdb did not change. Make sure a
+        locking.tdb record recreated by a fresh smbd does not reuse the
+        epoch another smbd has cached.
+        """
+        filename = "test_unique_content_epoch"
+        share_all = (libsmb.FILE_SHARE_READ |
+                     libsmb.FILE_SHARE_WRITE |
+                     libsmb.FILE_SHARE_DELETE)
+
+        c1 = libsmb.Conn(self.server_ip, "tmp", self.lp, self.creds)
+        c2 = libsmb.Conn(self.server_ip, "tmp", self.lp, self.creds)
+
+        self.clean_file(c1, filename)
+
+        try:
+            # c1 creates the file and the share mode record
+            f1 = c1.create(filename,
+                           DesiredAccess=security.SEC_FILE_READ_DATA,
+                           ShareAccess=share_all,
+                           CreateDisposition=libsmb.FILE_CREATE)
+
+            # c2's smbd caches the share_mode_data
+            f2 = c2.create(filename,
+                           DesiredAccess=security.SEC_FILE_READ_DATA,
+                           ShareAccess=share_all)
+            c2.close(f2)
+
+            # The last close removes the share mode record
+            c1.close(f1)
+
+            # A new connection gets a fresh smbd. It recreates the
+            # share mode record, denying write access.
+            c3 = libsmb.Conn(self.server_ip, "tmp", self.lp, self.creds)
+            f3 = c3.create(filename,
+                           DesiredAccess=security.SEC_FILE_READ_DATA,
+                           ShareAccess=libsmb.FILE_SHARE_READ)
+
+            # c2's smbd must see c3's share mode
+            with self.assertRaises(NTSTATUSError) as cm:
+                f2 = c2.create(filename,
+                               DesiredAccess=security.SEC_FILE_WRITE_DATA,
+                               ShareAccess=share_all)
+                c2.close(f2)
+            self.assertEqual(cm.exception.args[0],
+                             ntstatus.NT_STATUS_SHARING_VIOLATION)
+
+            c3.close(f3)
+        finally:
+            self.clean_file(c1, filename)
 
 if __name__ == "__main__":
     import unittest

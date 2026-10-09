@@ -38,9 +38,6 @@ struct file_id share_mode_lock_file_id(const struct share_mode_lock *lck);
 struct share_mode_lock *get_existing_share_mode_lock(TALLOC_CTX *mem_ctx,
 						     struct file_id id);
 
-bool del_share_mode_open_id(struct share_mode_lock *lck,
-			    struct server_id open_pid,
-			    uint64_t open_file_id);
 bool del_share_mode(struct share_mode_lock *lck,
 		    struct files_struct *fsp);
 bool downgrade_share_oplock(struct share_mode_lock *lck,
@@ -49,6 +46,7 @@ bool remove_share_oplock(struct share_mode_lock *lck,
 			 struct files_struct *fsp);
 bool file_has_read_lease(struct files_struct *fsp);
 
+struct GUID;
 bool set_share_mode(
 	struct share_mode_lock *lck,
 	struct files_struct *fsp,
@@ -56,6 +54,7 @@ bool set_share_mode(
 	uint64_t mid,
 	uint16_t op_type,
 	const struct smb2_lease_key *lease_key,
+	const struct GUID *create_guid,
 	uint32_t share_access,
 	uint32_t access_mask);
 bool reset_share_mode_entry(
@@ -207,3 +206,6 @@ NTSTATUS _share_mode_entry_prepare_unlock(
 
 uint16_t fsp_get_share_entry_flags(const struct files_struct *fsp);
 void fsp_apply_share_entry_flags(struct files_struct *fsp, uint16_t flags);
+
+struct dbwrap_wipe_flags;
+NTSTATUS locking_wipe(struct dbwrap_wipe_flags flags);

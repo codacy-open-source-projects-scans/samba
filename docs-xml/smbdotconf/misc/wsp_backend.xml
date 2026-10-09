@@ -1,0 +1,22 @@
+<samba:parameter name="wsp backend"
+		 context="G"
+		 type="enum"
+                 enumlist="enum_wsp_backend"
+		 xmlns:samba="http://www.samba.org/samba/DTD/samba-doc">
+<description>
+	<para>
+	  WSP search backend. Available backends:
+
+	<itemizedlist>
+	<listitem><para><constant>none</constant> -
+	</para></listitem>
+	<listitem><para><constant>elasticsearch</constant> -
+	a backend that uses JSON and REST over HTTP(s) to query an
+        Elasticsearch or Opensearch server.
+	</para></listitem>
+
+	</itemizedlist>
+	</para>
+</description>
+<value type="default">none</value>
+</samba:parameter>

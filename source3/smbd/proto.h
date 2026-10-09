@@ -414,9 +414,6 @@ void smb_fname_fsp_unlink(struct smb_filename *smb_fname);
 NTSTATUS move_smb_fname_fsp_link(struct smb_filename *smb_fname_dst,
 				 struct smb_filename *smb_fname_src);
 
-NTSTATUS reference_smb_fname_fsp_link(struct smb_filename *smb_fname_dst,
-				      const struct smb_filename *smb_fname_src);
-
 NTSTATUS synthetic_pathref(TALLOC_CTX *mem_ctx,
 			   const struct files_struct *dirfsp,
 			   const char *base_name,
@@ -512,6 +509,13 @@ NTSTATUS create_conn_struct_chdir(TALLOC_CTX *mem_ctx,
 				  const char *path,
 				  const struct auth_session_info *session_info,
 				  struct conn_wrap **_wrap);
+NTSTATUS create_conn_struct(TALLOC_CTX *mem_ctx,
+			    struct messaging_context *msg,
+			    int snum,
+			    const char *path,
+			    const struct auth_session_info *session_info,
+			    struct conn_wrap **_wrap);
+NTSTATUS conn_wrap_chdir(struct conn_wrap *w, TALLOC_CTX *mem_ctx);
 struct connection_struct *conn_wrap_connection(const struct conn_wrap *w);
 
 /* The following definitions come from smbd/notify.c  */
@@ -615,14 +619,6 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
                        uint32_t security_info_sent);
 NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
                        uint32_t security_info_sent);
-NTSTATUS copy_internals(TALLOC_CTX *ctx,
-			connection_struct *conn,
-			struct smb_request *req,
-			struct files_struct *src_dirfsp,
-			struct smb_filename *smb_fname_src,
-			struct files_struct *dst_dirfsp,
-			struct smb_filename *smb_fname_dst,
-			uint32_t attrs);
 NTSTATUS smbd_do_query_security_desc(connection_struct *conn,
 					TALLOC_CTX *mem_ctx,
 					files_struct *fsp,
@@ -706,6 +702,13 @@ NTSTATUS create_file_default(connection_struct *conn,
 			     int *pinfo,
 			     const struct smb2_create_blobs *in_context_blobs,
 			     struct smb2_create_blobs *out_context_blobs);
+
+NTSTATUS grant_new_fsp_lease(struct files_struct *fsp,
+			     struct share_mode_lock *lck,
+			     const struct GUID *client_guid,
+			     const struct smb2_lease *lease,
+			     uint32_t granted,
+			     bool bump_epoch);
 
 /* The following definitions come from smbd/oplock.c  */
 
@@ -1057,10 +1060,6 @@ NTSTATUS check_any_access_fsp(struct files_struct *fsp,
 			      uint32_t access_requested);
 uint64_t smb_roundup(connection_struct *conn, uint64_t val);
 bool samba_private_attr_name(const char *unix_ea_name);
-int get_ea_value_fsp(TALLOC_CTX *mem_ctx,
-		     files_struct *fsp,
-		     const char *ea_name,
-		     struct ea_struct *pea);
 NTSTATUS get_ea_names_from_fsp(TALLOC_CTX *mem_ctx,
 			files_struct *fsp,
 			char ***pnames,
@@ -1146,9 +1145,9 @@ const struct security_token *get_current_nttok(connection_struct *conn);
 /* The following definitions come from smbd/utmp.c  */
 
 void sys_utmp_claim(const char *username, const char *hostname,
-		    const char *id_str, int id_num);
+		    const char *id_str, uint32_t id_num);
 void sys_utmp_yield(const char *username, const char *hostname,
-		    const char *id_str, int id_num);
+		    const char *id_str, uint32_t id_num);
 
 /* The following definitions come from smbd/vfs.c  */
 
@@ -1210,6 +1209,7 @@ NTSTATUS vfs_default_durable_reconnect(struct connection_struct *conn,
 				       struct smb_request *smb1req,
 				       struct smbXsrv_open *op,
 				       const DATA_BLOB old_cookie,
+				       const struct smb2_lease *lease,
 				       TALLOC_CTX *mem_ctx,
 				       files_struct **result,
 				       DATA_BLOB *new_cookie);

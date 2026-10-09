@@ -30,6 +30,9 @@
 #include "util_tdb.h"
 #include "librpc/gen_ndr/ndr_open_files.h"
 #include "librpc/gen_ndr/ndr_smbXsrv.h"
+#include "source3/locking/share_mode_lock.h"
+#include "source3/smbd/scavenger.h"
+#include "source3/locking/proto.h"
 
 struct wipedbs_record_marker {
 	struct wipedbs_record_marker *prev, *next;
@@ -73,6 +76,7 @@ struct wipedbs_state {
 	struct timeval now;
 	bool testmode;
 	bool verbose;
+	bool wipe_persistent;
 };
 
 static struct wipedbs_server_data *get_server_data(struct wipedbs_state *state,
@@ -104,7 +108,7 @@ static struct wipedbs_server_data *get_server_data(struct wipedbs_state *state,
 		ret->exists = true;
 		val = make_tdb_data((const void*)&ret, sizeof(ret));
 		status = dbwrap_store(state->id2server_data,
-				      key, val, TDB_INSERT);
+				      key, val, DBWRAP_INSERT);
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0, ("Failed to store server entry for %s: %s\n",
 				  idbuf.buf, nt_errstr(status)));
@@ -127,7 +131,7 @@ done:
 	return ret;
 }
 
-static int wipedbs_traverse_sessions(struct smbXsrv_session_global0 *session,
+static int wipedbs_traverse_sessions(struct smbXsrv_session_global *session,
 				     void *wipedbs_state)
 {
 	struct wipedbs_state *state =
@@ -182,7 +186,7 @@ done:
 	return ret;
 }
 
-static int wipedbs_traverse_tcon(struct smbXsrv_tcon_global0 *tcon,
+static int wipedbs_traverse_tcon(struct smbXsrv_tcon_global *tcon,
 				 void *wipedbs_state)
 {
 	struct wipedbs_state *state =
@@ -293,7 +297,7 @@ done:
 }
 
 static int wipedbs_traverse_open(struct db_record *db_rec,
-				 struct smbXsrv_open_global0 *open,
+				 struct smbXsrv_open_global *open,
 				 TDB_DATA *rc_open_global_key,
 				 void *wipedbs_state)
 {
@@ -561,6 +565,35 @@ static void wipedbs_delete_fn(
 	state->num += 1;
 }
 
+static void wipedbs_delete_locking_record(
+	struct wipedbs_delete_state *delete_state)
+{
+	struct wipedbs_record_marker *cur = delete_state->cur;
+	struct smbXsrv_open_global *global = NULL;
+	NTSTATUS status;
+	bool ok;
+
+	/* Deleting open records, also remove associated locking.tdb record */
+
+	status = smbXsrv_open_global_parse_record(cur,
+						  cur->key,
+						  cur->val,
+						  &global);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("smbXsrv_open_global_parse_record() failed\n");
+		return;
+	}
+
+	ok = share_mode_cleanup_disconnected(global->file_id,
+					     global->open_global_id,
+					     global->name_hash);
+	TALLOC_FREE(global);
+	if (!ok) {
+		DBG_ERR("locking.tdb record cleanup failed\n");
+		return;
+	}
+}
+
 static void wipedbs_delete_replay_record(
 	struct wipedbs_delete_state *delete_state)
 {
@@ -590,15 +623,15 @@ static void wipedbs_delete_replay_record(
 		return;
 	}
 
-	if (global_blob.version != SMBXSRV_VERSION_0) {
+	if (global_blob.version != SMBXSRV_VERSION_1) {
 		DBG_ERR("Unsupported open record version %u\n",
 			global_blob.version);
 		TALLOC_FREE(mem_ctx);
 		return;
 	}
 
-	status = smbXsrv_replay_cleanup(&global_blob.info.info0->client_guid,
-					&global_blob.info.info0->create_guid);
+	status = smbXsrv_replay_cleanup(&global_blob.info.info1->client_guid,
+					&global_blob.info.info1->create_guid);
 	TALLOC_FREE(mem_ctx);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("Replay record cleanup failed\n");
@@ -636,6 +669,7 @@ static int wipedbs_delete_records(struct wipedbs_state *state,
 		if (state->open_db != db) {
 			continue;
 		}
+		wipedbs_delete_locking_record(&delete_state);
 		wipedbs_delete_replay_record(&delete_state);
 	}
 
@@ -736,17 +770,45 @@ static int wipedbs_traverse_replay_records(struct db_record *rec,
 	return 0;
 }
 
+static int net_serverid_wipedbs_persistent(struct wipedbs_state *state)
+{
+	struct dbwrap_wipe_flags flags = {.wipe_persistent_backup_db=true};
+	NTSTATUS status;
+
+	status = smbXsrv_open_global_wipe(flags);
+	if (!NT_STATUS_IS_OK(status)) {
+		fprintf(stderr, "smbXsrv_open_global_wipe_persistent failed\n");
+		return -1;
+	}
+
+	status = locking_wipe(flags);
+	if (!NT_STATUS_IS_OK(status)) {
+		fprintf(stderr, "locking_wipe failed\n");
+		return -1;
+	}
+
+	status = brlock_wipe(flags);
+	if (!NT_STATUS_IS_OK(status)) {
+		fprintf(stderr, "brlock_wipe failed\n");
+		return -1;
+	}
+
+	printf("Wiped persistent file state backup databases\n");
+	return 0;
+}
+
 int net_serverid_wipedbs(struct net_context *c, int argc, const char **argv)
 {
 	int ret = -1;
 	NTSTATUS status;
+	bool ok;
 	struct wipedbs_state *state = talloc_zero(talloc_tos(),
 						  struct wipedbs_state);
 
 	if (c->display_usage) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net serverid wipedbs [--test] [--verbose]\n"));
+			 _("net serverid wipedbs [--test] [--verbose] [--persistent]\n"));
 		d_printf("%s\n%s",
 			 _("Example:"),
 			 _("net serverid wipedbs -v\n"));
@@ -756,6 +818,13 @@ int net_serverid_wipedbs(struct net_context *c, int argc, const char **argv)
 	state->now = timeval_current();
 	state->testmode = c->opt_testmode;
 	state->verbose = c->opt_verbose;
+	state->wipe_persistent = c->opt_persistent;
+
+	ok = locking_init();
+	if (!ok) {
+		DBG_ERR("Failed to open locking.tdb\n");
+		goto done;
+	}
 
 	state->id2server_data = db_open_rbt(state);
 	if (state->id2server_data == NULL) {
@@ -846,6 +915,14 @@ int net_serverid_wipedbs(struct net_context *c, int argc, const char **argv)
 		 state->stat.replay.total - state->stat.replay.todelete,
 		 state->stat.replay.todelete,
 		 state->stat.replay.failure);
+
+	if (state->wipe_persistent) {
+		ret = net_serverid_wipedbs_persistent(state);
+		if (ret != 0) {
+			fprintf(stderr, "Wiping persistent dbs failed\n");
+			goto done;
+		}
+	}
 
 	ret = 0;
 done:

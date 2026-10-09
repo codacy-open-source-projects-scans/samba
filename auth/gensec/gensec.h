@@ -30,6 +30,7 @@
 #define GENSEC_SASL_NAME_NTLMSSP "NTLM"
 
 #define GENSEC_OID_NTLMSSP "1.3.6.1.4.1.311.2.2.10"
+#define GENSEC_OID_NEGOEX "1.3.6.1.4.1.311.2.2.30"
 #define GENSEC_OID_SPNEGO "1.3.6.1.5.5.2"
 #define GENSEC_OID_KERBEROS5 "1.2.840.113554.1.2.2"
 #define GENSEC_OID_KERBEROS5_OLD "1.2.840.48018.1.2.2"
@@ -243,13 +244,11 @@ const struct gensec_security_ops *gensec_security_by_name(struct gensec_security
 const struct gensec_security_ops **gensec_security_mechs(struct gensec_security *gensec_security,
 						   TALLOC_CTX *mem_ctx);
 const struct gensec_security_ops_wrapper *gensec_security_by_oid_list(
-					struct gensec_security *gensec_security,
-					TALLOC_CTX *mem_ctx,
-					const char * const *oid_strings,
-					const char *skip);
+	struct gensec_security *gensec_security,
+	TALLOC_CTX *mem_ctx,
+	const char *const *oid_strings);
 const char **gensec_security_oids(struct gensec_security *gensec_security,
-				  TALLOC_CTX *mem_ctx,
-				  const char *skip);
+				  TALLOC_CTX *mem_ctx);
 const char **gensec_security_oids_from_ops_wrapped(TALLOC_CTX *mem_ctx,
 				const struct gensec_security_ops_wrapper *wops);
 size_t gensec_max_input_size(struct gensec_security *gensec_security);

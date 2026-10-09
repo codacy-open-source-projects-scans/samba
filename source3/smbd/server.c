@@ -54,6 +54,9 @@
 #include "locking/leases_db.h"
 #include "smbd/notifyd/notifyd.h"
 #include "smbd/smbd_cleanupd.h"
+#ifdef WITH_RATELIMITD
+#include "smbd/smbd_ratelimitd.h"
+#endif
 #include "lib/util/sys_rw.h"
 #include "cleanupdb.h"
 #include "g_lock.h"
@@ -61,6 +64,7 @@
 #include "source3/lib/substitute.h"
 #include "lib/addrchange.h"
 #include "../source4/lib/tls/tls.h"
+#include "libcli/smb/smbXcli_base.h"
 
 #ifdef HAVE_LIBQUIC
 #include <netinet/quic.h>
@@ -90,6 +94,9 @@ struct smbd_parent_context {
 
 	struct server_id cleanupd;
 	struct server_id notifyd;
+#ifdef WITH_RATELIMITD
+	struct server_id ratelimitd;
+#endif
 
 	struct tevent_timer *cleanup_te;
 
@@ -877,9 +884,193 @@ static void cleanupd_started(struct tevent_req *req)
 	}
 }
 
+/**************************************************************************
+ * ratelimitd - cluster-wide rate limit coordination daemon
+ **************************************************************************/
+#ifdef WITH_RATELIMITD
+static void ratelimitd_stopped(struct tevent_req *req)
+{
+	int ret = smbd_ratelimitd_recv(req);
+	if (ret != 0) {
+		DBG_ERR("ratelimitd stopped with error: %s\n", strerror(ret));
+	} else {
+		DBG_NOTICE("ratelimitd stopped cleanly\n");
+	}
+}
+
+static bool smbd_ratelimitd_init(struct messaging_context *msg,
+				 bool interactive,
+				 struct server_id *ppid)
+{
+	struct tevent_context *ev = messaging_tevent_context(msg);
+	struct tevent_req *req;
+	pid_t pid;
+	NTSTATUS status;
+	bool ok;
+
+	/*
+	 * Start daemon unconditionally when clustering is enabled.
+	 * VFS modules load dynamically, so we can't detect aio_ratelimit
+	 * usage at startup. When idle, daemon only waits in event loop
+	 * and broadcasts nothing.
+	 */
+	if (!lp_clustering()) {
+		DBG_DEBUG("Clustering disabled, not starting ratelimitd\n");
+		return true;
+	}
+
+	if (interactive) {
+		req = smbd_ratelimitd_send(msg, ev, msg);
+		*ppid = messaging_server_id(msg);
+		return (req != NULL);
+	}
+
+	pid = fork();
+	if (pid == -1) {
+		DBG_ERR("ratelimitd fork failed: %s\n", strerror(errno));
+		return false;
+	}
+
+	if (pid != 0) {
+		DBG_DEBUG("Started ratelimitd pid=%d\n", (int)pid);
+
+		if (am_parent != NULL) {
+			add_child_pid(am_parent, pid);
+		}
+
+		*ppid = pid_to_procid(pid);
+		return true;
+	}
+
+	status = smbd_reinit_after_fork(msg, ev, true);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("reinit_after_fork failed: %s\n", nt_errstr(status));
+		exit(1);
+	}
+
+	process_set_title("smbd-ratelimitd", "ratelimitd");
+	set_remote_machine_name("ratelimitd", false);
+
+	reopen_logs();
+
+	req = smbd_ratelimitd_send(msg, ev, msg);
+	if (req == NULL) {
+		DBG_ERR("smbd_ratelimitd_send failed\n");
+		exit(1);
+	}
+
+	tevent_req_set_callback(req, ratelimitd_stopped, msg);
+
+	ok = tevent_req_poll(req, ev);
+	if (!ok) {
+		DBG_ERR("tevent_req_poll failed: %s\n", strerror(errno));
+	}
+	exit(0);
+}
+
+static void ratelimitd_init_trigger(struct tevent_req *subreq);
+
+struct ratelimitd_init_state {
+	struct tevent_context *ev;
+	struct messaging_context *msg;
+	struct server_id *ppid;
+	bool ok;
+};
+
+static struct tevent_req *ratelimitd_init_send(struct tevent_context *ev,
+					       TALLOC_CTX *mem_ctx,
+					       struct messaging_context *msg,
+					       struct server_id *ppid)
+{
+	struct tevent_req *req = NULL;
+	struct tevent_req *subreq = NULL;
+	struct ratelimitd_init_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state, struct ratelimitd_init_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	*state = (struct ratelimitd_init_state){
+		.msg = msg,
+		.ev = ev,
+		.ppid = ppid,
+	};
+
+	subreq = tevent_wakeup_send(state,
+				    ev,
+				    tevent_timeval_current_ofs(1, 0));
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	tevent_req_set_callback(subreq, ratelimitd_init_trigger, req);
+	return req;
+}
+
+static void ratelimitd_init_trigger(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(subreq,
+							  struct tevent_req);
+	struct ratelimitd_init_state *state = tevent_req_data(
+		req, struct ratelimitd_init_state);
+	bool ok;
+
+	DBG_NOTICE("Triggering ratelimitd startup\n");
+
+	ok = tevent_wakeup_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (!ok) {
+		tevent_req_error(req, ENOMEM);
+		return;
+	}
+
+	state->ok = smbd_ratelimitd_init(state->msg, false, state->ppid);
+	if (state->ok) {
+		DBG_NOTICE("ratelimitd restarted\n");
+		tevent_req_done(req);
+		return;
+	}
+
+	DBG_NOTICE("ratelimitd startup failed, rescheduling\n");
+
+	subreq = tevent_wakeup_send(state,
+				    state->ev,
+				    tevent_timeval_current_ofs(1, 0));
+	if (tevent_req_nomem(subreq, req)) {
+		DBG_ERR("scheduling ratelimitd restart failed, giving up\n");
+		return;
+	}
+
+	tevent_req_set_callback(subreq, ratelimitd_init_trigger, req);
+	return;
+}
+
+static bool ratelimitd_init_recv(struct tevent_req *req)
+{
+	struct ratelimitd_init_state *state = tevent_req_data(
+		req, struct ratelimitd_init_state);
+
+	return state->ok;
+}
+
+static void ratelimitd_started(struct tevent_req *req)
+{
+	bool ok;
+
+	ok = ratelimitd_init_recv(req);
+	TALLOC_FREE(req);
+	if (!ok) {
+		DBG_ERR("Failed to restart ratelimitd, giving up\n");
+		return;
+	}
+}
+#endif /* WITH_RATELIMITD */
+
 static void remove_child_pid(struct smbd_parent_context *parent,
 			     pid_t pid,
-			     bool unclean_shutdown)
+			     bool unclean_shutdown,
+			     bool ignore)
 {
 	struct smbd_child_pid *child;
 	NTSTATUS status;
@@ -898,6 +1089,11 @@ static void remove_child_pid(struct smbd_parent_context *parent,
 	if (child == NULL) {
 		/* not all forked child processes are added to the children list */
 		DEBUG(2, ("Could not find child %d -- ignoring\n", (int)pid));
+		return;
+	}
+
+	if (ignore) {
+		DBG_WARNING("Ignoring exit of child %d\n", pid);
 		return;
 	}
 
@@ -938,6 +1134,28 @@ static void remove_child_pid(struct smbd_parent_context *parent,
 		tevent_req_set_callback(req, notifyd_started, parent);
 		return;
 	}
+
+#ifdef WITH_RATELIMITD
+	if (pid == procid_to_pid(&parent->ratelimitd)) {
+		struct tevent_req *req;
+		struct tevent_context *ev = messaging_tevent_context(
+			parent->msg_ctx);
+
+		server_id_set_disconnected(&parent->ratelimitd);
+
+		DBG_WARNING("Restarting ratelimitd\n");
+		req = ratelimitd_init_send(ev,
+					   parent,
+					   parent->msg_ctx,
+					   &parent->ratelimitd);
+		if (req == NULL) {
+			DBG_ERR("Failed to restart ratelimitd\n");
+			return;
+		}
+		tevent_req_set_callback(req, ratelimitd_started, parent);
+		return;
+	}
+#endif /* WITH_RATELIMITD */
 
 	ok = cleanupdb_store_child(pid, unclean_shutdown);
 	if (!ok) {
@@ -986,13 +1204,19 @@ static void smbd_sig_chld_handler(struct tevent_context *ev,
 
 	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 		bool unclean_shutdown = False;
+		bool ignore = false;
 
 		/* If the child terminated normally, assume
 		   it was an unclean shutdown unless the
 		   status is 0
 		*/
 		if (WIFEXITED(status)) {
-			unclean_shutdown = WEXITSTATUS(status);
+			int exitcode = WEXITSTATUS(status);
+			unclean_shutdown = (exitcode != 0);
+#ifdef ENABLE_SELFTEST
+			ignore = (exitcode ==
+				  SMB_SUICIDE_EXIT_STATUS_BYPASS_CLEANUP);
+#endif
 		}
 		/* If the child terminated due to a signal
 		   we always assume it was unclean.
@@ -1000,7 +1224,7 @@ static void smbd_sig_chld_handler(struct tevent_context *ev,
 		if (WIFSIGNALED(status)) {
 			unclean_shutdown = True;
 		}
-		remove_child_pid(parent, pid, unclean_shutdown);
+		remove_child_pid(parent, pid, unclean_shutdown, ignore);
 	}
 }
 
@@ -1095,7 +1319,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 	if (pid == 0) {
 		enum smb_transport_type transport_type = s->transport.type;
 		struct tstream_tls_params *quic_tlsp = NULL;
-		char addrstr[INET6_ADDRSTRLEN];
+		struct ssaddr_buf buf;
 		NTSTATUS status = NT_STATUS_OK;
 
 		if (transport_type == SMB_TRANSPORT_TYPE_QUIC) {
@@ -1138,8 +1362,8 @@ static void smbd_accept_connection(struct tevent_context *ev,
 			smb_panic("reinit_after_fork() failed");
 		}
 
-		print_sockaddr(addrstr, sizeof(addrstr), &caddr.u.ss);
-		process_set_title("smbd[%s]", "client [%s]", addrstr);
+		process_set_title("smbd[%s]", "client [%s]",
+				  ssaddr_str_buf(&caddr, &buf));
 
 		if (transport_type == SMB_TRANSPORT_TYPE_QUIC) {
 			/*
@@ -1203,15 +1427,17 @@ static void smbd_accept_connection(struct tevent_context *ev,
 	force_check_log_size();
 }
 
-static bool smbd_open_one_socket(struct smbd_parent_context *parent,
-				 struct tevent_context *ev_ctx,
-				 const struct sockaddr_storage *ifss,
-				 const struct smb_transport *transport)
+static int smbd_open_one_socket(struct smbd_parent_context *parent,
+				struct tevent_context *ev_ctx,
+				const struct sockaddr_storage *ifss,
+				const struct smb_transport *transport,
+				bool ignore_bind_errors)
 {
 	struct smbd_open_socket *s;
 	uint16_t port = 0;
 	int protocol = 0;
 	bool rebind = false;
+	int err = 0;
 
 	switch (transport->type) {
 	case SMB_TRANSPORT_TYPE_TCP:
@@ -1232,19 +1458,19 @@ static bool smbd_open_one_socket(struct smbd_parent_context *parent,
 		 * Should never happen
 		 */
 		smb_panic(__location__);
-		return false;
+		return EIO;
 	}
 
 	if (port == 0) {
 		/*
 		 * Transport not supported...
 		 */
-		return false;
+		return EPROTONOSUPPORT;
 	}
 
 	s = talloc_zero(parent, struct smbd_open_socket);
 	if (!s) {
-		return false;
+		return ENOMEM;
 	}
 
 	s->parent = parent;
@@ -1252,13 +1478,17 @@ static bool smbd_open_one_socket(struct smbd_parent_context *parent,
 
 	s->fd = open_socket_in_protocol(SOCK_STREAM, protocol, ifss, port, rebind);
 	if (s->fd < 0) {
-		int err = -(s->fd);
-		DBG_ERR("open_socket_in failed: %s\n", strerror(err));
+		err = -(s->fd);
+		DBG_ERR("open_socket_in_protocol failed: %s\n", strerror(err));
 		TALLOC_FREE(s);
 		/*
-		 * We ignore an error here, as we've done before
+		 * For historical reasons, some callers like to ignore
+		 * errors here
 		 */
-		return true;
+		if (ignore_bind_errors) {
+			return 0;
+		}
+		return err;
 	}
 
 	/* ready to listen */
@@ -1276,11 +1506,11 @@ static bool smbd_open_one_socket(struct smbd_parent_context *parent,
 	set_blocking(s->fd, False);
 
 	if (listen(s->fd, SMBD_LISTEN_BACKLOG) == -1) {
-		DEBUG(0,("smbd_open_one_socket: listen: "
-			"%s\n", strerror(errno)));
-			close(s->fd);
+		err = errno;
+		DBG_ERR("listen: %s\n", strerror(errno));
+		close(s->fd);
 		TALLOC_FREE(s);
-		return false;
+		return err;
 	}
 
 	s->fde = tevent_add_fd(ev_ctx,
@@ -1289,23 +1519,23 @@ static bool smbd_open_one_socket(struct smbd_parent_context *parent,
 			       smbd_accept_connection,
 			       s);
 	if (!s->fde) {
-		DEBUG(0,("smbd_open_one_socket: "
-			 "tevent_add_fd: %s\n",
-			 strerror(errno)));
+		err = errno;
+		DBG_ERR("tevent_add_fd: %s\n", strerror(errno));
 		close(s->fd);
 		TALLOC_FREE(s);
-		return false;
+		return err;
 	}
 	tevent_fd_set_close_fn(s->fde, smbd_open_socket_close_fn);
 
 	DLIST_ADD_END(parent->sockets, s);
 
-	return true;
+	return 0;
 }
 
-static size_t smbd_open_socket_for_ip(struct smbd_parent_context *parent,
-				      struct tevent_context *ev_ctx,
-				      const struct sockaddr_storage *ifss);
+static int smbd_open_socket_for_ip(struct smbd_parent_context *parent,
+				   struct tevent_context *ev_ctx,
+				   const struct sockaddr_storage *ifss,
+				   bool ignore_bind_errors);
 
 /****************************************************************************
  Open the socket communication.
@@ -1372,7 +1602,7 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 		for(i = 0; i < num_interfaces; i++) {
 			const struct sockaddr_storage *ifss =
 					iface_n_sockaddr_storage(i);
-			size_t num_ok;
+			int num_ok;
 
 			if (ifss == NULL) {
 				DEBUG(0,("open_sockets_smbd: "
@@ -1383,8 +1613,9 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 
 			num_ok = smbd_open_socket_for_ip(parent,
 							 ev_ctx,
-							 ifss);
-			if (num_ok != ts->num_transports) {
+							 ifss,
+							 true);
+			if ((size_t)num_ok != ts->num_transports) {
 				return false;
 			}
 		}
@@ -1402,7 +1633,7 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 		for (i = 0; i < ARRAY_SIZE(sock_addrs); i++) {
 			const char *sock_tok = sock_addrs[i];
 			struct sockaddr_storage ss;
-			size_t num_ok;
+			int num_ok;
 
 			/* open an incoming socket */
 			if (!interpret_string_addr(&ss, sock_tok,
@@ -1412,16 +1643,17 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 
 			num_ok = smbd_open_socket_for_ip(parent,
 							 ev_ctx,
-							 &ss);
+							 &ss,
+							 true);
 			if (num_ok == 0) {
 				/*
 				 * If we fail to open any sockets
-				 * in this loop the parent-sockets == NULL
+				 * in this loop the parent->sockets == NULL
 				 * case below will prevent us from starting.
 				 */
 				continue;
 			}
-			if (num_ok != ts->num_transports) {
+			if ((size_t)num_ok != ts->num_transports) {
 				return false;
 			}
 		}
@@ -1730,24 +1962,29 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
  Open socket communication on given ip address
 ****************************************************************************/
 
-static size_t smbd_open_socket_for_ip(struct smbd_parent_context *parent,
-				      struct tevent_context *ev_ctx,
-				      const struct sockaddr_storage *ifss)
+static int smbd_open_socket_for_ip(struct smbd_parent_context *parent,
+				   struct tevent_context *ev_ctx,
+				   const struct sockaddr_storage *ifss,
+				   bool ignore_bind_errors)
 {
 	const struct smb_transports *ts = &parent->transports;
-	size_t num_ok = 0;
+	int num_ok = 0;
 	uint8_t ti;
 
 	for (ti = 0; ti < ts->num_transports; ti++) {
 		const struct smb_transport *t =
 			&ts->transports[ti];
-		bool ok;
+		int ret = 0;
 
-		ok = smbd_open_one_socket(parent,
-					  ev_ctx,
-					  ifss,
-					  t);
-		if (!ok) {
+		ret = smbd_open_one_socket(parent,
+					   ev_ctx,
+					   ifss,
+					   t,
+					   ignore_bind_errors);
+		if (ret != 0) {
+			if (!ignore_bind_errors) {
+				return -ret;
+			}
 			continue;
 		}
 
@@ -1818,13 +2055,13 @@ static void smbd_close_socket_for_ip(struct smbd_parent_context *parent,
 			continue;
 		}
 		if (sockaddr_equal(&saddr.u.sa, &addr->u.sa)) {
-			char addrstr[INET6_ADDRSTRLEN];
+			struct ssaddr_buf addrstr_buf;
+			char *addrstr = ssaddr_str_buf(addr, &addrstr_buf);
 			DATA_BLOB blob;
 			NTSTATUS status;
 
 			DLIST_REMOVE(parent->sockets, s);
 			TALLOC_FREE(s);
-			print_sockaddr(addrstr, sizeof(addrstr), &addr->u.ss);
 			DBG_NOTICE("smbd: Closed listening socket for %s\n",
 				   addrstr);
 
@@ -1843,6 +2080,176 @@ static void smbd_close_socket_for_ip(struct smbd_parent_context *parent,
 	}
 }
 
+struct smbd_dynamic_open_socket_state {
+	struct smbd_parent_context *parent;
+	struct tevent_context *ev;
+	struct samba_sockaddr addr;
+	struct ssaddr_buf addrbuf;
+	unsigned int max_attempts;
+	unsigned int num_attempts;
+};
+
+static void smbd_dynamic_open_socket_attempt(struct tevent_req *subreq)
+{
+	struct smbd_dynamic_open_socket_state *state = tevent_req_callback_data(
+			subreq, struct smbd_dynamic_open_socket_state);
+	bool ok = true;
+	int num_ok = 0;
+
+	state->num_attempts++;
+	DBG_INFO("Attempt #%u for %s\n", state->num_attempts, state->addrbuf.buf);
+
+	ok = tevent_wakeup_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (!ok) {
+		DBG_WARNING("tevent_wakeup_recv() error\n");
+		TALLOC_FREE(state);
+		return;
+	}
+
+	num_ok = smbd_open_socket_for_ip(state->parent,
+					 state->ev,
+					 &state->addr.u.ss,
+					 false);
+	if (num_ok > 0) {
+		/* Success */
+		TALLOC_FREE(state);
+		return;
+	}
+
+	if (num_ok == 0) {
+		DBG_NOTICE("smbd: Unable to open socket on %s\n",
+			   state->addrbuf.buf);
+		TALLOC_FREE(state);
+		return;
+	}
+
+	if (num_ok != -EADDRNOTAVAIL) {
+		DBG_WARNING("smbd: Error opening socket on %s - %s\n",
+			    state->addrbuf.buf,
+			    strerror(-num_ok));
+		TALLOC_FREE(state);
+		return;
+	}
+
+	/* EADDRNOTAVAIL, consider retry */
+	if (state->num_attempts >= state->max_attempts) {
+		DBG_WARNING("smbd: Too many attempts opening socket on %s\n",
+			    state->addrbuf.buf);
+		TALLOC_FREE(state);
+		return;
+	}
+
+	/*
+	 * Retry
+	 */
+	subreq = tevent_wakeup_send(state,
+				    state->ev,
+				    tevent_timeval_current_ofs(0, 1000));
+	if (subreq == NULL) {
+		DBG_WARNING("scheduling next attempt failed, giving up\n");
+		TALLOC_FREE(state);
+		return;
+	}
+
+	tevent_req_set_callback(subreq, smbd_dynamic_open_socket_attempt, state);
+}
+
+/*
+ * Races have been observed between an IPv4 address being added and
+ * trying to bind(2), with EADDRNOTAVAIL returned.  Delay the first
+ * attempt to add an address by 20µs and then retry up to 10 times at
+ * 1ms intervals.
+ */
+static void smbd_dynamic_open_socket_ipv4(struct smbd_parent_context *parent,
+					  struct tevent_context *ev,
+					  struct samba_sockaddr *addr,
+					  struct ssaddr_buf *addrstr_buf)
+{
+	struct smbd_dynamic_open_socket_state *state = NULL;
+	struct tevent_req *req = NULL;
+
+	state = talloc_zero(parent, struct smbd_dynamic_open_socket_state);
+	if (state == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		return;
+	}
+
+	state->parent = parent;
+	state->ev = ev;
+	state->addr = *addr;
+	state->addrbuf = *addrstr_buf;
+	state->max_attempts = 10;
+
+	req = tevent_wakeup_send(state,
+				 state->ev,
+				 tevent_timeval_current_ofs(0, 20));
+	if (req == NULL) {
+		DBG_WARNING("scheduling initial attempt failed, giving up\n");
+		return;
+	}
+
+	tevent_req_set_callback(req, smbd_dynamic_open_socket_attempt, state);
+}
+
+#if defined(HAVE_IPV6)
+/*
+ * For IPv6, retries are not needed because an additional notification
+ * is sent when Duplicate Address Detection (DAD) completes, and
+ * bind(2) always succeeds after this notification.  However, failures
+ * are expected earlier in the process so complain more quietly about
+ * EADDRNOTAVAIL.  Also, RFC 4429 (Optimistic DAD) says:
+ *
+ *   Optimistic DAD SHOULD NOT be used for manually entered addresses.
+ *
+ * so regular DAD should be used here and a delay is always expected
+ * before the final notification.
+ *
+ * There should be no race between an address being added and trying
+ * to bind(2).
+ */
+static void smbd_dynamic_open_socket_ipv6(struct smbd_parent_context *parent,
+					  struct tevent_context *ev,
+					  struct samba_sockaddr *addr,
+					  struct ssaddr_buf *addrstr_buf)
+{
+	int num_ok = 0;
+
+	num_ok = smbd_open_socket_for_ip(parent,
+					 ev,
+					 &addr->u.ss,
+					 false);
+	if (num_ok == -EADDRNOTAVAIL) {
+		DBG_DEBUG("smbd: Address not available (DAD?) %s\n",
+			  addrstr_buf->buf);
+		return;
+	}
+	if (num_ok == 0) {
+		DBG_NOTICE("smbd: Unable to open socket on %s\n",
+			   addrstr_buf->buf);
+	}
+}
+#endif /* defined(HAVE_IPV6) */
+
+static void smbd_dynamic_open_socket(struct smbd_parent_context *parent,
+				     struct tevent_context *ev,
+				     struct samba_sockaddr *addr,
+				     struct ssaddr_buf *addrstr_buf)
+{
+	switch (addr->u.ss.ss_family) {
+	case AF_INET:
+		smbd_dynamic_open_socket_ipv4(parent, ev, addr, addrstr_buf);
+		break;
+#if defined(HAVE_IPV6)
+	case AF_INET6:
+		smbd_dynamic_open_socket_ipv6(parent, ev, addr, addrstr_buf);
+		break;
+#endif
+	default:
+		DBG_WARNING("smbd: Unknown family for %s\n", addrstr_buf->buf);
+	}
+}
+
 static void smbd_addr_changed(struct tevent_req *req)
 {
 	struct smbd_addrchanged_state *state = tevent_req_callback_data(
@@ -1851,7 +2258,9 @@ static void smbd_addr_changed(struct tevent_req *req)
 	struct samba_sockaddr addr = { .sa_socklen = 0, };
 	NTSTATUS status;
 	uint32_t if_index;
-	bool match;
+	struct ssaddr_buf addrstr_buf = { 0 };
+	char *addrstr = NULL;
+	bool is_dynamic = false;
 
 	status = addrchange_recv(req, &type, &addr.u.ss, &if_index);
 	TALLOC_FREE(req);
@@ -1862,24 +2271,23 @@ static void smbd_addr_changed(struct tevent_req *req)
 		return;
 	}
 
-	match = interface_ifindex_exists_with_options(if_index,
-						      IFACE_DYNAMIC_OPTION);
-	if (!match) {
-		DBG_NOTICE(
-			"smbd: No interface present for if_index %u "
-			"with dynamic option\n",
-			if_index);
-		goto rearm;
-	}
+	addrstr = ssaddr_str_buf(&addr, &addrstr_buf);
+	is_dynamic = interface_ifindex_exists_with_options(if_index,
+							   IFACE_DYNAMIC_OPTION);
 
 	if (type == ADDRCHANGE_DEL) {
-		char addrstr[INET6_ADDRSTRLEN];
-
-		print_sockaddr(addrstr, sizeof(addrstr), &addr.u.ss);
+		if (!is_dynamic) {
+			DBG_DEBUG("smbd: kernel (AF_NETLINK) dropped ip %s "
+				  "on if_index %u (not dynamic)\n",
+				  addrstr,
+				  if_index);
+			goto rearm;
+		}
 
 		DBG_NOTICE("smbd: kernel (AF_NETLINK) dropped ip %s "
 			   "on if_index %u\n",
-			   addrstr, if_index);
+			   addrstr,
+			   if_index);
 
 		smbd_close_socket_for_ip(state->parent, state->msg_ctx, &addr);
 
@@ -1887,23 +2295,25 @@ static void smbd_addr_changed(struct tevent_req *req)
 	}
 
 	if (type == ADDRCHANGE_ADD) {
-		char addrstr[INET6_ADDRSTRLEN];
-		size_t num_ok;
-
-		print_sockaddr(addrstr, sizeof(addrstr), &addr.u.ss);
+		if (!is_dynamic) {
+			DBG_DEBUG("smbd: kernel (AF_NETLINK) added ip %s "
+				  "on if_index %u (not dynamic)\n",
+				  addrstr,
+				  if_index);
+			goto rearm;
+		}
 
 		DBG_NOTICE("smbd: kernel (AF_NETLINK) added ip %s "
 			   "on if_index %u\n",
-			   addrstr, if_index);
+			   addrstr,
+			   if_index);
 
-		num_ok = smbd_open_socket_for_ip(state->parent,
-						 state->ev,
-						 &addr.u.ss);
-		if (num_ok == 0) {
-			DBG_NOTICE("smbd: Unable to open socket on %s\n",
-				   addrstr);
-		}
+		smbd_dynamic_open_socket(state->parent,
+					 state->ev,
+					 &addr,
+					 &addrstr_buf);
 	}
+
 rearm:
 	req = addrchange_send(state, state->ev, state->ctx);
 	if (req == NULL) {
@@ -2432,13 +2842,6 @@ quic_disabled:
 		exit_daemon("Samba cannot init notification", EACCES);
 	}
 
-	if (!cleanupd_init(
-		    msg_ctx,
-		    cmdline_daemon_cfg->interactive,
-		    &parent->cleanupd)) {
-		exit_daemon("Samba cannot init the cleanupd", EACCES);
-	}
-
 	if (!messaging_parent_dgm_cleanup_init(msg_ctx)) {
 		exit(1);
 	}
@@ -2446,6 +2849,23 @@ quic_disabled:
 	if (!smbd_scavenger_init(NULL, msg_ctx, ev_ctx)) {
 		exit_daemon("Samba cannot init scavenging", EACCES);
 	}
+
+	if (!cleanupd_init(
+		    msg_ctx,
+		    cmdline_daemon_cfg->interactive,
+		    &parent->cleanupd)) {
+		exit_daemon("Samba cannot init the cleanupd", EACCES);
+	}
+
+#ifdef WITH_RATELIMITD
+	if (!smbd_ratelimitd_init(msg_ctx,
+				  cmdline_daemon_cfg->interactive,
+				  &parent->ratelimitd))
+	{
+		DBG_WARNING("ratelimitd init failed, "
+			    "cluster rate limiting will not be available\n");
+	}
+#endif /* WITH_RATELIMITD */
 
 	if (!W_ERROR_IS_OK(registry_init_full()))
 		exit_daemon("Samba cannot init registry", EACCES);

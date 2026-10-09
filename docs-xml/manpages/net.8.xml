@@ -375,8 +375,9 @@
 
 		<varlistentry>
 		<term>--json</term>
-		<listitem><para>Report results in JSON format for
-		"net ads info" and "net ads lookup".
+		<listitem><para>Report results in JSON format. Supported by
+		"net ads info", "net ads lookup", and all "net clusterlevel"
+		subcommands (features, show, showall, upgrade).
 		</para></listitem>
 		</varlistentry>
 
@@ -562,7 +563,7 @@ The remote server must be specified with the -S option.
 <refsect2>
 <title>[RPC|ADS] JOIN [TYPE] [--no-dns-updates] [-U username[%password]]
 [dnshostname=FQDN] [createupn=UPN] [createcomputer=OU] [machinepass=PASS]
-[osName=string osVer=string] [options]</title>
+[osName=string osVer=string] [DOMAIN] [options]</title>
 
 <para>
 Join a domain.  If the account already exists on the server, and
@@ -572,7 +573,7 @@ Otherwise, a password will be prompted for, and a new account may
 be created.</para>
 
 <para>
-[TYPE] may be PDC, BDC or MEMBER to specify the type of server
+[TYPE] (RPC only) may be PDC, BDC or MEMBER to specify the type of server
 joining the domain.
 </para>
 
@@ -601,6 +602,11 @@ being created by the join.
 [osName=string osVer=String] (ADS only) Set the operatingSystem and
 operatingSystemVersion attribute during the join.  Both parameters
 must be specified for either to take effect.
+</para>
+
+<para>
+[DOMAIN] (ADS only) The optional domain to be joined, the default
+is taken from smb.conf.
 </para>
 </refsect2>
 
@@ -2670,13 +2676,16 @@ standard output.
 <para>
 This command imports configuration from a file in smb.conf format.
 If a section encountered in the input file is present in registry,
-its contents is replaced. Sections of registry configuration that have
-no counterpart in the input file are not affected. If you want to delete these,
-you will have to use the "net conf drop" or "net conf delshare" commands.
-Optionally, a section may be specified to restrict the effect of the
-import command to that specific section. A test mode is enabled by specifying
-the parameter "-T" on the commandline. In test mode, no changes are made to the
-registry, and the resulting configuration is printed to standard output instead.
+its contents are replaced. However, when no section (share name)
+is specified on the command line, the existing registry configuration
+is first cleared and then re-populated entirely from the input file.
+Sections of registry configuration that have no counterpart in the
+input file are not retained in this case. If a section is specified
+on the command line, the import operation is limited to that specific
+section, and only that section is replaced. A test mode is enabled
+by specifying the parameter "-T" on the commandline. In test mode, no changes
+are made to the registry, and the resulting configuration is printed
+to standard output instead.
 </para>
 </refsect3>
 
@@ -3921,6 +3930,92 @@ net witness force-response   Force an AsyncNotify response based on json input (
 </refsect2>
 
 <refsect2>
+<title>CLUSTERLEVEL</title>
+
+<para>Starting with version 4.25 Samba has support for cluster functional levels.
+</para>
+
+<para>The following CLUSTERLEVEL commands are implemented:
+<simplelist>
+<member>
+net clusterlevel features [--json]  List the supported features.
+</member>
+<member>
+net clusterlevel show [--json]      Show the currently active cluster functional level.
+</member>
+<member>
+net clusterlevel showall [--json]   Show details about the whole cluster.
+</member>
+<member>
+net clusterlevel upgrade [--test] [--apply] [--json]   Upgrade the cluster functional level to the highest supported level.
+</member>
+
+</simplelist>
+</para>
+
+<refsect3>
+<title>clusterlevel features [--json]</title>
+<para>
+    List the compile time supported cluster features, including whether
+    clustering support is available and the supported cluster functional
+    level ranges. Does not require clustering=yes or a running ctdbd.
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>clusterlevel show [--json]</title>
+<para>
+    Show the currently active cluster functional level.
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>clusterlevel showall [--json]</title>
+<para>
+    Show details about the whole cluster. It shows the supported
+    cluster functional level ranges for each node.
+    Together with the currently active cluster functional level
+    and highest supported level.
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>clusterlevel upgrade [--test] [--apply] [--json]</title>
+<para>
+    Upgrade the cluster functional level to the highest supported level
+    all nodes agree. Currently the code is very strict and allows
+    an upgrade only if all nodes provide the exact same supported
+    level ranges.
+</para>
+<para>Options for upgrade:</para>
+<para>        --test</para>
+<para>            Only check if the upgrade would be possible.</para>
+<para>        --apply</para>
+<para>            Do a real upgrade that's persistent without a way back.</para>
+<para>
+    Note: --test is the default if no argument is given.
+</para>
+<para>
+    Note: only one of --test or --apply is allowed.
+</para>
+<para>
+    Note: Only supported with clustering=yes!
+</para>
+
+</refsect3>
+
+</refsect2>
+
+<refsect2>
   <title>serverid</title>
   <para>Check existence of a serverid and clean stale entries from fileserver
   state databases.</para>
@@ -3944,6 +4039,8 @@ net witness force-response   Force an AsyncNotify response based on json input (
   <para>            Only check for stale entries and log them</para>
   <para>        --verbose</para>
   <para>            Produce verbose logging</para>
+  <para>        --persistent</para>
+  <para>            Wipe persistent backup databases</para>
 </refsect3>
 
 

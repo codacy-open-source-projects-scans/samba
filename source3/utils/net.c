@@ -937,6 +937,14 @@ static struct functable net_func[] = {
 		   "'net witness' commands.")
 	},
 
+	{	"clusterlevel",
+		net_cluster_level,
+		NET_TRANSPORT_LOCAL,
+		N_("Manage cluster functional level"),
+		N_("  Use 'net help clusterlevel' to get more information about "
+		   "'net clusterlevel' commands.")
+	},
+
 #ifdef WITH_FAKE_KASERVER
 	{	"afs",
 		net_afs,
@@ -1088,6 +1096,12 @@ static struct functable net_func[] = {
 			.shortName  = 'T',
 			.argInfo    = POPT_ARG_NONE,
 			.arg        = &c->opt_testmode,
+		},
+		{
+			.longName   = "apply",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &c->opt_apply,
 		},
 		/* Options for 'net groupmap set' */
 		{
@@ -1320,6 +1334,13 @@ static struct functable net_func[] = {
 			.shortName  = 0,
 			.argInfo    = POPT_ARG_STRING,
 			.arg        = &c->opt_witness_forced_response,
+		},
+		/* Options for wipedbs */
+		{
+			.longName   = "persistent",
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &c->opt_persistent,
+			.descrip    = "Wipe persistent backup databases",
 		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_CONNECTION

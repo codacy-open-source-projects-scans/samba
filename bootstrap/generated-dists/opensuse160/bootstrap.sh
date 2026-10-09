@@ -68,6 +68,7 @@ zypper --non-interactive install \
     libunwind-devel \
     liburing-devel \
     libuuid-devel \
+    libxcrypt-devel \
     libxslt \
     lmdb \
     lmdb-devel \
@@ -97,7 +98,6 @@ zypper --non-interactive install \
     python3-policycoreutils \
     python3-pyasn1 \
     python3-python-dateutil \
-    python3-requests \
     python3-semanage \
     python3-setproctitle \
     readline-devel \

@@ -421,11 +421,11 @@ static bool load_auth_module(
 {
 	static bool initialised_static_modules = False;
 
-	struct auth_init_function_entry *entry;
-	char *module_name = smb_xstrdup(module);
+	struct auth_init_function_entry *entry = NULL;
+	char module_name[strlen(module) + 1];
 	char *module_params = NULL;
-	char *p;
-	bool good = False;
+	char *p = NULL;
+	NTSTATUS status;
 
 	/* Initialise static modules if not done so yet */
 	if(!initialised_static_modules) {
@@ -433,8 +433,9 @@ static bool load_auth_module(
 		initialised_static_modules = True;
 	}
 
-	DEBUG(5,("load_auth_module: Attempting to find an auth method to match %s\n",
-		 module));
+	DBG_INFO("Attempting to find an auth method to match %s\n", module);
+
+	memcpy(module_name, module, sizeof(module_name));
 
 	p = strchr(module_name, ':');
 	if (p) {
@@ -453,21 +454,21 @@ static bool load_auth_module(
 		}
 	}
 
-	if (entry != NULL) {
-		if (!NT_STATUS_IS_OK(entry->init(auth_context, module_params, ret))) {
-			DEBUG(0,("load_auth_module: auth method %s did not correctly init\n",
-				 module_name));
-		} else {
-			DEBUG(5,("load_auth_module: auth method %s has a valid init\n",
-				 module_name));
-			good = True;
-		}
-	} else {
-		DEBUG(0,("load_auth_module: can't find auth method %s!\n", module_name));
+	if (entry == NULL) {
+		DBG_ERR("can't find auth method %s!\n", module_name);
+		return false;
 	}
 
-	SAFE_FREE(module_name);
-	return good;
+	status = entry->init(auth_context, module_params, ret);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("auth method %s did not correctly init %s\n",
+			module_name,
+			nt_errstr(status));
+		return false;
+	}
+
+	DBG_INFO("auth method %s has a valid init\n", module_name);
+	return true;
 }
 
 /***************************************************************************

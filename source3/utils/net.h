@@ -69,6 +69,7 @@ struct net_context {
 	const char *opt_exclude;
 	const char *opt_destination;
 	int opt_testmode;
+	int opt_apply;
 	int opt_force_full_repl;
 	int legacy_opt_ccache;
 	int opt_single_obj_repl;
@@ -98,6 +99,7 @@ struct net_context {
 	int opt_witness_new_node;
 	const char *opt_witness_forced_response;
 	const char *opt_krb5_ccache;
+	int opt_persistent;
 
 	int opt_have_ip;
 	struct sockaddr_storage opt_dest_ip;

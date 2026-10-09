@@ -3510,10 +3510,13 @@ int main(int argc, char *argv[])
 
 	DEBUG( 3, ( "Client started (version %s).\n", SAMBA_VERSION_STRING ) );
 
-	if (query_host && (p=strchr_m(query_host,'#'))) {
-		*p = 0;
-		p++;
-		sscanf(p, "%x", &name_type);
+	if (query_host) {
+		p = discard_const_p(char, strchr_m(query_host, '#'));
+		if (p) {
+			*p = 0;
+			p++;
+			sscanf(p, "%x", &name_type);
+		}
 	}
 
 	if (query_host) {
@@ -3527,14 +3530,14 @@ int main(int argc, char *argv[])
 				   dest_ip,
 				   name_type, ev_ctx,
 				   lp_ctx,
-				   lpcfg_resolve_context(lp_ctx),
+				   lpcfg_resolve_context(lp_ctx, ctx),
 				   &smb_options,
                    lpcfg_socket_options(lp_ctx));
 		goto done;
 	}
 
 	if (!do_connect(ctx, ev_ctx, lp_ctx,
-			lpcfg_resolve_context(lp_ctx),
+			lpcfg_resolve_context(lp_ctx, ctx),
 			desthost, service,
 			lpcfg_socket_options(lp_ctx),
 			creds,

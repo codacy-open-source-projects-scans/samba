@@ -60,6 +60,7 @@
 
 #include "lib/util/debug.h"
 #include "lib/util/blocking.h"
+#include "lib/util/samba_sockaddr.h"
 
 #include "protocol/protocol.h"
 #include "protocol/protocol_util.h"
@@ -266,133 +267,405 @@ static uint16_t ip6_checksum(uint8_t *data, size_t n, struct ip6_hdr *ip6)
  * Send gratuitous ARP request/reply or IPv6 neighbor advertisement
  */
 
+/* For readability */
+#undef CTDB_CAN_SEND_ARPS
 #ifdef HAVE_PACKETSOCKET
+#ifdef HAVE_GETIFADDRS
+#ifdef HAVE_IF_NAMETOINDEX
+#define CTDB_CAN_SEND_ARPS
+#endif
+#endif
+#endif
+
+#ifdef CTDB_CAN_SEND_ARPS
+
+static inline socklen_t sall_len(struct sockaddr_ll *sll)
+{
+	/*
+	 * To support larger hardware addresses in future, this really
+	 * wants to be the 2nd calculation below, which accommodates
+	 * 20 octet IPoIB link-level addresses (which do not fit into
+	 * a struct sockaddr_ll).  However, for Ethernet that gives an
+	 * answer smaller than sizeof(struct sockaddr_ll), which
+	 * causes operations on an AF_PACKET socket to fail with
+	 * EINVAL.
+	 */
+	socklen_t len = MAX(sizeof(struct sockaddr_ll),
+			    offsetof(struct sockaddr_ll, sll_addr) +
+			    sll->sll_halen);
+	return len;
+}
+
+/*
+ * Find an interface using getifaddrs(3)
+ *
+ * The goal here is to support at least Ethernet and IPoIB (RFC 4391).
+ *
+ * We need to be able to get link-level (hardware) addresses and IPoIB
+ * link-level addresses are 20 octets.
+ *
+ * ioctl(2) SIOCGIFHWADDR will get link-level addresses but it uses
+ * struct sockaddr, which only has space for 14 octets of address.
+ * There appears to be no way to use more space.
+ *
+ * Instead, we use getifaddrs(3).  struct ifaddrs uses pointers
+ * (apparently) to struct sockaddr.  Nevertheless, it seems more space
+ * is actually allocated (perhaps struct sockaddr_storage?).
+ * Similarly, struct sockaddr_ll, used for link-level (i.e. hardware)
+ * addresses has only 8 octets of address space.  Therefore, struct
+ * samba_sockaddr is used for allocations, with appropriate casts
+ * throughout.
+ */
+
+static bool check_hwaddr(struct sockaddr *sa, unsigned int index)
+{
+	struct sockaddr_ll *sall = NULL;
+
+	/*
+	 * getifaddrs(3): This field (ifa_addr) may contain a null
+	 * pointer
+	 */
+	if (sa == NULL) {
+		return false;
+	}
+
+	/* Want struct sockaddr_ll, as per packet(7) */
+	if (sa->sa_family != AF_PACKET) {
+		return false;
+	}
+
+	sall = (struct sockaddr_ll *)sa;
+
+	/*
+	 * if_nametoindex(3) returns unsigned int but sll_ifindex is
+	 * int!
+	 */
+	if ((int)index != sall->sll_ifindex) {
+		return false;
+	}
+
+	if (sall->sll_halen == 0) {
+		return false;
+	}
+
+	return true;
+}
+
+static int find_interface(const char *name,
+			  struct samba_sockaddr *hardware_addr,
+			  struct samba_sockaddr *broadcast_addr)
+{
+	unsigned int index = 0;
+	struct ifaddrs *ifa = NULL;
+	struct ifaddrs *t = NULL;
+	bool ok = false;
+	int ret = 0;
+
+	/*
+	 * Matching will be done by index.
+	 *
+	 * Interface altname properties (altnames) are a method of
+	 * providing alternative names for a network interface (see
+	 * ip-link(8)). They can be used to provide some useful
+	 * flexibility across cluster nodes where interface name
+	 * different and dealing with udev is too bothersome..
+	 *
+	 * getifaddrs(3) only returns the primary name for each
+	 * interface.  If matching is done by name then only a primary
+	 * interface name can be matched, so altnames would not be
+	 * supported.  The key here is that if_nametoindex() works for
+	 * altnames, so matching on the returned index means that
+	 * altnames are supported by this function.
+	 */
+	index = if_nametoindex(name);
+	if (index == 0) {
+		return ENODEV;
+	}
+
+	ret = getifaddrs(&ifa);
+	if (ret == -1) {
+		ret = errno;
+		fprintf(stderr, "Unable to get interface list (%d)\n", ret);
+		return ret;
+	}
+
+	for (t = ifa; t != NULL; t = t->ifa_next) {
+		unsigned int want_flags = IFF_UP | IFF_BROADCAST;
+		unsigned int check_flags = want_flags | IFF_NOARP | IFF_LOOPBACK;
+
+		/*
+		 * Check the address to ensure this is an AF_PACKET
+		 * socket and matches the required index before
+		 * allowing soft-failure for loopback/non-arpable
+		 */
+		ok = check_hwaddr(t->ifa_addr, index);
+		if (!ok) {
+			continue;
+		}
+
+		/* Should be up, with broadcast address, arpable, not loopback */
+		if ((t->ifa_flags & check_flags) != want_flags) {
+			/*
+			 * The interface was found but it isn't one
+			 * that we can ARP on...
+			 */
+			ret = ENXIO;
+			goto done;
+		}
+
+		ok = check_hwaddr(t->ifa_ifu.ifu_broadaddr, index);
+		if (!ok) {
+			continue;
+		}
+
+		hardware_addr->sa_socklen =
+			sall_len((struct sockaddr_ll *)t->ifa_addr);
+		memcpy(&hardware_addr->u.ll,
+		       t->ifa_addr,
+		       hardware_addr->sa_socklen);
+		broadcast_addr->sa_socklen =
+			sall_len((struct sockaddr_ll *)t->ifa_broadaddr);
+		memcpy(&broadcast_addr->u.ll,
+		       t->ifa_broadaddr,
+		       broadcast_addr->sa_socklen);
+
+		ret = 0;
+		goto done;
+	}
+	ret = ENODEV;
+
+done:
+	freeifaddrs(ifa);
+	return ret;
+}
 
 /*
  * Create IPv4 ARP requests/replies or IPv6 neighbour advertisement
  * packets
  */
 
-#define ARP_STRUCT_SIZE sizeof(struct ether_header) + \
-			sizeof(struct ether_arp)
+/*
+ * Some link-level addresses are bigger than a sockaddr_ll.  However,
+ * they must fit into a samba_sockaddr, so determine the maximum
+ * possible size.
+ */
+#define SOCKADDR_LL_ADDR_LEN						\
+	sizeof(struct samba_sockaddr) - offsetof(struct sockaddr_ll, sll_addr)
 
-#define IP6_NA_STRUCT_SIZE sizeof(struct ether_header) + \
-			   sizeof(struct ip6_hdr) + \
-			   sizeof(struct nd_neighbor_advert) + \
-			   sizeof(struct nd_opt_hdr) + \
-			   sizeof(struct ether_addr)
+#define ARP_BUFFER_SIZE				  \
+	sizeof(struct arphdr) +			  \
+	SOCKADDR_LL_ADDR_LEN +			  \
+	sizeof(struct in_addr) +		  \
+	SOCKADDR_LL_ADDR_LEN +			  \
+	sizeof(struct in_addr)
 
-#define ARP_BUFFER_SIZE MAX(ARP_STRUCT_SIZE, 64)
-
-#define IP6_NA_BUFFER_SIZE MAX(IP6_NA_STRUCT_SIZE, 64)
+/* This will need to be enlarged if more options are added */
+#define IP6_NA_BUFFER_SIZE				       \
+	sizeof(struct ip6_hdr) +			       \
+	sizeof(struct nd_neighbor_advert) +		       \
+	sizeof(struct nd_opt_hdr) +			       \
+	SOCKADDR_LL_ADDR_LEN
 
 static int arp_build(uint8_t *buffer,
 		     size_t buflen,
 		     const struct sockaddr_in *addr,
-		     const struct ether_addr *hwaddr,
-		     bool reply,
-		     struct ether_addr **ether_dhost,
+		     const struct sockaddr_ll *hardware_addr,
+		     uint16_t arpop,
 		     size_t *len)
 {
-	size_t l = ARP_BUFFER_SIZE;
-	struct ether_header *eh;
-	struct ether_arp *ea;
+	size_t l = 0;
+	uint8_t *p = NULL;
 	struct arphdr *ah;
 
 	if (addr->sin_family != AF_INET) {
 		return EINVAL;
 	}
 
+	switch (arpop) {
+	case ARPOP_REQUEST:
+	case ARPOP_REPLY:
+		break;
+	default:
+		DBG_ERR("Internal error: invalid op=%" PRIu32 "\n", arpop);
+		return EINVAL;
+	};
+
+	/*
+	 * Could avoid this by checking for overflow after writing
+	 * each field, but this feels simpler... and it provides a
+	 * summary of the layout, which won't change because it is
+	 * standard.
+	 */
+	l = sizeof(struct arphdr) +
+		hardware_addr->sll_halen +
+		sizeof(addr->sin_addr) +
+		hardware_addr->sll_halen +
+		sizeof(addr->sin_addr);
 	if (buflen < l) {
 		return EMSGSIZE;
 	}
 
 	memset(buffer, 0 , l);
 
-	eh = (struct ether_header *)buffer;
-	memset(eh->ether_dhost, 0xff, ETH_ALEN);
-	memcpy(eh->ether_shost, hwaddr, ETH_ALEN);
-	eh->ether_type = htons(ETHERTYPE_ARP);
-
-	ea = (struct ether_arp *)(buffer + sizeof(struct ether_header));
-	ah = &ea->ea_hdr;
-	ah->ar_hrd = htons(ARPHRD_ETHER);
+	p = buffer;
+	ah = (struct arphdr *)p;
+	ah->ar_hrd = htons(hardware_addr->sll_hatype);
 	ah->ar_pro = htons(ETH_P_IP);
-	ah->ar_hln = ETH_ALEN;
-	ah->ar_pln = sizeof(ea->arp_spa);
+	ah->ar_hln = hardware_addr->sll_halen;
+	ah->ar_pln = sizeof(addr->sin_addr);
+	ah->ar_op = htons(arpop);
+	p += sizeof(struct arphdr);
 
-	if (! reply) {
-		ah->ar_op  = htons(ARPOP_REQUEST);
-		memcpy(ea->arp_sha, hwaddr, ETH_ALEN);
-		memcpy(ea->arp_spa, &addr->sin_addr, sizeof(ea->arp_spa));
-		memset(ea->arp_tha, 0, ETH_ALEN);
-		memcpy(ea->arp_tpa, &addr->sin_addr, sizeof(ea->arp_tpa));
+	memcpy(p, &hardware_addr->sll_addr, hardware_addr->sll_halen);
+	p += hardware_addr->sll_halen;
+	memcpy(p, &addr->sin_addr, sizeof(addr->sin_addr));
+	p += sizeof(addr->sin_addr);
+	if (arpop == ARPOP_REQUEST) {
+		/* Field must be all 0s - already done by memset() above */
 	} else {
-		ah->ar_op  = htons(ARPOP_REPLY);
-		memcpy(ea->arp_sha, hwaddr, ETH_ALEN);
-		memcpy(ea->arp_spa, &addr->sin_addr, sizeof(ea->arp_spa));
-		memcpy(ea->arp_tha, hwaddr, ETH_ALEN);
-		memcpy(ea->arp_tpa, &addr->sin_addr, sizeof(ea->arp_tpa));
+		memcpy(p, hardware_addr->sll_addr, hardware_addr->sll_halen);
+	}
+	p += hardware_addr->sll_halen;
+	memcpy(p, &addr->sin_addr, sizeof(addr->sin_addr));
+
+	*len = l;
+	return 0;
+}
+
+static int ip6_ll_multicast_build(struct sockaddr_ll *in,
+				  struct samba_sockaddr *out)
+{
+	/*
+	 * Ethernet multicast: 33:33:00:00:00:01 (see RFC2464, section
+	 * 7) - 1st 2 octets are 0x3333, final 4 are the last 4 of the
+	 * IPv6 address (see all_nodes_ll_multicast in ip6_na_build())
+	 */
+	const uint8_t ethernet_multicast[ETH_ALEN] = {
+		0x33, 0x33, 0x00, 0x00, 0x00, 0x01
+	};
+	uint8_t *in_sll_addr = (uint8_t *)in + offsetof(struct sockaddr_ll,
+							sll_addr);
+	struct sockaddr_ll *out_ll = &out->u.ll;
+	uint8_t *out_sll_addr =
+		(uint8_t *)&out->u.ss + offsetof(struct sockaddr_ll, sll_addr);
+
+	*out_ll = (struct sockaddr_ll) {
+		.sll_family = AF_PACKET,
+		.sll_halen = in->sll_halen,
+		.sll_protocol = htons(ETH_P_IPV6),
+		.sll_ifindex = in->sll_ifindex,
+	};
+
+	switch (in->sll_hatype) {
+	case ARPHRD_ETHER:
+		if (SOCKADDR_LL_ADDR_LEN < sizeof(ethernet_multicast)) {
+			return EMSGSIZE;
+		}
+		memcpy(&out_sll_addr[0],
+		       ethernet_multicast,
+		       sizeof(ethernet_multicast));
+		break;
+	case ARPHRD_INFINIBAND:
+		/*
+		 * RFC4391 and RFC4392 both mention (in passing!) that
+		 * the IPoIB link-layer address is 20 octets, so
+		 * insist on that.
+		 */
+		if (in->sll_halen != 20) {
+			return EINVAL;
+		}
+
+		/*
+		 * IPoIB Multicast Mapping is specified in RFC4391,
+		 * section 4.
+		 *
+		 * Comparing examples in
+		 * /sys/kernel/debug/ipoib/ib0_mcg, which includes the
+		 * following GIDs:
+		 *
+		 * - ff12:401b:ffff:0:0:0:ffff:ffff
+		 * - ff12:601b:ffff:0:0:0:0:1
+		 *
+		 * with the broadcast address on interface ib0:
+		 *
+		 * 00:ff:ff:ff:ff:12:40:1b:ff:ff:00:00:00:00:00:00:ff:ff:ff:ff
+		 *
+		 * The broadcast address is the IPv4 multicast group
+		 * GID (note IPoIB signature 0x401b for IPv4),
+		 * prefixed with 00:ff:ff:ff (no idea what the prefix
+		 * means).
+		 *
+		 * Given that RFC4391 says:
+		 *
+		 *   The same mapping function is used for both IPv4
+		 *   and IPv6 except for the IPoIB signature field.
+		 *
+		 * this should mean we should be able to convert the
+		 * IPv4 broadcast address to an IPv6 multicast address
+		 * by changing the IPoIB signature to 0x601b and the
+		 * last 4 octets to 00:00:00:01.  As in the equivalent
+		 * Ethernet multicast address, the last 4 octets
+		 * appear to be the last 4 octets of the IPv6
+		 * multicast address (see all_nodes_ll_multicast).
+		 */
+		memcpy(&out_sll_addr[0], &in_sll_addr[0], in->sll_halen);
+		out_sll_addr[6] = 0x60;
+		out_sll_addr[16] = 0x00;
+		out_sll_addr[17] = 0x00;
+		out_sll_addr[18] = 0x00;
+		out_sll_addr[19] = 0x01;
+		break;
+	default:
+		return EPROTONOSUPPORT;
 	}
 
-	*ether_dhost = (struct ether_addr *)eh->ether_dhost;
-	*len = l;
+	out->sa_socklen = sall_len(out_ll);
 	return 0;
 }
 
 static int ip6_na_build(uint8_t *buffer,
 			size_t buflen,
 			const struct sockaddr_in6 *addr,
-			const struct ether_addr *hwaddr,
-			struct ether_addr **ether_dhost,
+			const struct sockaddr_ll *hardware_addr,
 			size_t *len)
 {
-	size_t l = IP6_NA_BUFFER_SIZE;
-	struct ether_header *eh;
 	struct ip6_hdr *ip6;
+	/*
+	 * IPv6 all nodes link-level multicast address: (see RFC2373,
+	 * section 2.7.1)
+	 */
+	const char *all_nodes_ll_multicast = "ff02::1";
 	struct nd_neighbor_advert *nd_na;
 	struct nd_opt_hdr *nd_oh;
-	struct ether_addr *ea;
+	uint8_t *p = NULL;
+	size_t leftover = 0;
+	size_t padding = 0;
 	int ret;
 
 	if (addr->sin6_family != AF_INET6) {
 		return EINVAL;
 	}
 
-	if (buflen < l) {
+	if (buflen < IP6_NA_BUFFER_SIZE) {
 		return EMSGSIZE;
 	}
 
-	memset(buffer, 0 , l);
+	memset(buffer, 0 , buflen);
 
-	eh = (struct ether_header *)buffer;
-	/*
-	 * Ethernet multicast: 33:33:00:00:00:01 (see RFC2464,
-	 * section 7) - note memset 0 above!
-	 */
-	eh->ether_dhost[0] = 0x33;
-	eh->ether_dhost[1] = 0x33;
-	eh->ether_dhost[5] = 0x01;
-	memcpy(eh->ether_shost, hwaddr, ETH_ALEN);
-	eh->ether_type = htons(ETHERTYPE_IP6);
-
-	ip6 = (struct ip6_hdr *)(buffer + sizeof(struct ether_header));
+	ip6 = (struct ip6_hdr *)buffer;
 	ip6->ip6_vfc  = 6 << 4;
-	ip6->ip6_plen = htons(sizeof(struct nd_neighbor_advert) +
-			      sizeof(struct nd_opt_hdr) +
-			      ETH_ALEN);
+	/* ip6->ip6_plen set below, before checksum calculation */
 	ip6->ip6_nxt  = IPPROTO_ICMPV6;
 	ip6->ip6_hlim = 255;
 	ip6->ip6_src  = addr->sin6_addr;
-	/* all-nodes multicast */
 
-	ret = inet_pton(AF_INET6, "ff02::1", &ip6->ip6_dst);
+	ret = inet_pton(AF_INET6, all_nodes_ll_multicast, &ip6->ip6_dst);
 	if (ret != 1) {
+		/* Can't happen */
 		return EIO;
 	}
 
 	nd_na = (struct nd_neighbor_advert *)(buffer +
-					      sizeof(struct ether_header) +
 					      sizeof(struct ip6_hdr));
 	nd_na->nd_na_type = ND_NEIGHBOR_ADVERT;
 	nd_na->nd_na_code = 0;
@@ -401,196 +674,241 @@ static int ip6_na_build(uint8_t *buffer,
 
 	/* Option: Target link-layer address */
 	nd_oh = (struct nd_opt_hdr *)(buffer +
-				      sizeof(struct ether_header) +
 				      sizeof(struct ip6_hdr) +
 				      sizeof(struct nd_neighbor_advert));
 	nd_oh->nd_opt_type = ND_OPT_TARGET_LINKADDR;
-	nd_oh->nd_opt_len = 1;  /* multiple of 8 octets */
 
-	ea = (struct ether_addr *)(buffer +
-				   sizeof(struct ether_header) +
-				   sizeof(struct ip6_hdr) +
-				   sizeof(struct nd_neighbor_advert) +
-				   sizeof(struct nd_opt_hdr));
-	memcpy(ea, hwaddr, ETH_ALEN);
+	/* Hardware address goes here */
+	p = buffer +
+		sizeof(struct ip6_hdr) +
+		sizeof(struct nd_neighbor_advert) +
+		sizeof(struct nd_opt_hdr);
+
+	/*
+	 * RFC 4861: The length of the option (including the type and
+	 * length fields) in units of 8 octets.  For example, the
+	 * length for IEEE 802 addresses is 1.
+	 *
+	 * That is, nd_opt_type and nd_opt_len are 1 octet each, and
+	 * an Ethernet address is 6 octets, for a total of 8 octets.
+	 * So, nd_opt_len is 1 for Ethernet.
+	 *
+	 * For IPoIB (according to RFC 4391) this should be 3 so it
+	 * can fit 20 octets of IPoIB hardware address (plus
+	 * nd_opt_type & nd_opt_len).  So, for IPoIB, 3 * 8 = 24
+	 * octets of space is allocated.  However, the IPoIB hardware
+	 * address + nd_opt_type + nd_opt_len only fills 22 octets.
+	 * So, RFC 4391 says to prepend 2 zeroes to the hardware
+	 * address.  Once again, generalise this so it works for at
+	 * least Ethernet and IPoIB.
+	 *
+	 * There is probably a cleverer way of writing the following,
+	 * but listen to Kernighan's Law and aim for clarity.
+	 */
+	nd_oh->nd_opt_len = (2 + hardware_addr->sll_halen) / 8;
+	leftover = (2 + hardware_addr->sll_halen) % 8;
+	padding = 0;
+	if (leftover != 0) {
+		nd_oh->nd_opt_len += 1;
+		padding = 8 - leftover;
+		memset(p, 0, padding);
+		p += padding;
+	}
+
+	memcpy(p, hardware_addr->sll_addr, hardware_addr->sll_halen);
+	p += hardware_addr->sll_halen;
+
+	/*
+	 * This is either buried down here (with a helpful comment in
+	 * the correct place, above) or the whole nd_opt_len/padding
+	 * calculation is done out of order before the original
+	 * calculation of ip6->ip6_plen.  This seems to be the lesser
+	 * of two evils...
+	 */
+	ip6->ip6_plen = htons(sizeof(struct nd_neighbor_advert) +
+			      sizeof(struct nd_opt_hdr) +
+			      hardware_addr->sll_halen +
+			      padding);
 
 	nd_na->nd_na_cksum = ip6_checksum((uint8_t *)nd_na,
 					  ntohs(ip6->ip6_plen),
 					  ip6);
 
-	*ether_dhost = (struct ether_addr *)eh->ether_dhost;
-	*len = l;
+	*len = p - buffer;
 	return 0;
 }
 
 int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
 {
-	int s;
-	struct sockaddr_ll sall = {0};
-	struct ifreq if_hwaddr = {
-		.ifr_ifru = {
-			.ifru_flags = 0
-		},
-	};
+	struct samba_sockaddr hardware_addr = {};
+	struct samba_sockaddr broadcast_addr = {};
+	struct sockaddr_ll *hardware_addr_ll = &hardware_addr.u.ll;
+	struct sockaddr_ll *broadcast_addr_ll = &broadcast_addr.u.ll;
+	int s = -1;
+	struct samba_sockaddr sas = {0};
+	socklen_t dest_len = 0;
 	uint8_t buffer[MAX(ARP_BUFFER_SIZE, IP6_NA_BUFFER_SIZE)];
-	struct ifreq ifr = {
-		.ifr_ifru = {
-			.ifru_flags = 0
-		},
-	};
-	struct ether_addr *hwaddr = NULL;
-	struct ether_addr *ether_dhost = NULL;
 	size_t len = 0;
 	int ret = 0;
 
-	s = socket(AF_PACKET, SOCK_RAW, 0);
+	/* Find interface */
+	ret = find_interface(iface, &hardware_addr, &broadcast_addr);
+	switch (ret) {
+	case 0:
+		break;
+	case ENODEV:
+		DBG_ERR("Interface '%s' not found\n", iface);
+		goto done;
+	case ENXIO:
+		/* Probably loopback, so convert to success */
+		ret = 0;
+		DBG_DEBUG("Interface '%s' is not ARP-able\n", iface);
+		goto done;
+	default:
+		DBG_ERR("Failed to fetch information for interface '%s' (%d)\n",
+			iface,
+			ret);
+		goto done;
+	}
+
+	switch (hardware_addr_ll->sll_hatype) {
+	case ARPHRD_ETHER:
+	case ARPHRD_INFINIBAND:
+		break;
+	default:
+		DBG_ERR("Not a supported address family (0x%x)\n",
+			hardware_addr_ll->sll_hatype);
+		ret = EPROTONOSUPPORT;
+		goto done;
+	}
+
+	s = socket(AF_PACKET, SOCK_DGRAM, 0);
 	if (s == -1) {
 		ret = errno;
-		DBG_ERR("Failed to open raw socket\n");
+		DBG_ERR("Failed to open socket\n");
 		return ret;
 	}
 	DBG_DEBUG("Created SOCKET FD:%d for sending arp\n", s);
 
-	/* Find interface */
-	strlcpy(ifr.ifr_name, iface, sizeof(ifr.ifr_name));
-	if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
+	dest_len = sall_len(hardware_addr_ll);
+	ret = bind(s, (struct sockaddr *)hardware_addr_ll, dest_len);
+	if (ret == -1) {
 		ret = errno;
-		DBG_ERR("Interface '%s' not found\n", iface);
-		goto fail;
+		DBG_ERR("Failed bind (%d)\n", ret);
+		goto done;
 	}
-
-	/* Get MAC address */
-	strlcpy(if_hwaddr.ifr_name, iface, sizeof(if_hwaddr.ifr_name));
-	ret = ioctl(s, SIOCGIFHWADDR, &if_hwaddr);
-	if ( ret < 0 ) {
-		ret = errno;
-		DBG_ERR("ioctl failed\n");
-		goto fail;
-	}
-	if (ARPHRD_LOOPBACK == if_hwaddr.ifr_hwaddr.sa_family) {
-		ret = 0;
-		D_DEBUG("Ignoring loopback arp request\n");
-		goto fail;
-	}
-	if (if_hwaddr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
-		ret = EINVAL;
-		DBG_ERR("Not an ethernet address family (0x%x)\n",
-			if_hwaddr.ifr_hwaddr.sa_family);
-		goto fail;;
-	}
-
-	/* Set up most of destination address structure */
-	sall.sll_family = AF_PACKET;
-	sall.sll_halen = sizeof(struct ether_addr);
-	sall.sll_protocol = htons(ETH_P_ALL);
-	sall.sll_ifindex = ifr.ifr_ifindex;
-
-	/* For clarity */
-	hwaddr = (struct ether_addr *)if_hwaddr.ifr_hwaddr.sa_data;
 
 	switch (addr->ip.sin_family) {
 	case AF_INET:
 		/* Send gratuitous ARP */
+		hardware_addr_ll->sll_protocol = htons(ETH_P_ARP);
+		broadcast_addr_ll->sll_protocol = htons(ETH_P_ARP);
+		/*
+		 * Unlikely to be different to previous dest_len
+		 * calculation, but...
+		 */
+		dest_len = sall_len(broadcast_addr_ll);
+
 		ret = arp_build(buffer,
 				sizeof(buffer),
 				&addr->ip,
-				hwaddr,
-				false,
-				&ether_dhost,
+				hardware_addr_ll,
+				ARPOP_REQUEST,
 				&len);
 		if (ret != 0) {
 			DBG_ERR("Failed to build ARP request\n");
-			goto fail;
+			goto done;
 		}
-
-		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
 
 		ret = sendto(s,
 			     buffer,
 			     len,
 			     0,
-			     (struct sockaddr *)&sall,
-			     sizeof(sall));
+			     (struct sockaddr *)broadcast_addr_ll,
+			     dest_len);
 		if (ret < 0 ) {
 			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			goto fail;
+			goto done;
 		}
 
 		/* Send unsolicited ARP reply */
 		ret = arp_build(buffer,
 				sizeof(buffer),
 				&addr->ip,
-				hwaddr,
-				true,
-				&ether_dhost,
+				hardware_addr_ll,
+				ARPOP_REPLY,
 				&len);
 		if (ret != 0) {
 			DBG_ERR("Failed to build ARP reply\n");
-			goto fail;
+			goto done;
 		}
-
-		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
 
 		ret = sendto(s,
 			     buffer,
 			     len,
 			     0,
-			     (struct sockaddr *)&sall,
-			     sizeof(sall));
+			     (struct sockaddr *)broadcast_addr_ll,
+			     dest_len);
 		if (ret < 0 ) {
 			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			goto fail;
+			goto done;
 		}
 
-		close(s);
 		break;
 
 	case AF_INET6:
+		/* Send IPv6 NA */
+		ret = ip6_ll_multicast_build(broadcast_addr_ll, &sas);
+		if (ret != 0) {
+			DBG_ERR("Failed to build IPv6 link-level destination\n");
+			goto done;
+		}
+
 		ret = ip6_na_build(buffer,
 				   sizeof(buffer),
 				   &addr->ip6,
-				   hwaddr,
-				   &ether_dhost,
+				   hardware_addr_ll,
 				   &len);
 		if (ret != 0) {
 			DBG_ERR("Failed to build IPv6 neighbor advertisement\n");
-			goto fail;
+			goto done;
 		}
-
-		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
 
 		ret = sendto(s,
 			     buffer,
 			     len,
 			     0,
-			     (struct sockaddr *)&sall,
-			     sizeof(sall));
+			     (struct sockaddr *)&sas.u.ll,
+			     sall_len(&sas.u.ll));
 		if (ret < 0 ) {
 			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			goto fail;
+			goto done;
 		}
 
-		close(s);
 		break;
 
 	default:
 		ret = EINVAL;
 		DBG_ERR("Not an ipv4/ipv6 address (family is %u)\n",
 			addr->ip.sin_family);
-		goto fail;
+		goto done;
 	}
 
-	return 0;
+	ret = 0;
 
-fail:
-	close(s);
+done:
+	if (s != -1) {
+		close(s);
+	}
 	return ret;
 }
 
-#else /* HAVE_PACKETSOCKET */
+#else /* CTDB_CAN_SEND_ARPS */
+
+#warning "CTDB will be unable to send ARPs"
 
 int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
 {
@@ -598,7 +916,7 @@ int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
 	return ENOSYS;
 }
 
-#endif /* HAVE_PACKETSOCKET */
+#endif /* CTDB_CAN_SEND_ARPS */
 
 
 #define IP4_TCP_BUFFER_SIZE sizeof(struct ip) + \

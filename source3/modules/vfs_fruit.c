@@ -35,6 +35,7 @@
 #include "string_replace.h"
 #include "hash_inode.h"
 #include "lib/adouble.h"
+#include "lib/afpinfo.h"
 #include "lib/util_macstreams.h"
 #include "source3/smbd/dir.h"
 #include "lib/util/smb_strtox.h"
@@ -1931,45 +1932,95 @@ static int fruit_renameat(struct vfs_handle_struct *handle,
 		return -1;
 	}
 
+	if ((config->rsrc == FRUIT_RSRC_ADFILE) &&
+	    S_ISREG(smb_fname_src->st.st_ex_mode))
+	{
+		/*
+		 * Rename the AppleDouble sidecar file before the base
+		 * file. If we renamed the base file first and this
+		 * failed, eg because appending the "._" prefix to the
+		 * destination name overflows NAME_MAX, the sidecar
+		 * file would be left behind orphaned under its old
+		 * name.
+		 */
+		rc = adouble_path(talloc_tos(),
+				  smb_fname_src,
+				  &src_adp_smb_fname);
+		if (rc != 0) {
+			goto done;
+		}
+
+		rc = adouble_path(talloc_tos(),
+				  smb_fname_dst,
+				  &dst_adp_smb_fname);
+		if (rc != 0) {
+			goto done;
+		}
+
+		DBG_DEBUG("%s -> %s\n",
+			  smb_fname_str_dbg(src_adp_smb_fname),
+			  smb_fname_str_dbg(dst_adp_smb_fname));
+
+		rc = SMB_VFS_NEXT_RENAMEAT(handle,
+					   src_dirfsp,
+					   src_adp_smb_fname,
+					   dst_dirfsp,
+					   dst_adp_smb_fname,
+					   how);
+		if (rc == 0 || errno == ENOENT) {
+			goto base_rename;
+		}
+		if (errno != ENAMETOOLONG) {
+			goto done;
+		}
+
+		/*
+		 * ENAMETOOLONG doesn't tell us whether src or dst was
+		 * too long.  Check whether dst exists: if not, there
+		 * is nothing to rename and the base rename can
+		 * proceed; if it does exist, we got ENAMETOOLONG due
+		 * to "dst" being too long, so we have to fail with
+		 * that error code.
+		 */
+		{
+			SMB_STRUCT_STAT st = {};
+
+			rc = SMB_VFS_NEXT_FSTATAT(handle,
+						  src_dirfsp,
+						  src_adp_smb_fname,
+						  &st,
+						  AT_SYMLINK_NOFOLLOW);
+		}
+		if (rc == 0) {
+			/*
+			 * src sidecar exists, dst name was too long:
+			 * fail.
+			 */
+			rc = -1;
+			errno = ENAMETOOLONG;
+			goto done;
+		}
+		if (errno == ENAMETOOLONG) {
+			/*
+			 * fstatat() returns ENAMETOOLONG if the src
+			 * sidecar path is too long to even look up,
+			 * meaning it can't exist on disk.
+			 */
+			goto base_rename;
+		}
+		if (errno == ENOENT) {
+			/* src sidecar doesn't exist, proceed */
+			goto base_rename;
+		}
+	}
+
+base_rename:
 	rc = SMB_VFS_NEXT_RENAMEAT(handle,
 				   src_dirfsp,
 				   smb_fname_src,
 				   dst_dirfsp,
 				   smb_fname_dst,
 				   how);
-	if (rc != 0) {
-		return -1;
-	}
-
-	if ((config->rsrc != FRUIT_RSRC_ADFILE) ||
-	    (!S_ISREG(smb_fname_src->st.st_ex_mode)))
-	{
-		return 0;
-	}
-
-	rc = adouble_path(talloc_tos(), smb_fname_src, &src_adp_smb_fname);
-	if (rc != 0) {
-		goto done;
-	}
-
-	rc = adouble_path(talloc_tos(), smb_fname_dst, &dst_adp_smb_fname);
-	if (rc != 0) {
-		goto done;
-	}
-
-	DBG_DEBUG("%s -> %s\n",
-		  smb_fname_str_dbg(src_adp_smb_fname),
-		  smb_fname_str_dbg(dst_adp_smb_fname));
-
-	rc = SMB_VFS_NEXT_RENAMEAT(handle,
-				   src_dirfsp,
-				   src_adp_smb_fname,
-				   dst_dirfsp,
-				   dst_adp_smb_fname,
-				   how);
-	if (errno == ENOENT) {
-		rc = 0;
-	}
 
 done:
 	TALLOC_FREE(src_adp_smb_fname);
@@ -3252,7 +3303,7 @@ static int fruit_fstatat_meta(struct vfs_handle_struct *handle,
 	{
 		/* Populate the stat struct with info from the base file. */
 
-		struct smb_filename base_name = *smb_relname;
+		struct smb_filename base_name = *_smb_relname;
 		base_name.stream_name = NULL;
 
 		ret = SMB_VFS_NEXT_FSTATAT(
@@ -3263,11 +3314,11 @@ static int fruit_fstatat_meta(struct vfs_handle_struct *handle,
 		goto fail;
 	}
 
-	ino = hash_inode(sbuf, smb_relname->stream_name);
+	ino = hash_inode(sbuf, _smb_relname->stream_name);
 
 	if (config->meta == FRUIT_META_STREAM) {
 		ret = SMB_VFS_NEXT_FSTATAT(
-			handle, dirfsp, smb_relname, sbuf, flags);
+			handle, dirfsp, _smb_relname, sbuf, flags);
 		if (ret == -1) {
 			goto fail;
 		}
@@ -4552,6 +4603,7 @@ static NTSTATUS fruit_freaddir_attr(struct vfs_handle_struct *handle,
 		status = smbd_calculate_access_mask_fsp(fsp->conn->cwd_fsp,
 			fsp,
 			false,
+			false,
 			SEC_FLAG_MAXIMUM_ALLOWED,
 			&attr_data->attr_data.aapl.max_access);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -5332,7 +5384,7 @@ static bool fruit_tmsize_do_dirent(vfs_handle_struct *handle,
 				   const char *name)
 {
 	bool ok;
-	char *p = NULL;
+	const char *p = NULL;
 	size_t sparsebundle_strlen = strlen("sparsebundle");
 	size_t bandsize = 0;
 	size_t nbands;

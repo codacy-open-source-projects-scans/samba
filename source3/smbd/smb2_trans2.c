@@ -180,10 +180,10 @@ bool samba_private_attr_name(const char *unix_ea_name)
  Get one EA value. Fill in a struct ea_struct.
 ****************************************************************************/
 
-int get_ea_value_fsp(TALLOC_CTX *mem_ctx,
-		     files_struct *fsp,
-		     const char *ea_name,
-		     struct ea_struct *pea)
+static int get_ea_value_fsp(TALLOC_CTX *mem_ctx,
+			    files_struct *fsp,
+			    const char *ea_name,
+			    struct ea_struct *pea)
 {
 	/* Get the value of this xattr. Max size is 64k. */
 	size_t attr_size = 256;
@@ -3511,7 +3511,11 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 			/* Pathname with leading '\'. */
 			{
 				size_t byte_len;
-				byte_len = dos_PutUniCode(pdata+4,dos_fname,(size_t)max_data_bytes,False);
+				byte_len = push_string_check(
+					pdata + 4,
+					dos_fname,
+					(size_t)max_data_bytes,
+					STR_UNICODE | STR_NOALIGN);
 				DBG_DEBUG("SMB_FILE_NAME_INFORMATION\n");
 				SIVAL(pdata,0,byte_len);
 				data_size = 4 + byte_len;
@@ -3562,7 +3566,10 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 			DBG_DEBUG("SMB_FILE_STREAM_INFORMATION\n");
 
 			if (is_ntfs_stream_smb_fname(smb_fname)) {
-				return NT_STATUS_INVALID_PARAMETER;
+				if (!fsp_is_alternate_stream(fsp)) {
+					return NT_STATUS_INVALID_PARAMETER;
+				}
+				fsp = fsp->base_fsp;
 			}
 
 			status = vfs_fstreaminfo(fsp,
@@ -3741,7 +3748,7 @@ NTSTATUS hardlink_internals(TALLOC_CTX *ctx,
 			status = unlink_internals(conn,
 						req,
 						FILE_ATTRIBUTE_NORMAL,
-						NULL, /* new_dirfsp */
+						dirfsp_new,
 						smb_fname_new);
 			if (!NT_STATUS_IS_OK(status)) {
 				goto out;

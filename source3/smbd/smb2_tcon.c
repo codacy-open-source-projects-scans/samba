@@ -222,6 +222,7 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 	uint32_t session_global_id;
 	char *share_name = NULL;
 	uint8_t encryption_flags = 0;
+	const char *lease_mask = NULL;
 
 	*disconnect = false;
 
@@ -393,33 +394,29 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 	tcon->status = NT_STATUS_OK;
 
 	if (IS_PRINT(tcon->compat)) {
-		*out_share_type = SMB2_SHARE_TYPE_PRINT;
+		tcon->share_type = SMB2_SHARE_TYPE_PRINT;
 	} else if (IS_IPC(tcon->compat)) {
-		*out_share_type = SMB2_SHARE_TYPE_PIPE;
+		tcon->share_type = SMB2_SHARE_TYPE_PIPE;
 	} else {
-		*out_share_type = SMB2_SHARE_TYPE_DISK;
+		tcon->share_type = SMB2_SHARE_TYPE_DISK;
 	}
 
-	*out_share_flags = 0;
-
 	if (lp_msdfs_root(SNUM(tcon->compat)) && lp_host_msdfs()) {
-		*out_share_flags |= (SMB2_SHAREFLAG_DFS|SMB2_SHAREFLAG_DFS_ROOT);
-		*out_capabilities = SMB2_SHARE_CAP_DFS;
-	} else {
-		*out_capabilities = 0;
+		tcon->share_flags |= (SMB2_SHAREFLAG_DFS|SMB2_SHAREFLAG_DFS_ROOT);
+		tcon->capabilities = SMB2_SHARE_CAP_DFS;
 	}
 
 	switch(lp_csc_policy(SNUM(tcon->compat))) {
 	case CSC_POLICY_MANUAL:
 		break;
 	case CSC_POLICY_DOCUMENTS:
-		*out_share_flags |= SMB2_SHAREFLAG_AUTO_CACHING;
+		tcon->share_flags |= SMB2_SHAREFLAG_AUTO_CACHING;
 		break;
 	case CSC_POLICY_PROGRAMS:
-		*out_share_flags |= SMB2_SHAREFLAG_VDO_CACHING;
+		tcon->share_flags |= SMB2_SHAREFLAG_VDO_CACHING;
 		break;
 	case CSC_POLICY_DISABLE:
-		*out_share_flags |= SMB2_SHAREFLAG_NO_CACHING;
+		tcon->share_flags |= SMB2_SHAREFLAG_NO_CACHING;
 		break;
 	default:
 		break;
@@ -427,11 +424,11 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 
 	if (lp_hide_unreadable(SNUM(tcon->compat)) ||
 	    lp_hide_unwriteable_files(SNUM(tcon->compat))) {
-		*out_share_flags |= SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM;
+		tcon->share_flags |= SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM;
 	}
 
 	if (encryption_desired) {
-		*out_share_flags |= SMB2_SHAREFLAG_ENCRYPT_DATA;
+		tcon->share_flags |= SMB2_SHAREFLAG_ENCRYPT_DATA;
 	}
 
 	/*
@@ -439,9 +436,9 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 	 * behavior on a cluster...
 	 */
 	if (conn->protocol >= PROTOCOL_SMB3_00 &&
-	    *out_share_type == SMB2_SHARE_TYPE_DISK)
+	    tcon->share_type == SMB2_SHARE_TYPE_DISK)
 	{
-		bool persistent = false; /* persistent handles not implemented yet */
+		bool persistent = lp_persistent_handles();
 		bool cluster = lp_clustering();
 		bool scaleout = cluster;
 		bool witness = cluster && !lp_rpc_start_on_demand_helpers();
@@ -453,6 +450,9 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 		 * but windows clients mix this with the global persistent
 		 * handles support.
 		 *
+		 * SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY is only announced if
+		 * SMB2_CAP_PERSISTENT_HANDLES is enabled.
+		 *
 		 * Persistent handles are requested if
 		 * SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY is present
 		 * even without SMB2_CAP_PERSISTENT_HANDLES.
@@ -460,16 +460,22 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 		 * And SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY is
 		 * required for SMB2_SHARE_CAP_CLUSTER to have
 		 * an effect.
-		 *
-		 * So we better don't announce this by default
-		 * until we support persistent handles.
 		 */
+
+		persistent &= lp_durable_handles(SNUM(tcon->compat)) &&
+			!lp_posix_locking(tcon->compat->params) &&
+			!lp_kernel_share_modes(SNUM(tcon->compat)) &&
+			!lp_kernel_oplocks(SNUM(tcon->compat));
+
+		announce = persistent && lp_continuous_availability(
+			SNUM(tcon->compat));
+
 		announce = lp_parm_bool(SNUM(tcon->compat),
 					"smb3 share cap",
 					"CONTINUOUS AVAILABILITY",
-					persistent);
+					announce);
 		if (announce) {
-			*out_capabilities |= SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY;
+			tcon->capabilities |= SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY;
 		}
 
 		/*
@@ -480,7 +486,7 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 					"SCALE OUT",
 					scaleout);
 		if (announce) {
-			*out_capabilities |= SMB2_SHARE_CAP_SCALEOUT;
+			tcon->capabilities |= SMB2_SHARE_CAP_SCALEOUT;
 		}
 
 		/*
@@ -491,7 +497,7 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 					"CLUSTER",
 					witness);
 		if (announce) {
-			*out_capabilities |= SMB2_SHARE_CAP_CLUSTER;
+			tcon->capabilities |= SMB2_SHARE_CAP_CLUSTER;
 		}
 
 		/*
@@ -508,10 +514,46 @@ static NTSTATUS smbd_smb2_tree_connect(struct smbd_smb2_request *req,
 						asymmetric);
 		}
 		if (announce) {
-			*out_capabilities |= SMB2_SHARE_CAP_ASYMMETRIC;
+			tcon->capabilities |= SMB2_SHARE_CAP_ASYMMETRIC;
 		}
 	}
 
+	lease_mask = lp_parm_const_string(SNUM(tcon->compat),
+					  "smb2",
+					  "max lease mask",
+					  "RWH");
+	/*
+	 * Windows will at most grant R-leases on Scale-out (SO) servers. Samba
+	 * has a history of granting RWH-leases in Scale-out mode which for
+	 * Samba means clustering with ctdb, and it should continue to do so,
+	 * diverging in behaviour from Windows. We will restrict leases to R on
+	 * Continuously Available (CA) shares, not the SO, as CA allows clients
+	 * to request Persistent Handles (PH) basically implementing the
+	 * restrictions from the data model: we currently don't implement a
+	 * persistent leases.tdb (for performance reasons) and hence we can't
+	 * grant more than R leases (R lease is reaquired when reconnecting a
+	 * Persistent Handle if leases.tdb record was lost due to a node failure
+	 * (SO scenario), or wiped with clear-if-first semantics (non-SO,
+	 * failover scenario).
+	 */
+	if (tcon->capabilities & SMB2_SHARE_CAP_CONTINUOUS_AVAILABILITY) {
+		const char *lease_mask_option = NULL;
+
+		if (tcon->capabilities & SMB2_SHARE_CAP_SCALEOUT) {
+			lease_mask_option = "smb3 ca so";
+		} else {
+			lease_mask_option = "smb3 ca";
+		}
+		lease_mask = lp_parm_const_string(SNUM(tcon->compat),
+						  lease_mask_option,
+						  "max lease mask",
+						  "R");
+	}
+	tcon->smb_max_lease_mask = smb2_util_lease_state(lease_mask);
+
+	*out_share_type = tcon->share_type;
+	*out_share_flags = tcon->share_flags;
+	*out_capabilities = tcon->capabilities;
 	*out_maximal_access = tcon->compat->share_access;
 
 	*out_tree_id = tcon->global->tcon_wire_id;

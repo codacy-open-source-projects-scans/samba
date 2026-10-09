@@ -546,7 +546,11 @@ static bool is_hidden_share(int snum)
 		loadparm_s3_global_substitution();
 	const char *net_name = lp_servicename(talloc_tos(), lp_sub, snum);
 
-	return (net_name[strlen(net_name) - 1] == '$') ? True : False;
+	if (net_name == NULL || net_name[0] == '\0') {
+		return false;
+	}
+
+	return net_name[strlen(net_name) - 1] == '$';
 }
 
 /*******************************************************************
@@ -580,7 +584,7 @@ static bool is_enumeration_allowed(struct pipes_struct *p,
  Count an entry against the respective service.
 ****************************************************************************/
 
-static int count_for_all_fn(struct smbXsrv_tcon_global0 *tcon, void *udp)
+static int count_for_all_fn(struct smbXsrv_tcon_global *tcon, void *udp)
 {
 	union srvsvc_NetShareCtr *ctr = udp;
 
@@ -1170,7 +1174,7 @@ static void count_share_opens(struct srvsvc_NetConnInfo1 *arr,
  process an entry from the connection db.
 ****************************************************************************/
 
-static int share_conn_fn(struct smbXsrv_tcon_global0 *tcon,
+static int share_conn_fn(struct smbXsrv_tcon_global *tcon,
 			  void *data)
 {
 	struct share_conn_stat *scs = data;

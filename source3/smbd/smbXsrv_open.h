@@ -30,13 +30,15 @@
 struct smbXsrv_connection;
 struct auth_session_info;
 struct smbXsrv_open;
-struct smbXsrv_open_global0;
+struct smbXsrv_open_global;
 struct smbXsrv_client;
 
 NTSTATUS smbXsrv_open_global_init(void);
 NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 			     struct smbXsrv_session *session,
 			     struct smbXsrv_tcon *tcon,
+			     struct file_id *file_id,
+			     uint32_t name_hash,
 			     NTTIME now,
 			     struct smbXsrv_open **_open);
 NTSTATUS smbXsrv_open_update(struct smbXsrv_open *_open);
@@ -51,12 +53,22 @@ NTSTATUS smb2srv_open_lookup(struct smbXsrv_connection *conn,
 			     uint64_t volatile_id,
 			     NTTIME now,
 			     struct smbXsrv_open **_open);
+NTSTATUS smbXsrv_open_global_lookup(TALLOC_CTX *mem_ctx,
+				    uint32_t open_global_id,
+				    const struct smbXsrv_open_global **global);
+NTSTATUS smbXsrv_open_global_parse_record(TALLOC_CTX *mem_ctx,
+					  TDB_DATA key,
+					  TDB_DATA val,
+					  struct smbXsrv_open_global **global);
+
 NTSTATUS smbXsrv_open_purge_replay_cache(struct smbXsrv_client *client,
 					 const struct GUID *create_guid);
 NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 					  struct smbXsrv_session *session,
 					  struct GUID create_guid,
 					  const char *name,
+					  bool replay_operation,
+					  bool persistent_requested,
 					  NTTIME now,
 					  uint64_t *persistent_id,
 					  struct smbXsrv_open **_open);
@@ -73,10 +85,19 @@ NTSTATUS smb2srv_open_recreate(struct smbXsrv_connection *conn,
 struct db_record;
 NTSTATUS smbXsrv_open_global_traverse(
 	int (*fn)(struct db_record *rec,
-		  struct smbXsrv_open_global0 *global,
+		  struct smbXsrv_open_global *global,
 		  TDB_DATA *rc_open_global_key,
 		  void *private_data),
 	void *private_data);
+NTSTATUS smbXsrv_open_global_traverse_per_rec_persistent_read(
+	int (*fn)(struct db_record *rec,
+		  struct smbXsrv_open_global *global,
+		  TDB_DATA *rc_open_global_key,
+		  void *private_data),
+	void *private_data);
+
+struct dbwrap_wipe_flags;
+NTSTATUS smbXsrv_open_global_wipe(struct dbwrap_wipe_flags flags);
 
 NTSTATUS smbXsrv_open_cleanup(uint64_t persistent_id);
 NTSTATUS smbXsrv_replay_cleanup(const struct GUID *client_guid,

@@ -71,7 +71,7 @@ NTSTATUS parse_dfs_path_strict(TALLOC_CTX *ctx,
 	char *pathname_local = NULL;
 	char *p = NULL;
 	const char *hostname = NULL;
-	const char *servicename = NULL;
+	char *servicename = NULL;
 	const char *reqpath = NULL;
 	bool my_hostname = false;
 	NTSTATUS status;
@@ -255,7 +255,12 @@ static NTSTATUS create_conn_struct_as_root(
 
 	conn_setup_case_options(conn);
 
-	set_conn_connectpath(conn, connpath);
+	ok = set_conn_connectpath(conn, connpath);
+	if (!ok) {
+		DBG_ERR("Failed to set connectpath for service\n");
+		TALLOC_FREE(conn);
+		return NT_STATUS_BAD_NETWORK_NAME;
+	}
 
 	/*
 	 * New code to check if there's a share security descriptor
@@ -311,6 +316,9 @@ static NTSTATUS create_conn_struct_as_root(
 
 struct conn_wrap {
 	struct connection_struct *conn;
+	bool chdir;
+
+	struct conn_wrap_chdir_link *l;
 };
 
 static int conn_wrap_destructor(struct conn_wrap *w)
@@ -321,7 +329,9 @@ static int conn_wrap_destructor(struct conn_wrap *w)
 	/*
 	 * Make whatever directory we chdir()ed to umountable
 	 */
-	SMB_ASSERT(chdir("/") == 0);
+	if (w->chdir) {
+		SMB_ASSERT(chdir("/") == 0);
+	}
 
 	/*
 	 * Prevent vfs_ChDir() from skipping the real chdir()
@@ -331,18 +341,20 @@ static int conn_wrap_destructor(struct conn_wrap *w)
 	return 0;
 }
 
-NTSTATUS create_conn_struct_chdir(TALLOC_CTX *mem_ctx,
-				  struct messaging_context *msg,
-				  int snum,
-				  const char *path,
-				  const struct auth_session_info *session_info,
-				  struct conn_wrap **_wrap)
+static NTSTATUS create_conn_struct_chdir_internal(
+				TALLOC_CTX *mem_ctx,
+				struct messaging_context *msg,
+				int snum,
+				const char *path,
+				const struct auth_session_info *session_info,
+				bool chdir,
+				struct conn_wrap **_wrap)
 {
 	struct conn_wrap *w = NULL;
 	NTSTATUS status;
 	int ret;
 
-	w = talloc(mem_ctx, struct conn_wrap);
+	w = talloc_zero(mem_ctx, struct conn_wrap);
 	if (w == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -358,11 +370,14 @@ NTSTATUS create_conn_struct_chdir(TALLOC_CTX *mem_ctx,
 	}
 	talloc_set_destructor(w, conn_wrap_destructor);
 
-	ret = vfs_ChDir_shareroot(w->conn);
-	if (ret != 0) {
-		status = map_nt_error_from_unix(errno);
-		TALLOC_FREE(w);
-		return status;
+	if (chdir) {
+		ret = vfs_ChDir_shareroot(w->conn);
+		if (ret != 0) {
+			status = map_nt_error_from_unix(errno);
+			TALLOC_FREE(w);
+			return status;
+		}
+		w->chdir = true;
 	}
 
 	*_wrap = w;
@@ -370,9 +385,78 @@ NTSTATUS create_conn_struct_chdir(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
+NTSTATUS create_conn_struct_chdir(
+				TALLOC_CTX *mem_ctx,
+				struct messaging_context *msg,
+				int snum,
+				const char *path,
+				const struct auth_session_info *session_info,
+				struct conn_wrap **_wrap)
+{
+	return create_conn_struct_chdir_internal(mem_ctx,
+						 msg,
+						 snum,
+						 path,
+						 session_info,
+						 true,
+						 _wrap);
+}
+
+NTSTATUS create_conn_struct(TALLOC_CTX *mem_ctx,
+			    struct messaging_context *msg,
+			    int snum,
+			    const char *path,
+			    const struct auth_session_info *session_info,
+			    struct conn_wrap **_wrap)
+{
+	return create_conn_struct_chdir_internal(mem_ctx,
+						 msg,
+						 snum,
+						 path,
+						 session_info,
+						 false,
+						 _wrap);
+}
+
 struct connection_struct *conn_wrap_connection(const struct conn_wrap *w)
 {
 	return w->conn;
+}
+
+struct conn_wrap_chdir_link {
+	struct conn_wrap *w;
+};
+
+static int conn_wrap_chdir_destructor(struct conn_wrap_chdir_link *l)
+{
+	SMB_ASSERT(chdir("/") == 0);
+	l->w->l = NULL;
+	return 0;
+}
+
+NTSTATUS conn_wrap_chdir(struct conn_wrap *w, TALLOC_CTX *mem_ctx)
+{
+	struct conn_wrap_chdir_link *l = NULL;
+	int ret;
+
+	SMB_ASSERT(w->l == NULL);
+
+	l = talloc_zero(mem_ctx, struct conn_wrap_chdir_link);
+	if (l == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	l->w = w;
+	w->l = l;
+
+	ret = vfs_ChDir_shareroot(w->conn);
+	if (ret != 0) {
+		DBG_ERR("vfs_ChDir_shareroot failed\n");
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	talloc_set_destructor(l, conn_wrap_chdir_destructor);
+
+	return NT_STATUS_OK;
 }
 
 static void shuffle_strlist(char **list, int count)
@@ -1069,15 +1153,11 @@ char *msdfs_link_string(TALLOC_CTX *ctx,
 			size_t referral_count)
 {
 	char *refpath = NULL;
-	bool insert_comma = false;
 	char *msdfs_link = NULL;
+	char *referrals = NULL;
 	size_t i;
 
-	/* Form the msdfs_link contents */
-	msdfs_link = talloc_strdup(ctx, "msdfs:");
-	if (msdfs_link == NULL) {
-		goto err;
-	}
+	referrals = talloc_strdup(ctx, "");
 
 	for( i= 0; i < referral_count; i++) {
 		refpath = talloc_strdup(ctx, reflist[i].alternate_path);
@@ -1089,30 +1169,19 @@ char *msdfs_link_string(TALLOC_CTX *ctx,
 		/* Alternate paths always use Windows separators. */
 		trim_char(refpath, '\\', '\\');
 		if (*refpath == '\0') {
-			if (i == 0) {
-				insert_comma = false;
-			}
 			continue;
 		}
-		if (i > 0 && insert_comma) {
-			msdfs_link = talloc_asprintf_append_buffer(msdfs_link,
-					",%s",
-					refpath);
-		} else {
-			msdfs_link = talloc_asprintf_append_buffer(msdfs_link,
-					"%s",
-					refpath);
-		}
-
-		if (msdfs_link == NULL) {
-			goto err;
-		}
-
-		insert_comma = true;
+		talloc_asprintf_addsep(&referrals, ",", "%s", refpath);
 
 		TALLOC_FREE(refpath);
 	}
 
+	if (referrals == NULL) {
+		goto err;
+	}
+
+	msdfs_link = talloc_asprintf(ctx, "msdfs:%s", referrals);
+	TALLOC_FREE(referrals);
 	return msdfs_link;
 
   err:

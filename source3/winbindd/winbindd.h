@@ -44,6 +44,14 @@
 
 #define WB_REPLACE_CHAR		'_'
 
+/* Enum to indicate the reason for DC failover */
+enum winbindd_failover_reason {
+	WINBINDD_FAILOVER_NONE = 0,           /* No failover */
+	WINBINDD_FAILOVER_DC_CONNECTIVITY,    /* DC connectivity issue */
+	WINBINDD_FAILOVER_KERBEROS,           /* Kerberos authentication failure */
+	WINBINDD_FAILOVER_LDAP                /* LDAP operation failure */
+};
+
 struct winbind_internal_pipes;
 struct ads_struct;
 
@@ -113,6 +121,7 @@ struct getgrent_state {
 /* Our connection to the DC */
 
 struct winbindd_cm_conn {
+	bool ignore_smb_disconnected;
 	struct cli_state *cli;
 
 	enum dcerpc_AuthLevel auth_level;
@@ -192,13 +201,19 @@ struct winbindd_domain {
 	uint32_t sequence_number;
 	NTSTATUS last_status;
 
+	/* DC failover metrics */
+	struct timeval start_dc_time;
+	char *src_dc;
+	enum winbindd_failover_reason failover_reason;
+	NTSTATUS failover_status;
+
 	/* The smb connection */
 
 	struct winbindd_cm_conn conn;
 
 	/* The child pid we're talking to */
 
-	struct winbindd_child *children;
+	struct winbindd_child **children;
 
 	struct tevent_queue *queue;
 	struct dcerpc_binding_handle *binding_handle;

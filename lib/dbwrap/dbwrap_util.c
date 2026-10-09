@@ -84,7 +84,7 @@ NTSTATUS dbwrap_store_int32_bystring(struct db_context *db, const char *keystr,
 	SIVAL(v_store, 0, v);
 
 	status = dbwrap_store(db, string_term_tdb_data(keystr), data,
-			      TDB_REPLACE);
+			      DBWRAP_REPLACE);
 	return status;
 }
 
@@ -140,7 +140,7 @@ NTSTATUS dbwrap_store_uint32_bystring(struct db_context *db,
 	SIVAL(v_store, 0, v);
 
 	status = dbwrap_store(db, string_term_tdb_data(keystr), data,
-			      TDB_REPLACE);
+			      DBWRAP_REPLACE);
 	return status;
 }
 
@@ -184,7 +184,7 @@ static void dbwrap_change_uint32_atomic_action_fn(struct db_record *rec,
 	val += state->change_val;
 	PUSH_LE_U32(v_store, 0, val);
 
-	state->status = dbwrap_record_store(rec, data, TDB_REPLACE);
+	state->status = dbwrap_record_store(rec, data, DBWRAP_REPLACE);
 }
 
 static NTSTATUS dbwrap_change_uint32_atomic_action(struct db_context *db,
@@ -285,7 +285,7 @@ static void dbwrap_change_int32_atomic_action_fn(struct db_record *rec,
 	val += state->change_val;
 	PUSH_LE_U32(v_store, 0, val);
 
-	state->status = dbwrap_record_store(rec, data, TDB_REPLACE);
+	state->status = dbwrap_record_store(rec, data, DBWRAP_REPLACE);
 }
 
 static NTSTATUS dbwrap_change_int32_atomic_action(struct db_context *db,
@@ -425,7 +425,7 @@ NTSTATUS dbwrap_trans_store_int32_bystring(struct db_context *db,
 	return dbwrap_trans_store(db, string_term_tdb_data(keystr),
 				  make_tdb_data((const uint8_t *)&v_store,
 						sizeof(v_store)),
-				  TDB_REPLACE);
+				  DBWRAP_REPLACE);
 }
 
 NTSTATUS dbwrap_trans_store_uint32_bystring(struct db_context *db,
@@ -439,7 +439,7 @@ NTSTATUS dbwrap_trans_store_uint32_bystring(struct db_context *db,
 	return dbwrap_trans_store(db, string_term_tdb_data(keystr),
 				  make_tdb_data((const uint8_t *)&v_store,
 						sizeof(v_store)),
-				  TDB_REPLACE);
+				  DBWRAP_REPLACE);
 }
 
 NTSTATUS dbwrap_trans_store_bystring(struct db_context *db, const char *key,
@@ -753,4 +753,27 @@ NTSTATUS dbwrap_unmarshall(struct db_context *db, const uint8_t *buf,
 		return status;
 	}
 	return state.ret;
+}
+
+void dbwrap_log_key(const char *prefix, TDB_DATA key)
+{
+	if (DEBUGLEVEL < 10) {
+		return;
+	}
+	if (DEBUGLEVEL == 10) {
+		/*
+		 * Only fully spam at debuglevel > 10
+		 */
+		key.dsize = MIN(10, key.dsize);
+	}
+
+	if (key.dsize < 1024) {
+		char keystr[key.dsize*2+1];
+		hex_encode_buf(keystr, key.dptr, key.dsize);
+		DBG_DEBUG("%s key %s\n", prefix, keystr);
+		return;
+	}
+
+	DEBUG(DEBUGLEVEL, ("%s key\n", prefix));
+	dump_data(DEBUGLEVEL, key.dptr, key.dsize);
 }

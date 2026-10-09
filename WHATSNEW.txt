@@ -1,12 +1,12 @@
 Release Announcements
 =====================
 
-This is the first pre release of Samba 4.25.  This is *not*
+This is the first pre release of Samba 4.26.  This is *not*
 intended for production environments and is designed for testing
 purposes only.  Please report any defects via the Samba bug reporting
 system at https://bugzilla.samba.org/.
 
-Samba 4.25 will be the next version of the Samba suite.
+Samba 4.26 will be the next version of the Samba suite.
 
 
 UPGRADING
@@ -16,19 +16,28 @@ UPGRADING
 NEW FEATURES/CHANGES
 ====================
 
-JSON Audit logging
-------------------
 
-The two leading spaces before the opening '{' on JSON audit log lines have been
-removed. And any embedded new line characters '\n' are converted to spaces.
+Undocumented samba-tool dbcheck --yes changes
+---------------------------------------------
 
-Domain encryption types changed to AES by default
--------------------------------------------------
+The --yes option for samba-tool dbcheck, when combined with --fix,
+tells samba-tool to fix everything it can without asking questions.
 
-The default value of the smb.conf option ‘kdc default domain supported enctypes’
-now corresponds to ‘aes128-cts-hmac-sha1-96 aes256-cts-hmac-sha1-96’ (both AES
-encryption types) if the domain functional level is 2008 or higher. This
-addresses CVE-2026-20833.
+There has been an undocumented feature whereby if --yes was followed
+by certain special strings it would assume yes to only some of the
+questions. In addition, if --yes was followed by a less special string
+(including DN strings that dbcheck ought to expect), the failure would
+be quite mysterious. This aspect of --yes has been removed and
+replaced by --yes-restricted-to-rule. The usual sense of --yes works
+as expected.
+
+The use of --yes with special strings was only intended for automated
+tests, so was undocumented and unannounced. --yes-restricted-to-rule
+is also not mentioned by --help or the man page, and the magic strings
+it uses are not considered to be stable. We only mention this change
+in case people have stumbled across and come to rely on the feature.
+Otherwise please ignore this news.
+
 
 REMOVED FEATURES
 ================
@@ -39,14 +48,12 @@ smb.conf changes
 
   Parameter Name                          Description     Default
   --------------                          -----------     -------
-  allow dcerpc auth level connect         deprecated
-  kdc default domain supported enctypes   New default     AES encryption types (if supported by domain)
 
 
 KNOWN ISSUES
 ============
 
-https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.25#Release_blocking_bugs
+https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.26#Release_blocking_bugs
 
 
 #######################################

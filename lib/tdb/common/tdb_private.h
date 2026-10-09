@@ -157,16 +157,39 @@ struct tdb_record {
 	tdb_len_t data_len; /* byte length of data */
 	uint32_t full_hash; /* the full 32 bit hash of the key */
 	uint32_t magic;   /* try to catch errors */
-	/* the following union is implied:
-		union {
-			char record[rec_len];
-			struct {
-				char key[key_len];
-				char data[data_len];
-			}
-			uint32_t totalsize; (tailer)
-		}
-	*/
+	/*
+	 * Note that tdb_len_t and tdb_off_t are aliases of uint32_t
+	 * with a sizeof 4.
+	 *
+	 * The following virtual values are used:
+	 *   header_len = sizeof(struct tdb_record) ( 6 * 4 = 24 )
+	 *   total_size = header_len + rec_len;
+	 *   payload_len = key_len + data_len;
+	 *   padding_len = rec_len - ( payload_len + sizeof(tailer) )
+	 *   tailer = total_size
+	 *
+	 * With these, the following union is implied:
+	 * union {
+	 *     uint8_t record[rec_len];
+	 *     struct {
+	 *         union {
+	 *             uint8_t payload[payload_len];
+	 *             struct {
+	 *                 uint8_t key[key_len];
+	 *                 uint8_t data[data_len];
+	 *             };
+	 *         };
+	 *         uint8_t padding[padding_len];
+	 *         tdb_len_t tailer;
+	 *     };
+	 * };
+	 *
+	 * Note:
+	 * - The 'tailer' value is the total_size on disk for the
+	 *   record!
+	 * - 'rec_len' includes the size for payload, padding and tailer,
+	 *   it's total_size - header_len!
+	 */
 };
 
 
@@ -302,7 +325,9 @@ int tdb_ofs_read(struct tdb_context *tdb, tdb_off_t offset, tdb_off_t *d);
 int tdb_ofs_write(struct tdb_context *tdb, tdb_off_t offset, tdb_off_t *d);
 void *tdb_convert(void *buf, uint32_t size);
 int tdb_free(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec);
-tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
+tdb_off_t tdb_allocate(struct tdb_context *tdb,
+		       int hash,
+		       tdb_len_t payload_len,
 		       struct tdb_record *rec);
 
 int _tdb_oob(struct tdb_context *tdb, tdb_off_t off, tdb_len_t len, int probe);
@@ -333,7 +358,7 @@ int tdb_parse_data(struct tdb_context *tdb, TDB_DATA key,
 tdb_off_t tdb_find_lock_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t hash, int locktype,
 			   struct tdb_record *rec);
 tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
-			struct tdb_record *r, tdb_len_t length,
+			struct tdb_record *r, tdb_len_t payload_len,
 			tdb_off_t *p_last_ptr);
 int tdb_trim_dead(struct tdb_context *tdb, uint32_t hash);
 void tdb_io_init(struct tdb_context *tdb);
@@ -357,10 +382,13 @@ bool tdb_have_mutexes(struct tdb_context *tdb);
 int tdb_mutex_init(struct tdb_context *tdb);
 int tdb_mutex_mmap(struct tdb_context *tdb);
 int tdb_mutex_munmap(struct tdb_context *tdb);
-bool tdb_mutex_lock(struct tdb_context *tdb, int rw, off_t off, off_t len,
-		    bool waitflag, int *pret);
-bool tdb_mutex_unlock(struct tdb_context *tdb, int rw, off_t off, off_t len,
-		      int *pret);
+bool tdb_is_mutex_lock(struct tdb_context *tdb, off_t off, off_t len);
+int tdb_mutex_lock(struct tdb_context *tdb,
+		   int rw,
+		   off_t off,
+		   off_t len,
+		   bool waitflag);
+int tdb_mutex_unlock(struct tdb_context *tdb, int rw, off_t off, off_t len);
 int tdb_mutex_allrecord_lock(struct tdb_context *tdb, int ltype,
 			     enum tdb_lock_flags flags);
 int tdb_mutex_allrecord_unlock(struct tdb_context *tdb);

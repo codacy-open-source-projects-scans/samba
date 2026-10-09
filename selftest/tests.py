@@ -170,7 +170,7 @@ plantestsuite("ldb.base", "none", "%s/tests/test-tdb-subunit.sh %s" % (ldbdir, s
 
 planpythontestsuite("none", "samba.tests.credentials")
 planpythontestsuite("none", "samba.tests.registry")
-planpythontestsuite("ad_dc_ntvfs:local", "samba.tests.auth")
+planpythontestsuite("ad_dc:local", "samba.tests.auth")
 planpythontestsuite("none", "samba.tests.get_opt")
 planpythontestsuite("none", "samba.tests.cred_opt")
 planpythontestsuite("none", "samba.tests.security")
@@ -189,7 +189,7 @@ planpythontestsuite("none", "samba.tests.dcerpc.rpc_talloc")
 planpythontestsuite("none", "samba.tests.dcerpc.array")
 planpythontestsuite("none", "samba.tests.dcerpc.string_tests")
 planpythontestsuite("none", "samba.tests.hostconfig")
-planpythontestsuite("ad_dc_ntvfs:local", "samba.tests.messaging")
+planpythontestsuite("ad_dc:local", "samba.tests.messaging")
 planpythontestsuite("none", "samba.tests.s3param")
 planpythontestsuite("none", "samba.tests.s3passdb")
 planpythontestsuite("none", "samba.tests.s3registry")
@@ -536,6 +536,8 @@ plantestsuite("samba.unittests.talloc_keep_secret", "none",
 
 plantestsuite("samba.unittests.tldap", "none",
               [os.path.join(bindir(), "default/source3/test_tldap")])
+plantestsuite("samba.unittests.split_path", "none",
+              [os.path.join(bindir(), "default/source3/test_split_path")])
 plantestsuite("samba.unittests.rfc1738", "none",
               [os.path.join(bindir(), "default/lib/util/test_rfc1738")])
 plantestsuite("samba.unittests.kerberos", "none",
@@ -560,6 +562,8 @@ plantestsuite("samba.unittests.json_logging", "none",
               [os.path.join(bindir(), "default/lib/util/test_json_logging")])
 plantestsuite("samba.unittests.stable_sort", "none",
               [os.path.join(bindir(), "default/lib/util/test_stable_sort")])
+plantestsuite("samba.unittests.test_string_sub", "none",
+              [os.path.join(bindir(), "test_string_sub")])
 plantestsuite("samba.unittests.ntlm_check", "none",
               [os.path.join(bindir(), "default/libcli/auth/test_ntlm_check")])
 plantestsuite("samba.unittests.gnutls", "none",
@@ -574,6 +578,8 @@ plantestsuite("samba.unittests.test_oLschema2ldif", "none",
               [os.path.join(bindir(), "default/source4/utils/oLschema2ldif/test_oLschema2ldif")])
 plantestsuite("samba.unittests.auth.sam", "none",
               [os.path.join(bindir(), "test_auth_sam")])
+plantestsuite("samba.unittests.test_rpc_samr", "none",
+              [os.path.join(bindir(), "test_rpc_samr")])
 if have_heimdal_support and not using_system_gssapi:
     plantestsuite("samba.unittests.auth.heimdal_gensec_unwrap_des", "none",
                   [valgrindify(os.path.join(bindir(), "test_heimdal_gensec_unwrap_des"))])

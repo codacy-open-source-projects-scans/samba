@@ -54,6 +54,7 @@ apt-get -y install \
     libcap-dev \
     libcephfs-dev \
     libclang-dev \
+    libcrypt-dev \
     libcups2-dev \
     libdbus-1-dev \
     libevent-dev \
@@ -77,6 +78,7 @@ apt-get -y install \
     libsystemd-dev \
     libtasn1-bin \
     libtasn1-dev \
+    libtirpc-dev \
     libunwind-dev \
     liburing-dev \
     libutf8proc-dev \
@@ -102,7 +104,6 @@ apt-get -y install \
     python3-iso8601 \
     python3-markdown \
     python3-pyasn1 \
-    python3-requests \
     python3-setproctitle \
     rng-tools \
     rsync \

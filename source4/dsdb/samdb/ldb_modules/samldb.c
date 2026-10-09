@@ -358,41 +358,41 @@ static int samaccountname_bad_chars_check(struct samldb_ctx *ac,
 	 * Additionally, Samba collapses multiple spaces, and Windows doesn't.
 	 */
 	struct ldb_context *ldb = ldb_module_get_ctx(ac->module);
-	size_t i;
+	const char *inv = NULL;
 
-	for (i = 0; name[i] != '\0'; i++) {
-		uint8_t c = name[i];
-		char *p = NULL;
-		if (c < 32 || c == 127) {
+	inv = strstr_for_invalid_account_characters(name);
+	if (inv != NULL) {
+		char c = *inv;
+
+		if (c == '\0') {
 			ldb_asprintf_errstring(
 				ldb,
-				"samldb: sAMAccountName contains invalid "
-				"0x%.2x character\n", c);
+				"samldb: sAMAccountName is empty\n");
 			return LDB_ERR_CONSTRAINT_VIOLATION;
 		}
-		p = strchr("\"[]:;|=+*?<>/\\,", c);
-		if (p != NULL) {
+
+		if (c == '.') {
+			ldb_asprintf_errstring(
+				ldb,
+				"samldb: sAMAccountName ends with '.'");
+			return LDB_ERR_CONSTRAINT_VIOLATION;
+		}
+
+		if (isprint(c)) {
 			ldb_asprintf_errstring(
 				ldb,
 				"samldb: sAMAccountName contains invalid "
 				"'%c' character\n", c);
 			return LDB_ERR_CONSTRAINT_VIOLATION;
 		}
-	}
 
-	if (i == 0) {
 		ldb_asprintf_errstring(
 			ldb,
-			"samldb: sAMAccountName is empty\n");
+			"samldb: sAMAccountName contains invalid "
+			"0x%.2x character\n", c);
 		return LDB_ERR_CONSTRAINT_VIOLATION;
 	}
 
-	if (name[i - 1] == '.') {
-		ldb_asprintf_errstring(
-			ldb,
-			"samldb: sAMAccountName ends with '.'");
-		return LDB_ERR_CONSTRAINT_VIOLATION;
-	}
 	return LDB_SUCCESS;
 }
 
@@ -3821,8 +3821,8 @@ static int check_spn_alias_collision(struct ldb_context *ldb,
 {
 	int ret;
 	char *service_class = NULL;
-	char *spn_tail = NULL;
-	char *p = NULL;
+	const char *spn_tail = NULL;
+	const char *p = NULL;
 	char **aliases = NULL;
 	size_t n_aliases = 0;
 	size_t i, len;

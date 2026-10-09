@@ -53,7 +53,16 @@ typedef uint64_t br_off;
  * Internal structure in brlock.tdb
  *
  * The data in brlock records is an unsorted linear array of these
- * records.
+ * records, prefixed by a uint32_t version number:
+ *
+ * +----------------+-----------------------------------+
+ * |  Version (u32) |   Array of lock_struct records    |
+ * +----------------+-----------------------------------+
+ *                  |
+ *                  v
+ *         +-------------------+-------------------+-------------------+----
+ *         |   lock_struct[0]  |   lock_struct[1]  |   lock_struct[2]  | ...
+ *         +-------------------+-------------------+-------------------+----
  *
  * It is unnecessary to store the count as tdb provides the size of
  * the record.
@@ -66,6 +75,7 @@ struct lock_struct {
 	uint64_t fnum;
 	enum brl_type lock_type;
 	enum brl_flavour lock_flav;
+	bool persistent;
 };
 
 struct smbd_lock_element {

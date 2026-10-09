@@ -93,13 +93,16 @@ ubuntu2204:
 ubuntu2404:
   extends: .build_image_template
 
+ubuntu2604:
+  extends: .build_image_template
+
 debian11:
   extends: .build_image_template
 
 debian12:
   extends: .build_image_template
 
-fedora43:
+fedora44:
   extends: .build_image_template
 
 debian11-32bit:

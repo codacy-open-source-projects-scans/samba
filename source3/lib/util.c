@@ -192,39 +192,6 @@ void show_msg(const char *buf)
 }
 
 /*******************************************************************
- Setup only the byte count for a smb message.
-********************************************************************/
-
-int set_message_bcc(char *buf,int num_bytes)
-{
-	int num_words = CVAL(buf,smb_wct);
-	SSVAL(buf,smb_vwv + num_words*SIZEOFWORD,num_bytes);
-	_smb_setlen(buf,smb_size + num_words*2 + num_bytes - 4);
-	return (smb_size + num_words*2 + num_bytes);
-}
-
-/*******************************************************************
- Add a data blob to the end of a smb_buf, adjusting bcc and smb_len.
- Return the bytes added
-********************************************************************/
-
-ssize_t message_push_blob(uint8_t **outbuf, DATA_BLOB blob)
-{
-	size_t newlen = smb_len(*outbuf) + 4 + blob.length;
-	uint8_t *tmp;
-
-	if (!(tmp = talloc_realloc(NULL, *outbuf, uint8_t, newlen))) {
-		DEBUG(0, ("talloc failed\n"));
-		return -1;
-	}
-	*outbuf = tmp;
-
-	memcpy(tmp + smb_len(tmp) + 4, blob.data, blob.length);
-	set_message_bcc((char *)tmp, smb_buflen(tmp) + blob.length);
-	return blob.length;
-}
-
-/*******************************************************************
  Reduce a file name, removing .. elements.
 ********************************************************************/
 
@@ -576,7 +543,7 @@ void add_to_large_array(TALLOC_CTX *mem_ctx, size_t element_size,
 char *get_mydnsdomname(TALLOC_CTX *ctx)
 {
 	const char *domname;
-	char *p;
+	const char *p;
 
 	domname = get_mydnsfullname();
 	if (!domname) {
@@ -1331,7 +1298,7 @@ char *myhostname_upper(void)
 bool parent_dirname(TALLOC_CTX *mem_ctx, const char *dir, char **parent,
 		    const char **name)
 {
-	char *p;
+	const char *p;
 	ptrdiff_t len;
 
 	p = strrchr_m(dir, '/'); /* Find final '/', if any */

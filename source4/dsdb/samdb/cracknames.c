@@ -441,6 +441,9 @@ static WERROR get_format_functional_filtering_param(struct ldb_context *sam_ctx,
 			s[0] = '\0';
 			s++;
 
+			account = ldb_binary_encode_string(mem_ctx, account);
+			W_ERROR_HAVE_NO_MEMORY(account);
+
 			ldb_ret = ldb_search(sam_ctx, mem_ctx, &domain_res,
 						tmp_dn,
 						LDB_SCOPE_ONELEVEL,
@@ -960,7 +963,8 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 	struct ldb_message **result_res = NULL;
 	struct ldb_message *result = NULL;
 	int i;
-	char *p;
+	char *s = NULL;
+	char *p = NULL;
 	struct ldb_dn *partitions_basedn = samdb_partitions_dn(sam_ctx, mem_ctx);
 
 	const char * const _domain_attrs_1779[] = { "ncName", "dnsRoot", NULL};
@@ -1191,12 +1195,13 @@ static WERROR DsCrackNameOneFilter(struct ldb_context *sam_ctx, TALLOC_CTX *mem_
 		}
 	}
 
-	info1->dns_domain_name = ldb_dn_canonical_string(mem_ctx, result->dn);
-	W_ERROR_HAVE_NO_MEMORY(info1->dns_domain_name);
-	p = strchr(info1->dns_domain_name, '/');
+	s = ldb_dn_canonical_string(mem_ctx, result->dn);
+	W_ERROR_HAVE_NO_MEMORY(s);
+	p = strchr(s, '/');
 	if (p) {
 		p[0] = '\0';
 	}
+	info1->dns_domain_name = s;
 
 	/* here we can use result and domain_res[0] */
 	switch (format_desired) {
@@ -1539,7 +1544,8 @@ NTSTATUS crack_name_to_nt4_name(TALLOC_CTX *mem_ctx,
 {
 	WERROR werr;
 	struct drsuapi_DsNameInfo1 info1;
-	char *p;
+	char *s = NULL;
+	char *p = NULL;
 
 	/* Handle anonymous bind */
 	if (!name || !*name) {
@@ -1568,16 +1574,17 @@ NTSTATUS crack_name_to_nt4_name(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	*nt4_domain = talloc_strdup(mem_ctx, info1.result_name);
-	if (*nt4_domain == NULL) {
+	s = talloc_strdup(mem_ctx, info1.result_name);
+	if (s == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	p = strchr(*nt4_domain, '\\');
+	p = strchr(s, '\\');
 	if (!p) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 	p[0] = '\0';
+	*nt4_domain = s;
 
 	*nt4_account = talloc_strdup(mem_ctx, &p[1]);
 	if (*nt4_account == NULL) {

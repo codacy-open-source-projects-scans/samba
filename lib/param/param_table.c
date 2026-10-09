@@ -151,6 +151,12 @@ static const struct enum_list enum_smb_signing_vals[] = {
 	{-1, NULL}
 };
 
+static const struct enum_list enum_ph_durability_vals[] = {
+	{PH_DURABILITY_FULL_OUTAGE, "full_outage"},
+	{PH_DURABILITY_PARTIAL_OUTAGE, "partial_outage"},
+	{-1, NULL}
+};
+
 static const struct enum_list enum_smb_encryption_vals[] = {
 	{SMB_ENCRYPTION_DEFAULT, "default"},
 	{SMB_ENCRYPTION_OFF, "No"},
@@ -469,6 +475,10 @@ static const struct enum_list enum_ad_functional_level[] = {
 static const struct enum_list enum_acl_claims_evaluation[] = {
 	{ACL_CLAIMS_EVALUATION_AD_DC_ONLY, "AD DC only"},
 	{ACL_CLAIMS_EVALUATION_NEVER, "never"},
+};
+static const struct enum_list enum_wsp_backend[] = {
+	{WSP_BACKEND_NONE, "none"},
+	{WSP_BACKEND_ELASTIC, "elasticsearch"},
 	{-1, NULL}
 };
 

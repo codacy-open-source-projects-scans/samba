@@ -49,7 +49,7 @@ static struct smbd_scavenger_state *smbd_scavenger_state = NULL;
 struct scavenger_message {
 	struct file_id file_id;
 	uint64_t open_persistent_id;
-	NTTIME until;
+	uint32_t name_hash;
 };
 
 static int smbd_scavenger_main(struct smbd_scavenger_state *state)
@@ -410,40 +410,27 @@ fail:
 	return false;
 }
 
-void scavenger_schedule_disconnected(struct files_struct *fsp)
+void scavenger_schedule_disconnected(struct messaging_context *msg_ctx,
+				     uint64_t open_persistent_id,
+				     struct file_id *file_id,
+				     uint32_t name_hash)
 {
 	NTSTATUS status;
-	struct server_id self = messaging_server_id(fsp->conn->sconn->msg_ctx);
-	struct timeval disconnect_time, until;
-	uint64_t timeout_usec;
+	struct server_id self = messaging_server_id(msg_ctx);
 	struct scavenger_message msg;
 	DATA_BLOB msg_blob;
 	struct server_id_buf tmp;
 	struct file_id_buf idbuf;
 
-	if (fsp->op == NULL) {
-		return;
-	}
-	nttime_to_timeval(&disconnect_time, fsp->op->global->disconnect_time);
-	timeout_usec = UINT64_C(1000) * fsp->op->global->durable_timeout_msec;
-	until = timeval_add(&disconnect_time,
-			    timeout_usec / 1000000,
-			    timeout_usec % 1000000);
-
 	ZERO_STRUCT(msg);
-	msg.file_id = fsp->file_id;
-	msg.open_persistent_id = fsp->op->global->open_persistent_id;
-	msg.until = timeval_to_nttime(&until);
+	msg.file_id = *file_id;
+	msg.open_persistent_id = open_persistent_id;
+	msg.name_hash = name_hash;
 
-	DEBUG(10, ("smbd: %s mark file %s as disconnected at %s with timeout "
-		   "at %s in %fs\n",
-		   server_id_str_buf(self, &tmp),
-		   file_id_str_buf(fsp->file_id, &idbuf),
-		   timeval_string(talloc_tos(), &disconnect_time, true),
-		   timeval_string(talloc_tos(), &until, true),
-		   fsp->op->global->durable_timeout_msec/1000.0));
+	DBG_DEBUG("smbd: %s mark file %s as disconnected\n",
+		  server_id_str_buf(self, &tmp),
+		  file_id_str_buf(*file_id, &idbuf));
 
-	SMB_ASSERT(server_id_is_disconnected(&fsp->op->global->server_id));
 	SMB_ASSERT(!server_id_equal(&self, &smbd_scavenger_state->parent_id));
 	SMB_ASSERT(!smbd_scavenger_state->am_scavenger);
 
@@ -472,6 +459,7 @@ struct scavenger_timer_context {
 
 struct cleanup_disconnected_state {
 	struct file_id fid;
+	uint32_t name_hash;
 	struct share_mode_lock *lck;
 	uint64_t open_persistent_id;
 	struct share_mode_entry e;
@@ -489,7 +477,11 @@ static bool cleanup_disconnected_share_mode_entry_fn(
 		return false;
 	}
 
-	disconnected = server_id_is_disconnected(&e->pid);
+	if (e->flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) {
+		disconnected = !serverid_exists(&e->pid);
+	} else {
+		disconnected = server_id_is_disconnected(&e->pid);
+	}
 	if (!disconnected) {
 		char *name = share_mode_filename(talloc_tos(), state->lck);
 		struct file_id_buf tmp1;
@@ -501,8 +493,12 @@ static bool cleanup_disconnected_share_mode_entry_fn(
 			name,
 			server_id_str_buf(e->pid, &tmp2));
 		TALLOC_FREE(name);
-		smb_panic(__location__);
+		return false;
 	}
+
+	reset_delete_on_close_lck_open_id(state->lck,
+					  state->name_hash,
+					  state->open_persistent_id);
 
 	/*
 	 * Setting e->stale = true is
@@ -514,12 +510,13 @@ static bool cleanup_disconnected_share_mode_entry_fn(
 	return true;
 }
 
-static bool share_mode_cleanup_disconnected(
-	struct file_id fid, uint64_t open_persistent_id)
+bool share_mode_cleanup_disconnected(
+	struct file_id fid, uint64_t open_persistent_id, uint32_t name_hash)
 {
 	struct cleanup_disconnected_state state = {
 		.fid = fid,
-		.open_persistent_id = open_persistent_id
+		.open_persistent_id = open_persistent_id,
+		.name_hash = name_hash,
 	};
 	bool ret = false;
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -577,10 +574,19 @@ static bool share_mode_cleanup_disconnected(
 					       &state.e.lease_key);
 		if (!NT_STATUS_IS_OK(status)) {
 			struct GUID_txt_buf gbuf;
+			int dbg_level = DBGLVL_WARNING;
 
-			DBG_WARNING("Failed to clean up lease associated "
+			if ((state.e.flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) &&
+			    NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND))
+			{
+				dbg_level = DBGLVL_DEBUG;
+				ret = true;
+			}
+
+			DBG_PREFIX(dbg_level,
+				   ("Failed to clean up lease associated "
 				    "with file (file-id='%s', servicepath='%s', "
-				    "name='%s', open_persistent_id=%" PRIu64
+				    "name='%s', open_persistent_id=%" PRIu64 ", "
 				    "client_guid=%s, "
 				    "lease_key=%"PRIx64"/%"PRIx64"): %s\n",
 				    file_id_str_buf(fid, &idbuf),
@@ -590,7 +596,7 @@ static bool share_mode_cleanup_disconnected(
 				    GUID_buf_string(&state.e.client_guid, &gbuf),
 				    state.e.lease_key.data[0],
 				    state.e.lease_key.data[1],
-				    nt_errstr(status));
+				    nt_errstr(status)));
 			goto done;
 		}
 	}
@@ -626,7 +632,8 @@ static void scavenger_timer(struct tevent_context *ev,
 	}
 
 	ok = share_mode_cleanup_disconnected(ctx->msg.file_id,
-					     ctx->msg.open_persistent_id);
+					     ctx->msg.open_persistent_id,
+					     ctx->msg.name_hash);
 	if (!ok) {
 		DBG_WARNING("Failed to cleanup share modes and byte range "
 			    "locks for file %s open %"PRIu64"\n",
@@ -639,12 +646,70 @@ static void scavenger_timer(struct tevent_context *ev,
 static void scavenger_add_timer(struct smbd_scavenger_state *state,
 				struct scavenger_message *msg)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct tevent_timer *te;
 	struct scavenger_timer_context *ctx;
+	const struct smbXsrv_open_global *global = NULL;
 	struct timeval until;
 	struct file_id_buf idbuf;
+	NTTIME disconnect_time = 0;
+	uint32_t durable_timeout_msec = 0;
+	struct timeval disconnect_timeval;
+	uint64_t timeout_usec;
+	NTSTATUS status;
 
-	nttime_to_timeval(&until, msg->until);
+	status = smbXsrv_open_global_lookup(frame,
+					    (uint32_t)msg->open_persistent_id,
+					    &global);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		DBG_DEBUG("global open [%" PRIx64 "] already gone\n",
+			  msg->open_persistent_id);
+	} else if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("smbXsrv_open_global_lookup [%" PRIx64 "] failed: %s\n",
+			    msg->open_persistent_id,
+			    nt_errstr(status));
+		goto done;
+	}
+
+	if (global != NULL) {
+		if (!global->persistent) {
+			if (!server_id_is_disconnected(&global->server_id)) {
+				DBG_ERR("Open [0x%"PRIx64"] fileid [%s] is "
+					"not marked disconnected\n",
+					msg->open_persistent_id,
+					file_id_str_buf(msg->file_id, &idbuf));
+				goto done;
+			}
+			if (global->disconnect_time == 0) {
+				DBG_ERR("Open [0x%"PRIx64"] fileid [%s] without "
+					"disconnect_time\n",
+					msg->open_persistent_id,
+					file_id_str_buf(msg->file_id, &idbuf));
+			}
+		} else {
+			if (serverid_exists(&global->server_id)) {
+				struct server_id_buf sidbuf;
+				DBG_ERR("Open [0x%"PRIx64"] fileid [%s] pid [%s] "
+					"still around\n",
+					msg->open_persistent_id,
+					file_id_str_buf(msg->file_id, &idbuf),
+					server_id_str_buf(global->server_id,
+							  &sidbuf));
+				goto done;
+			}
+		}
+		disconnect_time = global->disconnect_time;
+		durable_timeout_msec = global->durable_timeout_msec;
+	}
+	if (disconnect_time != 0) {
+		nttime_to_timeval(&disconnect_timeval, disconnect_time);
+	} else {
+		GetTimeOfDay(&disconnect_timeval);
+	}
+	timeout_usec = UINT64_C(1000) * durable_timeout_msec;
+	until = timeval_add(&disconnect_timeval,
+			    timeout_usec / 1000000,
+			    timeout_usec % 1000000);
 
 	DBG_DEBUG("schedule file %s for cleanup at %s\n",
 		  file_id_str_buf(msg->file_id, &idbuf),
@@ -653,7 +718,7 @@ static void scavenger_add_timer(struct smbd_scavenger_state *state,
 	ctx = talloc_zero(state, struct scavenger_timer_context);
 	if (ctx == NULL) {
 		DEBUG(2, ("Failed to talloc_zero(scavenger_timer_context)\n"));
-		return;
+		goto done;
 	}
 
 	ctx->state = state;
@@ -667,9 +732,12 @@ static void scavenger_add_timer(struct smbd_scavenger_state *state,
 	if (te == NULL) {
 		DEBUG(2, ("Failed to add scavenger_timer event\n"));
 		talloc_free(ctx);
-		return;
+		goto done;
 	}
 
 	/* delete context after handler was running */
 	talloc_steal(te, ctx);
+
+done:
+	TALLOC_FREE(frame);
 }

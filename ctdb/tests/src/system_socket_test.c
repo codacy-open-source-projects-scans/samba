@@ -69,13 +69,67 @@ static void test_types(void)
 	assert(sizeof(ip4pkt) == sizeof(struct ip) + sizeof(struct tcphdr));
 }
 
-#ifdef HAVE_PACKETSOCKET
+#ifdef CTDB_CAN_SEND_ARPS
 
-static void test_arp(const char *addr_str, const char *hwaddr_str, bool reply)
+static void hwaddr_to_sockaddr_ll(const char *asc, struct sockaddr_ll *sall)
+{
+	/*
+	 * If initializing this, some (older) compilers report:
+	 *   error: variable-sized object may not be initialized
+	 * However, strlcpy() overwrites the entire buffer a few lines
+	 * in, so no initialization needed.
+	 */
+	char in[strlen(asc) + 1];
+	char *t = NULL;
+	char *tok = NULL;
+	uint8_t *sll_addr = (uint8_t *)sall + offsetof(struct sockaddr_ll,
+						       sll_addr);
+
+	*sall = (struct sockaddr_ll) {
+		.sll_family = AF_PACKET,
+		.sll_protocol = htons(ETH_P_ALL),
+		.sll_ifindex = 2,
+		.sll_pkttype = PACKET_HOST,
+	};
+
+	(void)strlcpy(in, asc, sizeof(in));
+	t = in;
+	while ((tok = strtok(t, ":")) != NULL) {
+		char *end = NULL;
+		unsigned long octet = strtoul(tok, &end, 16);
+
+		assert(sall->sll_halen < SOCKADDR_LL_ADDR_LEN);
+		assert(end != NULL && *end == '\0');
+		assert(octet <= 0xff);
+		sll_addr[sall->sll_halen] = (uint8_t)octet;
+		sall->sll_halen++;
+
+		t = NULL;
+	}
+
+	switch (sall->sll_halen) {
+	case 6:
+		sall->sll_hatype = ARPHRD_ETHER;
+		break;
+	case 20:
+		sall->sll_hatype = ARPHRD_INFINIBAND;
+		break;
+	default:
+		fprintf(stderr,
+			"Unknown hardware address length (%d)\n",
+			(int)sall->sll_halen);
+		abort();
+	}
+}
+
+static void test_arp(const char *addr_str,
+		     const char *hwaddr_str,
+		     uint16_t arpop)
 {
 	ctdb_sock_addr addr;
-	struct ether_addr *hw, *dhw;
-	uint8_t buf[512];
+	struct samba_sockaddr hardware_addr = {};
+	struct sockaddr_ll *sall = &hardware_addr.u.ll;
+	uint8_t buf[MAX(ARP_BUFFER_SIZE, IP6_NA_BUFFER_SIZE)];
 	size_t buflen = sizeof(buf);
 	size_t len;
 	int ret;
@@ -83,15 +137,15 @@ static void test_arp(const char *addr_str, const char *hwaddr_str, bool reply)
 	ret = ctdb_sock_addr_from_string(addr_str, &addr, false);
 	assert(ret == 0);
 
-	hw = ether_aton(hwaddr_str);
-	assert(hw != NULL);
+	hwaddr_to_sockaddr_ll(hwaddr_str, sall);
+	hardware_addr.sa_socklen = sall_len(sall);
 
 	switch (addr.ip.sin_family) {
 	case AF_INET:
-		ret = arp_build(buf, buflen, &addr.ip, hw, reply, &dhw, &len);
+		ret = arp_build(buf, buflen, &addr.ip, sall, arpop, &len);
 		break;
 	case AF_INET6:
-		ret = ip6_na_build(buf, buflen, &addr.ip6, hw, &dhw, &len);
+		ret = ip6_na_build(buf, buflen, &addr.ip6, sall, &len);
 		break;
 	default:
 		abort();
@@ -102,14 +156,36 @@ static void test_arp(const char *addr_str, const char *hwaddr_str, bool reply)
 	hexdump(buf, len);
 }
 
-#else /* HAVE_PACKETSOCKET  */
+static void test_ip6_ll_multicast_build(const char *hwaddr_str)
+{
+	struct samba_sockaddr hardware_addr = {};
+	struct sockaddr_ll *sall = &hardware_addr.u.ll;
+	struct samba_sockaddr hardware_addr_out = {};
+	struct sockaddr_ll *sall_out = &hardware_addr_out.u.ll;
+	int ret;
+
+	hwaddr_to_sockaddr_ll(hwaddr_str, sall);
+
+	ret = ip6_ll_multicast_build(sall, &hardware_addr_out);
+	assert(ret == 0);
+
+	hexdump((uint8_t*)sall_out,
+		offsetof(struct sockaddr_ll, sll_addr) + sall_out->sll_halen);
+}
+
+#else /* CTDB_CAN_SEND_ARPS  */
 
 static void test_arp(const char *addr_str, const char *hwaddr_str, bool reply)
 {
-	fprintf(stderr, "PACKETSOCKET not supported\n");
+	fprintf(stderr, "Sending ARPs not supported\n");
 }
 
-#endif /* HAVE_PACKETSOCKET */
+static void test_ip6_ll_multicast_build(const char *hwaddr_str)
+{
+	fprintf(stderr, "Sending ARPs not supported\n");
+}
+
+#endif /* CTDB_CAN_SEND_ARPS */
 
 static void test_tcp(const char *src_str,
 		     const char *dst_str,
@@ -245,7 +321,9 @@ static void usage(const char *prog)
 	fprintf(stderr, "  commands:\n");
 	fprintf(stderr, "    types\n");
 	fprintf(stderr, "    arp <ipaddr> <hwaddr> [reply]\n");
+	fprintf(stderr, "    ip6_sll_multicast <hwaddr>\n");
 	fprintf(stderr, "    haveip <ipaddr>\n");
+	fprintf(stderr, "    sendarp <ipaddr> <iface>\n");
 	fprintf(stderr, "    tcp <src> <dst> <seq> <ack> <rst>\n");
 
 	exit(1);
@@ -270,12 +348,29 @@ int main(int argc, char **argv)
 		if (argc != 4 && argc != 5) {
 			usage(argv[0]);
 		}
-		test_arp(argv[2], argv[3], (argc == 5));
+		test_arp(argv[2],
+			 argv[3],
+			 argc == 5 ? ARPOP_REPLY : ARPOP_REQUEST);
+	} else if (strcmp(argv[1], "ip6_sll_multicast") == 0) {
+		if (argc != 3) {
+			usage(argv[0]);
+		}
+		test_ip6_ll_multicast_build(argv[2]);
 	} else if (strcmp(argv[1], "tcp") == 0) {
 		if (argc != 7) {
 			usage(argv[0]);
 		}
 		test_tcp(argv[2], argv[3], argv[4], argv[5], argv[6]);
+	} else if (strcmp(argv[1], "sendarp") == 0) {
+		ctdb_sock_addr addr = {};
+		int ret = 0;
+		if (argc != 4) {
+			usage(argv[0]);
+		}
+		ret = ctdb_sock_addr_from_string(argv[2], &addr, false);
+		assert(ret == 0);
+		ret = ctdb_sys_send_arp(&addr, argv[3]);
+		assert(ret == 0);
 	} else if (strcmp(argv[1], "haveip") == 0) {
 		if (argc != 3) {
 			usage(argv[0]);

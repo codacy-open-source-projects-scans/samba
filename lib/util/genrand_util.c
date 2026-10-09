@@ -76,9 +76,18 @@ _PUBLIC_ uint64_t generate_unique_u64(uint64_t veto_value)
 	if (unlikely(pid != generate_unique_u64_state.pid)) {
 		generate_unique_u64_state = (struct generate_unique_u64_state) {
 			.pid = pid,
-			.next_value = veto_value,
 		};
+
+		/*
+		 * Start at a random value, processes must not
+		 * generate the same sequence of values.
+		 */
+		generate_nonce_buffer(
+			(void *)&generate_unique_u64_state.next_value,
+			sizeof(generate_unique_u64_state.next_value));
 	}
+
+	generate_unique_u64_state.next_value++;
 
 	while (unlikely(generate_unique_u64_state.next_value == veto_value)) {
 		generate_nonce_buffer(
@@ -86,7 +95,7 @@ _PUBLIC_ uint64_t generate_unique_u64(uint64_t veto_value)
 				sizeof(generate_unique_u64_state.next_value));
 	}
 
-	return generate_unique_u64_state.next_value++;
+	return generate_unique_u64_state.next_value;
 }
 
 /**
@@ -231,7 +240,7 @@ _PUBLIC_ char *generate_random_str_list_buf(char *buf,
 	generate_secret_buffer((uint8_t *)buf, len);
 
 	for (i=0; i<len; i++) {
-		buf[i] = list[buf[i] % list_len];
+		buf[i] = list[(uint8_t)buf[i] % list_len];
 	}
 
 	return buf;

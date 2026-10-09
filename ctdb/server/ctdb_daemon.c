@@ -311,17 +311,17 @@ int daemon_register_message_handler(struct ctdb_context *ctdb, uint32_t client_i
 	struct ctdb_client *client = reqid_find(ctdb->idr, client_id, struct ctdb_client);
 	int res;
 	if (client == NULL) {
-		DEBUG(DEBUG_ERR,("Bad client_id in daemon_request_register_message_handler\n"));
+		DBG_ERR("Bad client_id\n");
 		return -1;
 	}
 	res = srvid_register(ctdb->srv, client, srvid, daemon_message_handler,
 			     client);
 	if (res != 0) {
-		DEBUG(DEBUG_ERR,(__location__ " Failed to register handler %llu in daemon\n",
-			 (unsigned long long)srvid));
+		DBG_ERR("Failed to register handler %llu in daemon\n",
+			(unsigned long long)srvid);
 	} else {
-		DEBUG(DEBUG_INFO,(__location__ " Registered message handler for srvid=%llu\n",
-			 (unsigned long long)srvid));
+		D_INFO("Registered message handler for srvid=%llu\n",
+		       (unsigned long long)srvid);
 	}
 
 	return res;
@@ -335,7 +335,7 @@ int daemon_deregister_message_handler(struct ctdb_context *ctdb, uint32_t client
 {
 	struct ctdb_client *client = reqid_find(ctdb->idr, client_id, struct ctdb_client);
 	if (client == NULL) {
-		DEBUG(DEBUG_ERR,("Bad client_id in daemon_request_deregister_message_handler\n"));
+		DBG_ERR("Bad client_id\n");
 		return -1;
 	}
 	return srvid_deregister(ctdb->srv, srvid, client);
@@ -2113,6 +2113,328 @@ int32_t ctdb_control_deregister_notify(struct ctdb_context *ctdb, uint32_t clien
 	talloc_free(nl);
 
 	return 0;
+}
+
+struct ctdb_push_record_hdr_state {
+	struct ctdb_ltdb_header hdr;
+	bool found;
+};
+
+static int ctdb_push_record_hdr_parser(TDB_DATA key,
+				       TDB_DATA data,
+				       void *private_data)
+{
+	struct ctdb_push_record_hdr_state *state = private_data;
+
+	if (data.dsize < sizeof(state->hdr)) {
+		return 0;
+	}
+
+	memcpy(&state->hdr, data.dptr, sizeof(state->hdr));
+	state->found = true;
+	return 0;
+}
+
+/*
+ * called when we should retry a deferred push-record control
+ */
+static void ctdb_push_record_input_pkt(void *p, struct ctdb_req_header *hdr)
+{
+	struct ctdb_context *ctdb = talloc_get_type_abort(p, struct ctdb_context);
+
+	ctdb_input_pkt(ctdb, hdr);
+}
+
+struct push_record_fanout_state {
+	struct ctdb_context *ctdb;
+	struct ctdb_req_control_old *c;
+	const char *errormsg;
+	uint32_t num_pending;
+	int32_t status;
+};
+
+static void ctdb_push_record_fanout_timeout(struct tevent_context *ev,
+					    struct tevent_timer *te,
+					    struct timeval t,
+					    void *private_data)
+{
+	struct push_record_fanout_state *state = talloc_get_type_abort(
+		private_data, struct push_record_fanout_state);
+
+	DBG_ERR("Timed out waiting for %"PRIu32" PUSH_RECORD_STORE replies\n",
+		state->num_pending);
+
+	ctdb_request_control_reply(state->ctdb,
+				   state->c,
+				   NULL,
+				   -1,
+				   "push-record timed out");
+	talloc_free(state);
+}
+
+/*
+  Called once for each node we fanned the store out to. Every control we
+  send produces exactly one callback, either a reply or a timeout from
+  ctdb_control_timeout(), so counting the replies is safe.
+ */
+static void ctdb_push_record_fanout_callback(struct ctdb_context *ctdb,
+					     int32_t status,
+					     TDB_DATA data,
+					     const char *errormsg,
+					     void *private_data)
+{
+	struct push_record_fanout_state *state = talloc_get_type_abort(
+		private_data, struct push_record_fanout_state);
+
+	if (status != 0) {
+		DBG_ERR("PUSH_RECORD_STORE failed: status=%"PRIi32" %s\n",
+			status,
+			errormsg != NULL ? errormsg : "no error message given");
+		if (state->status == 0) {
+			state->status = status;
+			state->errormsg = errormsg;
+		}
+	}
+
+	state->num_pending--;
+	if (state->num_pending != 0) {
+		return;
+	}
+
+	ctdb_request_control_reply(state->ctdb,
+				   state->c,
+				   NULL,
+				   state->status,
+				   state->errormsg);
+	talloc_free(state);
+}
+
+/*
+  Push a record out to the volatile databases of all other active nodes and
+  wait until they have acked it.
+
+  This is modelled on ctdb_control_trans3_commit(): the node holding the
+  record asks its own daemon to fan the store out as
+  CTDB_CONTROL_PUSH_RECORD_STORE, and we reply once every node has answered.
+  The caller therefore knows the record is on all nodes before it goes on,
+  instead of having to reason about an unsequenced broadcast that may be
+  applied at an arbitrary point in the future.
+ */
+int32_t ctdb_control_push_record(struct ctdb_context *ctdb,
+				 struct ctdb_req_control_old *c,
+				 TDB_DATA indata,
+				 bool *async_reply)
+{
+	struct push_record_fanout_state *state = NULL;
+	unsigned int i;
+
+	state = talloc_zero(ctdb, struct push_record_fanout_state);
+	if (state == NULL) {
+		DBG_ERR("talloc_zero failed\n");
+		return -1;
+	}
+	state->ctdb = ctdb;
+	state->c = c;
+
+	for (i = 0; i < ctdb->num_nodes; i++) {
+		struct ctdb_node *node = ctdb->nodes[i];
+		int ret;
+
+		/* only send to active nodes */
+		if (node->flags & NODE_FLAGS_INACTIVE) {
+			continue;
+		}
+
+		/*
+		 * Do not store on the pushing node. It has already written
+		 * the record, with an incremented RSN, and storing it here
+		 * would overwrite that.
+		 */
+		if (node->pnn == ctdb->pnn) {
+			continue;
+		}
+
+		ret = ctdb_daemon_send_control(ctdb,
+					       node->pnn,
+					       0,
+					       CTDB_CONTROL_PUSH_RECORD_STORE,
+					       c->client_id,
+					       0,
+					       indata,
+					       ctdb_push_record_fanout_callback,
+					       state);
+		if (ret != 0) {
+			DBG_ERR("Unable to send PUSH_RECORD_STORE to pnn %u\n",
+				node->pnn);
+			talloc_free(state);
+			return -1;
+		}
+
+		state->num_pending++;
+	}
+
+	if (state->num_pending == 0) {
+		talloc_free(state);
+		return 0;
+	}
+
+	/* we need to wait for the replies */
+	*async_reply = true;
+
+	/* need to keep the control structure around */
+	talloc_steal(state, c);
+
+	/* but we won't wait forever */
+	tevent_add_timer(ctdb->ev,
+			 state,
+			 timeval_current_ofs(ctdb->tunable.control_timeout, 0),
+			 ctdb_push_record_fanout_timeout,
+			 state);
+
+	return 0;
+}
+
+/*
+  Store a record pushed to us by the node that holds it. This is the worker
+  side of CTDB_CONTROL_PUSH_RECORD, fanned out by ctdb_control_push_record()
+  on the pushing node.
+ */
+int32_t ctdb_control_push_record_store(struct ctdb_context *ctdb,
+				       struct ctdb_req_control_old *c,
+				       TDB_DATA indata,
+				       bool *async_reply)
+{
+	struct ctdb_push_record_data *data = NULL;
+	struct ctdb_db_context *ctdb_db = NULL;
+	struct ctdb_push_record_hdr_state hdr_state = {};
+	size_t np = 0;
+	int ret = 0;
+	int32_t status = -1;
+
+	ret = ctdb_push_record_data_pull(indata.dptr,
+					 indata.dsize,
+					 ctdb,
+					 &data,
+					 &np);
+	if (ret != 0) {
+		DBG_ERR("Invalid data\n");
+		goto done;
+	}
+
+	if (ctdb->vnn_map->generation != data->generation) {
+		/*
+		 * A recovery happened since the push was sent. Tell the
+		 * pusher.
+		 */
+		DBG_INFO("Rejecting outdated push-record\n");
+		goto done;
+	}
+
+	/*
+	 * Do not store on the dmaster.  This will have already been
+	 * written by smbd.  Storing here would overwrite the already
+	 * written record, which has an incremented RSN.
+	 */
+	if (data->hdr.dmaster == ctdb->pnn) {
+		status = 0;
+		goto done;
+	}
+
+
+	ctdb_db = find_ctdb_db(ctdb, data->db_id);
+	if (ctdb_db == NULL) {
+		DBG_ERR(" Unknown db id 0x%08x\n", data->db_id);
+		goto done;
+	}
+
+	/*
+	 * Take the chainlock without blocking. A client may be holding
+	 * the chainlock of this record while waiting for a reply
+	 * from this daemon, so blocking here deadlocks.
+	 * Instead defer the control and let it be redispatched once the
+	 * record becomes available, just like a record request.
+	 */
+	ret = ctdb_ltdb_lock_requeue(ctdb_db,
+				     data->key,
+				     &c->hdr,
+				     ctdb_push_record_input_pkt,
+				     ctdb,
+				     false);
+	if (ret == -1) {
+		DBG_ERR("Failed to lock record\n");
+		goto done;
+	}
+	if (ret == -2) {
+		DBG_INFO(__location__ " deferring ctdb_control_push_record\n");
+		*async_reply = true;
+		status = 0;
+		goto done;
+	}
+
+	/*
+	 * Ignore a push-record that lost the race against the normal
+	 * record protocol. The push is sent as an unsequenced broadcast
+	 * control while the sender still is the dmaster, but by the time
+	 * it arrives here the record may have been migrated on. Storing
+	 * it then resurrects an obsolete dmaster, which breaks the
+	 * dmaster chain.
+	 *
+	 * Read the header with tdb_parse_record() rather than
+	 * ctdb_ltdb_fetch(): for a missing record the latter synthesises an
+	 * initial header and, on the lmaster, stores it, which would add an
+	 * unrelated write to the push path.
+	 */
+	ret = tdb_parse_record(ctdb_db->ltdb->tdb,
+			       data->key,
+			       ctdb_push_record_hdr_parser,
+			       &hdr_state);
+	if (ret != 0) {
+		enum TDB_ERROR err = tdb_error(ctdb_db->ltdb->tdb);
+
+		if (err != TDB_ERR_NOEXIST) {
+			DBG_ERR("tdb_parse_record failed: %s\n",
+				tdb_errorstr(ctdb_db->ltdb->tdb));
+			goto unlock;
+		}
+		/*
+		 * No local copy, so there is nothing the push can be
+		 * older than.
+		 */
+	}
+
+	if (hdr_state.found && hdr_state.hdr.rsn >= data->hdr.rsn) {
+		DBG_DEBUG("Ignoring stale push-record for db 0x%08x: "
+			  "local rsn %"PRIu64" >= pushed rsn %"PRIu64"\n",
+			  data->db_id,
+			  hdr_state.hdr.rsn,
+			  data->hdr.rsn);
+		status = 0;
+		goto unlock;
+	}
+
+	data->hdr.flags |= CTDB_REC_FLAG_MIGRATED_WITH_DATA;
+
+	ret = ctdb_ltdb_store(ctdb_db, data->key, &data->hdr, data->value);
+	if (ret != 0) {
+		goto unlock;
+	}
+
+	ret = ctdb_ltdb_sync(ctdb_db);
+	if (ret != 0) {
+		goto unlock;
+	}
+
+	status = 0;
+
+unlock:
+	ret = ctdb_ltdb_unlock(ctdb_db, data->key);
+	if (ret != 0) {
+		DBG_ERR("ctdb_ltdb_unlock() failed with error %d\n", ret);
+	}
+
+done:
+	talloc_free(data);
+	return status;
 }
 
 struct ctdb_client *ctdb_find_client_by_pid(struct ctdb_context *ctdb, pid_t pid)

@@ -39,20 +39,6 @@ class cmd_dbcheck(Command):
         "credopts": options.CredentialsOptionsDouble,
     }
 
-    def process_yes(option, opt, value, parser):
-        assert value is None
-        rargs = parser.rargs
-        if rargs:
-            arg = rargs[0]
-            if ((arg[:2] == "--" and len(arg) > 2) or
-                (arg[:1] == "-" and len(arg) > 1 and arg[1] != "-")):
-                setattr(parser.values, "yes", True)
-            else:
-                setattr(parser.values, "yes_rules", arg.split())
-                del rargs[0]
-        else:
-            setattr(parser.values, "yes", True)
-
     takes_args = ["DN?"]
 
     takes_options = [
@@ -60,8 +46,10 @@ class cmd_dbcheck(Command):
                help="Pass search scope that builds DN list. Options: SUB, ONE, BASE"),
         Option("--fix", dest="fix", default=False, action='store_true',
                help='Fix any errors found'),
-        Option("--yes", action='callback', callback=process_yes,
+        Option("--yes", action='store_true',
                help="don't confirm changes individually. Applies all as a single transaction (will not succeed if any errors are found)"),
+        Option("--yes-restricted-to-rule", action='append', dest='yes_rules',
+               help=optparse.SUPPRESS_HELP),  # only used by blackbox tests
         Option("--cross-ncs", dest="cross_ncs", default=False, action='store_true',
                help="cross naming context boundaries"),
         Option("-v", "--verbose", dest="verbose", action="store_true", default=False,
@@ -86,6 +74,8 @@ class cmd_dbcheck(Command):
         Option("--selftest-check-expired-tombstones",
                dest="selftest_check_expired_tombstones", default=False, action="store_true",
                help=optparse.SUPPRESS_HELP),  # This is only used by tests
+        Option("--check-gpo-links", action="store_true",
+               help="check that GPO related links and paths point to the current domain"),
     ]
 
     def run(self, DN=None, H=None, verbose=False, fix=False, yes=False,
@@ -95,7 +85,7 @@ class cmd_dbcheck(Command):
             quick_membership_checks=False,
             reset_well_known_acls=False,
             selftest_check_expired_tombstones=False,
-            yes_rules=None):
+            yes_rules=None, check_gpo_links=False):
 
         if yes_rules is None:
             yes_rules = []
@@ -158,11 +148,12 @@ class cmd_dbcheck(Command):
                           quick_membership_checks=quick_membership_checks,
                           reset_well_known_acls=reset_well_known_acls,
                           check_expired_tombstones=selftest_check_expired_tombstones,
-                          colour=stdout_colour)
+                          colour=stdout_colour,
+                          check_gpo_links=check_gpo_links)
 
             for option in yes_rules:
-                if hasattr(chk, option):
-                    setattr(chk, option, 'ALL')
+                if option in chk.confirmation_options:
+                    chk.confirmation_options[option] = 'ALL'
                 else:
                     raise CommandError("Invalid fix rule %s" % option)
 

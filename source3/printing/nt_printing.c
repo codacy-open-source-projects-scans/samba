@@ -743,30 +743,20 @@ static int get_file_version(files_struct *fsp,
 	 * or an NE (New Executable).
 	 */
 	if (IVAL(buf,PE_HEADER_SIGNATURE_OFFSET) == PE_HEADER_SIGNATURE) {
-		return handle_pe_file(fsp,
-					in_pos,
-					fname,
-					buf,
-					major,
-					minor);
-	} else if (SVAL(buf,NE_HEADER_SIGNATURE_OFFSET) ==
-			NE_HEADER_SIGNATURE) {
-		return handle_ne_file(fsp,
-					in_pos,
-					fname,
-					buf,
-					major,
-					minor);
-	} else {
-		/*
-		 * Assume this isn't an error... the file just
-		 * looks sort of like a PE/NE file.
-		 */
-		DBG_NOTICE("File [%s] unknown file format, signature = 0x%x\n",
-			fname,
-			IVAL(buf,PE_HEADER_SIGNATURE_OFFSET));
-		/* Fallthrough into no_version_info: */
+		return handle_pe_file(fsp, in_pos, fname, buf, major, minor);
 	}
+
+	if (SVAL(buf, NE_HEADER_SIGNATURE_OFFSET) == NE_HEADER_SIGNATURE) {
+		return handle_ne_file(fsp, in_pos, fname, buf, major, minor);
+	}
+
+	/*
+	 * Assume this isn't an error... the file just
+	 * looks sort of like a PE/NE file.
+	 */
+	DBG_NOTICE("File [%s] unknown file format, signature = 0x%x\n",
+		   fname,
+		   IVAL(buf, PE_HEADER_SIGNATURE_OFFSET));
 
 	no_version_info:
 		SAFE_FREE(buf);
@@ -1162,6 +1152,7 @@ done:
 ****************************************************************************/
 
 #define strip_driver_path(_mem_ctx, _element) do { \
+	const char *_p = NULL; \
 	if (_element && ((_p = strrchr((_element), '\\')) != NULL)) { \
 		(_element) = talloc_asprintf((_mem_ctx), "%s", _p+1); \
 		W_ERROR_HAVE_NO_MEMORY((_element)); \
@@ -1183,7 +1174,6 @@ static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
 	const char *short_architecture;
 	int i, cversion;
 	WERROR err;
-	char *_p;
 
 	if (!*driver_path || !*data_file) {
 		return WERR_INVALID_PARAMETER;

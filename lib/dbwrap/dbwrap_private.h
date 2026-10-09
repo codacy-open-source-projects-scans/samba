@@ -33,6 +33,7 @@ struct db_record {
 	NTSTATUS (*storev)(struct db_record *rec, const TDB_DATA *dbufs,
 			   int num_dbufs, int flag);
 	NTSTATUS (*delete_rec)(struct db_record *rec);
+	struct db_record_flags flags;
 	void *private_data;
 };
 
@@ -48,6 +49,10 @@ struct db_context {
 			     int (*f)(struct db_record *rec,
 				      void *private_data),
 			     void *private_data);
+	int (*traverse_per_rec_persistent_read)(struct db_context *db,
+						int (*f)(struct db_record *rec,
+							 void *private_data),
+						void *private_data);
 	int (*get_seqnum)(struct db_context *db);
 	int (*transaction_start)(struct db_context *db);
 	NTSTATUS (*transaction_start_nonblock)(struct db_context *db);
@@ -72,12 +77,13 @@ struct db_context {
 					 void *private_data),
 			      void *private_data);
 	int (*exists)(struct db_context *db,TDB_DATA key);
-	int (*wipe)(struct db_context *db);
+	int (*wipe)(struct db_context *db, struct dbwrap_wipe_flags flags);
 	int (*check)(struct db_context *db);
 	size_t (*id)(struct db_context *db, uint8_t *id, size_t idlen);
 
 	const char *name;
 	void *private_data;
+	uint64_t flags;
 	enum dbwrap_lock_order lock_order;
 	bool persistent;
 };
@@ -88,6 +94,9 @@ struct db_context {
 #define DBWRAP_LOCK_ORDER_VALID(order) \
 	(((order) >= DBWRAP_LOCK_ORDER_MIN) && \
 	 ((order) <= DBWRAP_LOCK_ORDER_MAX))
+
+#define DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY \
+	"DBWRAP_PERSISTENT_MIGRATION_MARKER"
 
 #endif /* __DBWRAP_PRIVATE_H__ */
 

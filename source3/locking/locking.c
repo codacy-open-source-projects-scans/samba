@@ -324,6 +324,7 @@ NTSTATUS do_lock(struct byte_range_lock *br_lck,
 			  count,
 			  lock_type,
 			  lock_flav,
+			  fsp->op->global->persistent,
 			  &blocker_pid,
 			  &blocker_smblctx);
 	brl_req_set(br_lck, NULL, NULL);
@@ -726,7 +727,12 @@ bool share_entry_stale_pid(struct share_mode_entry *e)
 	struct server_id_buf buf;
 	bool exists;
 
+	if (e->protect) {
+		SMB_ASSERT(!e->stale);
+		return false;
+	}
 	if (e->stale) {
+		SMB_ASSERT(!e->protect);
 		return true;
 	}
 
@@ -739,6 +745,11 @@ bool share_entry_stale_pid(struct share_mode_entry *e)
 
 	DBG_DEBUG("PID %s does not exist anymore\n",
 		  server_id_str_buf(e->pid, &buf));
+
+	if (e->flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) {
+		e->protect = true;
+		return false;
+	}
 
 	e->stale = true;
 
@@ -772,6 +783,10 @@ static bool add_delete_on_close_token(struct share_mode_data *d,
 		dtl->parent_lease_key = lease->parent_lease_key;
 	}
 
+	if (fsp->op != NULL) {
+		dtl->open_persistent_id = fsp->op->global->open_persistent_id;
+	}
+
 	dtl->delete_nt_token = security_token_duplicate(d->delete_tokens, nt_tok);
 	if (dtl->delete_nt_token == NULL) {
 		return false;
@@ -785,8 +800,10 @@ static bool add_delete_on_close_token(struct share_mode_data *d,
 	return true;
 }
 
-void reset_delete_on_close_lck(files_struct *fsp,
-			       struct share_mode_lock *lck)
+static void reset_delete_on_close_lck_internal(struct share_mode_lock *lck,
+					       uint32_t name_hash,
+					       bool check_open_id,
+					       uint64_t open_persistent_id)
 {
 	struct share_mode_data *d = NULL;
 	NTSTATUS status;
@@ -795,8 +812,8 @@ void reset_delete_on_close_lck(files_struct *fsp,
 	status = share_mode_lock_access_private_data(lck, &d);
 	if (!NT_STATUS_IS_OK(status)) {
 		/* Any error recovery possible here ? */
-		DBG_ERR("share_mode_lock_access_private_data() failed for "
-			"%s - %s\n", fsp_str_dbg(fsp), nt_errstr(status));
+		DBG_ERR("share_mode_lock_access_private_data() failed: %s\n",
+			nt_errstr(status));
 		smb_panic(__location__);
 		return;
 	}
@@ -804,7 +821,12 @@ void reset_delete_on_close_lck(files_struct *fsp,
 	for (i=0; i<d->num_delete_tokens; i++) {
 		struct delete_token *dt = &d->delete_tokens[i];
 
-		if (dt->name_hash == fsp->name_hash) {
+		if (dt->name_hash == name_hash) {
+			if (check_open_id &&
+			    (dt->open_persistent_id != open_persistent_id))
+			{
+				continue;
+			}
 			d->modified = true;
 
 			/* Delete this entry. */
@@ -814,6 +836,22 @@ void reset_delete_on_close_lck(files_struct *fsp,
 			d->num_delete_tokens -= 1;
 		}
 	}
+}
+
+void reset_delete_on_close_lck(struct share_mode_lock *lck,
+			       uint32_t name_hash)
+{
+	reset_delete_on_close_lck_internal(lck, name_hash, false, 0);
+}
+
+void reset_delete_on_close_lck_open_id(struct share_mode_lock *lck,
+				       uint32_t name_hash,
+				       uint64_t open_persistent_id)
+{
+	reset_delete_on_close_lck_internal(lck,
+					   name_hash,
+					   true,
+					   open_persistent_id);
 }
 
 struct set_delete_on_close_state {
@@ -896,6 +934,11 @@ void set_delete_on_close_lck(files_struct *fsp,
 				dt->parent_lease_key = lease->parent_lease_key;
 			}
 
+			if (fsp->op != NULL) {
+				dt->open_persistent_id =
+					fsp->op->global->open_persistent_id;
+			}
+
 			TALLOC_FREE(dt->delete_nt_token);
 			dt->delete_nt_token = security_token_duplicate(dt, nt_tok);
 			SMB_ASSERT(dt->delete_nt_token != NULL);
@@ -950,7 +993,7 @@ static void set_delete_on_close_locked(struct share_mode_lock *lck,
 					state->nt_tok,
 					state->tok);
 	} else {
-		reset_delete_on_close_lck(state->fsp, lck);
+		reset_delete_on_close_lck(lck, state->fsp->name_hash);
 	}
 
 	state->fsp->fsp_flags.delete_on_close = state->delete_on_close;

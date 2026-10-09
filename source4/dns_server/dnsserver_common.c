@@ -75,6 +75,44 @@ uint8_t werr_to_dns_err(WERROR werr)
 	return DNS_RCODE_SERVFAIL;
 }
 
+void dns_server_scavenging_interval(struct loadparm_context *lp_ctx,
+				    uint32_t *_si_hours,
+				    time_t *_si_secs)
+{
+	uint32_t si_hours = 0;
+	time_t si_secs = 0;
+
+	if (lpcfg_dns_zone_scavenging(lp_ctx)) {
+		int i_hours;
+
+		i_hours = lpcfg_parm_int(lp_ctx,
+					 NULL,
+					 "dnsserver",
+					 "ScavengingInterval",
+					 2);
+		i_hours = MAX(i_hours, 0);
+		i_hours = MIN(i_hours, (365*24));
+
+		si_secs = i_hours * (60 * 60);
+		si_secs = lpcfg_parm_int(lp_ctx,
+					 NULL,
+					 "dnsserver",
+					 "scavenging_interval",
+					 si_secs);
+		if (si_secs > 0) {
+			si_hours = si_secs / (60 * 60);
+			si_hours = MAX(si_hours, 1);
+		}
+	}
+
+	if (_si_hours != NULL) {
+		*_si_hours = si_hours;
+	}
+	if (_si_secs != NULL) {
+		*_si_secs = si_secs;
+	}
+}
+
 WERROR dns_common_extract(struct ldb_context *samdb,
 			  const struct ldb_message_element *el,
 			  TALLOC_CTX *mem_ctx,
@@ -873,13 +911,24 @@ WERROR dns_get_zone_properties(struct ldb_context *samdb,
 			       struct ldb_dn *zone_dn,
 			       struct dnsserver_zoneinfo *zoneinfo)
 {
-
+	struct loadparm_context *lp_ctx =
+		talloc_get_type_abort(ldb_get_opaque(samdb, "loadparm"),
+				      struct loadparm_context);
+	struct dnsserver_serverinfo *serverinfo = NULL;
 	int ret, i;
 	struct dnsp_DnsProperty *prop = NULL;
 	struct ldb_message_element *element = NULL;
 	const char *const attrs[] = {"dNSProperty", NULL};
 	struct ldb_result *res = NULL;
 	enum ndr_err_code err;
+
+	*zoneinfo = (struct dnsserver_zoneinfo) {};
+
+	serverinfo = dnsserver_init_serverinfo(mem_ctx, lp_ctx, samdb);
+	if (serverinfo == NULL) {
+		DBG_ERR("dnsserver_init_serverinfo() failed\n");
+		return DNS_ERR(SERVER_FAILURE);
+	}
 
 	ret = ldb_search(samdb,
 			 mem_ctx,
@@ -926,6 +975,28 @@ WERROR dns_get_zone_properties(struct ldb_context *samdb,
 		if (!valid_property) {
 			return DNS_ERR(SERVER_FAILURE);
 		}
+	}
+
+	/*
+	 * Fallback to the defaults
+	 */
+	if (zoneinfo->dwRefreshInterval == 0) {
+		zoneinfo->dwRefreshInterval =
+			serverinfo->dwDefaultRefreshInterval;
+	}
+	if (zoneinfo->dwNoRefreshInterval == 0) {
+		zoneinfo->dwNoRefreshInterval =
+			serverinfo->dwDefaultNoRefreshInterval;
+	}
+
+	/*
+	 * If any value is still 0 we disable aging
+	 */
+	if (zoneinfo->dwRefreshInterval == 0) {
+		zoneinfo->fAging = 0;
+	}
+	if (zoneinfo->dwNoRefreshInterval == 0) {
+		zoneinfo->fAging = 0;
 	}
 
 	return WERR_OK;

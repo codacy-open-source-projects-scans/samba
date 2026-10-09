@@ -220,6 +220,11 @@ enum dns_update_settings {DNS_UPDATE_OFF, DNS_UPDATE_ON, DNS_UPDATE_SIGNED};
 /* MDNS name sources */
 enum mdns_name_values {MDNS_NAME_NETBIOS, MDNS_NAME_MDNS};
 
+enum persistent_handles_durability {
+	PH_DURABILITY_FULL_OUTAGE,
+	PH_DURABILITY_PARTIAL_OUTAGE
+};
+
 /* LDAP SSL options */
 enum ldap_ssl_types {LDAP_SSL_OFF, LDAP_SSL_START_TLS};
 
@@ -267,6 +272,11 @@ enum store_nt_hash {
 enum acl_claims_evaluation {
 	ACL_CLAIMS_EVALUATION_AD_DC_ONLY,
 	ACL_CLAIMS_EVALUATION_NEVER
+};
+/* WSP backend options */
+enum wsp_backend_options {
+	WSP_BACKEND_NONE,
+	WSP_BACKEND_ELASTIC,
 };
 
 /* Controlling the protocol for netlogon ping */

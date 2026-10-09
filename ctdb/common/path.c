@@ -31,20 +31,26 @@ struct {
 	char datadir[PATH_MAX];
 	char etcdir[PATH_MAX];
 	const char* helperdir;
-	char rundir[PATH_MAX];
+	char lockdir[PATH_MAX];
+	char piddir[PATH_MAX];
+	char socketdir[PATH_MAX];
 	char vardir[PATH_MAX];
 	bool test_mode;
 	bool basedir_set;
 	bool datadir_set;
 	bool etcdir_set;
 	bool helperdir_set;
-	bool rundir_set;
+	bool lockdir_set;
+	bool piddir_set;
+	bool socketdir_set;
 	bool vardir_set;
 } ctdb_paths = {
 	.datadir = CTDB_DATADIR,
 	.etcdir = CTDB_ETCDIR,
 	.helperdir = CTDB_HELPER_BINDIR,
-	.rundir = CTDB_RUNDIR,
+	.lockdir = CTDB_LOCKDIR,
+	.piddir = CTDB_PIDDIR,
+	.socketdir = CTDB_SOCKETDIR,
 	.vardir = CTDB_VARDIR,
 };
 
@@ -169,20 +175,52 @@ done:
 	return ctdb_paths.helperdir;
 }
 
-const char *path_rundir(void)
+const char *path_lockdir(void)
 {
 	bool ok;
 
-	if (! ctdb_paths.rundir_set) {
-		ok = path_construct(ctdb_paths.rundir, "run");
+	if (! ctdb_paths.lockdir_set) {
+		ok = path_construct(ctdb_paths.lockdir, "run");
 		if (!ok) {
-			D_ERR("Failed to construct RUNDIR\n");
+			D_ERR("Failed to construct LOCKDIR\n");
 		} else {
-			ctdb_paths.rundir_set = true;
+			ctdb_paths.lockdir_set = true;
 		}
 	}
 
-	return ctdb_paths.rundir;
+	return ctdb_paths.lockdir;
+}
+
+const char *path_piddir(void)
+{
+	bool ok;
+
+	if (! ctdb_paths.piddir_set) {
+		ok = path_construct(ctdb_paths.piddir, "run");
+		if (!ok) {
+			D_ERR("Failed to construct PIDDIR\n");
+		} else {
+			ctdb_paths.piddir_set = true;
+		}
+	}
+
+	return ctdb_paths.piddir;
+}
+
+const char *path_socketdir(void)
+{
+	bool ok;
+
+	if (! ctdb_paths.socketdir_set) {
+		ok = path_construct(ctdb_paths.socketdir, "run");
+		if (!ok) {
+			D_ERR("Failed to construct SOCKETDIR\n");
+		} else {
+			ctdb_paths.socketdir_set = true;
+		}
+	}
+
+	return ctdb_paths.socketdir;
 }
 
 const char *path_vardir(void)
@@ -216,9 +254,19 @@ char *path_helperdir_append(TALLOC_CTX *mem_ctx, const char *path)
 	return talloc_asprintf(mem_ctx, "%s/%s", path_helperdir(), path);
 }
 
-char *path_rundir_append(TALLOC_CTX *mem_ctx, const char *path)
+char *path_lockdir_append(TALLOC_CTX *mem_ctx, const char *path)
 {
-	return talloc_asprintf(mem_ctx, "%s/%s", path_rundir(), path);
+	return talloc_asprintf(mem_ctx, "%s/%s", path_lockdir(), path);
+}
+
+char *path_piddir_append(TALLOC_CTX *mem_ctx, const char *path)
+{
+	return talloc_asprintf(mem_ctx, "%s/%s", path_piddir(), path);
+}
+
+char *path_socketdir_append(TALLOC_CTX *mem_ctx, const char *path)
+{
+	return talloc_asprintf(mem_ctx, "%s/%s", path_socketdir(), path);
 }
 
 char *path_vardir_append(TALLOC_CTX *mem_ctx, const char *path)
@@ -234,19 +282,22 @@ char *path_config(TALLOC_CTX *mem_ctx)
 char *path_socket(TALLOC_CTX *mem_ctx, const char *daemon)
 {
 	path_set_test_mode();
-	if (ctdb_paths.test_mode) {
-		if (strcmp(daemon, "ctdbd") == 0) {
+
+	if (strcmp(daemon, "ctdbd") == 0) {
+		if (ctdb_paths.test_mode) {
 			const char *t = getenv("CTDB_SOCKET");
 
 			if (t != NULL) {
 				return talloc_strdup(mem_ctx, t);
 			}
+		} else {
+			return talloc_strdup(mem_ctx, CTDB_SOCKET);
 		}
 	}
 
 	return talloc_asprintf(mem_ctx,
 			       "%s/%s.socket",
-			       path_rundir(),
+			       path_socketdir(),
 			       daemon);
 }
 
@@ -254,6 +305,6 @@ char *path_pidfile(TALLOC_CTX *mem_ctx, const char *daemon)
 {
 	return talloc_asprintf(mem_ctx,
 			       "%s/%s.pid",
-			       path_rundir(),
+			       path_piddir(),
 			       daemon);
 }

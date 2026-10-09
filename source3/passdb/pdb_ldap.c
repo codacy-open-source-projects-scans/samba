@@ -1033,6 +1033,9 @@ static bool init_sam_from_ldap(struct ldapsam_privates *ldap_state,
 		if (unix_pw.pw_gecos == NULL) {
 			unix_pw.pw_gecos = fullname;
 		}
+		if (unix_pw.pw_gecos == NULL) {
+			unix_pw.pw_gecos = discard_const_p(char, "");
+		}
 		unix_pw.pw_dir = smbldap_talloc_single_attribute(
 				priv2ld(ldap_state),
 				entry,
@@ -5366,6 +5369,11 @@ static NTSTATUS ldapsam_create_user(struct pdb_methods *my_methods,
 	uid_t uid = -1;
 	NTSTATUS ret;
 	int rc;
+
+	if (name[0] == '\0') {
+		DBG_ERR("Name can not be empty\n");
+		return NT_STATUS_INVALID_ACCOUNT_NAME;
+	}
 
 	if (((acb_info & ACB_NORMAL) && name[strlen(name)-1] == '$') ||
 	      acb_info & ACB_WSTRUST ||

@@ -28,39 +28,77 @@
 #include "lib/util/fault.h"
 #include "lib/util/tsort.h"
 
-#ifdef strcasecmp
-#undef strcasecmp
-#endif
 #ifdef strncasecmp
 #undef strncasecmp
 #endif
 
 
-/**
- Case insensitive string comparison, handle specified for testing
-**/
-_PUBLIC_ int strcasecmp_m_handle(struct smb_iconv_handle *iconv_handle,
-				 const char *s1, const char *s2)
+/*
+ * Case insensitive string comparison, looking at no more than "max_cp"
+ * codepoints and no more than "max_bytes" bytes. A limit of SIZE_MAX
+ * does not apply: No string is long enough to reach it. With a byte
+ * limit, only codepoints with the same encoded length can compare
+ * equal.
+ */
+static int strncasecmp_m_internal(struct smb_iconv_handle *iconv_handle,
+				  const char *s1,
+				  const char *s2,
+				  size_t max_cp,
+				  size_t max_bytes)
 {
 	codepoint_t c1=0, c2=0;
 	codepoint_t u1=0, u2=0;
 	codepoint_t l1=0, l2=0;
 	size_t size1, size2;
+	size_t num_cp = 0;
+	size_t num_bytes = 0;
 
 	/* handle null ptr comparisons to simplify the use in qsort */
 	if (s1 == s2) return 0;
 	if (s1 == NULL) return -1;
 	if (s2 == NULL) return 1;
 
-	while (*s1 && *s2) {
-		c1 = next_codepoint_handle(iconv_handle, s1, &size1);
-		c2 = next_codepoint_handle(iconv_handle, s2, &size2);
+	while (*s1 && *s2 && (num_cp < max_cp) && (num_bytes < max_bytes)) {
+		size_t cp_left = max_cp - num_cp;
+		size_t bytes_left = max_bytes - num_bytes;
 
-		if (c1 == INVALID_CODEPOINT ||
-		    c2 == INVALID_CODEPOINT) {
-			return strcasecmp(s1, s2);
+		/*
+		 * We assume that no multi-byte character can take
+		 * more than 5 bytes, see next_codepoint_handle().
+		 */
+		size_t len = MIN(bytes_left, 5);
+
+		c1 = next_codepoint_handle_ext(
+			iconv_handle, s1, strnlen(s1, len), CH_UNIX, &size1);
+		c2 = next_codepoint_handle_ext(
+			iconv_handle, s2, strnlen(s2, len), CH_UNIX, &size2);
+
+		if (c1 == INVALID_CODEPOINT || c2 == INVALID_CODEPOINT) {
+			/*
+			 * Compare the rest byte-wise. max_cp counts
+			 * codepoints, now we must convert it to
+			 * bytes. As bytes are the smallest character
+			 * unit, looking at size1 bytes plus one byte
+			 * per remaining codepoint never compares more
+			 * than cp_left codepoints. strncasecmp() stops
+			 * at the terminating NUL, so this never reads
+			 * beyond the strings.
+			 *
+			 * The subtractions can't wrap: cp_left >= 1
+			 * by the loop condition, and
+			 * next_codepoint_handle_ext() consumed at
+			 * most len <= bytes_left bytes.
+			 */
+			size_t n = MIN(bytes_left - size1, cp_left - 1);
+			return strncasecmp(s1, s2, size1 + n);
 		}
 
+		if ((max_bytes != SIZE_MAX) && (size1 != size2)) {
+			return NUMERIC_CMP(size1, size2);
+		}
+
+		num_cp += 1;
+		num_bytes += size1;
 		s1 += size1;
 		s2 += size2;
 
@@ -83,7 +121,22 @@ _PUBLIC_ int strcasecmp_m_handle(struct smb_iconv_handle *iconv_handle,
 		return NUMERIC_CMP(l1, l2);
 	}
 
+	if ((num_cp == max_cp) || (num_bytes == max_bytes)) {
+		return 0;
+	}
+
 	return NUMERIC_CMP(*s1, *s2);
+}
+
+/**
+ Case insensitive string comparison, handle specified for testing
+**/
+_PUBLIC_ int strcasecmp_m_handle(struct smb_iconv_handle *iconv_handle,
+				 const char *s1,
+				 const char *s2)
+{
+	return strncasecmp_m_internal(
+		iconv_handle, s1, s2, SIZE_MAX, SIZE_MAX);
 }
 
 /**
@@ -100,71 +153,11 @@ _PUBLIC_ int strcasecmp_m(const char *s1, const char *s2)
  testing
 **/
 _PUBLIC_ int strncasecmp_m_handle(struct smb_iconv_handle *iconv_handle,
-				  const char *s1, const char *s2, size_t n)
+				  const char *s1,
+				  const char *s2,
+				  size_t n)
 {
-	codepoint_t c1=0, c2=0;
-	codepoint_t u1=0, u2=0;
-	codepoint_t l1=0, l2=0;
-	size_t size1, size2;
-
-	/* handle null ptr comparisons to simplify the use in qsort */
-	if (s1 == s2) return 0;
-	if (s1 == NULL) return -1;
-	if (s2 == NULL) return 1;
-
-	while (*s1 && *s2 && n) {
-		n--;
-
-		c1 = next_codepoint_handle(iconv_handle, s1, &size1);
-		c2 = next_codepoint_handle(iconv_handle, s2, &size2);
-
-		if (c1 == INVALID_CODEPOINT ||
-		    c2 == INVALID_CODEPOINT) {
-			/*
-			 * n was specified in characters,
-			 * now we must convert it to bytes.
-			 * As bytes are the smallest
-			 * character unit, the following
-			 * increment and strncasecmp is always
-			 * safe.
-			 *
-			 * The source string was already known
-			 * to be n characters long, so we are
-			 * guaranteed to be able to look at the
-			 * (n remaining + size1) bytes from the
-			 * s1 position).
-			 */
-			n += size1;
-			return strncasecmp(s1, s2, n);
-		}
-
-		s1 += size1;
-		s2 += size2;
-
-		if (c1 == c2) {
-			continue;
-		}
-
-		u1 = toupper_m(c1);
-		u2 = toupper_m(c2);
-		if (u1 == u2) {
-			continue;
-		}
-
-		l1 = tolower_m(c1);
-		l2 = tolower_m(c2);
-		if (l1 == l2) {
-			continue;
-		}
-
-		return NUMERIC_CMP(l1, l2);
-	}
-
-	if (n == 0) {
-		return 0;
-	}
-
-	return NUMERIC_CMP(*s1, *s2);
+	return strncasecmp_m_internal(iconv_handle, s1, s2, n, SIZE_MAX);
 }
 
 /**
@@ -184,6 +177,24 @@ _PUBLIC_ int strncasecmp_m(const char *s1, const char *s2, size_t n)
 _PUBLIC_ bool strequal_m(const char *s1, const char *s2)
 {
 	return strcasecmp_m(s1,s2) == 0;
+}
+
+/**
+ * Case insensitive comparison of no more than "n" bytes. Unlike
+ * strncasecmp_m() and strnequal(), "n" counts bytes, not
+ * characters. Characters only compare equal if they have the same
+ * encoded length. From an invalid character or a character cut off
+ * by "n" on, the rest is compared with strncasecmp(), which only
+ * ignores ASCII case. Unlike strnequal(), n == 0 returns true. Two
+ * NULL pointers are equal, NULL never equals a non-NULL string.
+ **/
+_PUBLIC_ bool strnequal_bytes(const char *s1, const char *s2, size_t n)
+{
+	struct smb_iconv_handle *iconv_handle = get_iconv_handle();
+	int cmp;
+
+	cmp = strncasecmp_m_internal(iconv_handle, s1, s2, SIZE_MAX, n);
+	return (cmp == 0);
 }
 
 /**
@@ -357,7 +368,7 @@ _PUBLIC_ size_t strlen_m_term_null(const char *s)
 /**
  Strchr and strrchr_m are a bit complex on general multi-byte strings.
 **/
-_PUBLIC_ char *strchr_m(const char *src, char c)
+_PUBLIC_ const char *strchr_m_const(const char *src, char c)
 {
 	const char *s;
 	struct smb_iconv_handle *ic = NULL;
@@ -367,7 +378,8 @@ _PUBLIC_ char *strchr_m(const char *src, char c)
 	/* characters below 0x3F are guaranteed to not appear in
 	   non-initial position in multi-byte charsets */
 	if ((c & 0xC0) == 0) {
-		return strchr(src, c);
+		s = strchr(src, c);
+		return discard_const_p(char, s);
 	}
 
 	/* this is quite a common operation, so we want it to be
@@ -377,7 +389,7 @@ _PUBLIC_ char *strchr_m(const char *src, char c)
 
 	for (s = src; *s && !(((unsigned char)s[0]) & 0x80); s++) {
 		if (*s == c)
-			return discard_const_p(char, s);
+			return s;
 	}
 
 	if (!*s)
@@ -394,7 +406,7 @@ _PUBLIC_ char *strchr_m(const char *src, char c)
 		size_t size;
 		codepoint_t c2 = next_codepoint_handle(ic, s, &size);
 		if (c2 == c) {
-			return discard_const_p(char, s);
+			return s;
 		}
 		s += size;
 	}
@@ -405,10 +417,10 @@ _PUBLIC_ char *strchr_m(const char *src, char c)
 /**
  * Multibyte-character version of strrchr
  */
-_PUBLIC_ char *strrchr_m(const char *s, char c)
+_PUBLIC_ const char *strrchr_m_const(const char *s, char c)
 {
 	struct smb_iconv_handle *ic;
-	char *ret = NULL;
+	const char *ret = NULL;
 
 	if (s == NULL) {
 		return NULL;
@@ -417,7 +429,8 @@ _PUBLIC_ char *strrchr_m(const char *s, char c)
 	/* characters below 0x3F are guaranteed to not appear in
 	   non-initial position in multi-byte charsets */
 	if ((c & 0xC0) == 0) {
-		return strrchr(s, c);
+		const char *t = strrchr(s, c);
+		return discard_const_p(char, t);
 	}
 
 	/* this is quite a common operation, so we want it to be
@@ -447,7 +460,7 @@ _PUBLIC_ char *strrchr_m(const char *s, char c)
 					break;
 				}
 				/* No - we have a match ! */
-				return discard_const_p(char , cp);
+				return cp;
 			}
 		} while (cp-- != s);
 		if (!got_mb)
@@ -460,12 +473,27 @@ _PUBLIC_ char *strrchr_m(const char *s, char c)
 		size_t size;
 		codepoint_t c2 = next_codepoint_handle(ic, s, &size);
 		if (c2 == c) {
-			ret = discard_const_p(char, s);
+			ret = s;
 		}
 		s += size;
 	}
 
 	return ret;
+}
+
+_PUBLIC_ char *strchr_m_nonconst(const char *s, char c)
+{
+	return discard_const_p(char, strchr_m_const(s, c));
+}
+
+_PUBLIC_ char *strrchr_m_nonconst(const char *s, char c)
+{
+	return discard_const_p(char, strrchr_m_const(s, c));
+}
+
+_PUBLIC_ char *strstr_m_nonconst(const char *s, const char *findstr)
+{
+	return discard_const_p(char, strstr_m_const(s, findstr));
 }
 
 /**
@@ -532,24 +560,24 @@ _PUBLIC_ bool strhasupper(const char *string)
  strstr_m - We convert via ucs2 for now.
 ***********************************************************************/
 
-char *strstr_m(const char *src, const char *findstr)
+_PUBLIC_ const char *strstr_m_const(const char *src, const char *findstr)
 {
 	TALLOC_CTX *mem_ctx = NULL;
 	smb_ucs2_t *p;
 	smb_ucs2_t *src_w, *find_w;
 	const char *s;
 	char *s2;
-	char *retp = NULL;
+	const char *retp = NULL;
 	size_t converted_size, findstr_len = 0;
 
 	/* for correctness */
 	if (!findstr[0]) {
-		return discard_const_p(char, src);
+		return src;
 	}
 
 	/* Samba does single character findstr calls a *lot*. */
 	if (findstr[1] == '\0')
-		return strchr_m(src, *findstr);
+		return strchr_m_const(src, *findstr);
 
 	/* We optimise for the ascii case, knowing that all our
 	   supported multi-byte character sets are ascii-compatible
@@ -561,7 +589,7 @@ char *strstr_m(const char *src, const char *findstr)
 				findstr_len = strlen(findstr);
 
 			if (strncmp(s, findstr, findstr_len) == 0) {
-				return discard_const_p(char, s);
+				return s;
 			}
 		}
 	}
@@ -604,7 +632,7 @@ char *strstr_m(const char *src, const char *findstr)
 	if (!pull_ucs2_talloc(mem_ctx, &s2, src_w, &converted_size)) {
 		goto done;
 	}
-	retp = discard_const_p(char, (s+strlen(s2)));
+	retp = s + strlen(s2);
 done:
 	TALLOC_FREE(mem_ctx);
 	return retp;

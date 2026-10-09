@@ -301,10 +301,11 @@ static bool cephmount_cache_remove(struct cephmount_cached *entry)
 static char *cephmount_get_cookie(TALLOC_CTX * mem_ctx,
 				  struct vfs_ceph_config *config)
 {
-	return talloc_asprintf(mem_ctx, "(%s/%s/%s)",
+	return talloc_asprintf(mem_ctx, "(%s/%s/%s/%d)",
 			       config->conf_file,
 			       config->user_id,
-			       config->fsname);
+			       config->fsname,
+			       (int)config->proxy);
 }
 
 static int cephmount_update_conf(struct vfs_ceph_config *config,
@@ -2314,6 +2315,38 @@ static void vfs_ceph_iput(const struct vfs_handle_struct *handle,
 	}
 }
 
+static int vfs_ceph_open_share_root(struct vfs_handle_struct *handle,
+				    struct files_struct *root_fsp,
+				    const char *connectpath)
+{
+	SMB_STRUCT_STAT st = {};
+	struct vfs_ceph_iref iref = {};
+	int result = -1;
+
+	DBG_DEBUG("[CEPH] open_share_root: %s\n", connectpath);
+
+	result = vfs_ceph_iget(handle, connectpath, 0, &iref);
+	if (result != 0) {
+		goto out;
+	}
+
+	result = vfs_ceph_ll_getattr(handle, &iref, &st);
+	if (result != 0) {
+		goto out;
+	}
+
+	result = vfs_set_share_root(root_fsp, connectpath, &st);
+	if (result != 0) {
+		result = -errno;
+		goto out;
+	}
+out:
+	DBG_DEBUG("[CEPH] open_share_root: %s result=%d\n",
+		  connectpath, result);
+	vfs_ceph_iput(handle, &iref);
+	return status_code(result);
+}
+
 #ifdef HAVE_CEPH_FSCRYPT
 /* Fscrypt */
 /*
@@ -3639,7 +3672,7 @@ static int vfs_ceph_unlinkat(struct vfs_handle_struct *handle,
 			     int flags)
 {
 	struct vfs_ceph_fh *dircfh = NULL;
-	const char *name = smb_fname_str_dbg(smb_fname);
+	const char *name = smb_fname->base_name;
 	int result = -1;
 
 	START_PROFILE_X(SNUM(handle->conn), syscall_unlinkat);
@@ -3662,7 +3695,7 @@ static int vfs_ceph_unlinkat(struct vfs_handle_struct *handle,
 out:
 	DBG_DEBUG("[CEPH] unlinkat: dirfsp_name=%s name=%s result=%d\n",
 		  fsp_str_dbg(dirfsp),
-		  name,
+		  smb_fname_str_dbg(smb_fname),
 		  result);
 	END_PROFILE_X(syscall_unlinkat);
 	return status_code(result);
@@ -4609,6 +4642,7 @@ static struct vfs_fn_pointers ceph_new_fns = {
 
 	.connect_fn = vfs_ceph_connect,
 	.disconnect_fn = vfs_ceph_disconnect,
+	.open_share_root_fn = vfs_ceph_open_share_root,
 	.disk_free_fn = vfs_ceph_disk_free,
 	.get_quota_fn = vfs_not_implemented_get_quota,
 	.set_quota_fn = vfs_not_implemented_set_quota,

@@ -55,6 +55,7 @@
 #include "lib/util/server_id.h"
 #include "lib/util/util_tdb.h"
 #include "lib/util/util_file.h"
+#include "lib/util/util_str_escape.h"
 #include "lib/tdb_wrap/tdb_wrap.h"
 #include "lib/async_req/async_sock.h"
 #include "librpc/rpc/dcerpc_util.h"
@@ -89,6 +90,7 @@ struct rpc_host {
 	int worker_stdin[2];
 
 	bool np_helper;
+	bool np_only;
 
 	/*
 	 * If we're started with --np-helper but nobody contacts us,
@@ -115,6 +117,7 @@ struct rpc_host_iface_name {
 struct rpc_host_endpoint {
 	struct rpc_server *server;
 	struct dcerpc_binding *binding;
+	struct named_pipe_auth_rep_info8 np_info;
 	struct ndr_syntax_id *interfaces;
 	int *fds;
 	size_t num_fds;
@@ -198,6 +201,7 @@ struct rpc_server {
 
 	size_t max_workers;
 	size_t idle_seconds;
+	bool is_npsd;
 
 	/*
 	 * "workers" can be larger than "max_workers": Internal
@@ -216,6 +220,7 @@ struct rpc_server {
 struct rpc_server_get_endpoints_state {
 	char **argl;
 	char *ncalrpc_endpoint;
+	bool is_npsd;
 	enum dcerpc_transport_t only_transport;
 
 	struct rpc_host_iface_name *iface_names;
@@ -263,6 +268,8 @@ static struct tevent_req *rpc_server_get_endpoints_send(
 	} else {
 		progname = rpc_server_exe;
 	}
+
+	state->is_npsd = fnmatch("npsd_*", progname, 0) == 0;
 
 	state->ncalrpc_endpoint = talloc_strdup(state, progname);
 	if (tevent_req_nomem(state->ncalrpc_endpoint, req)) {
@@ -314,7 +321,7 @@ static struct rpc_host_iface_name *rpc_exe_parse_iface_line(
 		return NULL;
 	}
 
-	name = strchr(line, ' ');
+	name = discard_const_p(char, strchr_m(line, ' '));
 	if (name == NULL) {
 		return NULL;
 	}
@@ -553,6 +560,101 @@ static bool ndr_interfaces_add_unique(
 	return true;
 }
 
+static bool parse_regex_num(const char *str,
+			    const regmatch_t *match,
+			    uint64_t max,
+			    uint64_t *_num)
+{
+	size_t len = match->rm_eo - match->rm_so;
+	char numstr[len + 1];
+	unsigned long long num;
+	int err;
+
+	memcpy(numstr, str + match->rm_so, len);
+	numstr[len] = '\0';
+
+	num = smb_strtoull(numstr, NULL, 10, &err, SMB_STR_FULL_STR_CONV);
+	if (err != 0) {
+		DBG_DEBUG("smb_strtoull(%s) failed: %s\n",
+			  numstr,
+			  strerror(err));
+		return false;
+	}
+	if (num > max) {
+		DBG_DEBUG("%llu larger than expected max %" PRIu64 "\n",
+			  num,
+			  max);
+		return false;
+	}
+	*_num = num;
+
+	return true;
+}
+
+static bool parse_npsd_descriptor(TALLOC_CTX *mem_ctx,
+				  const char *descr,
+				  char **_pipename,
+				  struct named_pipe_auth_rep_info8 *_info8)
+{
+	size_t namelen;
+	char *pipename = NULL;
+	struct named_pipe_auth_rep_info8 info8 = {};
+	regex_t regex;
+	regmatch_t matches[5];
+	uint64_t num;
+	int ret;
+	bool ok = false;
+
+	ret = regcomp(&regex,
+		      "^\\\\pipe\\\\([^ ]+) ([0-9]+) ([0-9]+) ([0-9]+)$",
+		      REG_EXTENDED | REG_ICASE);
+	if (ret != 0) {
+		DBG_DEBUG("recomp() failed\n");
+		return false;
+	}
+
+	ret = regexec(&regex, descr, 5, matches, 0);
+	if (ret != 0) {
+		DBG_DEBUG("regexec() failed\n");
+		goto fail;
+	}
+
+	namelen = matches[1].rm_eo - matches[1].rm_so;
+
+	pipename = talloc_strndup(mem_ctx, descr + matches[1].rm_so, namelen);
+	if (pipename == NULL) {
+		DBG_DEBUG("talloc_strndup of %zu bytes failed\n", namelen);
+		goto fail;
+	}
+
+	ok = parse_regex_num(descr, &matches[2], UINT16_MAX, &num);
+	if (!ok) {
+		goto fail;
+	}
+	info8.file_type = num;
+
+	ok = parse_regex_num(descr, &matches[3], UINT16_MAX, &num);
+	if (!ok) {
+		goto fail;
+	}
+	info8.device_state = num;
+
+	ok = parse_regex_num(descr, &matches[4], UINT64_MAX, &num);
+	if (!ok) {
+		goto fail;
+	}
+	info8.allocation_size = num;
+
+	*_pipename = pipename;
+	pipename = NULL;
+	*_info8 = info8;
+
+fail:
+	TALLOC_FREE(pipename);
+	regfree(&regex);
+	return ok;
+}
+
 /*
  * Read the text reply from the rpcd_* process telling us what
  * endpoints it will serve when asked with --list-interfaces.
@@ -624,9 +726,86 @@ static void rpc_server_get_endpoints_done(struct tevent_req *subreq)
 		  state->idle_seconds,
 		  state->argl[0]);
 
+	if (state->is_npsd) {
+		/*
+		 * We expect lines like this:
+		 *
+		 * \pipe\MsFteWds 2 1535 3702
+		 *
+		 * this is file_type=2 device_state=0x5ff allocation_size=3702
+		 *
+		 * this would result in a rpc_host_endpoint with a dcerpc_binding
+		 * for ncacn_np[\pipe\MsFteWds] and interfaces = NULL.
+		 * interfaces == NULL will be the indication for non-dcerpc
+		 * services and the following changes are needed:
+		 */
+
+		for (i=2; i<num_lines; i++) {
+			char *line = lines[i];
+			struct rpc_host_endpoint *endpoint = NULL;
+			char *pipename = NULL;
+			char *binding = NULL;
+			struct named_pipe_auth_rep_info8 info8 = {};
+			bool ok;
+
+			ok = parse_npsd_descriptor(state,
+						   line,
+						   &pipename,
+						   &info8);
+			if (!ok) {
+				DBG_ERR("Invalid line: %s\n",
+					log_escape(state, line));
+				tevent_req_error(req, EINVAL);
+				return;
+			}
+
+			binding = talloc_asprintf(state,
+						  "ncacn_np:[\\pipe\\%s]",
+						  pipename);
+			TALLOC_FREE(pipename);
+			if (tevent_req_nomem(binding, req)) {
+				return;
+			}
+
+			switch (info8.file_type) {
+			case FILE_TYPE_BYTE_MODE_PIPE:
+			case FILE_TYPE_MESSAGE_MODE_PIPE:
+				break;
+			default:
+				DBG_ERR("Invalid file_type=%hu for %s\n",
+					info8.file_type,
+					binding);
+				TALLOC_FREE(binding);
+				tevent_req_error(req, EINVAL);
+				return;
+			}
+
+			endpoint = rpc_host_endpoint_find(state, binding);
+			if (endpoint == NULL) {
+				DBG_ERR("rpc_host_endpoint_find(%s) failed\n",
+					binding);
+				tevent_req_error(req, EINVAL);
+				return;
+			}
+
+			if (endpoint->np_info.file_type != 0) {
+				DBG_ERR("rpc_host_endpoint_find(%s) twice\n",
+					binding);
+				tevent_req_error(req, EINVAL);
+				return;
+			}
+
+			endpoint->np_info = info8;
+		}
+
+		tevent_req_done(req);
+		return;
+	}
+
 	for (i=2; i<num_lines; i++) {
 		char *line = lines[i];
 		struct rpc_host_endpoint *endpoint = NULL;
+		enum dcerpc_transport_t transport;
 		bool ok;
 
 		if (line[0] != ' ') {
@@ -655,6 +834,15 @@ static void rpc_server_get_endpoints_done(struct tevent_req *subreq)
 			DBG_DEBUG("rpc_host_endpoint_find for %s failed\n",
 				  line+1);
 			continue;
+		}
+
+		transport = dcerpc_binding_get_transport(endpoint->binding);
+		if (transport == NCACN_NP && endpoint->np_info.file_type == 0) {
+			endpoint->np_info = (struct named_pipe_auth_rep_info8) {
+				.file_type = FILE_TYPE_MESSAGE_MODE_PIPE,
+				.device_state = 0xff | 0x0400 | 0x0100,
+				.allocation_size = 4096,
+			};
 		}
 
 		ok = ndr_interfaces_add_unique(
@@ -686,7 +874,8 @@ static int rpc_server_get_endpoints_recv(
 	struct rpc_host_endpoint ***endpoints,
 	struct rpc_host_iface_name **iface_names,
 	size_t *num_workers,
-	size_t *idle_seconds)
+	size_t *idle_seconds,
+	bool *is_npsd)
 {
 	struct rpc_server_get_endpoints_state *state = tevent_req_data(
 		req, struct rpc_server_get_endpoints_state);
@@ -701,6 +890,7 @@ static int rpc_server_get_endpoints_recv(
 	*iface_names = talloc_move(mem_ctx, &state->iface_names);
 	*num_workers = state->num_workers;
 	*idle_seconds = state->idle_seconds;
+	*is_npsd = state->is_npsd;
 	tevent_req_received(req);
 	return 0;
 }
@@ -894,39 +1084,41 @@ fail:
 	return status;
 }
 
-struct rpc_host_bind_read_state {
+struct rpc_host_new_client_state {
 	struct tevent_context *ev;
 
 	int sock;
 	struct tstream_context *plain;
 	struct tstream_context *npa_stream;
-
+	bool is_npsd;
 	struct ncacn_packet *pkt;
 	struct rpc_host_client *client;
 };
 
-static void rpc_host_bind_read_cleanup(
+static void rpc_host_new_client_cleanup(
 	struct tevent_req *req, enum tevent_req_state req_state);
-static void rpc_host_bind_read_got_npa(struct tevent_req *subreq);
-static void rpc_host_bind_read_got_bind(struct tevent_req *subreq);
+static void rpc_host_new_client_got_npa(struct tevent_req *subreq);
+static void rpc_host_new_client_got_bind(struct tevent_req *subreq);
 
 /*
  * Wait for a bind packet from a client.
  */
-static struct tevent_req *rpc_host_bind_read_send(
+static struct tevent_req *rpc_host_new_client_send(
 	TALLOC_CTX *mem_ctx,
 	struct tevent_context *ev,
-	enum dcerpc_transport_t transport,
+	const struct rpc_host_endpoint *endpoint,
 	int *psock,
 	const struct samba_sockaddr *peer_addr)
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
-	struct rpc_host_bind_read_state *state = NULL;
+	struct rpc_host_new_client_state *state = NULL;
+	enum dcerpc_transport_t transport =
+		dcerpc_binding_get_transport(endpoint->binding);
 	int rc, sock_dup;
 	NTSTATUS status;
 
 	req = tevent_req_create(
-		mem_ctx, &state, struct rpc_host_bind_read_state);
+		mem_ctx, &state, struct rpc_host_new_client_state);
 	if (req == NULL) {
 		return NULL;
 	}
@@ -935,12 +1127,16 @@ static struct tevent_req *rpc_host_bind_read_send(
 	state->sock = *psock;
 	*psock = -1;
 
-	tevent_req_set_cleanup_fn(req, rpc_host_bind_read_cleanup);
+	tevent_req_set_cleanup_fn(req, rpc_host_new_client_cleanup);
 
-	state->client = talloc_zero(state, struct rpc_host_client);
+	state->is_npsd = endpoint->server->is_npsd;
+	state->client = talloc(state, struct rpc_host_client);
 	if (tevent_req_nomem(state->client, req)) {
 		return tevent_req_post(req, ev);
 	}
+	*state->client = (struct rpc_host_client){
+		.np_info = endpoint->np_info,
+	};
 
 	/*
 	 * Dup the socket to read the first RPC packet:
@@ -970,15 +1166,20 @@ static struct tevent_req *rpc_host_bind_read_send(
 			state,
 			ev,
 			state->plain,
-			FILE_TYPE_MESSAGE_MODE_PIPE,
-			0xff | 0x0400 | 0x0100,
-			4096);
+			endpoint->np_info.file_type,
+			endpoint->np_info.device_state,
+			endpoint->np_info.allocation_size);
 		if (tevent_req_nomem(subreq, req)) {
 			return tevent_req_post(req, ev);
 		}
 		tevent_req_set_callback(
-			subreq, rpc_host_bind_read_got_npa, req);
+			subreq, rpc_host_new_client_got_npa, req);
 		return req;
+	}
+
+	if (state->is_npsd) {
+		tevent_req_error(req, EINVAL);
+		return tevent_req_post(req, ev);
 	}
 
 	status = rpc_host_generate_npa_info8_from_sock(
@@ -996,15 +1197,15 @@ static struct tevent_req *rpc_host_bind_read_send(
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
-	tevent_req_set_callback(subreq, rpc_host_bind_read_got_bind, req);
+	tevent_req_set_callback(subreq, rpc_host_new_client_got_bind, req);
 	return req;
 }
 
-static void rpc_host_bind_read_cleanup(
+static void rpc_host_new_client_cleanup(
 	struct tevent_req *req, enum tevent_req_state req_state)
 {
-	struct rpc_host_bind_read_state *state = tevent_req_data(
-		req, struct rpc_host_bind_read_state);
+	struct rpc_host_new_client_state *state = tevent_req_data(
+		req, struct rpc_host_new_client_state);
 
 	if ((req_state == TEVENT_REQ_RECEIVED) && (state->sock != -1)) {
 		close(state->sock);
@@ -1012,13 +1213,16 @@ static void rpc_host_bind_read_cleanup(
 	}
 }
 
-static void rpc_host_bind_read_got_npa(struct tevent_req *subreq)
+static void rpc_host_new_client_got_npa(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
-	struct rpc_host_bind_read_state *state = tevent_req_data(
-		req, struct rpc_host_bind_read_state);
+	struct rpc_host_new_client_state *state = tevent_req_data(
+		req, struct rpc_host_new_client_state);
 	struct named_pipe_auth_req_info8 *info8 = NULL;
+	struct auth_session_info *session_info = NULL;
+	uint32_t npa_flags = 0;
+	bool npa_found;
 	int ret, err;
 
 	ret = tstream_npa_accept_existing_recv(subreq,
@@ -1037,22 +1241,47 @@ static void rpc_host_bind_read_got_npa(struct tevent_req *subreq)
 		return;
 	}
 
+	session_info = info8->session_info->session_info;
+	npa_found = security_token_find_npa_flags(session_info->security_token,
+						  &npa_flags);
+	if (npa_found && (npa_flags & SAMBA_NPA_FLAGS_PROBE_ONLY)) {
+		/*
+		 * This means the caller will close
+		 * stop processing as the client
+		 * only wanted to probe if the
+		 * pipe exists.
+		 */
+		TALLOC_FREE(state->npa_stream);
+		TALLOC_FREE(state->plain);
+		if (state->sock != -1) {
+			close(state->sock);
+			state->sock = -1;
+		}
+		tevent_req_error(req, EEXIST);
+		return;
+	}
+
 	state->client->npa_info8 = talloc_move(state->client, &info8);
+
+	if (state->is_npsd) {
+		tevent_req_done(req);
+		return;
+	}
 
 	subreq = dcerpc_read_ncacn_packet_send(
 		state, state->ev, state->npa_stream);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
-	tevent_req_set_callback(subreq, rpc_host_bind_read_got_bind, req);
+	tevent_req_set_callback(subreq, rpc_host_new_client_got_bind, req);
 }
 
-static void rpc_host_bind_read_got_bind(struct tevent_req *subreq)
+static void rpc_host_new_client_got_bind(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
-	struct rpc_host_bind_read_state *state = tevent_req_data(
-		req, struct rpc_host_bind_read_state);
+	struct rpc_host_new_client_state *state = tevent_req_data(
+		req, struct rpc_host_new_client_state);
 	struct ncacn_packet *pkt = NULL;
 	NTSTATUS status;
 
@@ -1073,15 +1302,15 @@ static void rpc_host_bind_read_got_bind(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-static int rpc_host_bind_read_recv(
+static int rpc_host_new_client_recv(
 	struct tevent_req *req,
 	TALLOC_CTX *mem_ctx,
 	int *sock,
 	struct rpc_host_client **client,
 	struct ncacn_packet **bind_pkt)
 {
-	struct rpc_host_bind_read_state *state = tevent_req_data(
-		req, struct rpc_host_bind_read_state);
+	struct rpc_host_new_client_state *state = tevent_req_data(
+		req, struct rpc_host_new_client_state);
 	int err;
 
 	if (tevent_req_is_unix_error(req, &err)) {
@@ -1320,7 +1549,11 @@ again:
 		return;
 	}
 
-	assoc_group_id = pending_client->bind_pkt->u.bind.assoc_group_id;
+	if (pending_client->bind_pkt != NULL) {
+		assoc_group_id = pending_client->bind_pkt->u.bind.assoc_group_id;
+	} else {
+		assoc_group_id = 0;
+	}
 
 	if (assoc_group_id != 0) {
 		size_t num_workers = talloc_array_length(server->workers);
@@ -1353,14 +1586,12 @@ again:
 		uint32_t flags = 0;
 		bool found;
 
-		client_type = "new";
-
 		found = security_token_find_npa_flags(
 			session_info->session_info->security_token,
 			&flags);
 
 		/* fresh assoc group requested */
-		if (found & (flags & SAMBA_NPA_FLAGS_NEED_IDLE)) {
+		if (found && (flags & SAMBA_NPA_FLAGS_NEED_IDLE)) {
 			client_type = "new+exclusive";
 			worker = rpc_host_find_idle_worker(server);
 		} else {
@@ -1455,8 +1686,12 @@ static void rpc_host_client_exited(struct tevent_req *subreq)
 	bool ok;
 	int err;
 
-	ok = wait_for_read_recv(subreq, &err);
-
+	if (pending->server->is_npsd) {
+		err = wait_for_error_recv(subreq);
+		ok = false;
+	} else {
+		ok = wait_for_read_recv(subreq, &err);
+	}
 	TALLOC_FREE(subreq);
 	pending->hangup_wait = NULL;
 
@@ -1669,7 +1904,7 @@ static struct tevent_req *rpc_server_setup_send(
 		state,
 		ev,
 		rpc_server_exe,
-		host->np_helper ? NCACN_NP : NCA_UNKNOWN);
+		host->np_only ? NCACN_NP : NCA_UNKNOWN);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -1694,7 +1929,8 @@ static void rpc_server_setup_got_endpoints(struct tevent_req *subreq)
 		&server->endpoints,
 		&server->iface_names,
 		&server->max_workers,
-		&server->idle_seconds);
+		&server->idle_seconds,
+		&server->is_npsd);
 	TALLOC_FREE(subreq);
 	if (ret != 0) {
 		tevent_req_nterror(req, map_nt_error_from_unix(ret));
@@ -1740,6 +1976,11 @@ static void rpc_server_setup_got_endpoints(struct tevent_req *subreq)
 				return;
 			}
 		}
+	}
+
+	if (server->is_npsd) {
+		tevent_req_done(req);
+		return;
 	}
 
 	ok = rpc_host_fill_epm_db(
@@ -1985,11 +2226,23 @@ static void rpc_host_msg_shutdown(
 
 /*
  * Only match directory entries starting in rpcd_
+ * or npsd_
  */
 static int rpcd_filter(const struct dirent *d)
 {
-	int match = fnmatch("rpcd_*", d->d_name, 0);
-	return (match == 0) ? 1 : 0;
+	int match;
+
+	match = fnmatch("rpcd_*", d->d_name, 0);
+	if (match == 0) {
+		return 1;
+	}
+
+	match = fnmatch("npsd_*", d->d_name, 0);
+	if (match == 0) {
+		return 1;
+	}
+
+	return 0;
 }
 
 /*
@@ -2043,7 +2296,7 @@ struct rpc_host_endpoint_accept_state {
 };
 
 static void rpc_host_endpoint_accept_accepted(struct tevent_req *subreq);
-static void rpc_host_endpoint_accept_got_bind(struct tevent_req *subreq);
+static void rpc_host_endpoint_accept_client_ready(struct tevent_req *subreq);
 
 /*
  * Asynchronously wait for a DCERPC connection from a client.
@@ -2110,23 +2363,23 @@ static void rpc_host_endpoint_accept_accepted(struct tevent_req *subreq)
 	tevent_req_set_callback(
 		subreq, rpc_host_endpoint_accept_accepted, req);
 
-	subreq = rpc_host_bind_read_send(
+	subreq = rpc_host_new_client_send(
 		state,
 		state->ev,
-		dcerpc_binding_get_transport(endpoint->binding),
+		endpoint,
 		&sock,
 		&peer_addr);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
 	tevent_req_set_callback(
-		subreq, rpc_host_endpoint_accept_got_bind, req);
+		subreq, rpc_host_endpoint_accept_client_ready, req);
 }
 
 /*
  * Client sent us a DCERPC bind packet.
  */
-static void rpc_host_endpoint_accept_got_bind(struct tevent_req *subreq)
+static void rpc_host_endpoint_accept_client_ready(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
@@ -2140,11 +2393,15 @@ static void rpc_host_endpoint_accept_got_bind(struct tevent_req *subreq)
 	int ret;
 	int sock=-1;
 
-	ret = rpc_host_bind_read_recv(
+	ret = rpc_host_new_client_recv(
 		subreq, state, &sock, &client, &bind_pkt);
 	TALLOC_FREE(subreq);
+	if (ret == EEXIST) {
+		DBG_DEBUG("SAMBA_NPA_FLAGS_PROBE_ONLY returning\n");
+		goto fail;
+	}
 	if (ret != 0) {
-		DBG_DEBUG("rpc_host_bind_read_recv returned %s\n",
+		DBG_DEBUG("rpc_host_new_client_recv returned %s\n",
 			  strerror(ret));
 		goto fail;
 	}
@@ -2167,12 +2424,22 @@ static void rpc_host_endpoint_accept_got_bind(struct tevent_req *subreq)
 	talloc_set_destructor(pending, rpc_host_pending_client_destructor);
 	sock = -1;
 
-	pending->hangup_wait = wait_for_read_send(
-		pending, state->ev, pending->sock, true);
-	if (pending->hangup_wait == NULL) {
-		DBG_WARNING("wait_for_read_send failed, dropping client\n");
-		TALLOC_FREE(pending);
-		return;
+	if (pending->server->is_npsd) {
+		pending->hangup_wait = wait_for_error_send(
+			pending, state->ev, pending->sock);
+		if (pending->hangup_wait == NULL) {
+			DBG_WARNING("wait_for_error_send failed, dropping client\n");
+			TALLOC_FREE(pending);
+			return;
+		}
+	} else {
+		pending->hangup_wait = wait_for_read_send(
+			pending, state->ev, pending->sock, true);
+		if (pending->hangup_wait == NULL) {
+			DBG_WARNING("wait_for_read_send failed, dropping client\n");
+			TALLOC_FREE(pending);
+			return;
+		}
 	}
 	tevent_req_set_callback(
 		pending->hangup_wait, rpc_host_client_exited, pending);
@@ -2368,7 +2635,8 @@ static struct tevent_req *rpc_host_send(
 	char *servers,
 	int ready_signal_fd,
 	const char *daemon_ready_progname,
-	bool is_np_helper)
+	bool is_np_helper,
+	bool bind_np_only)
 {
 	struct tevent_req *req = NULL, *subreq = NULL;
 	struct rpc_host_state *state = NULL;
@@ -2408,6 +2676,7 @@ static struct tevent_req *rpc_host_send(
 
 	host->msg_ctx = msg_ctx;
 	host->np_helper = is_np_helper;
+	host->np_only = bind_np_only;
 
 	ret = pipe(host->worker_stdin);
 	if (ret == -1) {
@@ -2707,6 +2976,7 @@ int main(int argc, const char *argv[])
 
 	int libexec_rpcds = 0;
 	int np_helper = 0;
+	int np_only = 0;
 	int ready_signal_fd = -1;
 
 	struct samba_cmdline_daemon_cfg *cmdline_daemon_cfg = NULL;
@@ -2729,6 +2999,13 @@ int main(int argc, const char *argv[])
 			.argInfo    = POPT_ARG_NONE,
 			.arg        = &np_helper,
 			.descrip    = "Internal named pipe server",
+		},
+		{
+			.longName   = "np-only",
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &np_only,
+			.descrip    =
+				"Only listen on named pipes like --np-helper",
 		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_DAEMON
@@ -2827,6 +3104,11 @@ int main(int argc, const char *argv[])
 			exit(1);
 	}
 
+	/* --np-helper implies --no-only */
+	if (np_helper != 0) {
+		np_only = 1;
+	}
+
 	if (libexec_rpcds != 0) {
 		ret = rpc_host_list_servers(
 			dyn_SAMBA_LIBEXECDIR, frame, &servers);
@@ -2920,7 +3202,8 @@ int main(int argc, const char *argv[])
 		servers,
 		ready_signal_fd,
 		cmdline_daemon_cfg->fork ? NULL : progname,
-		np_helper != 0);
+		np_helper != 0,
+		np_only != 0);
 	if (req == NULL) {
 		DBG_ERR("rpc_host_send failed\n");
 		global_messaging_context_free();

@@ -20,7 +20,7 @@
 #include "includes.h"
 #include "torture/smbtorture.h"
 #include <talloc.h>
-#include "lib/addns/dns.h"
+#include "dns.h"
 
 static struct dns_connection *setup_connection(struct torture_context *tctx)
 {
@@ -77,7 +77,7 @@ static bool test_internal_dns_query_self(struct torture_context *tctx)
 		return false;
 	}
 
-	err = dns_create_query(conn, host, QTYPE_A, DNS_CLASS_IN, &req);
+	err = dns_create_query(conn, host, DNS_QTYPE_A, DNS_QCLASS_IN, &req);
 	if (!ERR_DNS_IS_OK(err)) {
 		printf("Failed to create A record query\n");
 		return false;

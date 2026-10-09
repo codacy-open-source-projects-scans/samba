@@ -293,6 +293,9 @@ static struct check_ctx* check_ctx_create(TALLOC_CTX *mem_ctx, const char *db,
 					  const struct check_options *opt)
 {
 	struct check_ctx *ctx = talloc_zero(mem_ctx, struct check_ctx);
+	if (ctx == NULL) {
+		return NULL;
+	}
 
 	ctx->opt = *opt;
 	ctx->reg = db_open_rbt(ctx);
@@ -1236,7 +1239,10 @@ static bool check_ctx_write_new_db(struct check_ctx *ctx) {
 	assert(ctx->odb);
 
 	if (ctx->opt.wipe) {
-		int ret = dbwrap_wipe(ctx->odb);
+		int ret = dbwrap_wipe(ctx->odb,
+				      (struct dbwrap_wipe_flags){
+					      .wipe_default=true
+				      });
 		if (ret != 0) {
 			DEBUG(0, ("wiping %s failed\n", ctx->opt.output));
 			return false;
@@ -1263,8 +1269,8 @@ int net_registry_check_db(const char *name, const struct check_options *opt)
 	NTSTATUS status;
 	int ret = -1;
 	struct check_ctx *ctx = check_ctx_create(talloc_tos(), name, opt);
-	if (ctx==NULL) {
-		goto done;
+	if (ctx == NULL) {
+		return ret;
 	}
 
 	d_printf("Check database: %s\n", name);

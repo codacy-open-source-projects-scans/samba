@@ -98,6 +98,60 @@ static bool test_strcasecmp_m(struct torture_context *tctx)
 	return true;
 }
 
+/*
+ * 0xff is never valid in utf8. strcasecmp_m() and strncasecmp_m()
+ * fall back to a byte-wise strcasecmp()/strncasecmp() from the
+ * invalid byte on.
+ */
+static bool test_strcasecmp_m_invalid(struct torture_context *tctx)
+{
+	const char ff_abc[] = {0xff, 'a', 'b', 'c', 0};
+	const char ff_ABC[] = {0xff, 'A', 'B', 'C', 0};
+	const char ff_abd[] = {0xff, 'a', 'b', 'd', 0};
+	const char ff_ABD[] = {0xff, 'A', 'B', 'D', 0};
+	const char ab_ff_cd[] = {'a', 'b', 0xff, 'c', 'd', 0};
+	const char AB_ff_CD[] = {'A', 'B', 0xff, 'C', 'D', 0};
+	const char AB_ff_CE[] = {'A', 'B', 0xff, 'C', 'E', 0};
+
+	torture_assert_int_equal(tctx,
+				 strcasecmp_m(ff_abc, ff_ABC),
+				 0,
+				 "invalid char, rest differs in case");
+	torture_assert_int_less(tctx,
+				strcasecmp_m(ff_abc, ff_abd),
+				0,
+				"invalid char, rest differs");
+	torture_assert_int_equal(tctx,
+				 strcasecmp_m(ab_ff_cd, AB_ff_CD),
+				 0,
+				 "invalid char in the middle");
+	torture_assert_int_less(tctx,
+				strcasecmp_m("abc", ff_abc),
+				0,
+				"invalid char in one string only");
+
+	/*
+	 * After the invalid char, the remaining number of characters
+	 * to compare is used as number of bytes.
+	 */
+	torture_assert_int_equal(tctx,
+				 strncasecmp_m(ff_abc, ff_ABD, 3),
+				 0,
+				 "invalid char, limited before difference");
+	torture_assert_int_less(tctx,
+				strncasecmp_m(ff_abc, ff_ABD, 4),
+				0,
+				"invalid char, limited after difference");
+	torture_assert_int_equal(tctx,
+				 strncasecmp_m(ab_ff_cd, AB_ff_CE, 4),
+				 0,
+				 "invalid char in the middle, limited");
+	torture_assert_int_less(tctx,
+				strncasecmp_m(ab_ff_cd, AB_ff_CE, 5),
+				0,
+				"invalid char in the middle, not limited");
+	return true;
+}
 
 static bool test_strequal_m(struct torture_context *tctx)
 {
@@ -177,6 +231,69 @@ static bool test_strncasecmp_m(struct torture_context *tctx)
 	torture_assert_int_equal(tctx, strncasecmp_m(NULL, NULL, 3),   0, "both NULL");
 	torture_assert_int_greater(tctx, strncasecmp_m(file_iso8859_1, file_utf8, 6), 0,
 		"file.{accented e} should differ");
+	return true;
+}
+
+static bool test_strnequal_bytes(struct torture_context *tctx)
+{
+	/* fooä and fooÄ in utf8 */
+	const char foo_ae_lower[6] = {0x66, 0x6f, 0x6f, 0xc3, 0xa4, 0};
+	const char foo_ae_upper[6] = {0x66, 0x6f, 0x6f, 0xc3, 0x84, 0};
+	/* fooö in utf8 */
+	const char foo_oe_lower[6] = {0x66, 0x6f, 0x6f, 0xc3, 0xb6, 0};
+	/* fooĀ in utf8, different leading byte than fooä */
+	const char foo_a_macron[6] = {0x66, 0x6f, 0x6f, 0xc4, 0x80, 0};
+
+	torture_assert(tctx,
+		       strnequal_bytes("foo", "Foo", 3),
+		       "different case strings");
+	torture_assert(tctx,
+		       strnequal_bytes("fool", "Foo", 3),
+		       "n counts bytes");
+	torture_assert(tctx,
+		       !strnequal_bytes("food", "Fool", 4),
+		       "differ at the end");
+	torture_assert(tctx,
+		       !strnequal_bytes("foo", "Fool", 4),
+		       "one string shorter");
+	torture_assert(tctx,
+		       strnequal_bytes("foo", "Foo", 4),
+		       "both strings shorter");
+	torture_assert(tctx, strnequal_bytes("BLA", "Fool", 0), "empty");
+	torture_assert(tctx, !strnequal_bytes(NULL, "Foo", 3), "one NULL");
+	torture_assert(tctx, !strnequal_bytes("foo", NULL, 3), "other NULL");
+	torture_assert(tctx, strnequal_bytes(NULL, NULL, 3), "both NULL");
+	torture_assert(tctx,
+		       strnequal_bytes(foo_ae_lower, foo_ae_upper, 5),
+		       "multibyte different case");
+	torture_assert(tctx,
+		       !strnequal_bytes(foo_ae_lower, foo_oe_lower, 5),
+		       "multibyte different chars");
+
+	/*
+	 * The following two tests exercise the ILLEGAL_CODEPOINT
+	 * behavior that existed in strncasecmp forever: Illegal
+	 * codepoints start to compare the remaining strings as bytes,
+	 * and if we cut a UTF-8 character in the middle, we compare
+	 * the bytes that are left.
+	 */
+
+	/*
+	 * n cuts the last character in half: Only the leading byte
+	 * is compared, which is the same for ä and ö.
+	 */
+	torture_assert(tctx,
+		       strnequal_bytes(foo_ae_lower, foo_oe_lower, 4),
+		       "cut multibyte char");
+
+	/*
+	 * n cuts the last character in half with different leading
+	 * bytes for ä and Ā.
+	 */
+	torture_assert(tctx,
+		       !strnequal_bytes(foo_ae_lower, foo_a_macron, 4),
+		       "cut multibyte char, different leading byte");
+
 	return true;
 }
 
@@ -374,11 +491,17 @@ struct torture_suite *torture_local_charset(TALLOC_CTX *mem_ctx)
 	torture_suite_add_simple_test(suite, "codepoint_cmpi", test_codepoint_cmpi);
 	torture_suite_add_simple_test(suite, "strcasecmp", test_strcasecmp);
 	torture_suite_add_simple_test(suite, "strcasecmp_m", test_strcasecmp_m);
+	torture_suite_add_simple_test(suite,
+				      "strcasecmp_m_invalid",
+				      test_strcasecmp_m_invalid);
 	torture_suite_add_simple_test(suite, "strequal_m", test_strequal_m);
 	torture_suite_add_simple_test(suite, "strcsequal", test_strcsequal);
 	torture_suite_add_simple_test(suite, "string_replace_m", test_string_replace_m);
 	torture_suite_add_simple_test(suite, "strncasecmp", test_strncasecmp);
 	torture_suite_add_simple_test(suite, "strncasecmp_m", test_strncasecmp_m);
+	torture_suite_add_simple_test(suite,
+				      "strnequal_bytes",
+				      test_strnequal_bytes);
 	torture_suite_add_simple_test(suite, "next_token", test_next_token);
 	torture_suite_add_simple_test(suite, "next_token_null", test_next_token_null);
 	torture_suite_add_simple_test(suite, "next_token_implicit_sep", test_next_token_implicit_sep);

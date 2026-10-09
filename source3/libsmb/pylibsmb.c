@@ -62,6 +62,7 @@ c = libsmb.Conn("127.0.0.1",
 #include "auth/credentials/pycredentials.h"
 #include "trans2.h"
 #include "libsmb/clirap.h"
+#include "lib/afpinfo.h"
 #include "librpc/rpc/pyrpc_util.h"
 #include "librpc/gen_ndr/ndr_security.h"
 
@@ -1429,6 +1430,50 @@ static PyObject *py_unix_mode_to_wire(struct py_cli_state *self,
 	return v;
 }
 
+static PyObject *py_afpinfo_pack(PyObject *module,
+				 PyObject *args,
+				 PyObject *kwds)
+{
+	static const char *kwlist[] = {"finder_info", NULL};
+	TALLOC_CTX *frame = talloc_stackframe();
+	AfpInfo *ai = NULL;
+	char *finder_info = NULL;
+	Py_ssize_t finder_info_len = 0;
+	char buf[AFP_INFO_SIZE];
+	PyObject *result = NULL;
+	bool ok;
+
+	ok = ParseTupleAndKeywords(args,
+				   kwds,
+				   PYARG_BYTES_LEN,
+				   kwlist,
+				   &finder_info,
+				   &finder_info_len);
+	if (!ok) {
+		goto fail;
+	}
+
+	if (finder_info_len != AFP_FinderSize) {
+		PyErr_Format(PyExc_ValueError,
+			     "finder_info must be %d bytes",
+			     AFP_FinderSize);
+		goto fail;
+	}
+
+	ai = afpinfo_new(frame);
+	if (ai == NULL) {
+		result = PyErr_NoMemory();
+		goto fail;
+	}
+	memcpy(ai->afpi_FinderInfo, finder_info, AFP_FinderSize);
+	afpinfo_pack(ai, buf);
+
+	result = PyBytes_FromStringAndSize(buf, sizeof(buf));
+fail:
+	TALLOC_FREE(frame);
+	return result;
+}
+
 static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -1614,6 +1659,58 @@ static PyObject *py_cli_qfileinfo(struct py_cli_state *self, PyObject *args)
 	TALLOC_FREE(frame);
 
 	return result;
+}
+
+static PyObject *py_cli_sfileinfo(struct py_cli_state *self, PyObject *args)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_req *req = NULL;
+	int fnum, type, level;
+	uint8_t *data = NULL;
+	Py_ssize_t data_len;
+	DATA_BLOB blob;
+	NTSTATUS status;
+
+	if (!PyArg_ParseTuple(args,
+			      "iii"PYARG_BYTES_LEN,
+			      &fnum,
+			      &type,
+			      &level,
+			      &data,
+			      &data_len))
+	{
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	blob = (DATA_BLOB) {
+		.data = data,
+		.length = data_len
+	};
+
+	req = cli_smb2_set_info_fnum_send(frame,
+					  self->ev,
+					  self->cli,
+					  fnum,
+					  type,
+					  level,
+					  &blob,
+					  0);
+	if (!py_tevent_req_wait_exc(self, req)) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+	status = cli_smb2_set_info_fnum_recv(req);
+	TALLOC_FREE(req);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	TALLOC_FREE(frame);
+	Py_RETURN_NONE;
 }
 
 static PyObject *py_cli_rename(
@@ -2066,6 +2163,117 @@ static PyObject *py_cli_delete_on_close(struct py_cli_state *self,
 
 	TALLOC_FREE(frame);
 	Py_RETURN_NONE;
+}
+
+/*
+ * Byte range locks, SMB2 style: A list of (offset, length, flags)
+ * with SMB2_LOCK_FLAG_* flags. For SMB1 this is mapped to a LockingX
+ * request.
+ */
+static bool py_cli_lock_elements(TALLOC_CTX *mem_ctx,
+				 PyObject *py_locks,
+				 uint16_t *pnum_locks,
+				 struct smb2_lock_element **plocks)
+{
+	struct smb2_lock_element *locks = NULL;
+	Py_ssize_t i, num_locks;
+
+	num_locks = PyList_GET_SIZE(py_locks);
+	if ((num_locks == 0) || (num_locks > UINT16_MAX)) {
+		PyErr_SetString(PyExc_ValueError, "invalid number of locks");
+		return false;
+	}
+
+	locks = talloc_array(mem_ctx, struct smb2_lock_element, num_locks);
+	if (locks == NULL) {
+		PyErr_NoMemory();
+		return false;
+	}
+
+	for (i = 0; i < num_locks; i++) {
+		PyObject *py_lock = PyList_GET_ITEM(py_locks, i);
+		unsigned long long offset = 0;
+		unsigned long long length = 0;
+		unsigned flags = 0;
+		bool ok;
+
+		ok = PyArg_ParseTuple(
+			py_lock, "KKI", &offset, &length, &flags);
+		if (!ok) {
+			return false;
+		}
+		locks[i] = (struct smb2_lock_element){
+			.offset = offset,
+			.length = length,
+			.flags = flags,
+		};
+	}
+
+	*pnum_locks = num_locks;
+	*plocks = locks;
+	return true;
+}
+
+static PyObject *py_cli_lock(struct py_cli_state *self,
+			     PyObject *args,
+			     PyObject *kwds)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	static const char *kwlist[] = {
+		"fnum",
+		"locks",
+		"lock_sequence",
+		NULL,
+	};
+	unsigned fnum = 0;
+	PyObject *py_locks = NULL;
+	unsigned lock_sequence = 0;
+	uint16_t num_locks = 0;
+	struct smb2_lock_element *locks = NULL;
+	struct tevent_req *req = NULL;
+	PyObject *result = NULL;
+	NTSTATUS status;
+	bool ok;
+
+	ok = ParseTupleAndKeywords(args,
+				   kwds,
+				   "IO!|I:lock",
+				   kwlist,
+				   &fnum,
+				   &PyList_Type,
+				   &py_locks,
+				   &lock_sequence);
+	if (!ok) {
+		goto done;
+	}
+
+	ok = py_cli_lock_elements(frame, py_locks, &num_locks, &locks);
+	if (!ok) {
+		goto done;
+	}
+
+	req = cli_lock_send(frame,
+			    self->ev,
+			    self->cli,
+			    fnum,
+			    lock_sequence,
+			    num_locks,
+			    locks);
+	ok = py_tevent_req_wait_exc(self, req);
+	if (!ok) {
+		goto done;
+	}
+	status = cli_lock_recv(req);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		goto done;
+	}
+
+	result = Py_None;
+	Py_INCREF(result);
+done:
+	TALLOC_FREE(frame);
+	return result;
 }
 
 struct py_cli_notify_state {
@@ -3333,6 +3541,11 @@ static PyMethodDef py_cli_state_methods[] = {
 			py_cli_ftruncate),
 	  METH_VARARGS|METH_KEYWORDS,
 	  "Truncate a file" },
+	{ "lock", PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_lock),
+	  METH_VARARGS|METH_KEYWORDS,
+	  "lock(fnum, locks[, lock_sequence=0]) -> None\n\n"
+	  "\t\tByte range locks, locks is a list of (offset, length, flags)\n"
+	  "\t\twith SMB2_LOCK_FLAG_* flags, mapped to LockingX for SMB1." },
 	{ "delete_on_close", PY_DISCARD_FUNC_SIG(PyCFunction,
 					 py_cli_delete_on_close),
 	  METH_VARARGS|METH_KEYWORDS,
@@ -3426,6 +3639,12 @@ static PyMethodDef py_cli_state_methods[] = {
 		METH_VARARGS | METH_KEYWORDS,
 		"qfileinfo(fnum, level) -> blob",
 	},
+	{
+		"sfileinfo",
+		(PyCFunction)py_cli_sfileinfo,
+		METH_VARARGS,
+		"sfileinfo(fnum, type, level, blob)",
+	},
 	{ "mknod",
 	  PY_DISCARD_FUNC_SIG(PyCFunction, py_cli_mknod),
 	  METH_VARARGS|METH_KEYWORDS,
@@ -3463,6 +3682,14 @@ static PyMethodDef py_libsmb_methods[] = {
 		(PyCFunction)py_wire_mode_to_unix,
 		METH_VARARGS,
 		"Convert posix wire format mode to mode_t",
+	},
+	{
+		"afpinfo_pack",
+		PY_DISCARD_FUNC_SIG(PyCFunction, py_afpinfo_pack),
+		METH_VARARGS | METH_KEYWORDS,
+		"afpinfo_pack(finder_info) -> bytes\n\n"
+		"\t\tPack an AfpInfo structure for the AFP_AfpInfo "
+		"stream with a caller supplied 32 byte Finder Info blob.",
 	},
 	{0},
 };
@@ -3674,6 +3901,11 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(NFS_SPECFILE_FIFO);
 	ADD_FLAGS(NFS_SPECFILE_SOCK);
 
+	ADD_FLAGS(SMB2_0_INFO_FILE);
+	ADD_FLAGS(SMB2_0_INFO_FILESYSTEM);
+	ADD_FLAGS(SMB2_0_INFO_SECURITY);
+	ADD_FLAGS(SMB2_0_INFO_QUOTA);
+
 	ADD_FLAGS(FSCC_FILE_DIRECTORY_INFORMATION);
 	ADD_FLAGS(FSCC_FILE_FULL_DIRECTORY_INFORMATION);
 	ADD_FLAGS(FSCC_FILE_BOTH_DIRECTORY_INFORMATION);
@@ -3751,6 +3983,15 @@ MODULE_INIT_FUNC(libsmb_samba_cwrapper)
 	ADD_FLAGS(FILE_DIRECTORY_FILE);
 
 	ADD_FLAGS(SMB2_CLOSE_FLAGS_FULL_INFORMATION);
+	ADD_FLAGS(SMB2_LOCK_FLAG_SHARED);
+	ADD_FLAGS(SMB2_LOCK_FLAG_EXCLUSIVE);
+	ADD_FLAGS(SMB2_LOCK_FLAG_UNLOCK);
+	ADD_FLAGS(SMB2_LOCK_FLAG_FAIL_IMMEDIATELY);
+
+#define ADD_TEXT(val) PyModule_AddObject(m, #val, PyUnicode_FromString(val))
+
+	ADD_TEXT(AFPINFO_STREAM_NAME);
+	ADD_TEXT(AFPRESOURCE_STREAM_NAME);
 
 	return m;
 }

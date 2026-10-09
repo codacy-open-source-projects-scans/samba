@@ -111,11 +111,11 @@ NTSTATUS read_packet_remainder(int fd, char *buffer,
 
 	status = read_fd_with_timeout(fd, buffer, len, len, timeout, NULL);
 	if (!NT_STATUS_IS_OK(status)) {
-		char addr[INET6_ADDRSTRLEN];
-		DEBUG(0, ("read_fd_with_timeout failed for client %s read "
-			  "error = %s.\n",
-			  get_peer_addr(fd, addr, sizeof(addr)),
-			  nt_errstr(status)));
+		struct ssaddr_buf buf;
+		DBG_ERR("read_fd_with_timeout failed for client %s read "
+			"error = %s.\n",
+			get_peer_addr(fd, &buf),
+			nt_errstr(status));
 	}
 	return status;
 }
@@ -1003,9 +1003,9 @@ static void smbd_server_connection_handler(struct tevent_context *ev,
 struct smbd_release_ip_state {
 	struct smbXsrv_connection *xconn;
 	struct tevent_immediate *im;
-	struct sockaddr_storage srv;
-	struct sockaddr_storage clnt;
-	char addr[INET6_ADDRSTRLEN];
+	struct samba_sockaddr srv;
+	struct samba_sockaddr clnt;
+	struct ssaddr_buf addr;
 };
 
 static int release_ip(struct tevent_context *ev,
@@ -1026,9 +1026,11 @@ static int smbd_release_ip_state_destructor(struct smbd_release_ip_state *s)
 	}
 
 	if (NT_STATUS_EQUAL(xconn->transport.status, NT_STATUS_CONNECTION_IN_USE)) {
-		ctdbd_passed_ips(cconn, &s->srv, &s->clnt, release_ip, s);
+		ctdbd_passed_ips(
+			cconn, &s->srv.u.ss, &s->clnt.u.ss, release_ip, s);
 	} else {
-		ctdbd_unregister_ips(cconn, &s->srv, &s->clnt, release_ip, s);
+		ctdbd_unregister_ips(
+			cconn, &s->srv.u.ss, &s->clnt.u.ss, release_ip, s);
 	}
 
 	return 0;
@@ -1067,7 +1069,7 @@ static int release_ip(struct tevent_context *ev,
 		struct smbd_release_ip_state);
 	struct smbXsrv_connection *xconn = state->xconn;
 	const char *ip;
-	const char *addr = state->addr;
+	const char *addr = state->addr.buf;
 	const char *p = addr;
 
 	if (msglen == 0) {
@@ -1155,8 +1157,8 @@ static int match_cluster_movable_ip(uint32_t total_ip_count,
 }
 
 static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
-				  struct sockaddr_storage *srv,
-				  struct sockaddr_storage *clnt)
+				  struct samba_sockaddr *srv,
+				  struct samba_sockaddr *clnt)
 {
 	struct smbd_release_ip_state *state;
 	struct ctdbd_connection *cconn;
@@ -1178,14 +1180,12 @@ static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
 	}
 	state->srv = *srv;
 	state->clnt = *clnt;
-	if (print_sockaddr(state->addr, sizeof(state->addr), srv) == NULL) {
-		return NT_STATUS_NO_MEMORY;
-	}
+	ssaddr_str_buf(srv, &state->addr);
 
 	if (xconn->client->server_multi_channel_enabled) {
 		ret = ctdbd_public_ip_foreach(cconn,
 					      match_cluster_movable_ip,
-					      srv);
+					      &srv->u.ss);
 		if (ret == EADDRNOTAVAIL) {
 			xconn->has_cluster_movable_ip = true;
 			DBG_DEBUG("cluster movable IP on %s\n",
@@ -1197,7 +1197,8 @@ static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
 		}
 	}
 
-	ret = ctdbd_register_ips(cconn, srv, clnt, release_ip, state);
+	ret = ctdbd_register_ips(
+		cconn, &srv->u.ss, &clnt->u.ss, release_ip, state);
 	if (ret != 0) {
 		return map_nt_error_from_unix(ret);
 	}
@@ -1219,13 +1220,12 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 {
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct smbXsrv_connection *xconn;
-	struct sockaddr_storage ss_srv;
-	void *sp_srv = (void *)&ss_srv;
-	struct sockaddr *sa_srv = (struct sockaddr *)sp_srv;
-	struct sockaddr_storage ss_clnt;
-	void *sp_clnt = (void *)&ss_clnt;
-	struct sockaddr *sa_clnt = (struct sockaddr *)sp_clnt;
-	socklen_t sa_socklen;
+	struct samba_sockaddr ss_srv = {
+		.sa_socklen = sizeof(struct sockaddr_storage),
+	};
+	struct samba_sockaddr ss_clnt = {
+		.sa_socklen = sizeof(struct sockaddr_storage),
+	};
 	struct tsocket_address *local_address = NULL;
 	struct tsocket_address *remote_address = NULL;
 	const char *remaddr = NULL;
@@ -1265,8 +1265,7 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 	set_socket_options(sock_fd, "SO_KEEPALIVE");
 	set_socket_options(sock_fd, lp_socket_options());
 
-	sa_socklen = sizeof(ss_clnt);
-	ret = getpeername(sock_fd, sa_clnt, &sa_socklen);
+	ret = getpeername(sock_fd, &ss_clnt.u.sa, &ss_clnt.sa_socklen);
 	if (ret != 0) {
 		int saved_errno = errno;
 		int level = (errno == ENOTCONN)?2:0;
@@ -1276,7 +1275,8 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 		return map_nt_error_from_unix_common(saved_errno);
 	}
 	ret = tsocket_address_bsd_from_sockaddr(xconn,
-						sa_clnt, sa_socklen,
+						&ss_clnt.u.sa,
+						ss_clnt.sa_socklen,
 						&remote_address);
 	if (ret != 0) {
 		int saved_errno = errno;
@@ -1286,8 +1286,7 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 		return map_nt_error_from_unix_common(saved_errno);
 	}
 
-	sa_socklen = sizeof(ss_srv);
-	ret = getsockname(sock_fd, sa_srv, &sa_socklen);
+	ret = getsockname(sock_fd, &ss_srv.u.sa, &ss_srv.sa_socklen);
 	if (ret != 0) {
 		int saved_errno = errno;
 		int level = (errno == ENOTCONN)?2:0;
@@ -1297,7 +1296,8 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 		return map_nt_error_from_unix_common(saved_errno);
 	}
 	ret = tsocket_address_bsd_from_sockaddr(xconn,
-						sa_srv, sa_socklen,
+						&ss_srv.u.sa,
+						ss_srv.sa_socklen,
 						&local_address);
 	if (ret != 0) {
 		int saved_errno = errno;

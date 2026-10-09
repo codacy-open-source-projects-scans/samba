@@ -19,6 +19,7 @@
 
 #include "includes.h"
 #include "adouble.h"
+#include "lib/afpinfo.h"
 #include "MacExtensions.h"
 #include "string_replace.h"
 #include "smbd/smbd.h"
@@ -2662,6 +2663,7 @@ struct adouble *ad_get(TALLOC_CTX *ctx,
 struct adouble *ad_fget(TALLOC_CTX *ctx, vfs_handle_struct *handle,
 			files_struct *fsp, adouble_type_t type)
 {
+	SMB_ASSERT(fsp != NULL);
 	return ad_get_internal(ctx, handle, fsp, NULL, type);
 }
 
@@ -2798,75 +2800,6 @@ struct smb_filename *adouble_name(TALLOC_CTX *mem_ctx,
 	snprintf(ad_name, sizeof(ad_name), "._%s", base->base_name);
 
 	return cp_smb_filename(mem_ctx, &ad_fname);
-}
-
-/**
- * Allocate and initialize an AfpInfo struct
- **/
-AfpInfo *afpinfo_new(TALLOC_CTX *ctx)
-{
-	AfpInfo *ai = talloc(ctx, AfpInfo);
-	if (ai == NULL) {
-		return NULL;
-	}
-	*ai = (AfpInfo){
-		.afpi_Signature = AFP_Signature,
-		.afpi_Version = AFP_Version,
-		.afpi_BackupTime = AD_DATE_START,
-	};
-	return ai;
-}
-
-/**
- * Pack an AfpInfo struct into a buffer
- *
- * Buffer size must be at least AFP_INFO_SIZE
- * Returns size of packed buffer
- **/
-ssize_t afpinfo_pack(const AfpInfo *ai, char *buf)
-{
-	memset(buf, 0, AFP_INFO_SIZE);
-
-	RSIVAL(buf, 0, ai->afpi_Signature);
-	RSIVAL(buf, 4, ai->afpi_Version);
-	RSIVAL(buf, 12, ai->afpi_BackupTime);
-	memcpy(buf + 16, ai->afpi_FinderInfo, sizeof(ai->afpi_FinderInfo));
-
-	return AFP_INFO_SIZE;
-}
-
-/**
- * Unpack a buffer into a AfpInfo structure
- *
- * Buffer size must be at least AFP_INFO_SIZE
- * Returns allocated AfpInfo struct
- **/
-AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data, bool validate)
-{
-	AfpInfo *ai = talloc_zero(ctx, AfpInfo);
-	if (ai == NULL) {
-		return NULL;
-	}
-
-	ai->afpi_Signature = RIVAL(data, 0);
-	ai->afpi_Version = RIVAL(data, 4);
-	ai->afpi_BackupTime = RIVAL(data, 12);
-	memcpy(ai->afpi_FinderInfo, (const char *)data + 16,
-	       sizeof(ai->afpi_FinderInfo));
-
-	if (validate) {
-		if (ai->afpi_Signature != AFP_Signature
-		    || ai->afpi_Version != AFP_Version)
-		{
-			DEBUG(1, ("Bad AfpInfo signature or version\n"));
-			TALLOC_FREE(ai);
-		}
-	} else {
-		ai->afpi_Signature = AFP_Signature;
-		ai->afpi_Version = AFP_Version;
-	}
-
-	return ai;
 }
 
 bool adouble_buf_parse(const uint8_t *buf,

@@ -849,6 +849,12 @@ char *ldb_dn_get_extended_linearized(TALLOC_CTX *mem_ctx, struct ldb_dn *dn, int
 	TYPESAFE_QSORT(dn->ext_components, dn->ext_comp_num,
 		       ldb_dn_extended_component_compare);
 
+	if (dn->ext_comp_num == 0) {
+		return NULL;
+	}
+
+	p = talloc_strdup(mem_ctx, "");
+
 	for (i = 0; i < dn->ext_comp_num; i++) {
 		const struct ldb_dn_extended_syntax *ext_syntax;
 		const char *name = dn->ext_components[i].name;
@@ -875,27 +881,14 @@ char *ldb_dn_get_extended_linearized(TALLOC_CTX *mem_ctx, struct ldb_dn *dn, int
 			return NULL;
 		}
 
-		if (i == 0) {
-			p = talloc_asprintf(mem_ctx, "<%s=%.*s>",
-					    name,
-					    (int)val.length,
-					    val.data);
-		} else {
-			talloc_asprintf_addbuf(&p, ";<%s=%.*s>",
-					       name,
-					       (int)val.length,
-					       val.data);
-		}
+		talloc_asprintf_addsep(
+			&p, ";", "<%s=%.*s>", name, (int)val.length, val.data);
 
 		talloc_free(val.data);
 	}
 
-	if (dn->ext_comp_num && *linearized) {
+	if (*linearized) {
 		talloc_asprintf_addbuf(&p, ";%s", linearized);
-	}
-
-	if (!p) {
-		return NULL;
 	}
 
 	return p;

@@ -35,6 +35,7 @@
 #include "messages.h"
 #include "util_tdb.h"
 #include "source3/locking/share_mode_lock.h"
+#include "../librpc/gen_ndr/ndr_open_files.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_LOCKING
@@ -344,6 +345,7 @@ void brl_init(bool read_only)
 {
 	int tdb_flags;
 	char *db_path;
+	uint64_t dbwrap_flags = DBWRAP_FLAG_NONE;
 
 	if (brlock_db) {
 		return;
@@ -357,10 +359,14 @@ void brl_init(bool read_only)
 		return;
 	}
 
+	if (lp_persistent_handles()) {
+		dbwrap_flags |= DBWRAP_FLAG_PER_REC_PERSISTENT;
+	}
+
 	brlock_db = db_open(NULL, db_path,
 			    SMBD_VOLATILE_TDB_HASH_SIZE, tdb_flags,
 			    read_only?O_RDONLY:(O_RDWR|O_CREAT), 0640,
-			    DBWRAP_LOCK_ORDER_2, DBWRAP_FLAG_NONE);
+			    DBWRAP_LOCK_ORDER_2, dbwrap_flags);
 	if (!brlock_db) {
 		DEBUG(0,("Failed to open byte range locking database %s\n",
 			 db_path));
@@ -936,6 +942,7 @@ NTSTATUS brl_lock(
 	br_off size,
 	enum brl_type lock_type,
 	enum brl_flavour lock_flav,
+	bool persistent,
 	struct server_id *blocker_pid,
 	uint64_t *psmblctx)
 {
@@ -952,7 +959,8 @@ NTSTATUS brl_lock(
 		.size = size,
 		.fnum = br_lck->fsp->fnum,
 		.lock_type = lock_type,
-		.lock_flav = lock_flav
+		.lock_flav = lock_flav,
+		.persistent = persistent,
 	};
 
 	if (lock_flav == WINDOWS_LOCK) {
@@ -1434,6 +1442,7 @@ bool brl_reconnect_disconnected(struct files_struct *fsp,
 	uint64_t fnum = fsp->fnum;
 	unsigned int i;
 	struct server_id self = messaging_server_id(fsp->conn->sconn->msg_ctx);
+	int matched_locks = 0;
 
 	if (fsp->op == NULL) {
 		return false;
@@ -1459,32 +1468,46 @@ bool brl_reconnect_disconnected(struct files_struct *fsp,
 		struct lock_struct *lock = &br_lck->lock_data[i];
 
 		/*
-		 * as this is a durable handle we only expect locks
-		 * of the current file handle!
+		 * If this is a durable handle we only expect locks of the
+		 * current file handle. If we're reconnecting a Persistent
+		 * Handle, we do allow other opens.
 		 */
 
 		if (lock->context.smblctx != smblctx) {
+			/*
+			 *  This lock is not for this open
+			 */
+			if (fsp->op->global->persistent) {
+				continue;
+			}
+			TALLOC_FREE(br_lck);
 			return false;
 		}
 
-		if (lock->context.tid != TID_FIELD_INVALID) {
-			return false;
-		}
+		if (!fsp->op->global->persistent) {
+			if (lock->context.tid != TID_FIELD_INVALID) {
+				TALLOC_FREE(br_lck);
+				return false;
+			}
 
-		if (!server_id_is_disconnected(&lock->context.pid)) {
-			return false;
-		}
+			if (!server_id_is_disconnected(&lock->context.pid)) {
+				TALLOC_FREE(br_lck);
+				return false;
+			}
 
-		if (lock->fnum != FNUM_FIELD_INVALID) {
-			return false;
+			if (lock->fnum != FNUM_FIELD_INVALID) {
+				TALLOC_FREE(br_lck);
+				return false;
+			}
 		}
 
 		lock->context.pid = self;
 		lock->context.tid = tid;
 		lock->fnum = fnum;
+		matched_locks++;
 	}
 
-	fsp->current_lock_count = br_lck->num_locks;
+	fsp->current_lock_count = matched_locks;
 	br_lck->modified = true;
 	return true;
 }
@@ -1503,15 +1526,19 @@ struct brl_forall_cb {
  on each lock.
 ****************************************************************************/
 
+static bool brl_parse_data(TALLOC_CTX *mem_ctx,
+			   struct byte_range_lock *br_lck,
+			   TDB_DATA data);
+
 static int brl_traverse_fn(struct db_record *rec, void *state)
 {
 	struct brl_forall_cb *cb = (struct brl_forall_cb *)state;
-	struct lock_struct *locks;
+	struct byte_range_lock br_lck = {};
 	struct file_id *key;
 	unsigned int i;
-	unsigned int num_locks = 0;
 	TDB_DATA dbkey;
 	TDB_DATA value;
+	bool ok;
 
 	dbkey = dbwrap_record_get_key(rec);
 	value = dbwrap_record_get_value(rec);
@@ -1519,28 +1546,26 @@ static int brl_traverse_fn(struct db_record *rec, void *state)
 	/* In a traverse function we must make a copy of
 	   dbuf before modifying it. */
 
-	locks = (struct lock_struct *)talloc_memdup(
-		talloc_tos(), value.dptr, value.dsize);
-	if (!locks) {
+	ok = brl_parse_data(talloc_tos(), &br_lck, value);
+	if (!ok) {
 		return -1; /* Terminate traversal. */
 	}
 
 	key = (struct file_id *)dbkey.dptr;
-	num_locks = value.dsize/sizeof(*locks);
 
 	if (cb->fn) {
-		for ( i=0; i<num_locks; i++) {
+		for ( i=0; i<br_lck.num_locks; i++) {
 			cb->fn(*key,
-				locks[i].context.pid,
-				locks[i].lock_type,
-				locks[i].lock_flav,
-				locks[i].start,
-				locks[i].size,
+				br_lck.lock_data[i].context.pid,
+				br_lck.lock_data[i].lock_type,
+				br_lck.lock_data[i].lock_flav,
+				br_lck.lock_data[i].start,
+				br_lck.lock_data[i].size,
 				cb->private_data);
 		}
 	}
 
-	TALLOC_FREE(locks);
+	TALLOC_FREE(br_lck.lock_data);
 	return 0;
 }
 
@@ -1583,6 +1608,7 @@ static void byte_range_lock_flush(struct byte_range_lock *br_lck)
 {
 	unsigned i;
 	struct lock_struct *locks = br_lck->lock_data;
+	bool have_persistent_lock = false;
 
 	if (!br_lck->modified) {
 		DEBUG(10, ("br_lck not modified\n"));
@@ -1599,9 +1625,12 @@ static void byte_range_lock_flush(struct byte_range_lock *br_lck)
 			 */
 			locks[i] = locks[br_lck->num_locks-1];
 			br_lck->num_locks -= 1;
-		} else {
-			i += 1;
+			continue;
 		}
+		if (locks[i].persistent) {
+			have_persistent_lock = true;
+		}
+		i += 1;
 	}
 
 	if (br_lck->num_locks == 0) {
@@ -1613,13 +1642,26 @@ static void byte_range_lock_flush(struct byte_range_lock *br_lck)
 			smb_panic("Could not delete byte range lock entry");
 		}
 	} else {
-		TDB_DATA data = {
-			.dsize = br_lck->num_locks * sizeof(struct lock_struct),
-			.dptr = (uint8_t *)br_lck->lock_data,
+		uint8_t version_buf[sizeof(uint32_t)];
+		TDB_DATA data[] = {
+			[0].dsize = sizeof(uint32_t),
+			[0].dptr = version_buf,
+			[1].dsize = br_lck->num_locks * sizeof(struct lock_struct),
+			[1].dptr = (uint8_t *)br_lck->lock_data,
 		};
 		NTSTATUS status;
+		int store_flags = DBWRAP_REPLACE;
 
-		status = dbwrap_record_store(br_lck->record, data, TDB_REPLACE);
+		if (have_persistent_lock) {
+			store_flags |= DBWRAP_STORE_PERSISTENT;
+		}
+
+		PUSH_BE_U32(version_buf, 0, SHARE_MODE_DATA_VERSION_1);
+
+		status = dbwrap_record_storev(br_lck->record,
+					     data,
+					     ARRAY_SIZE(data),
+					     store_flags);
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0, ("store returned %s\n", nt_errstr(status)));
 			smb_panic("Could not store byte range mode entry");
@@ -1639,22 +1681,49 @@ static int byte_range_lock_destructor(struct byte_range_lock *br_lck)
 	return 0;
 }
 
-static bool brl_parse_data(struct byte_range_lock *br_lck, TDB_DATA data)
+/*
+ * Parse a brlock record into br_lck.
+ *
+ * mem_ctx owns the resulting lock data. It is normally br_lck itself, but
+ * brl_traverse_fn() keeps br_lck on the stack.
+ */
+static bool brl_parse_data(TALLOC_CTX *mem_ctx,
+			   struct byte_range_lock *br_lck,
+			   TDB_DATA data)
 {
-	size_t data_len;
+	size_t data_len = data.dsize;
+	uint32_t version;
 
-	if (data.dsize == 0) {
+	if (data_len == 0) {
 		return true;
 	}
-	if (data.dsize % sizeof(struct lock_struct) != 0) {
-		DEBUG(1, ("Invalid data size: %u\n", (unsigned)data.dsize));
+	if (data_len < sizeof(uint32_t)) {
+		DBG_WARNING("Invalid data size: %zu\n", data_len);
+		return false;
+	}
+	version = PULL_BE_U32(data.dptr, 0);
+	if (version != SHARE_MODE_DATA_VERSION_1) {
+		DBG_WARNING("Invalid version: %"PRIu32"\n", version);
 		return false;
 	}
 
-	br_lck->num_locks = data.dsize / sizeof(struct lock_struct);
+	data_len -= sizeof(uint32_t);
+
+	if (data_len % sizeof(struct lock_struct) != 0) {
+		DBG_WARNING("Invalid data size: %zu\n", data_len);
+		return false;
+	}
+
+	br_lck->num_locks = data_len / sizeof(struct lock_struct);
+	if (br_lck->num_locks < 1) {
+		DBG_WARNING("Invalid data size: %zu\n", data_len);
+		return false;
+	}
 	data_len = br_lck->num_locks * sizeof(struct lock_struct);
 
-	br_lck->lock_data = talloc_memdup(br_lck, data.dptr, data_len);
+	br_lck->lock_data = talloc_memdup(mem_ctx,
+					  data.dptr + sizeof(uint32_t),
+					  data_len);
 	if (br_lck->lock_data == NULL) {
 		DEBUG(1, ("talloc_memdup failed\n"));
 		return false;
@@ -1668,7 +1737,8 @@ static bool brl_parse_data(struct byte_range_lock *br_lck, TDB_DATA data)
  TALLOC_FREE(brl) will release the lock in the destructor.
 ********************************************************************/
 
-struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx, files_struct *fsp)
+static struct byte_range_lock *brl_get_locks_internal(TALLOC_CTX *mem_ctx,
+						      struct file_id *file_id)
 {
 	TDB_DATA key, data;
 	struct byte_range_lock *br_lck;
@@ -1678,9 +1748,7 @@ struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx, files_struct *fsp)
 		return NULL;
 	}
 
-	br_lck->fsp = fsp;
-
-	key.dptr = (uint8_t *)&fsp->file_id;
+	key.dptr = (uint8_t *)file_id;
 	key.dsize = sizeof(struct file_id);
 
 	br_lck->record = dbwrap_fetch_locked(brlock_db, br_lck, key);
@@ -1693,7 +1761,7 @@ struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx, files_struct *fsp)
 
 	data = dbwrap_record_get_value(br_lck->record);
 
-	if (!brl_parse_data(br_lck, data)) {
+	if (!brl_parse_data(br_lck, br_lck, data)) {
 		TALLOC_FREE(br_lck);
 		return NULL;
 	}
@@ -1706,13 +1774,32 @@ struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx, files_struct *fsp)
 		struct lock_struct *locks = br_lck->lock_data;
 		DBG_DEBUG("%u current locks on file_id %s\n",
 			  br_lck->num_locks,
-			  file_id_str_buf(fsp->file_id, &buf));
+			  file_id_str_buf(*file_id, &buf));
 		for( i = 0; i < br_lck->num_locks; i++) {
 			print_lock_struct(i, &locks[i]);
 		}
 	}
 
 	return br_lck;
+}
+
+struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx,
+				      files_struct *fsp)
+{
+	struct byte_range_lock *brl = NULL;
+
+	brl = brl_get_locks_internal(mem_ctx, &fsp->file_id);
+	if (brl == NULL) {
+		return NULL;
+	}
+	brl->fsp = fsp;
+	return brl;
+}
+
+struct byte_range_lock *brl_get_locks_for_cleanup(TALLOC_CTX *mem_ctx,
+						  struct file_id *file_id)
+{
+	return brl_get_locks_internal(mem_ctx, file_id);
 }
 
 struct brl_get_locks_readonly_state {
@@ -1734,7 +1821,7 @@ static void brl_get_locks_readonly_parser(TDB_DATA key, TDB_DATA data,
 		return;
 	}
 	*br_lck = (struct byte_range_lock) { 0 };
-	if (!brl_parse_data(br_lck, data)) {
+	if (!brl_parse_data(br_lck, br_lck, data)) {
 		*state->br_lock = NULL;
 		return;
 	}
@@ -1822,63 +1909,59 @@ bool brl_cleanup_disconnected(struct file_id fid, uint64_t open_persistent_id)
 {
 	bool ret = false;
 	TALLOC_CTX *frame = talloc_stackframe();
-	TDB_DATA key, val;
-	struct db_record *rec;
-	struct lock_struct *lock;
+	struct byte_range_lock *br_lck = NULL;
+	struct lock_struct *locks = NULL;
 	unsigned n, num;
 	struct file_id_buf buf;
-	NTSTATUS status;
 
-	key = make_tdb_data((void*)&fid, sizeof(fid));
-
-	rec = dbwrap_fetch_locked(brlock_db, frame, key);
-	if (rec == NULL) {
-		DBG_INFO("failed to fetch record for file %s\n",
-			 file_id_str_buf(fid, &buf));
-		goto done;
+	br_lck = brl_get_locks_for_cleanup(frame, &fid);
+	if (br_lck == NULL) {
+		return false;
 	}
 
-	val = dbwrap_record_get_value(rec);
-	lock = (struct lock_struct*)val.dptr;
-	num = val.dsize / sizeof(struct lock_struct);
-	if (lock == NULL) {
-		DBG_DEBUG("no byte range locks for file %s\n",
-			  file_id_str_buf(fid, &buf));
-		ret = true;
-		goto done;
-	}
+	locks = br_lck->lock_data;
 
-	for (n=0; n<num; n++) {
-		struct lock_context *ctx = &lock[n].context;
-
-		if (!server_id_is_disconnected(&ctx->pid)) {
-			struct server_id_buf tmp;
-			DBG_INFO("byte range lock "
-				 "%s used by server %s, do not cleanup\n",
-				 file_id_str_buf(fid, &buf),
-				 server_id_str_buf(ctx->pid, &tmp));
-			goto done;
-		}
+	for (n = 0, num = 0; n < br_lck->num_locks; n++) {
+		struct lock_struct *lock = &locks[n];
+		struct lock_context *ctx = &lock->context;
 
 		if (ctx->smblctx != open_persistent_id)	{
-			DBG_INFO("byte range lock %s expected smblctx %"PRIu64" "
-				 "but found %"PRIu64", do not cleanup\n",
-				 file_id_str_buf(fid, &buf),
-				 open_persistent_id,
-				 ctx->smblctx);
-			goto done;
+			DBG_DEBUG("byte range lock %s, "
+				  "cleanup smblctx %"PRIu64", "
+				  "found %"PRIu64", do not cleanup\n",
+				  file_id_str_buf(fid, &buf),
+				  open_persistent_id,
+				  ctx->smblctx);
+			continue;
 		}
-	}
 
-	status = dbwrap_record_delete(rec);
-	if (!NT_STATUS_IS_OK(status)) {
-		DBG_INFO("failed to delete record "
-			 "for file %s from %s, open %"PRIu64": %s\n",
-			 file_id_str_buf(fid, &buf),
-			 dbwrap_name(brlock_db),
-			 open_persistent_id,
-			 nt_errstr(status));
-		goto done;
+		if (lock->persistent) {
+			if (serverid_exists(&ctx->pid)) {
+				struct server_id_buf tmp;
+				DBG_WARNING("byte range lock %s used by "
+					    "server %s, do not cleanup\n",
+					    file_id_str_buf(fid, &buf),
+					    server_id_str_buf(ctx->pid, &tmp));
+				continue;
+			}
+		} else {
+			if (!server_id_is_disconnected(&ctx->pid)) {
+				struct server_id_buf tmp;
+				DBG_WARNING("byte range lock %s used by "
+					    "server %s, do not cleanup\n",
+					    file_id_str_buf(fid, &buf),
+					    server_id_str_buf(ctx->pid, &tmp));
+				continue;
+			}
+		}
+
+		/*
+		 * Set lock pid holder to 0, triggers lock deletion in
+		 * byte_range_lock_flush().
+		 */
+		lock->context.pid.pid = 0;
+		br_lck->modified = true;
+		num++;
 	}
 
 	DBG_DEBUG("file %s cleaned up %u entries from open %"PRIu64"\n",
@@ -1887,7 +1970,7 @@ bool brl_cleanup_disconnected(struct file_id fid, uint64_t open_persistent_id)
 		  open_persistent_id);
 
 	ret = true;
-done:
+
 	talloc_free(frame);
 	return ret;
 }
@@ -2026,4 +2109,15 @@ bool file_has_brlocks(files_struct *fsp)
 		}
 	}
 	return false;
+}
+
+NTSTATUS brlock_wipe(struct dbwrap_wipe_flags flags)
+{
+	int ret;
+
+	ret = dbwrap_wipe(brlock_db, flags);
+	if (ret != 0) {
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+	return NT_STATUS_OK;
 }

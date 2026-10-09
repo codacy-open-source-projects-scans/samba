@@ -53,6 +53,7 @@ static connection_struct *make_connection_smb1(struct smb_request *req,
 	struct smbXsrv_tcon *tcon;
 	NTSTATUS status;
 	struct connection_struct *conn;
+	const char *lease_mask = NULL;
 
 	session_global_id = req->session->global->session_global_id;
 	share_name = lp_servicename(talloc_tos(), lp_sub, snum);
@@ -78,8 +79,9 @@ static connection_struct *make_connection_smb1(struct smb_request *req,
 				     share_name,
 				     now, &tcon);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0,("make_connection_smb1: Couldn't find free tcon for [%s] - %s\n",
-			 share_name, nt_errstr(status)));
+		DBG_ERR("Couldn't find free tcon for [%s] - %s\n",
+			share_name,
+			nt_errstr(status));
 		TALLOC_FREE(share_name);
 		*pstatus = status;
 		return NULL;
@@ -90,7 +92,7 @@ static connection_struct *make_connection_smb1(struct smb_request *req,
 	if (!conn) {
 		TALLOC_FREE(tcon);
 
-		DEBUG(0,("make_connection_smb1: Couldn't find free connection.\n"));
+		DBG_ERR("Couldn't find free connection.\n");
 		*pstatus = NT_STATUS_INSUFFICIENT_RESOURCES;
 		return NULL;
 	}
@@ -109,8 +111,14 @@ static connection_struct *make_connection_smb1(struct smb_request *req,
 		return NULL;
 	}
 
+	lease_mask = lp_parm_const_string(SNUM(tcon->compat),
+					  "smb1",
+					  "max lease mask",
+					  "RWH");
+
 	tcon->compat = talloc_move(tcon, &conn);
 	tcon->status = NT_STATUS_OK;
+	tcon->smb_max_lease_mask = smb2_util_lease_state(lease_mask);
 
 	*pstatus = NT_STATUS_OK;
 
@@ -143,8 +151,8 @@ connection_struct *make_connection(struct smb_request *req,
 	/* This must ONLY BE CALLED AS ROOT. As it exits this function as
 	 * root. */
 	if (!non_root_mode() && (euid = geteuid()) != 0) {
-		DEBUG(0,("make_connection: PANIC ERROR. Called as nonroot "
-			 "(%u)\n", (unsigned int)euid ));
+		DBG_ERR("PANIC ERROR. Called as nonroot (%u)\n",
+			(unsigned int)euid);
 		smb_panic("make_connection: PANIC ERROR. Called as nonroot\n");
 	}
 
@@ -154,8 +162,7 @@ connection_struct *make_connection(struct smb_request *req,
 	}
 
 	if (session == NULL) {
-		DEBUG(1,("make_connection: refusing to connect with "
-			 "no session setup\n"));
+		DBG_WARNING("refusing to connect with no session setup\n");
 		*status = NT_STATUS_ACCESS_DENIED;
 		return NULL;
 	}
@@ -168,23 +175,24 @@ connection_struct *make_connection(struct smb_request *req,
 
 	if (strequal(service_in,HOMES_NAME)) {
 		if (session->homes_snum == -1) {
-			DEBUG(2, ("[homes] share not available for "
-				  "this user because it was not found "
-				  "or created at session setup "
-				  "time\n"));
+			DBG_NOTICE("[homes] share not available for "
+				   "this user because it was not found "
+				   "or created at session setup "
+				   "time\n");
 			*status = NT_STATUS_BAD_NETWORK_NAME;
 			return NULL;
 		}
-		DEBUG(5, ("making a connection to [homes] service "
-			  "created at session setup time\n"));
+		DBG_INFO("making a connection to [homes] service "
+			 "created at session setup time\n");
 		return make_connection_smb1(req, now,
 					    session->homes_snum,
 					    dev, status);
 	} else if ((session->homes_snum != -1)
 		   && strequal(service_in,
 			       lp_const_servicename(session->homes_snum))) {
-		DEBUG(5, ("making a connection to 'homes' service [%s] "
-			  "created at session setup time\n", service_in));
+		DBG_INFO("making a connection to 'homes' service [%s] "
+			 "created at session setup time\n",
+			 service_in);
 		return make_connection_smb1(req, now,
 					    session->homes_snum,
 					    dev, status);
@@ -197,7 +205,7 @@ connection_struct *make_connection(struct smb_request *req,
 	}
 
 	if (!strlower_m(service)) {
-		DEBUG(2, ("strlower_m %s failed\n", service));
+		DBG_NOTICE("strlower_m %s failed\n", service);
 		*status = NT_STATUS_INVALID_PARAMETER;
 		return NULL;
 	}
@@ -211,30 +219,31 @@ connection_struct *make_connection(struct smb_request *req,
 	if (snum < 0) {
 		if (strequal(service,"IPC$") ||
 		    (lp_enable_asu_support() && strequal(service,"ADMIN$"))) {
-			DEBUG(3,("refusing IPC connection to %s\n", service));
+			DBG_NOTICE("refusing IPC connection to %s\n", service);
 			*status = NT_STATUS_ACCESS_DENIED;
 			return NULL;
 		}
 
-		DEBUG(3,("%s (%s) couldn't find service %s\n",
-			get_remote_machine_name(),
-			tsocket_address_string(
-				sconn->remote_address, talloc_tos()),
-			service));
+		DBG_NOTICE("%s (%s) couldn't find service %s\n",
+			   get_remote_machine_name(),
+			   tsocket_address_string(sconn->remote_address,
+						  talloc_tos()),
+			   service);
 		*status = NT_STATUS_BAD_NETWORK_NAME;
 		return NULL;
 	}
 
 	/* Handle non-Dfs clients attempting connections to msdfs proxy */
 	if (lp_host_msdfs() && (*lp_msdfs_proxy(talloc_tos(), lp_sub, snum) != '\0'))  {
-		DEBUG(3, ("refusing connection to dfs proxy share '%s' "
-			  "(pointing to %s)\n",
-			service, lp_msdfs_proxy(talloc_tos(), lp_sub, snum)));
+		DBG_NOTICE("refusing connection to dfs proxy share '%s' "
+			   "(pointing to %s)\n",
+			   service,
+			   lp_msdfs_proxy(talloc_tos(), lp_sub, snum));
 		*status = NT_STATUS_BAD_NETWORK_NAME;
 		return NULL;
 	}
 
-	DEBUG(5, ("making a connection to 'normal' service %s\n", service));
+	DBG_INFO("making a connection to 'normal' service %s\n", service);
 
 	return make_connection_smb1(req, now, snum,
 				    dev, status);

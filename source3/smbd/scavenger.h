@@ -26,6 +26,13 @@ bool smbd_scavenger_init(TALLOC_CTX *mem_ctx,
 			 struct messaging_context *msg,
 			 struct tevent_context *ev);
 
-void scavenger_schedule_disconnected(struct files_struct *fsp);
+void scavenger_schedule_disconnected(struct messaging_context *msg_ctx,
+				     uint64_t open_persistent_id,
+				     struct file_id *file_id,
+				     uint32_t name_hash);
+
+bool share_mode_cleanup_disconnected(struct file_id fid,
+				     uint64_t open_persistent_id,
+				     uint32_t name_hash);
 
 #endif

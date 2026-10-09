@@ -1859,7 +1859,7 @@ bool handle_kdc_default_domain_supported_enctypes(struct loadparm_context *lp_ct
 
 			/* See if the bit's specified in hexadecimal. */
 			if (bitstr[0] == '0' &&
-			    (bitstr[1] == 'x' || bitstr[2] == 'X'))
+			    (bitstr[1] == 'x' || bitstr[1] == 'X'))
 			{
 				base = 16;
 				bitstr += 2;
@@ -1928,7 +1928,7 @@ bool handle_kdc_supported_enctypes(struct loadparm_context *lp_ctx,
 
 			/* See if the bit's specified in hexadecimal. */
 			if (bitstr[0] == '0' &&
-			    (bitstr[1] == 'x' || bitstr[2] == 'X'))
+			    (bitstr[1] == 'x' || bitstr[1] == 'X'))
 			{
 				base = 16;
 				bitstr += 2;
@@ -1940,7 +1940,7 @@ bool handle_kdc_supported_enctypes(struct loadparm_context *lp_ctx,
 			bit = smb_strtoul(bitstr, NULL, base, &error, SMB_STR_FULL_STR_CONV);
 			if (error) {
 				DBG_ERR("WARNING: Ignoring invalid value '%s' "
-					"for parameter 'kdc default domain supported enctypes'\n",
+					"for parameter 'kdc supported enctypes'\n",
 					*enctype);
 				ok = false;
 			} else {
@@ -3294,6 +3294,10 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx,
 				  "client smb encryption over quic",
 				  "yes");
+
+	lpcfg_do_global_parameter(lp_ctx,
+				  "persistent handles durability",
+				  "full_outage");
 
 	for (i = 0; parm_table[i].label; i++) {
 		if (!(lp_ctx->flags[i] & FLAG_CMDLINE)) {

@@ -56,6 +56,7 @@ struct share_mode_lock {
 #include "messages.h"
 #include "util_tdb.h"
 #include "../librpc/gen_ndr/ndr_open_files.h"
+#include "../librpc/gen_ndr/ndr_smbXsrv.h"
 #include "source3/lib/dbwrap/dbwrap_watch.h"
 #include "locking/leases_db.h"
 #include "../lib/util/memcache.h"
@@ -98,20 +99,22 @@ static NTSTATUS share_mode_g_lock_dump(TDB_DATA key,
 
 static NTSTATUS share_mode_g_lock_writev(TDB_DATA key,
 					 const TDB_DATA *dbufs,
-					 size_t num_dbufs)
+					 size_t num_dbufs,
+					 int flags)
 {
 	if (share_mode_g_lock_within_cb(key)) {
 		return g_lock_lock_cb_writev(current_share_mode_glck,
-					     dbufs, num_dbufs);
+					     dbufs, num_dbufs, flags);
 	}
 
-	return g_lock_writev_data(lock_ctx, key, dbufs, num_dbufs);
+	return g_lock_writev_data(lock_ctx, key, dbufs, num_dbufs, flags);
 }
 
 static bool locking_init_internal(bool read_only)
 {
 	struct db_context *backend;
 	char *db_path;
+	uint64_t dbwrap_flags = DBWRAP_FLAG_NONE;
 
 	brl_init(read_only);
 
@@ -124,13 +127,17 @@ static bool locking_init_internal(bool read_only)
 		return false;
 	}
 
+	if (lp_persistent_handles()) {
+		dbwrap_flags |= DBWRAP_FLAG_PER_REC_PERSISTENT;
+	}
+
 	backend = db_open(NULL, db_path,
 			  SMBD_VOLATILE_TDB_HASH_SIZE,
 			  SMBD_VOLATILE_TDB_FLAGS |
 			  TDB_SEQNUM,
 			  read_only?O_RDONLY:O_RDWR|O_CREAT, 0640,
 			  DBWRAP_LOCK_ORDER_NONE,
-			  DBWRAP_FLAG_NONE);
+			  dbwrap_flags);
 	TALLOC_FREE(db_path);
 	if (!backend) {
 		DEBUG(0,("ERROR: Failed to initialise locking database\n"));
@@ -155,6 +162,16 @@ static bool locking_init_internal(bool read_only)
 
 bool locking_init(void)
 {
+	struct server_id server_id;
+	NTSTATUS status;
+
+	server_id = messaging_server_id(global_messaging_context());
+	status = smbXsrv_version_global_init(&server_id);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("smbXsrv_version_global_init() failed\n");
+		return false;
+	}
+
 	return locking_init_internal(false);
 }
 
@@ -242,6 +259,12 @@ static enum ndr_err_code get_share_mode_blob_header(
 		.data = discard_const_p(uint8_t, buf),
 		.data_size = buflen,
 	};
+	enum share_mode_data_version v;
+	NDR_CHECK(ndr_pull_share_mode_data_version(&ndr, NDR_SCALARS, &v));
+	if (v != SHARE_MODE_DATA_VERSION_1) {
+		DBG_ERR("Invalid version\n");
+		return NDR_ERR_VALIDATE;
+	}
 	NDR_CHECK(ndr_pull_hyper(&ndr, NDR_SCALARS, pepoch));
 	NDR_CHECK(ndr_pull_uint16(&ndr, NDR_SCALARS, pflags));
 	return NDR_ERR_SUCCESS;
@@ -328,13 +351,13 @@ static struct share_mode_data *share_mode_memcache_fetch(
 }
 
 /*
- * 124 is the sizeof an ndr-encoded struct share_mode_entry_buf.
+ * 128 is the sizeof an ndr-encoded struct share_mode_entry_buf.
  * Reading/writing entries will immediately error out if this
  * size differs (push/pull is done without allocs).
  */
 
 struct share_mode_entry_buf {
-	uint8_t buf[124];
+	uint8_t buf[128];
 };
 #define SHARE_MODE_ENTRY_SIZE (sizeof(struct share_mode_entry_buf))
 
@@ -506,7 +529,8 @@ static NTSTATUS locking_tdb_data_store(
 	TDB_DATA key,
 	const struct locking_tdb_data *ltdb,
 	const TDB_DATA *share_mode_dbufs,
-	size_t num_share_mode_dbufs)
+	size_t num_share_mode_dbufs,
+	int flags)
 {
 	uint8_t share_mode_data_len_buf[4];
 	TDB_DATA dbufs[num_share_mode_dbufs+3];
@@ -518,7 +542,7 @@ static NTSTATUS locking_tdb_data_store(
 		/*
 		 * Nothing to write
 		 */
-		status = share_mode_g_lock_writev(key, NULL, 0);
+		status = share_mode_g_lock_writev(key, NULL, 0, flags);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_ERR("share_mode_g_lock_writev(NULL) failed: %s\n",
 				nt_errstr(status));
@@ -552,7 +576,7 @@ static NTSTATUS locking_tdb_data_store(
 		       num_share_mode_dbufs * sizeof(TDB_DATA));
 	}
 
-	status = share_mode_g_lock_writev(key, dbufs, ARRAY_SIZE(dbufs));
+	status = share_mode_g_lock_writev(key, dbufs, ARRAY_SIZE(dbufs), flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("share_mode_g_lock_writev() failed: %s\n",
 			nt_errstr(status));
@@ -570,7 +594,9 @@ static struct share_mode_data *parse_share_mode_data(
 	const uint8_t *buf,
 	size_t buflen)
 {
-	struct share_mode_data *d;
+	struct share_mode_dataB data_blob;
+	struct share_mode_data *d = NULL;
+	struct file_id_buf idbuf;
 	enum ndr_err_code ndr_err;
 	DATA_BLOB blob;
 
@@ -580,32 +606,36 @@ static struct share_mode_data *parse_share_mode_data(
 		return d;
 	}
 
-	d = talloc(mem_ctx, struct share_mode_data);
-	if (d == NULL) {
-		DEBUG(0, ("talloc failed\n"));
-		goto fail;
-	}
-
 	blob = (DATA_BLOB) {
 		.data = discard_const_p(uint8_t, buf),
 		.length = buflen,
 	};
 	ndr_err = ndr_pull_struct_blob_all(
-		&blob, d, d, (ndr_pull_flags_fn_t)ndr_pull_share_mode_data);
+		&blob, mem_ctx, &data_blob,
+		(ndr_pull_flags_fn_t)ndr_pull_share_mode_dataB);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 		DBG_WARNING("ndr_pull_share_mode_data failed: %s\n",
 			    ndr_errstr(ndr_err));
 		goto fail;
 	}
 
+	if (data_blob.version != SHARE_MODE_DATA_VERSION_1) {
+		DBG_ERR("Invalid record in locking.tdb:"
+			 "key '%s' unsupported version: %d\n",
+			 file_id_str_buf(id, &idbuf),
+			 (int)data_blob.version);
+		goto fail;
+	}
+	d = data_blob.data.data1;
+
 	if (DEBUGLEVEL >= 10) {
-		DEBUG(10, ("parse_share_modes:\n"));
+		DBG_DEBUG("parse_share_modes:\n");
 		NDR_PRINT_DEBUG(share_mode_data, d);
 	}
 
 	return d;
 fail:
-	TALLOC_FREE(d);
+	TALLOC_FREE(data_blob.data.data1);
 	return NULL;
 }
 
@@ -619,6 +649,7 @@ static NTSTATUS share_mode_data_ltdb_store(struct share_mode_data *d,
 					   size_t num_share_mode_dbufs)
 {
 	DATA_BLOB blob = { 0 };
+	int flags = 0;
 	NTSTATUS status;
 
 	if (!d->modified) {
@@ -634,13 +665,21 @@ static NTSTATUS share_mode_data_ltdb_store(struct share_mode_data *d,
 	}
 
 	if (ltdb->num_share_entries != 0 || num_share_mode_dbufs != 0) {
+		struct share_mode_dataB data_blob;
 		enum ndr_err_code ndr_err;
+
+		data_blob = (struct share_mode_dataB) {
+			.version = SHARE_MODE_DATA_VERSION_1,
+			.unique_content_epoch = d->unique_content_epoch,
+			.flags = d->flags,
+		};
+		data_blob.data.data1 = d;
 
 		ndr_err = ndr_push_struct_blob(
 			&blob,
 			ltdb,
-			d,
-			(ndr_push_flags_fn_t)ndr_push_share_mode_data);
+			&data_blob,
+			(ndr_push_flags_fn_t)ndr_push_share_mode_dataB);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			DBG_ERR("ndr_push_share_mode_data failed: %s\n",
 				  ndr_errstr(ndr_err));
@@ -652,10 +691,15 @@ static NTSTATUS share_mode_data_ltdb_store(struct share_mode_data *d,
 	ltdb->share_mode_data_len = blob.length;
 
 store:
+	if (d->num_persistent > 0) {
+		flags |= DBWRAP_STORE_PERSISTENT;
+	}
+
 	status = locking_tdb_data_store(key,
 					ltdb,
 					share_mode_dbufs,
-					num_share_mode_dbufs);
+					num_share_mode_dbufs,
+					flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("locking_tdb_data_store failed: %s\n",
 			nt_errstr(status));
@@ -2031,6 +2075,7 @@ bool set_share_mode(struct share_mode_lock *lck,
 		    uint64_t mid,
 		    uint16_t op_type,
 		    const struct smb2_lease_key *lease_key,
+		    const struct GUID *create_guid,
 		    uint32_t share_access,
 		    uint32_t access_mask)
 {
@@ -2087,6 +2132,13 @@ bool set_share_mode(struct share_mode_lock *lck,
 		const struct GUID *client_guid = fsp_client_guid(fsp);
 		e.client_guid = *client_guid;
 		e.lease_key = *lease_key;
+	}
+
+	if (e.flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) {
+		d->num_persistent++;
+		d->modified = true;
+		SMB_ASSERT(create_guid != NULL);
+		e.create_guid = *create_guid;
 	}
 
 	ok = share_mode_entry_put(&e, &e_buf);
@@ -2177,6 +2229,7 @@ done:
 }
 
 static bool share_mode_for_one_entry(
+	struct share_mode_data *d,
 	bool (*fn)(struct share_mode_entry *e,
 		   bool *modified,
 		   void *private_data),
@@ -2234,6 +2287,10 @@ static bool share_mode_for_one_entry(
 				SHARE_MODE_ENTRY_SIZE);
 		}
 		*num_share_modes -= 1;
+		if (e.flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) {
+			SMB_ASSERT(d->num_persistent > 0);
+			d->num_persistent--;
+		}
 		*writeback = true;
 		return stop;
 	}
@@ -2319,6 +2376,7 @@ bool share_mode_forall_entries(
 	i = 0;
 	while (i<num_share_entries) {
 		stop = share_mode_for_one_entry(
+			d,
 			fn,
 			private_data,
 			&i,
@@ -2535,6 +2593,7 @@ done:
 
 struct del_share_mode_state {
 	bool ok;
+	bool persistent;
 };
 
 static void del_share_mode_fn(
@@ -2544,13 +2603,17 @@ static void del_share_mode_fn(
 	void *private_data)
 {
 	struct del_share_mode_state *state = private_data;
+
+	if (e->flags & SHARE_ENTRY_FLAG_PERSISTENT_OPEN) {
+		state->persistent = true;
+	}
 	e->stale = true;
 	state->ok = true;
 }
 
-bool del_share_mode_open_id(struct share_mode_lock *lck,
-			    struct server_id open_pid,
-			    uint64_t open_file_id)
+static bool del_share_mode_open_id(struct share_mode_lock *lck,
+				   struct server_id open_pid,
+				   uint64_t open_file_id)
 {
 	struct del_share_mode_state state = { .ok = false };
 	struct share_mode_data *d = NULL;
@@ -2576,6 +2639,11 @@ bool del_share_mode_open_id(struct share_mode_lock *lck,
 	if (!state.ok) {
 		DBG_DEBUG("del_share_mode_fn failed\n");
 		return false;
+	}
+	if (state.persistent) {
+		SMB_ASSERT(d->num_persistent > 0);
+		d->num_persistent--;
+		d->modified = true;
 	}
 	return true;
 }
@@ -3527,6 +3595,9 @@ uint16_t fsp_get_share_entry_flags(const struct files_struct *fsp)
 	if (fsp->fsp_flags.ntcreatex_deny_fcb) {
 		flags |= SHARE_ENTRY_FLAG_DENY_FCB;
 	}
+	if (fsp->op != NULL && fsp->op->global->persistent) {
+		flags |= SHARE_ENTRY_FLAG_PERSISTENT_OPEN;
+	}
 	return flags;
 }
 
@@ -3549,4 +3620,9 @@ void fsp_apply_share_entry_flags(struct files_struct *fsp, uint16_t flags)
 	 */
 	SMB_ASSERT(!(flags & SHARE_ENTRY_FLAG_DENY_DOS));
 	SMB_ASSERT(!(flags & SHARE_ENTRY_FLAG_DENY_FCB));
+}
+
+NTSTATUS locking_wipe(struct dbwrap_wipe_flags flags)
+{
+	return g_lock_wipe(lock_ctx, flags);
 }

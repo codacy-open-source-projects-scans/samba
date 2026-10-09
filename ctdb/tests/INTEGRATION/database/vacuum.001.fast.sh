@@ -8,14 +8,14 @@ set -e
 
 ctdb_test_init
 
-vacuum_test ()
+vacuum_test()
 {
 	local db="$1"
 	local num_records="$2"
 	local delete_from_lmaster="${3:-false}"
 
 	local t
-	if "$delete_from_lmaster" ; then
+	if "$delete_from_lmaster"; then
 		t="lmaster"
 	else
 		t="non-lmaster"
@@ -47,13 +47,13 @@ vacuum_test ()
 	echo
 	echo "Write ${num_records} records to ${db}"
 	local i
-	for i in $(seq 1 "$num_records") ; do
+	for i in $(seq 1 "$num_records"); do
 		ctdb_onnode "$first" "writekey ${db} test${i} value${i}"
 	done
 
 	echo
 	echo "Migrate record(s) to all nodes"
-	for i in $(seq 1 "$num_records") ; do
+	for i in $(seq 1 "$num_records"); do
 		ctdb_onnode all "readkey ${db} test${i}"
 	done
 
@@ -72,12 +72,12 @@ vacuum_test ()
 	lmaster="$out"
 	echo "  lmaster=${lmaster}"
 
-	if "$delete_from_lmaster" ; then
+	if "$delete_from_lmaster"; then
 		echo "  Delete key ${key} on lmaster node ${lmaster}"
 		dnode="$lmaster"
 	else
-		for i in $all_pnns ; do
-			if [ "$i" != "$lmaster" ] ; then
+		for i in $all_pnns; do
+			if [ "$i" != "$lmaster" ]; then
 				dnode="$i"
 				break
 			fi
@@ -87,20 +87,20 @@ vacuum_test ()
 	ctdb_onnode "$dnode" "deletekey ${db} ${key}"
 
 	echo
-	vacuum_confirm_key_empty_dmaster "$dnode" "$db" "$key"
+	db_confirm_key_empty_dmaster "$dnode" "$db" "$key"
 
 	echo
 	echo "Confirm all records still exist on all nodes"
 	check_cattdb_num_records "$db" "$num_records" "$all_pnns"
 
-	if ! "$delete_from_lmaster" ; then
+	if ! "$delete_from_lmaster"; then
 		# Ask the lmaster to fetch the deleted record
 		echo
 		echo "Vacuum on non-lmaster node ${dnode}"
 		testprog_onnode "$dnode" "ctdb-db-test vacuum ${db}"
 
 		echo
-		vacuum_confirm_key_empty_dmaster "$dnode" "$db" "$key"
+		db_confirm_key_empty_dmaster "$dnode" "$db" "$key"
 
 		# Fetch the record and put it in the delete queue in
 		# the main daemon for processing in next vacuuming run
@@ -114,7 +114,7 @@ vacuum_test ()
 		check_cattdb_num_records "$db" "$num_records" "$all_pnns"
 
 		echo
-		vacuum_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
+		db_confirm_key_empty_dmaster "$lmaster" "$db" "$key"
 	fi
 
 	echo
@@ -131,11 +131,11 @@ vacuum_test ()
 	echo
 	echo "Confirm all other records still exist with expected values"
 	local i
-	for i in $(seq 1 "$num_records") ; do
+	for i in $(seq 1 "$num_records"); do
 		local k="test${i}"
 		local v="value${i}"
 
-		if [ "$k" = "$key" ] ; then
+		if [ "$k" = "$key" ]; then
 			continue
 		fi
 

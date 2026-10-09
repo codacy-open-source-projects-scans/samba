@@ -26,6 +26,7 @@
 #include "passdb.h"
 #include "utils/net_dns.h"
 #include "lib/util/string_wrappers.h"
+#include "source3/libsmb/namequery.h"
 
 #ifdef HAVE_ADS
 
@@ -34,7 +35,6 @@
 *******************************************************************/
 
 #if defined(HAVE_KRB5)
-#include "../lib/addns/dns.h"
 
 static NTSTATUS net_update_dns_internal(struct net_context *c,
 					TALLOC_CTX *ctx,
@@ -45,10 +45,9 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 					int num_addrs, bool remove_host)
 {
 	struct dns_rr_ns *nameservers = NULL;
+	struct dns_rr_ns _nameserver = {};
 	size_t ns_count = 0, i;
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
-	DNS_ERROR dns_err;
-	fstring dns_server;
 	const char *dnsdomain = NULL;
 	char *root_domain = NULL;
 	uint32_t ttl = 3600;
@@ -65,8 +64,31 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 	}
 	dnsdomain++;
 
+	if (c->opt_host != NULL) {
+		bool ok;
+
+		_nameserver.hostname = c->opt_host;
+		_nameserver.ss_s = talloc(ctx, struct samba_sockaddr);
+		if (_nameserver.ss_s == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto done;
+		}
+
+		ok = resolve_name(c->opt_host, _nameserver.ss_s, 0x20, false);
+		if (!ok) {
+			DBG_WARNING("Host %s not found\n", c->opt_host);
+			status = NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND;
+			goto done;
+		}
+
+		nameservers = &_nameserver;
+		ns_count = 1;
+		goto do_update;
+	}
+
 	status = ads_dns_lookup_ns(ctx,
 				   dnsdomain,
+				   lp_get_async_dns_timeout(),
 				   &nameservers,
 				   &ns_count);
 	if ( !NT_STATUS_IS_OK(status) || (ns_count == 0)) {
@@ -111,6 +133,7 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 
 		status = ads_dns_lookup_ns(ctx,
 					   root_domain,
+					   lp_get_async_dns_timeout(),
 					   &nameservers,
 					   &ns_count);
 
@@ -127,7 +150,10 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 
 	}
 
+do_update:
 	for (i=0; i < ns_count; i++) {
+		struct dns_rr_ns *ns = &nameservers[i];
+		struct ssaddr_buf addstrbuf;
 
 		uint32_t flags = DNS_UPDATE_SIGNED |
 				 DNS_UPDATE_UNSIGNED |
@@ -150,37 +176,36 @@ static NTSTATUS net_update_dns_internal(struct net_context *c,
 
 		status = NT_STATUS_UNSUCCESSFUL;
 
+		if (talloc_array_length(ns->ss_s) == 0) {
+			/*
+			 * ads_dns_lookup_ns gave no addresses even
+			 * though it tries to find them if they did
+			 * not come with the NS query reply
+			 */
+			continue;
+		}
+
 		/* Now perform the dns update - we'll try non-secure and if we fail,
 		   we'll follow it up with a secure update */
 
-		fstrcpy( dns_server, nameservers[i].hostname );
-
-		dns_err = DoDNSUpdate(dns_server,
-				      dnsdomain,
-				      machine_name,
-				      creds,
-		                      addrs,
-				      num_addrs,
-				      flags,
-				      ttl,
-				      remove_host);
-		if (ERR_DNS_IS_OK(dns_err)) {
+		status = DoDNSUpdate(ssaddr_str_buf(&ns->ss_s[0], &addstrbuf),
+				     ns->hostname,
+				     dnsdomain,
+				     machine_name,
+				     creds,
+				     addrs,
+				     num_addrs,
+				     flags,
+				     ttl,
+				     remove_host);
+		if (NT_STATUS_IS_OK(status)) {
 			status = NT_STATUS_OK;
 			goto done;
 		}
 
-		if (ERR_DNS_EQUAL(dns_err, ERROR_DNS_INVALID_NAME_SERVER) ||
-		    ERR_DNS_EQUAL(dns_err, ERROR_DNS_CONNECTION_FAILED) ||
-		    ERR_DNS_EQUAL(dns_err, ERROR_DNS_SOCKET_ERROR)) {
-			DEBUG(1,("retrying DNS update with next nameserver after receiving %s\n",
-				dns_errstr(dns_err)));
-			continue;
-		}
-
-		d_printf(_("DNS Update for %s failed: %s\n"),
-			machine_name, dns_errstr(dns_err));
-		status = NT_STATUS_UNSUCCESSFUL;
-		goto done;
+		DBG_WARNING("retrying DNS update with next nameserver after "
+			    "receiving %s\n",
+			    nt_errstr(status));
 	}
 
 done:

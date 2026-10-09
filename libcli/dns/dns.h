@@ -51,14 +51,14 @@ struct dns_rr_srv {
 	uint16_t weight;
 	uint16_t port;
 	size_t num_ips;
-	struct sockaddr_storage *ss_s;	/* support multi-homed hosts */
+	struct samba_sockaddr *ss_s; /* support multi-homed hosts */
 };
 
 /* NS records */
 
 struct dns_rr_ns {
 	const char *hostname;
-	struct sockaddr_storage ss;
+	struct samba_sockaddr *ss_s; /* support multi-homed hosts */
 };
 
 #endif

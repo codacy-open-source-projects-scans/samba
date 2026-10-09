@@ -228,6 +228,7 @@ static bool torture_smb2_read_only_file(struct torture_context *tctx,
 {
 	struct smb2_create c;
 	struct smb2_handle h = {{0}};
+	union smb_fileinfo getinfo;
 	bool ret = true;
 	NTSTATUS status;
 
@@ -252,6 +253,7 @@ static bool torture_smb2_read_only_file(struct torture_context *tctx,
 		.in.file_attributes = FILE_ATTRIBUTE_READONLY,
 		.in.create_disposition = NTCREATEX_DISP_OPEN,
 		.in.fname = MAXIMUM_ALLOWED_FILE,
+		.in.query_maximal_access = true,
 	};
 
 	status = smb2_create(tree, tctx, &c);
@@ -259,8 +261,186 @@ static bool torture_smb2_read_only_file(struct torture_context *tctx,
 		tctx, status, ret, done,
 		"Failed to open READ-ONLY file with SEC_FLAG_MAXIMUM_ALLOWED\n");
 	h = c.out.file.handle;
+
+	/*
+	 * Verify maximum access from create context
+	 */
+
+	torture_assert_u32_equal_goto(tctx,
+				      c.out.maximal_access,
+				      SEC_RIGHTS_FILE_ALL,
+				      ret, done,
+				      "Wrong maxaccess\n");
+
+	/*
+	 * Verify actual access mask from infolevel
+	 */
+
+	ZERO_STRUCT(getinfo);
+	getinfo.generic.level = RAW_FILEINFO_ACCESS_INFORMATION;
+	getinfo.generic.in.file.handle = h;
+
+	status = smb2_getinfo_file(tree, tree, &getinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_getinfo_file\n");
+
+	torture_assert_u32_equal_goto(
+		tctx,
+		getinfo.access_information.out.access_flags,
+		/*
+		 * Use exactly the bits from MS-FSA 2.1.5.1.2.1 "Algorithm to
+		 * Check Access to an Existing File" and note that
+		 * SEC_FILE_APPEND_DATA = SEC_DIR_ADD_SUBDIR
+		 */
+		SEC_RIGHTS_FILE_ALL & ~(
+			SEC_FILE_WRITE_DATA |
+			SEC_FILE_APPEND_DATA |
+			SEC_DIR_ADD_SUBDIR |
+			SEC_DIR_DELETE_CHILD
+		),
+		ret, done,
+		"Bad access mask\n");
+
+	status = smb2_util_write(tree, h, "foo", 0, 3);
+	torture_assert_ntstatus_equal_goto(tctx,
+					   status,
+					   NT_STATUS_ACCESS_DENIED,
+					   ret, done,
+					   "smb2_getinfo_file\n");
+
 	smb2_util_close(tree, h);
 	ZERO_STRUCT(h);
+
+done:
+	if (!smb2_util_handle_empty(h)) {
+		smb2_util_close(tree, h);
+	}
+	smb2_deltree(tree, MAXIMUM_ALLOWED_FILE);
+	return ret;
+}
+
+static bool torture_smb2_read_only_dir(struct torture_context *tctx,
+				       struct smb2_tree *tree)
+{
+	struct smb2_create c;
+	struct smb2_handle h = {};
+	union smb_fileinfo getinfo;
+	bool ret = true;
+	NTSTATUS status;
+
+	smb2_deltree(tree, MAXIMUM_ALLOWED_FILE);
+
+	c = (struct smb2_create) {
+		.in.desired_access = SEC_RIGHTS_FILE_ALL,
+		.in.file_attributes = FILE_ATTRIBUTE_READONLY|NTCREATEX_OPTIONS_DIRECTORY,
+		.in.create_disposition = NTCREATEX_DISP_CREATE,
+		.in.create_options = NTCREATEX_OPTIONS_DIRECTORY,
+		.in.fname = MAXIMUM_ALLOWED_FILE,
+	};
+
+	status = smb2_create(tree, tctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = c.out.file.handle;
+	smb2_util_close(tree, h);
+	ZERO_STRUCT(h);
+
+	c = (struct smb2_create) {
+		.in.desired_access = SEC_FLAG_MAXIMUM_ALLOWED,
+		.in.file_attributes = FILE_ATTRIBUTE_READONLY|NTCREATEX_OPTIONS_DIRECTORY,
+		.in.create_disposition = NTCREATEX_DISP_OPEN,
+		.in.fname = MAXIMUM_ALLOWED_FILE,
+		.in.query_maximal_access = true,
+	};
+
+	status = smb2_create(tree, tctx, &c);
+	torture_assert_ntstatus_ok_goto(
+		tctx, status, ret, done,
+		"Failed to open READ-ONLY file with SEC_FLAG_MAXIMUM_ALLOWED\n");
+	h = c.out.file.handle;
+
+	/*
+	 * Verify maximum access from create context
+	 */
+
+	torture_assert_u32_equal_goto(tctx,
+				      c.out.maximal_access,
+				      SEC_RIGHTS_FILE_ALL,
+				      ret, done,
+				      "Wrong maxaccess\n");
+
+	/*
+	 * Verify actual access mask from infolevel
+	 */
+
+	ZERO_STRUCT(getinfo);
+	getinfo.generic.level = RAW_FILEINFO_ACCESS_INFORMATION;
+	getinfo.generic.in.file.handle = h;
+
+	status = smb2_getinfo_file(tree, tree, &getinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_getinfo_file\n");
+
+	torture_assert_u32_equal_goto(
+		tctx,
+		getinfo.access_information.out.access_flags,
+		SEC_RIGHTS_FILE_ALL,
+		ret, done,
+		"Bad access mask\n");
+
+	smb2_util_close(tree, h);
+	ZERO_STRUCT(h);
+
+	/*
+	 * Verify we can create and delete a file in the directory
+	 */
+
+	c = (struct smb2_create) {
+		.in.desired_access = SEC_RIGHTS_FILE_ALL,
+		.in.create_disposition = NTCREATEX_DISP_CREATE,
+		.in.fname = MAXIMUM_ALLOWED_FILE "\\file",
+	};
+
+	status = smb2_create(tree, tctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = c.out.file.handle;
+
+
+	status = smb2_util_close(tree, h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h);
+
+	status = smb2_util_unlink(tree, MAXIMUM_ALLOWED_FILE "\\file");
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_unlink failed\n");
+
+	/*
+	 * Verify we can create and delete a directory in the directory
+	 */
+
+	c = (struct smb2_create) {
+		.in.desired_access = SEC_RIGHTS_FILE_ALL,
+		.in.create_disposition = NTCREATEX_DISP_CREATE,
+		.in.create_options = NTCREATEX_OPTIONS_DIRECTORY,
+		.in.fname = MAXIMUM_ALLOWED_FILE "\\dir",
+	};
+
+	status = smb2_create(tree, tctx, &c);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h = c.out.file.handle;
+
+	status = smb2_util_close(tree, h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_close failed\n");
+	ZERO_STRUCT(h);
+
+	status = smb2_util_rmdir(tree, MAXIMUM_ALLOWED_FILE "\\dir");
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_util_unlink failed\n");
+
 
 done:
 	if (!smb2_util_handle_empty(h)) {
@@ -275,6 +455,7 @@ struct torture_suite *torture_smb2_max_allowed(TALLOC_CTX *ctx)
 	struct torture_suite *suite = torture_suite_create(ctx, "maximum_allowed");
 
 	torture_suite_add_1smb2_test(suite, "maximum_allowed", torture_smb2_maximum_allowed);
-	torture_suite_add_1smb2_test(suite, "read_only", torture_smb2_read_only_file);
+	torture_suite_add_1smb2_test(suite, "read_only_file", torture_smb2_read_only_file);
+	torture_suite_add_1smb2_test(suite, "read_only_dir", torture_smb2_read_only_dir);
 	return suite;
 }

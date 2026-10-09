@@ -84,7 +84,7 @@ static void profile_message(struct messaging_context *msg_ctx,
 			    struct server_id src,
 			    DATA_BLOB *data)
 {
-        int level;
+	int level;
 
 	if (data->length != sizeof(level)) {
 		DEBUG(0, ("got invalid profile message\n"));
@@ -104,14 +104,14 @@ static void reqprofile_message(struct messaging_context *msg_ctx,
 			       struct server_id src,
 			       DATA_BLOB *data)
 {
-        int level;
+	int level;
 
-	level = 1;
-	if (smbprofile_state.config.do_count) {
-		level += 2;
-	}
-	if (smbprofile_state.config.do_times) {
-		level += 4;
+	if (!smbprofile_state.config.do_count) {
+		level = 0;
+	} else if (!smbprofile_state.config.do_times) {
+		level = 1;
+	} else {
+		level = 2;
 	}
 
 	DEBUG(1,("INFO: Received REQ_PROFILELEVEL message from PID %u\n",
@@ -472,17 +472,19 @@ void smbprofile_persvc_unref(int snum)
 
 	persvc = smbprofile_persvc_lookup(snum);
 	if (persvc != NULL) {
-		persvc->refcnt--;
+		if (persvc->refcnt > 0) {
+			persvc->refcnt--;
+		} else {
+			DBG_INFO("Profile persvc-entry with zero refcnt "
+				 "(snum %d)\n",
+				 snum);
+		}
 	}
 }
 
 struct profile_stats *smbprofile_persvc_get(int snum)
 {
 	struct profile_stats_persvc *persvc = NULL;
-
-	if (!smbprofile_active() || (snum < 0)) {
-		return NULL;
-	}
 
 	persvc = smbprofile_persvc_lookup(snum);
 	if (persvc == NULL) {

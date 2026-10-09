@@ -329,12 +329,12 @@ done:
    able to free up the record without fragmentation
  */
 static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
-				  tdb_len_t length, tdb_off_t rec_ptr,
+				  tdb_len_t new_rec_len, tdb_off_t rec_ptr,
 				  struct tdb_record *rec, tdb_off_t last_ptr)
 {
 #define MIN_REC_SIZE (sizeof(struct tdb_record) + sizeof(tdb_off_t) + 8)
 
-	if (rec->rec_len < length + MIN_REC_SIZE) {
+	if (rec->rec_len < new_rec_len + MIN_REC_SIZE) {
 		/* we have to grab the whole record */
 
 		/* unlink it from the previous record */
@@ -351,7 +351,7 @@ static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
 	}
 
 	/* we're going to just shorten the existing record */
-	rec->rec_len -= (length + sizeof(*rec));
+	rec->rec_len -= (new_rec_len + sizeof(*rec));
 	if (tdb_rec_write(tdb, rec_ptr, rec) == -1) {
 		return 0;
 	}
@@ -363,7 +363,7 @@ static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
 	rec_ptr += sizeof(*rec) + rec->rec_len;
 
 	memset(rec, '\0', sizeof(*rec));
-	rec->rec_len = length;
+	rec->rec_len = new_rec_len;
 	rec->magic = TDB_MAGIC;
 
 	if (tdb_rec_write(tdb, rec_ptr, rec) == -1) {
@@ -384,7 +384,7 @@ static tdb_off_t tdb_allocate_ofs(struct tdb_context *tdb,
    0 is returned if the space could not be allocated
  */
 static tdb_off_t tdb_allocate_from_freelist(
-	struct tdb_context *tdb, tdb_len_t length, struct tdb_record *rec)
+	struct tdb_context *tdb, tdb_len_t payload_len, struct tdb_record *rec)
 {
 	tdb_off_t rec_ptr, last_ptr, newrec_ptr;
 	struct tdb_chainwalk_ctx chainwalk;
@@ -393,15 +393,18 @@ static tdb_off_t tdb_allocate_from_freelist(
 		tdb_off_t rec_ptr, last_ptr;
 		tdb_len_t rec_len;
 	} bestfit;
+	tdb_len_t rec_len = payload_len;
 	float multiplier = 1.0;
 	bool merge_created_candidate;
 
-	/* over-allocate to reduce fragmentation */
-	length *= 1.25;
+	/*
+	 * over-allocate to reduce fragmentation
+	 */
+	rec_len *= 1.25;
 
 	/* Extra bytes required for tailer */
-	length += sizeof(tdb_off_t);
-	length = TDB_ALIGN(length, TDB_ALIGNMENT);
+	rec_len += sizeof(tdb_off_t);
+	rec_len = TDB_ALIGN(rec_len, TDB_ALIGNMENT);
 
  again:
 	merge_created_candidate = false;
@@ -470,7 +473,7 @@ static tdb_off_t tdb_allocate_from_freelist(
 				bestfit.rec_len = left_rec.rec_len;
 			}
 
-			if (left_rec.rec_len > length) {
+			if (left_rec.rec_len > rec_len) {
 				merge_created_candidate = true;
 			}
 
@@ -479,7 +482,7 @@ static tdb_off_t tdb_allocate_from_freelist(
 			continue;
 		}
 
-		if (rec->rec_len >= length) {
+		if (rec->rec_len >= rec_len) {
 			if (bestfit.rec_ptr == 0 ||
 			    rec->rec_len < bestfit.rec_len) {
 				bestfit.rec_len = rec->rec_len;
@@ -505,7 +508,7 @@ static tdb_off_t tdb_allocate_from_freelist(
 		   definition of 'too big' changes as we scan
 		   through */
 		if (bestfit.rec_len > 0 &&
-		    bestfit.rec_len < length * multiplier) {
+		    bestfit.rec_len < rec_len * multiplier) {
 			break;
 		}
 
@@ -521,7 +524,7 @@ static tdb_off_t tdb_allocate_from_freelist(
 			return 0;
 		}
 
-		newrec_ptr = tdb_allocate_ofs(tdb, length, bestfit.rec_ptr,
+		newrec_ptr = tdb_allocate_ofs(tdb, rec_len, bestfit.rec_ptr,
 					      rec, bestfit.last_ptr);
 		return newrec_ptr;
 	}
@@ -532,19 +535,19 @@ static tdb_off_t tdb_allocate_from_freelist(
 
 	/* we didn't find enough space. See if we can expand the
 	   database and if we can then try again */
-	if (tdb_expand(tdb, length + sizeof(*rec)) == 0)
+	if (tdb_expand(tdb, rec_len + sizeof(*rec)) == 0)
 		goto again;
 
 	return 0;
 }
 
 static bool tdb_alloc_dead(
-	struct tdb_context *tdb, int hash, tdb_len_t length,
+	struct tdb_context *tdb, int hash, tdb_len_t payload_len,
 	tdb_off_t *rec_ptr, struct tdb_record *rec)
 {
 	tdb_off_t last_ptr;
 
-	*rec_ptr = tdb_find_dead(tdb, hash, rec, length, &last_ptr);
+	*rec_ptr = tdb_find_dead(tdb, hash, rec, payload_len, &last_ptr);
 	if (*rec_ptr == 0) {
 		return false;
 	}
@@ -570,7 +573,9 @@ static void tdb_purge_dead(struct tdb_context *tdb, uint32_t hash)
  * Chain "hash" is assumed to be locked
  */
 
-tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
+tdb_off_t tdb_allocate(struct tdb_context *tdb,
+		       int hash,
+		       tdb_len_t payload_len,
 		       struct tdb_record *rec)
 {
 	tdb_off_t ret;
@@ -604,7 +609,7 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
 		if (tdb_lock_nonblock(tdb, list, F_WRLCK) == 0) {
 			bool got_dead;
 
-			got_dead = tdb_alloc_dead(tdb, list, length, &ret, rec);
+			got_dead = tdb_alloc_dead(tdb, list, payload_len, &ret, rec);
 			tdb_unlock(tdb, list, F_WRLCK);
 
 			if (got_dead) {
@@ -619,7 +624,7 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
 			 */
 			tdb_purge_dead(tdb, hash);
 
-			ret = tdb_allocate_from_freelist(tdb, length, rec);
+			ret = tdb_allocate_from_freelist(tdb, payload_len, rec);
 			tdb_unlock(tdb, -1, F_WRLCK);
 			return ret;
 		}
@@ -636,7 +641,7 @@ blocking_freelist_allocate:
 	 * tdb_delete happens concurrently with a traverse.
 	 */
 	tdb_purge_dead(tdb, hash);
-	ret = tdb_allocate_from_freelist(tdb, length, rec);
+	ret = tdb_allocate_from_freelist(tdb, payload_len, rec);
 	tdb_unlock(tdb, -1, F_WRLCK);
 	return ret;
 }

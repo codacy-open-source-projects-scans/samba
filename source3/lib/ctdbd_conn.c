@@ -40,6 +40,9 @@
 #include "lib/async_req/async_sock.h"
 #include "lib/dbwrap/dbwrap.h"
 #include "lib/dbwrap/dbwrap_rbt.h"
+#include "librpc/gen_ndr/ndr_cluster_level.h"
+#include "cluster_support.h"
+#include "cluster_level_db.h"
 
 /* paths to these include files come from --with-ctdb= in configure */
 
@@ -54,6 +57,11 @@ struct ctdbd_srvid_cb {
 };
 
 struct ctdbd_connection {
+	struct {
+		pid_t pid;
+		struct timeval start_time;
+	} local_ctdbd;
+	struct cluster_level_active active_level;
 	uint32_t reqid;
 	uint32_t our_vnn;
 	uint64_t rand_srvid;
@@ -282,6 +290,56 @@ static int ctdbd_msg_call_back(struct tevent_context *ev,
 }
 
 /*
+ * get the pid of the ctdbd process
+ */
+static int get_ctdbd_pid(struct ctdbd_connection *conn, pid_t *pid)
+{
+	int32_t cstatus=-1;
+	int ret;
+	ret = ctdbd_control_local(conn, CTDB_CONTROL_GET_PID, 0, 0,
+				  tdb_null, NULL, NULL, &cstatus);
+	if (ret != 0) {
+		DEBUG(1, ("ctdbd_control failed: %s\n", strerror(ret)));
+		return ret;
+	}
+	*pid = (pid_t)cstatus;
+	return ret;
+}
+
+/*
+ * get the start time of the ctdbd process
+ */
+static int get_ctdbd_start_time(struct ctdbd_connection *conn,
+				struct timeval *st)
+{
+	const struct ctdb_uptime *uptime = NULL;
+	int32_t cstatus=-1;
+	TDB_DATA outdata = {0};
+	int ret;
+
+	ret = ctdbd_control_local(conn, CTDB_CONTROL_UPTIME, 0, 0,
+				  tdb_null, conn, &outdata, &cstatus);
+	if (ret != 0) {
+		DEBUG(1, ("ctdbd_control failed: %s\n", strerror(ret)));
+		return ret;
+	}
+	if ((cstatus != 0) || (outdata.dptr == NULL)) {
+		DEBUG(2, ("Received invalid ctdb data\n"));
+		return EINVAL;
+	}
+	if (outdata.dsize != sizeof(*uptime)) {
+		talloc_free(outdata.dptr);
+		DEBUG(2, ("Received invalid ctdb data\n"));
+		return EINVAL;
+	}
+
+	uptime = (const struct ctdb_uptime *)outdata.dptr;
+	*st = uptime->ctdbd_start_time;
+	talloc_free(outdata.dptr);
+	return 0;
+}
+
+/*
  * get our vnn from the cluster
  */
 static int get_cluster_vnn(struct ctdbd_connection *conn, uint32_t *vnn)
@@ -318,6 +376,87 @@ static int ctdbd_control_get_nodemap(struct ctdbd_connection *conn,
 	}
 
 	*_nodemap = (struct ctdb_node_map_old *)outdata.dptr;
+	return 0;
+}
+
+/*
+ * This includes all nodes without NODE_FLAGS_DELETED
+ * of the whole cluster.
+ */
+int ctdbd_nodes_foreach(struct ctdbd_connection *conn,
+			int (*cb)(uint32_t total_nodes_count,
+				  const struct ctdb_node_and_flags *nf,
+				  void *private_data),
+			void *private_data)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct ctdb_node_map_old *nodemap = NULL;
+	int ret = ENOMEM;
+	uint32_t total_nodes_count = 0;
+	uint32_t i;
+
+	ret = ctdbd_control_get_nodemap(conn, frame, &nodemap);
+	if (ret != 0) {
+		DBG_WARNING("ctdbd_control_get_nodemap() failed: %s\n",
+			    strerror(ret));
+		TALLOC_FREE(frame);
+		return -1;
+	}
+
+	for (i = 0; i < nodemap->num; i++) {
+		const struct ctdb_node_and_flags *nf = &nodemap->nodes[i];
+
+		if (nf->flags & NODE_FLAGS_DELETED) {
+			continue;
+		}
+
+		total_nodes_count += 1;
+	}
+
+	for (i = 0; i < nodemap->num; i++) {
+		const struct ctdb_node_and_flags *nf = &nodemap->nodes[i];
+
+		if (nf->flags & NODE_FLAGS_DELETED) {
+			continue;
+		}
+
+		ret = cb(total_nodes_count,
+			 nf,
+			 private_data);
+		if (ret != 0) {
+			TALLOC_FREE(frame);
+			return ret;
+		}
+	}
+
+	TALLOC_FREE(frame);
+	return 0;
+}
+
+int ctdbd_generation(struct ctdbd_connection *conn, uint32_t *generation)
+{
+	struct ctdb_vnn_map *vnnmap = NULL;
+	int32_t cstatus = -1;
+	TDB_DATA outdata = {0};
+	int ret;
+
+	ret = ctdbd_control_local(conn, CTDB_CONTROL_GETVNNMAP, 0, 0,
+				  tdb_null, talloc_tos(), &outdata, &cstatus);
+	if (ret != 0) {
+		DBG_ERR("ctdbd_control failed: %s\n", strerror(ret));
+		return ret;
+	}
+	if ((cstatus != 0) || (outdata.dptr == NULL)) {
+		DBG_ERR("Received invalid ctdb data\n");
+		return EINVAL;
+	}
+
+	vnnmap = (struct ctdb_vnn_map *)outdata.dptr;
+	*generation = vnnmap->generation;
+	TALLOC_FREE(vnnmap);
+
+	DBG_DEBUG("Cluster generation is [0x%" PRIx32 "]\n", *generation);
+
 	return 0;
 }
 
@@ -361,9 +500,63 @@ fail:
 	return ok;
 }
 
+/*
+ * Is the cluster running in a cluster functional level we support.
+ */
+static bool ctdbd_supported_cluster_level(struct ctdbd_connection *conn)
+{
+	NTSTATUS status;
+
+	status = cluster_level_db_check(conn);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("cluster_level_db_check() %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	DBG_DEBUG("cluster_level_db_check() %s\n",
+		  nt_errstr(status));
+	return true;
+}
+
+/*
+ * Get the cluster-wide active functional level.
+ */
+const struct cluster_level_active *ctdbd_conn_get_cluster_level(
+					struct ctdbd_connection *conn)
+{
+	return &conn->active_level;
+}
+
+/*
+ * Set the cluster-wide active functional level
+ * on the ctdbd_connection, for the cases of the
+ * initial creation of the global version.
+ */
+void ctdbd_conn_set_cluster_level(struct ctdbd_connection *conn,
+				  const struct cluster_level_active *level)
+{
+	/*
+	 * only upgrades are possible
+	 */
+	SMB_ASSERT(cluster_level_is_valid(level));
+	SMB_ASSERT(cluster_level_is_valid_update(&conn->active_level, level));
+	conn->active_level = *level;
+}
+
 uint32_t ctdbd_vnn(const struct ctdbd_connection *conn)
 {
 	return conn->our_vnn;
+}
+
+pid_t ctdbd_pid(const struct ctdbd_connection *conn)
+{
+	return conn->local_ctdbd.pid;
+}
+
+struct timeval ctdbd_start_time(const struct ctdbd_connection *conn)
+{
+	return conn->local_ctdbd.start_time;
 }
 
 /*
@@ -529,7 +722,9 @@ static int ctdbd_connection_destructor(struct ctdbd_connection *c);
  */
 
 static int ctdbd_init_connection_internal(TALLOC_CTX *mem_ctx,
-					  const char *sockname, int timeout,
+					  const char *sockname,
+					  int timeout,
+					  bool check_cluster_level,
 					  struct ctdbd_connection *conn)
 {
 	int ret;
@@ -552,8 +747,27 @@ static int ctdbd_init_connection_internal(TALLOC_CTX *mem_ctx,
 		return ret;
 	}
 
+	ret = get_ctdbd_pid(conn, &conn->local_ctdbd.pid);
+	if (ret != 0) {
+		DEBUG(10, ("get_ctdbd_pid failed: %s\n", strerror(ret)));
+		return ret;
+	}
+
+	ret = get_ctdbd_start_time(conn, &conn->local_ctdbd.start_time);
+	if (ret != 0) {
+		DEBUG(10, ("get_ctdbd_start_time failed: %s\n", strerror(ret)));
+		return ret;
+	}
+
 	if (!ctdbd_working(conn, conn->our_vnn)) {
 		DEBUG(2, ("Node is not working, can not connect\n"));
+		return EIO;
+	}
+
+	if (check_cluster_level &&
+	    !ctdbd_supported_cluster_level(conn))
+	{
+		DBG_ERR("Cluster functional level not support, can not connect\n");
 		return EIO;
 	}
 
@@ -585,6 +799,7 @@ int ctdbd_init_connection(TALLOC_CTX *mem_ctx,
 	ret = ctdbd_init_connection_internal(mem_ctx,
 					     sockname,
 					     timeout,
+					     true, /* check_cluster_level */
 					     conn);
 	if (ret != 0) {
 		DBG_ERR("ctdbd_init_connection_internal failed (%s)\n",
@@ -600,31 +815,6 @@ int ctdbd_init_connection(TALLOC_CTX *mem_ctx,
 	return ret;
 }
 
-int ctdbd_reinit_connection(TALLOC_CTX *mem_ctx,
-			    const char *sockname, int timeout,
-			    struct ctdbd_connection *conn)
-{
-	int ret;
-
-	ret = ctdbd_connection_destructor(conn);
-	if (ret != 0) {
-		DBG_ERR("ctdbd_connection_destructor failed\n");
-		return ret;
-	}
-
-	ret = ctdbd_init_connection_internal(mem_ctx,
-					     sockname,
-					     timeout,
-					     conn);
-	if (ret != 0) {
-		DBG_ERR("ctdbd_init_connection_internal failed (%s)\n",
-			strerror(ret));
-		return ret;
-	}
-
-	return 0;
-}
-
 int ctdbd_init_async_connection(
 	TALLOC_CTX *mem_ctx,
 	const char *sockname,
@@ -636,8 +826,25 @@ int ctdbd_init_async_connection(
 
 	*pconn = NULL;
 
-	ret = ctdbd_init_connection(mem_ctx, sockname, timeout, &conn);
+	conn = talloc_zero(mem_ctx, struct ctdbd_connection);
+	if (conn == NULL) {
+		return ENOMEM;
+	}
+
+	/*
+	 * This is called from within db_open_ctdb_ex()
+	 * so we can't check the cluster level here
+	 * without getting into recursion problems.
+	 */
+	ret = ctdbd_init_connection_internal(mem_ctx,
+					     sockname,
+					     timeout,
+					     false, /* check_cluster_level */
+					     conn);
 	if (ret != 0) {
+		DBG_ERR("ctdbd_init_connection_internal failed (%s)\n",
+			strerror(ret));
+		TALLOC_FREE(conn);
 		return ret;
 	}
 
@@ -1006,13 +1213,16 @@ int ctdbd_migrate(struct ctdbd_connection *conn, uint32_t db_id, TDB_DATA key)
  */
 int ctdbd_parse(struct ctdbd_connection *conn, uint32_t db_id,
 		TDB_DATA key, bool local_copy,
-		void (*parser)(TDB_DATA key, TDB_DATA data,
+		void (*parser)(TDB_DATA key,
+			       struct ctdb_ltdb_header *header,
+			       TDB_DATA data,
 			       void *private_data),
 		void *private_data)
 {
 	struct ctdb_req_call_old req;
 	struct ctdb_req_header *hdr = NULL;
 	struct ctdb_reply_call_old *reply;
+	TDB_DATA data;
 	struct iovec iov[2];
 	ssize_t nwritten;
 	uint32_t flags;
@@ -1039,7 +1249,7 @@ int ctdbd_parse(struct ctdbd_connection *conn, uint32_t db_id,
 	req.hdr.operation    = CTDB_REQ_CALL;
 	req.hdr.reqid        = ctdbd_next_reqid(conn);
 	req.flags            = flags;
-	req.callid           = CTDB_FETCH_FUNC;
+	req.callid           = CTDB_FETCH_WITH_HEADER_FUNC;
 	req.db_id            = db_id;
 	req.keylen           = key.dsize;
 
@@ -1067,7 +1277,9 @@ int ctdbd_parse(struct ctdbd_connection *conn, uint32_t db_id,
 	}
 	reply = (struct ctdb_reply_call_old *)hdr;
 
-	if (reply->datalen == 0) {
+	SMB_ASSERT(reply->datalen >= sizeof(struct ctdb_ltdb_header));
+
+	if (reply->datalen == sizeof(struct ctdb_ltdb_header)) {
 		/*
 		 * Treat an empty record as non-existing
 		 */
@@ -1075,7 +1287,12 @@ int ctdbd_parse(struct ctdbd_connection *conn, uint32_t db_id,
 		goto fail;
 	}
 
-	parser(key, make_tdb_data(&reply->data[0], reply->datalen),
+	data = make_tdb_data(reply->data + sizeof(struct ctdb_ltdb_header),
+			     reply->datalen - sizeof(struct ctdb_ltdb_header));
+
+	parser(key,
+	       (struct ctdb_ltdb_header *)reply->data,
+	       data,
 	       private_data);
 
 	ret = 0;
@@ -1170,14 +1387,6 @@ int ctdbd_traverse(struct ctdbd_connection *conn, uint32_t db_id,
 			/* end of traverse */
 			return 0;
 		}
-
-		if (data.dsize < sizeof(struct ctdb_ltdb_header)) {
-			DEBUG(0, ("Got invalid ltdb header length %d\n",
-				  (int)data.dsize));
-			return EIO;
-		}
-		data.dsize -= sizeof(struct ctdb_ltdb_header);
-		data.dptr += sizeof(struct ctdb_ltdb_header);
 
 		if (fn != NULL) {
 			fn(key, data, private_data);
@@ -1789,6 +1998,29 @@ int ctdbd_control_local(struct ctdbd_connection *conn, uint32_t opcode,
 			     mem_ctx, outdata, cstatus);
 }
 
+/*
+  call a control on all active nodes
+ */
+int ctdbd_control_broadcast(struct ctdbd_connection *conn,
+			    uint32_t opcode,
+			    uint64_t srvid,
+			    uint32_t flags,
+			    TDB_DATA data,
+			    TALLOC_CTX *mem_ctx,
+			    TDB_DATA *outdata,
+			    int32_t *cstatus)
+{
+	return ctdbd_control(conn,
+			     CTDB_BROADCAST_ACTIVE,
+			     opcode,
+			     srvid,
+			     flags,
+			     data,
+			     mem_ctx,
+			     outdata,
+			     cstatus);
+}
+
 int ctdb_watch_us(struct ctdbd_connection *conn)
 {
 	struct ctdb_notify_data_old reg_data;
@@ -2202,6 +2434,7 @@ struct ctdbd_parse_state {
 	struct ctdb_req_call_old ctdb_req;
 	struct iovec iov[2];
 	void (*parser)(TDB_DATA key,
+		       struct ctdb_ltdb_header *header,
 		       TDB_DATA data,
 		       void *private_data);
 	void *private_data;
@@ -2216,6 +2449,7 @@ struct tevent_req *ctdbd_parse_send(TALLOC_CTX *mem_ctx,
 				    TDB_DATA key,
 				    bool local_copy,
 				    void (*parser)(TDB_DATA key,
+						   struct ctdb_ltdb_header *header,
 						   TDB_DATA data,
 						   void *private_data),
 				    void *private_data,
@@ -2271,7 +2505,7 @@ struct tevent_req *ctdbd_parse_send(TALLOC_CTX *mem_ctx,
 	state->ctdb_req.hdr.operation    = CTDB_REQ_CALL;
 	state->ctdb_req.hdr.reqid        = state->reqid;
 	state->ctdb_req.flags            = flags;
-	state->ctdb_req.callid           = CTDB_FETCH_FUNC;
+	state->ctdb_req.callid           = CTDB_FETCH_WITH_HEADER_FUNC;
 	state->ctdb_req.db_id            = db_id;
 	state->ctdb_req.keylen           = state->key.dsize;
 
@@ -2297,8 +2531,10 @@ static void ctdbd_parse_done(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct ctdbd_parse_state *state = tevent_req_data(
 		req, struct ctdbd_parse_state);
+	uint8_t *reply_data = NULL;
 	struct ctdb_req_header *hdr = NULL;
 	struct ctdb_reply_call_old *reply = NULL;
+	struct ctdb_ltdb_header ltdb_header;
 	int ret;
 
 	ret = ctdbd_req_recv(subreq, state, &hdr);
@@ -2318,6 +2554,12 @@ static void ctdbd_parse_done(struct tevent_req *subreq)
 
 	reply = (struct ctdb_reply_call_old *)hdr;
 
+	SMB_ASSERT(reply->datalen >= sizeof(struct ctdb_ltdb_header));
+
+	memcpy(&ltdb_header, reply->data, sizeof(struct ctdb_ltdb_header));
+	reply_data = reply->data + sizeof(struct ctdb_ltdb_header);
+	reply->datalen -= sizeof(struct ctdb_ltdb_header);
+
 	if (reply->datalen == 0) {
 		/*
 		 * Treat an empty record as non-existing
@@ -2327,7 +2569,8 @@ static void ctdbd_parse_done(struct tevent_req *subreq)
 	}
 
 	state->parser(state->key,
-		      make_tdb_data(&reply->data[0], reply->datalen),
+		      &ltdb_header,
+		      make_tdb_data(reply_data, reply->datalen),
 		      state->private_data);
 
 	tevent_req_done(req);

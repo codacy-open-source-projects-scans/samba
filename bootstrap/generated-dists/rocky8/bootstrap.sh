@@ -79,6 +79,7 @@ yum install -y \
     libtirpc-devel \
     libunwind-devel \
     libuuid-devel \
+    libxcrypt-devel \
     libxslt \
     lmdb \
     lmdb-devel \
@@ -110,7 +111,6 @@ yum install -y \
     python3-markdown \
     python3-policycoreutils \
     python3-pyasn1 \
-    python3-requests \
     python3-setproctitle \
     python3-varlink \
     quota-devel \

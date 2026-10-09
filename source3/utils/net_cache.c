@@ -44,7 +44,7 @@ static void print_cache_entry(const char* keystr, DATA_BLOB value,
 {
 	char *timeout_str;
 	char *alloc_str = NULL;
-	const char *datastr;
+	const char *datastr = NULL;
 	char *datastr_free = NULL;
 	time_t now_t = time(NULL);
 	struct tm timeout_tm, now_tm;
@@ -77,8 +77,6 @@ static void print_cache_entry(const char* keystr, DATA_BLOB value,
 		timeout_str = alloc_str;
 	}
 
-	datastr = (char *)value.data;
-
 	if (strnequal(keystr, "NAME2SID/", strlen("NAME2SID/"))) {
 		const char *strv = (char *)value.data;
 		size_t strv_len = value.length;
@@ -97,7 +95,21 @@ static void print_cache_entry(const char* keystr, DATA_BLOB value,
 					  domain, name, type);
 	}
 
-	if ((value.length > 0) && (value.data[value.length-1] != '\0')) {
+	if ((datastr == NULL) && (value.length > 0)) {
+		const size_t len = value.length - 1;
+		bool print = (value.data[len] == '\0');
+		size_t i;
+
+		for (i = 0; print && i < len; i++) {
+			print = isprint(value.data[i]);
+		}
+
+		if (print) {
+			datastr = (char *)value.data;
+		}
+	}
+
+	if (datastr == NULL) {
 		datastr_free = talloc_asprintf(
 			talloc_tos(), "<binary length %d>",
 			(int)value.length);
@@ -110,6 +122,7 @@ static void print_cache_entry(const char* keystr, DATA_BLOB value,
 	d_printf(_("Key: %s\t Timeout: %s\t Value: %s  %s\n"), keystr,
 	         timeout_str, datastr, timeout > now_t ? "": _("(expired)"));
 
+	TALLOC_FREE(datastr_free);
 	SAFE_FREE(alloc_str);
 }
 
@@ -134,6 +147,11 @@ static time_t parse_timeout(const char* timeout_str)
 	int len, number_begin, number_end;
 	time_t timeout;
 
+	len = strlen(timeout_str);
+	if (len == 0) {
+		return 0;
+	}
+
 	/* sign detection */
 	if (timeout_str[0] == '!' || timeout_str[0] == '+') {
 		sign = timeout_str[0];
@@ -143,7 +161,6 @@ static time_t parse_timeout(const char* timeout_str)
 	}
 
 	/* unit detection */
-	len = strlen(timeout_str);
 	switch (timeout_str[len - 1]) {
 	case 's':
 	case 'm':
@@ -531,6 +548,24 @@ static int net_cache_samlogon_delete(struct net_context *c,
 	return 0;
 }
 
+static int net_cache_samlogon_flush(struct net_context *c,
+				    int argc,
+				    const char **argv)
+{
+	if (c->display_usage) {
+		d_printf(  "%s\n"
+			   "net cache samlogon flush\n"
+			   "    %s\n",
+			 _("Usage:"),
+			 _("Flush entire samlogon cache database."));
+		return 0;
+	}
+
+	netsamlogon_cache_flush();
+
+	return 0;
+}
+
 static int net_cache_samlogon(struct net_context *c, int argc, const char **argv)
 {
 	struct functable func[] = {
@@ -565,6 +600,14 @@ static int net_cache_samlogon(struct net_context *c, int argc, const char **argv
 			N_("Delete samlogon cache entry"),
 			N_("net cache samlogon delete SID\n"
 			   "    Delete samlogon cache entry\n")
+		},
+		{
+			"flush",
+			net_cache_samlogon_flush,
+			NET_TRANSPORT_LOCAL,
+			N_("Flush entire samlogon cache"),
+			N_("net cache samlogon flush\n"
+			   "    Flush entire samlogon cache database\n")
 		},
 		{NULL, NULL, 0, NULL, NULL}
 	};

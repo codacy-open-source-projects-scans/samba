@@ -28,6 +28,8 @@
 #include "lib/param/param.h"
 
 #include "ctdb/include/ctdb_protocol.h"
+#include "ctdb/protocol/protocol.h"
+#include "ctdb/protocol/protocol_api.h"
 #include "ctdbd_conn.h"
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_private.h"
@@ -37,6 +39,9 @@
 #include "messages_ctdb.h"
 #include "lib/cluster_support.h"
 #include "lib/util/tevent_ntstatus.h"
+#include "lib/util/server_id.h"
+#include "source3/lib/global_contexts.h"
+#include "source3/include/serverid.h"
 
 struct db_ctdb_transaction_handle {
 	struct db_ctdb_ctx *ctx;
@@ -53,8 +58,15 @@ struct db_ctdb_ctx {
 	struct db_context *db;
 	struct tdb_wrap *wtdb;
 	uint32_t db_id;
+	struct server_id msg_server_id;
+	bool allow_transactions;
 	struct db_ctdb_transaction_handle *transaction;
 	struct g_lock_ctx *lock_ctx;
+
+	/*
+	 * Persistent db used with DBWRAP_FLAG_PER_REC_PERSISTENT
+	 */
+	struct db_context *pdb;
 
 	/* thresholds for warning messages */
 	int warn_unlock_msecs;
@@ -67,6 +79,7 @@ struct db_ctdb_rec {
 	struct db_ctdb_ctx *ctdb_ctx;
 	struct ctdb_ltdb_header header;
 	struct timeval lock_time;
+	bool locked;
 };
 
 struct ctdb_async_ctx {
@@ -196,6 +209,121 @@ static NTSTATUS db_ctdb_ltdb_store(struct db_ctdb_ctx *db,
 	return (ret == 0) ? NT_STATUS_OK
 			  : tdb_error_to_ntstatus(db->wtdb->tdb);
 
+}
+
+static NTSTATUS db_ctdb_push_record(TALLOC_CTX *mem_ctx,
+				    struct db_ctdb_ctx *ctx,
+				    const struct ctdb_ltdb_header *header,
+				    TDB_DATA key,
+				    const TDB_DATA *dbufs,
+				    int num_dbufs)
+{
+	struct ctdbd_connection *conn = messaging_ctdb_connection();
+	TDB_DATA data = {};
+	TDB_DATA ctrl_data;
+	struct ctdb_push_record_data prd = {
+		.db_id = ctx->db_id,
+		.hdr = *header,
+		.key = key,
+	};
+	useconds_t sleep_time = 10000; /* Start with 10ms */
+	uint32_t new_generation;
+	int32_t ctrl_ret;
+	NTSTATUS status;
+	size_t np = 0;
+	int ret;
+
+	status = dbwrap_merge_dbufs(&data, mem_ctx, dbufs, num_dbufs);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
+
+	prd.value = data;
+
+again:
+	/*
+	 * Re-read the generation on every attempt: it is part of the payload
+	 * and the receiving nodes reject a push that does not carry the
+	 * current one, so retrying with a stale generation would never
+	 * succeed.
+	 */
+	ret = ctdbd_generation(conn, &prd.generation);
+	if (ret != 0) {
+		DBG_ERR("ctdbd_generation() failed: %s\n",
+			strerror(ret));
+		status = NT_STATUS_CLUSTER_NODE_DOWN;
+		goto done;
+	}
+
+	ctrl_data.dsize = ctdb_push_record_data_len(&prd);
+	ctrl_data.dptr = talloc_zero_array(mem_ctx, uint8_t, ctrl_data.dsize);
+	if (ctrl_data.dptr == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+	ctdb_push_record_data_push(&prd, ctrl_data.dptr, &np);
+
+	/*
+	 * Hand the record to our own ctdbd, which fans it out to the other
+	 * nodes and only answers once they have all stored it. Returning
+	 * means the record is on every active node, so the caller does not
+	 * have to reason about an unsequenced broadcast that may land at an
+	 * arbitrary point in the future.
+	 */
+	ret = ctdbd_control_local(conn,
+				  CTDB_CONTROL_PUSH_RECORD,
+				  ctx->db_id,
+				  0,
+				  ctrl_data,
+				  NULL,
+				  NULL,
+				  &ctrl_ret);
+	if (ret != 0 || ctrl_ret != 0) {
+		/*
+		 * Like the TRANS3_COMMIT control in
+		 * db_ctdb_transaction_commit(), this should only fail when a
+		 * recovery ran concurrently. Compare the generation to find
+		 * out: if it moved, retry with an exponential backoff,
+		 * starting with 10 ms up to one second. Repeating the push is
+		 * harmless, a node that already has the record discards the
+		 * duplicate on its RSN test.
+		 */
+		TALLOC_FREE(ctrl_data.dptr);
+
+		if (ctdbd_generation(conn, &new_generation) != 0) {
+			DBG_ERR("ctdbd_generation() failed\n");
+			status = NT_STATUS_CLUSTER_NODE_DOWN;
+			goto done;
+		}
+
+		if (new_generation != prd.generation) {
+			DBG_NOTICE("PUSH_RECORD failed across a recovery "
+				   "(generation 0x%"PRIx32" -> 0x%"PRIx32"), "
+				   "retrying\n",
+				   prd.generation, new_generation);
+			usleep(sleep_time);
+			if (sleep_time < 1000000) {
+				sleep_time *= 2;
+			}
+			goto again;
+		}
+
+		DBG_ERR("Error sending PUSH_RECORD control: %s, "
+			"ctrl_ret = %" PRIi32 "\n",
+			strerror(ret), ctrl_ret);
+		if (ret != 0) {
+			status = map_nt_error_from_unix(ret);
+		} else {
+			status = NT_STATUS_UNSUCCESSFUL;
+		}
+		goto done;
+	}
+
+	status = NT_STATUS_OK;
+done:
+	TALLOC_FREE(data.dptr);
+	TALLOC_FREE(ctrl_data.dptr);
+	return status;
 }
 
 /*
@@ -352,6 +480,12 @@ static int db_ctdb_transaction_start(struct db_context *db)
 	if (!db->persistent) {
 		DEBUG(0,("transactions not supported on non-persistent database 0x%08x\n", 
 			 ctx->db_id));
+		return -1;
+	}
+
+	if (!ctx->allow_transactions) {
+		DEBUG(0,("transactions not allowed on persistent database 0x%08x %s\n",
+			 ctx->db_id, db->name));
 		return -1;
 	}
 
@@ -772,6 +906,7 @@ static int db_ctdb_transaction_commit(struct db_context *db)
 	int32_t status;
 	struct db_ctdb_transaction_handle *h = ctx->transaction;
 	uint64_t old_seqnum, new_seqnum;
+	useconds_t sleep_time = 10000; /* Start with 10ms */
 	int ret;
 
 	if (h == NULL) {
@@ -851,7 +986,15 @@ again:
 		}
 
 		if (new_seqnum == old_seqnum) {
-			/* Recovery prevented all our changes: retry. */
+			/*
+			 * Recovery prevented all our changes: retry. Do an
+			 * exponential backoff, starting with 10 ms up to one
+			 * second.
+			 */
+			usleep(sleep_time);
+			if (sleep_time < 1000000) {
+				sleep_time *= 2;
+			}
 			goto again;
 		}
 		if (new_seqnum != (old_seqnum + 1)) {
@@ -907,16 +1050,447 @@ static int db_ctdb_transaction_cancel(struct db_context *db)
 	return 0;
 }
 
+static bool db_ctdb_can_use_local_copy(TDB_DATA ctdb_data,
+				       uint32_t my_vnn,
+				       bool *persistent_in_progress);
+
+static int db_ctdb_migrate_locked(struct db_ctdb_rec *crec,
+				  TDB_DATA key,
+				  TDB_DATA *_data)
+{
+	struct db_ctdb_ctx *ctx = crec->ctdb_ctx;
+	struct timeval migrate_start;
+	struct timeval chainlock_start;
+	struct timeval ctdb_start_time;
+	double chainlock_time = 0;
+	double ctdb_time = 0;
+	int migrate_attempts;
+	double duration;
+	int duration_msecs;
+	bool persistent_in_progress;
+	useconds_t sleep_time = 10000; /* Start with 10ms */
+	TDB_DATA data;
+	int ret;
+
+	SMB_ASSERT(!crec->locked);
+	migrate_attempts = 0;
+	GetTimeOfDay(&migrate_start);
+
+again:
+	if (DEBUGLEVEL >= 10) {
+		char *keystr = hex_encode_talloc(talloc_tos(),
+						 key.dptr,
+						 key.dsize);
+		DBG_DEBUG(DEBUGLEVEL > 10
+			   ? "Locking db %u key %s\n"
+			   : "Locking db %u key %.20s\n",
+			   (int)ctx->db_id, keystr);
+		TALLOC_FREE(keystr);
+	}
+
+	GetTimeOfDay(&chainlock_start);
+
+	ret = tdb_chainlock(ctx->wtdb->tdb, key);
+	if (ret != 0) {
+		DBG_ERR("tdb_chainlock failed\n");
+		return -1;
+	}
+	crec->locked = true;
+
+	chainlock_time += timeval_elapsed(&chainlock_start);
+
+	data = tdb_fetch(ctx->wtdb->tdb, key);
+
+	if (!db_ctdb_can_use_local_copy(data,
+					get_my_vnn(),
+					&persistent_in_progress))
+	{
+		tdb_chainunlock(ctx->wtdb->tdb, key);
+		crec->locked = false;
+		if (persistent_in_progress) {
+			/*
+			 * Someone else is in the middle of doing a store with
+			 * DBWRAP_STORE_PERSISTENT, give him enough time to grab
+			 * the record and finish.
+			 */
+			usleep(sleep_time);
+			if (sleep_time < 1000000) {
+				sleep_time *= 2;
+			}
+		}
+
+		migrate_attempts++;
+		GetTimeOfDay(&ctdb_start_time);
+
+		DBG_DEBUG("data.dptr = %p, dmaster = %"PRIu32" "
+			  "(%"PRIu32") %"PRIu32"\n",
+			  data.dptr, data.dptr ?
+			  ((struct ctdb_ltdb_header *)data.dptr)->dmaster :
+			   UINT32_MAX,
+			   get_my_vnn(),
+			  data.dptr ?
+			  ((struct ctdb_ltdb_header *)data.dptr)->flags : 0);
+
+		SAFE_FREE(data.dptr);
+
+		ret = ctdbd_migrate(messaging_ctdb_connection(),
+				    ctx->db_id,
+				    key);
+		ctdb_time += timeval_elapsed(&ctdb_start_time);
+		if (ret != 0) {
+			DBG_ERR("ctdbd_migrate failed: %s\n", strerror(ret));
+			return -1;
+		}
+
+		goto again;
+	}
+
+	duration = timeval_elapsed(&migrate_start);
+	duration_msecs = duration * 1000;
+
+	if ((migrate_attempts > ctx->warn_migrate_attempts) ||
+	    (duration_msecs > ctx->warn_migrate_msecs))
+	{
+		int chain = 0;
+
+		if (tdb_get_flags(ctx->wtdb->tdb) & TDB_INCOMPATIBLE_HASH) {
+			chain = tdb_jenkins_hash(&key) %
+				tdb_hash_size(ctx->wtdb->tdb);
+		}
+
+		DBG_ERR("db %s key %s, chain %d "
+			"needed %d attempts, %d milliseconds, "
+			"chainlock: %f ms, CTDB %f ms\n",
+			tdb_name(ctx->wtdb->tdb),
+			hex_encode_talloc(talloc_tos(),
+					  (unsigned char *)key.dptr,
+					  key.dsize),
+			chain,
+			migrate_attempts,
+			duration_msecs,
+			chainlock_time * 1000.0,
+			ctdb_time * 1000.0);
+	}
+
+	memcpy(&crec->header, data.dptr, sizeof(crec->header));
+	memmove(data.dptr,
+		data.dptr + sizeof(struct ctdb_ltdb_header),
+		data.dsize - sizeof(struct ctdb_ltdb_header));
+	data.dsize -= sizeof(struct ctdb_ltdb_header);
+
+	if (persistent_in_progress) {
+		/* An in-progress header, remove it */
+		memmove(data.dptr,
+			data.dptr + SERVER_ID_BUF_LENGTH,
+			data.dsize - SERVER_ID_BUF_LENGTH);
+
+		data.dsize -= SERVER_ID_BUF_LENGTH;
+
+		/*
+		 * We hand out the value without the server_id prefix, so
+		 * the header the caller uses for subsequent stores must
+		 * not claim there is one.
+		 */
+		crec->header.flags &= ~CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+	}
+
+	*_data = data;
+	return 0;
+}
+
+static void prepare_local_header_for_push_record(struct ctdb_ltdb_header *h)
+{
+	/*
+	 * The combination of db_ctdb_ltdb_store() and db_ctdb_push_record()
+	 * causes the record to be written to all active nodes in the cluster.
+	 * This needs to be done carefully, otherwise it will interact badly
+	 * with vacuuming.  The behaviour needs to simulate what happens during
+	 * CTDB recovery, since this is the only other time the same record in a
+	 * volatile database may be written to all nodes.
+	 *
+	 * MIGRATED_WITH_DATA: All records need to be written with this flag.
+	 * For other nodes, this is handled by the ctdbd push record
+	 * implementation.  For this (dmaster) node this flag needs to be
+	 * explicitly set.
+	 *
+	 * dmaster has rsn++: The current dmaster needs to have the highest
+	 * RSN so CTDB vacuuming recognises copies elsewhere as out-of-date,
+	 * causing them to be deleted.  This would normally be done when
+	 * ctdb_ltdb_store() calls ctdb_ltdb_store_server().  However, the
+	 * record is stored directly here, so the RSN increment needs to be
+	 * done here.
+	 */
+	h->rsn++;
+	h->flags |= CTDB_REC_FLAG_MIGRATED_WITH_DATA;
+}
 
 static NTSTATUS db_ctdb_storev(struct db_record *rec,
-			       const TDB_DATA *dbufs, int num_dbufs, int flag)
+			       const TDB_DATA *orig_dbufs,
+			       int orig_num_dbufs,
+			       int flag)
 {
 	struct db_ctdb_rec *crec = talloc_get_type_abort(
 		rec->private_data, struct db_ctdb_rec);
+	int num_dbufs = orig_num_dbufs;
+	TDB_DATA data;
+	TDB_DATA _dbufs[num_dbufs + 1];
+	const TDB_DATA *dbufs = orig_dbufs;
+	uint8_t idbuf[SERVER_ID_BUF_LENGTH];
+	struct ctdb_ltdb_header header = crec->header;
+	struct db_context *pdb = crec->ctdb_ctx->pdb;
+	struct db_ctdb_ctx *pdb_ctdb_ctx = NULL;
+	struct db_record *prec = NULL;
+	bool do_persistent_store = false;
+	bool do_persistent_delete = false;
 	NTSTATUS status;
+	int ret;
 
-	status = db_ctdb_ltdb_store(crec->ctdb_ctx, rec->key, &(crec->header),
-				    dbufs, num_dbufs);
+	if (flag & DBWRAP_STORE_PERSISTENT) {
+		do_persistent_store = true;
+	} else if (rec->flags.persistent) {
+		do_persistent_delete = true;
+	}
+
+	if (do_persistent_store || do_persistent_delete) {
+		struct server_id id;
+
+		/*
+		 * We may forked and crec->ctdb_ctx->msg_server_id
+		 * might be out of date.
+		 */
+		if (crec->ctdb_ctx->msg_server_id.pid != tevent_cached_getpid()) {
+			struct messaging_context *msg_ctx =
+				global_messaging_context_raw();
+
+			if (msg_ctx == NULL) {
+				DBG_ERR("global_messaging_context_raw() failed\n");
+				return NT_STATUS_INTERNAL_ERROR;
+			}
+
+			crec->ctdb_ctx->msg_server_id =
+				messaging_server_id(msg_ctx);
+		}
+		id = crec->ctdb_ctx->msg_server_id;
+
+		/*
+		 * As we drop the chainlock at some point below and reacquire it
+		 * at the end (see below for the reasons for that), we have to
+		 * add this user-space lock to make the whole operation atomic
+		 * again.
+		 */
+		server_id_put(idbuf, id);
+		_dbufs[0] = (TDB_DATA) {
+			.dptr = idbuf,
+			.dsize = SERVER_ID_BUF_LENGTH,
+		};
+		memcpy(&_dbufs[1], orig_dbufs, orig_num_dbufs * sizeof(TDB_DATA));
+		dbufs = _dbufs;
+		num_dbufs++;
+		header.flags |= CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+	}
+
+	if (do_persistent_store) {
+		prepare_local_header_for_push_record(&header);
+		header.flags |= CTDB_REC_FLAG_PERSISTENT;
+		crec->header.flags |= CTDB_REC_FLAG_PERSISTENT;
+	}
+
+	status = db_ctdb_ltdb_store(crec->ctdb_ctx,
+				    rec->key,
+				    &header,
+				    dbufs,
+				    num_dbufs);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("db_ctdb_ltdb_store failed: %s\n", nt_errstr(status));
+		return status;
+	}
+
+	if (do_persistent_delete) {
+		ret = tdb_chainunlock(crec->ctdb_ctx->wtdb->tdb, rec->key);
+		if (ret != 0) {
+			DBG_ERR("tdb_chainunlock failed\n");
+			return NT_STATUS_INTERNAL_DB_ERROR;
+		}
+		crec->locked = false;
+
+		/*
+		 * With "persistent handles durability = partial_outage"
+		 * there is no backup db to remove the record from, but the
+		 * record still has to lose CTDB_REC_FLAG_PERSISTENT below.
+		 */
+		if (pdb != NULL) {
+			pdb_ctdb_ctx = talloc_get_type_abort(
+				pdb->private_data, struct db_ctdb_ctx);
+
+			prec = db_ctdb_fetch_locked_persistent(pdb_ctdb_ctx,
+							       talloc_tos(),
+							       rec->key);
+			if (prec == NULL) {
+				DBG_ERR("db_ctdb_fetch_locked_persistent "
+					"failed\n");
+				return NT_STATUS_INTERNAL_ERROR;
+			}
+
+			status = db_ctdb_delete_transaction(prec);
+			if (!NT_STATUS_IS_OK(status)) {
+				DBG_ERR("db_ctdb_delete_transaction failed: "
+					"%s\n", nt_errstr(status));
+				TALLOC_FREE(prec);
+				return status;
+			}
+
+			/* This commits the transaction */
+			TALLOC_FREE(prec);
+		}
+
+		ret = db_ctdb_migrate_locked(crec, rec->key, &data);
+		if (ret != 0) {
+			DBG_ERR("db_ctdb_migrate failed\n");
+			return NT_STATUS_INTERNAL_ERROR;
+		}
+		SAFE_FREE(data.dptr);
+
+		crec->header.flags &= ~CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+                crec->header.flags &= ~CTDB_REC_FLAG_PERSISTENT;
+
+		status = db_ctdb_ltdb_store(crec->ctdb_ctx,
+					    rec->key,
+					    &crec->header,
+					    orig_dbufs,
+					    orig_num_dbufs);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("db_ctdb_ltdb_store failed: %s\n", nt_errstr(status));
+			return status;
+		}
+		rec->flags.persistent = false;
+		return NT_STATUS_OK;
+	}
+
+	if (!do_persistent_store) {
+		return NT_STATUS_OK;
+	}
+
+	/* Make sure not to confuse tdb with unknown flags */
+	flag &= DBWRAP_TDB_FLAGS;
+
+	/*
+	 * Drop the chainlock. We must not hold it while talking to the local
+	 * ctdbd below, and holding it would deadlock with a ctdb recovery
+	 * during the transaction on the persistent db. This has consequences,
+	 * see below.
+	 *
+	 * The record we stored above carries our server_id and
+	 * CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS, which keeps other openers of
+	 * the database off this record until we're done.
+	 */
+	ret = tdb_chainunlock(crec->ctdb_ctx->wtdb->tdb, rec->key);
+	if (ret != 0) {
+		DBG_ERR("tdb_chainunlock failed\n");
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+	crec->locked = false;
+
+	/*
+	 * Push out the record to the volatile dbs on all nodes. If this
+	 * returns success, this just means the push out succeeded, not that the
+	 * records are already on stable storage on the nodes.
+	 *
+	 * The transaction on the persistent db below is what makes this a
+	 * sequence point: ctdb_control_trans3_commit() runs on our own ctdbd
+	 * and sends CTDB_CONTROL_UPDATE_RECORD to every active node over the
+	 * same connections that carried the push, and it only succeeds once
+	 * all of them acked with no recovery running. As ctdbd processes a
+	 * node's packets in order, the push is applied before the persistent
+	 * write, so a successful commit means every node holds this record,
+	 * or something newer, or a recovery has distributed our copy.
+	 *
+	 * That ordering is not absolute though: ctdb_control_push_record()
+	 * defers a push whose chainlock is busy, and a deferred push leaves the
+	 * packet order, so a node can ack the persistent write with the push
+	 * still pending. The race window is a lock helper turnaround against a
+	 * cluster wide commit, but any node dying inside may cause lost
+	 * pushed records, as deferred pending pushes are discarded as
+	 * part of recovery.
+	 *
+	 * The persistent db does not cover that. It is only read back into
+	 * the volatile db by db_ctdb_migrate_persistent_recs(), at db open
+	 * time and only when the migration marker is missing, ie after the
+	 * whole cluster has restarted. A single node failure rebuilds the
+	 * volatile db by merging the surviving nodes' copies alone and never
+	 * consults the backup.
+	 *
+	 * As the chainlock is not held here, the record may get migrated away
+	 * before the push is sent. The push then carries an outdated dmaster
+	 * and RSN and the receiving nodes discard it, they hold a newer copy
+	 * in that case anyway.
+	 */
+	status = db_ctdb_push_record(rec,
+				     crec->ctdb_ctx,
+				     &crec->header,
+				     rec->key,
+				     orig_dbufs,
+				     orig_num_dbufs);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	/*
+	 * With "persistent handles durability = partial_outage" there is no
+	 * backup db. The push above has put the record on every node, which
+	 * is all that setting promises.
+	 */
+	if (pdb != NULL) {
+		pdb_ctdb_ctx = talloc_get_type_abort(
+			pdb->private_data, struct db_ctdb_ctx);
+
+		prec = db_ctdb_fetch_locked_persistent(pdb_ctdb_ctx,
+						       talloc_tos(),
+						       rec->key);
+		if (prec == NULL) {
+			DBG_ERR("db_ctdb_fetch_locked_persistent failed\n");
+			return NT_STATUS_INTERNAL_ERROR;
+		}
+
+		status = db_ctdb_storev_transaction(prec,
+						    orig_dbufs,
+						    orig_num_dbufs,
+						    flag);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("db_ctdb_storev_transaction failed: %s\n",
+				nt_errstr(status));
+			TALLOC_FREE(prec);
+			return status;
+		}
+
+		/* This will commit the transaction */
+		TALLOC_FREE(prec);
+	}
+
+
+	/*
+	 * We have to go through the whole migrate/lock/check loop again as
+	 * we've dropped the chainlock above and the record could have been
+	 * migrated away.
+	 */
+	ret = db_ctdb_migrate_locked(crec, rec->key, &data);
+	if (ret != 0) {
+		DBG_ERR("db_ctdb_migrate failed\n");
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+	SAFE_FREE(data.dptr);
+
+	crec->header.flags &= ~CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+
+	status = db_ctdb_ltdb_store(crec->ctdb_ctx,
+				    rec->key,
+				    &crec->header,
+				    orig_dbufs,
+				    orig_num_dbufs);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("db_ctdb_ltdb_store failed: %s\n", nt_errstr(status));
+		return status;
+	}
+	rec->flags.persistent = true;
 	return status;
 }
 
@@ -1004,6 +1578,10 @@ static int db_ctdb_record_destr(struct db_record* data)
 		   hex_encode_talloc(data, (unsigned char *)data->key.dptr,
 			      data->key.dsize)));
 
+	if (!crec->locked) {
+		goto after_unlock;
+	}
+
 	before = timeval_current();
 
 	ret = tdb_chainunlock(crec->ctdb_ctx->wtdb->tdb, data->key);
@@ -1027,6 +1605,7 @@ static int db_ctdb_record_destr(struct db_record* data)
 		return -1;
 	}
 
+after_unlock:
 	threshold = crec->ctdb_ctx->warn_locktime_msecs;
 	if (threshold != 0) {
 		timediff = timeval_elapsed(&crec->lock_time) * 1000;
@@ -1049,13 +1628,64 @@ static int db_ctdb_record_destr(struct db_record* data)
 /**
  * Check whether we have a valid local copy of the given record,
  * either for reading or for writing.
+ *
+ * While a store with DBWRAP_STORE_PERSISTENT is in progress the record
+ * value is prefixed with the server_id of the storing process and the
+ * record header carries CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS.
+ * *persistent_in_progress is set whenever the record carries that
+ * marker, whether or not the record can be used: if we return false the
+ * caller has to back off and retry, if we return true the caller has to
+ * check persistent_in_progress and skip SERVER_ID_BUF_LENGTH bytes to
+ * get at the record value.
+ *
+ * Note that this function must not modify the record: in the local parse
+ * case @data points directly into the tdb mmap.
  */
 static bool db_ctdb_can_use_local_hdr(const struct ctdb_ltdb_header *hdr,
-				      uint32_t my_vnn, bool read_only)
+				      TDB_DATA data,
+				      uint32_t my_vnn,
+				      bool read_only,
+				      bool *persistent_in_progress)
 {
+	*persistent_in_progress = false;
+
 	if (hdr->dmaster != my_vnn) {
 		/* If we're not dmaster, it must be r/o copy. */
 		return read_only && (hdr->flags & CTDB_REC_RO_HAVE_READONLY);
+	}
+
+	if (hdr->flags & CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS) {
+		struct server_id my_id = messaging_server_id(
+			global_messaging_context());
+		struct server_id id;
+
+		SMB_ASSERT(data.dsize >= SERVER_ID_BUF_LENGTH);
+
+		/*
+		 * The record data starts with a in-progress header containing
+		 * the owners server_id of size SERVER_ID_BUF_LENGTH, let the
+		 * caller know, so he can skip the header.
+		 */
+		*persistent_in_progress = true;
+
+		server_id_get(&id, data.dptr);
+		if (server_id_equal(&id, &my_id)) {
+			/*
+			 * Our own in-progress record, we can use it
+			 */
+			return true;
+		}
+		if (serverid_exists(&id)) {
+			/*
+			 * Someone else is using it, we can't use it.
+			 */
+			return false;
+		}
+		/*
+		 * This has a stale persistent_in_progress header,
+		 * we can use the record.
+		 */
+		return true;
 	}
 
 	/*
@@ -1064,9 +1694,14 @@ static bool db_ctdb_can_use_local_hdr(const struct ctdb_ltdb_header *hdr,
 	return read_only || !(hdr->flags & CTDB_REC_RO_HAVE_DELEGATIONS);
 }
 
-static bool db_ctdb_can_use_local_copy(TDB_DATA ctdb_data, uint32_t my_vnn,
-				       bool read_only)
+static bool db_ctdb_can_use_local_copy(TDB_DATA ctdb_data,
+				       uint32_t my_vnn,
+				       bool *persistent_in_progress)
 {
+	TDB_DATA data;
+
+	*persistent_in_progress = false;
+
 	if (ctdb_data.dptr == NULL) {
 		return false;
 	}
@@ -1075,8 +1710,17 @@ static bool db_ctdb_can_use_local_copy(TDB_DATA ctdb_data, uint32_t my_vnn,
 		return false;
 	}
 
+	data = (TDB_DATA) {
+		.dptr = ctdb_data.dptr + sizeof(struct ctdb_ltdb_header),
+		.dsize = ctdb_data.dsize - sizeof(struct ctdb_ltdb_header)
+	};
+
 	return db_ctdb_can_use_local_hdr(
-		(struct ctdb_ltdb_header *)ctdb_data.dptr, my_vnn, read_only);
+		(struct ctdb_ltdb_header *)ctdb_data.dptr,
+		data,
+		my_vnn,
+		false,
+		persistent_in_progress);
 }
 
 static struct db_record *fetch_locked_internal(struct db_ctdb_ctx *ctx,
@@ -1086,14 +1730,6 @@ static struct db_record *fetch_locked_internal(struct db_ctdb_ctx *ctx,
 	struct db_record *result;
 	struct db_ctdb_rec *crec;
 	TDB_DATA ctdb_data;
-	int migrate_attempts;
-	struct timeval migrate_start;
-	struct timeval chainlock_start;
-	struct timeval ctdb_start_time;
-	double chainlock_time = 0;
-	double ctdb_time = 0;
-	int duration_msecs;
-	int lockret;
 	int ret;
 
 	if (!(result = talloc(mem_ctx, struct db_record))) {
@@ -1107,9 +1743,25 @@ static struct db_record *fetch_locked_internal(struct db_ctdb_ctx *ctx,
 		return NULL;
 	}
 
+	result->flags = (struct db_record_flags) {};
 	result->db = ctx->db;
 	result->private_data = (void *)crec;
+	result->storev = db_ctdb_storev;
+	result->delete_rec = db_ctdb_delete;
 	crec->ctdb_ctx = ctx;
+
+	/*
+	 * Do a blocking lock on the record
+	 */
+	ret = db_ctdb_migrate_locked(crec, key, &ctdb_data);
+	if (ret != 0) {
+		DBG_ERR("db_ctdb_migrate_locked failed\n");
+		TALLOC_FREE(result);
+		return NULL;
+	}
+
+	GetTimeOfDay(&crec->lock_time);
+	talloc_set_destructor(result, db_ctdb_record_destr);
 
 	result->key.dsize = key.dsize;
 	result->key.dptr = (uint8_t *)talloc_memdup(result, key.dptr,
@@ -1120,119 +1772,12 @@ static struct db_record *fetch_locked_internal(struct db_ctdb_ctx *ctx,
 		return NULL;
 	}
 
-	migrate_attempts = 0;
-	GetTimeOfDay(&migrate_start);
-
-	/*
-	 * Do a blocking lock on the record
-	 */
-again:
-
-	if (DEBUGLEVEL >= 10) {
-		char *keystr = hex_encode_talloc(result, key.dptr, key.dsize);
-		DEBUG(10, (DEBUGLEVEL > 10
-			   ? "Locking db %u key %s\n"
-			   : "Locking db %u key %.20s\n",
-			   (int)crec->ctdb_ctx->db_id, keystr));
-		TALLOC_FREE(keystr);
-	}
-
-	GetTimeOfDay(&chainlock_start);
-	lockret = tdb_chainlock(ctx->wtdb->tdb, key);
-	chainlock_time += timeval_elapsed(&chainlock_start);
-
-	if (lockret != 0) {
-		DEBUG(3, ("tdb_chainlock failed\n"));
-		TALLOC_FREE(result);
-		return NULL;
-	}
-
-	result->storev = db_ctdb_storev;
-	result->delete_rec = db_ctdb_delete;
-	talloc_set_destructor(result, db_ctdb_record_destr);
-
-	ctdb_data = tdb_fetch(ctx->wtdb->tdb, key);
-
-	/*
-	 * See if we have a valid record and we are the dmaster. If so, we can
-	 * take the shortcut and just return it.
-	 */
-
-	if (!db_ctdb_can_use_local_copy(ctdb_data, get_my_vnn(), false)) {
-		SAFE_FREE(ctdb_data.dptr);
-		tdb_chainunlock(ctx->wtdb->tdb, key);
-		talloc_set_destructor(result, NULL);
-
-		migrate_attempts += 1;
-
-		DEBUG(10, ("ctdb_data.dptr = %p, dmaster = %"PRIu32" "
-			   "(%"PRIu32") %"PRIu32"\n",
-			   ctdb_data.dptr, ctdb_data.dptr ?
-			   ((struct ctdb_ltdb_header *)ctdb_data.dptr)->dmaster :
-			   UINT32_MAX,
-			   get_my_vnn(),
-			   ctdb_data.dptr ?
-			   ((struct ctdb_ltdb_header *)ctdb_data.dptr)->flags : 0));
-
-		GetTimeOfDay(&ctdb_start_time);
-		ret = ctdbd_migrate(messaging_ctdb_connection(), ctx->db_id,
-				    key);
-		ctdb_time += timeval_elapsed(&ctdb_start_time);
-
-		if (ret != 0) {
-			DEBUG(5, ("ctdbd_migrate failed: %s\n",
-				  strerror(ret)));
-			TALLOC_FREE(result);
-			return NULL;
-		}
-		/* now its migrated, try again */
-		goto again;
-	}
-
-	{
-		double duration;
-		duration = timeval_elapsed(&migrate_start);
-
-		/*
-		 * Convert the duration to milliseconds to avoid a
-		 * floating-point division of
-		 * lp_parm_int("migrate_duration") by 1000.
-		 */
-		duration_msecs = duration * 1000;
-	}
-
-	if ((migrate_attempts > ctx->warn_migrate_attempts) ||
-	    (duration_msecs > ctx->warn_migrate_msecs)) {
-		int chain = 0;
-
-		if (tdb_get_flags(ctx->wtdb->tdb) & TDB_INCOMPATIBLE_HASH) {
-			chain = tdb_jenkins_hash(&key) %
-				tdb_hash_size(ctx->wtdb->tdb);
-		}
-
-		DEBUG(0, ("db_ctdb_fetch_locked for %s key %s, chain %d "
-			  "needed %d attempts, %d milliseconds, "
-			  "chainlock: %f ms, CTDB %f ms\n",
-			  tdb_name(ctx->wtdb->tdb),
-			  hex_encode_talloc(talloc_tos(),
-					    (unsigned char *)key.dptr,
-					    key.dsize),
-			  chain,
-			  migrate_attempts, duration_msecs,
-			  chainlock_time * 1000.0,
-			  ctdb_time * 1000.0));
-	}
-
-	GetTimeOfDay(&crec->lock_time);
-
-	memcpy(&crec->header, ctdb_data.dptr, sizeof(crec->header));
-
-	result->value.dsize = ctdb_data.dsize - sizeof(crec->header);
+	result->value.dsize = ctdb_data.dsize;
 	result->value.dptr = NULL;
 
 	if (result->value.dsize != 0) {
 		result->value.dptr = talloc_memdup(
-			result, ctdb_data.dptr + sizeof(crec->header),
+			result, ctdb_data.dptr,
 			result->value.dsize);
 		if (result->value.dptr == NULL) {
 			DBG_ERR("talloc failed\n");
@@ -1240,6 +1785,11 @@ again:
 			return NULL;
 		}
 	}
+
+	if (crec->header.flags & CTDB_REC_FLAG_PERSISTENT) {
+		result->flags.persistent = true;
+	}
+
 	result->value_valid = true;
 
 	SAFE_FREE(ctdb_data.dptr);
@@ -1266,12 +1816,19 @@ static struct db_record *db_ctdb_fetch_locked(struct db_context *db,
 }
 
 struct db_ctdb_parse_record_state {
+	struct tevent_context *ev;
+	struct db_context *db;
+	TDB_DATA key;
 	void (*parser)(TDB_DATA key, TDB_DATA data, void *private_data);
 	void *private_data;
 	uint32_t my_vnn;
+	bool local;
 	bool ask_for_readonly_copy;
 	bool done;
 	bool empty_record;
+	enum dbwrap_req_state *req_state;
+	bool persistent_in_progress;
+	useconds_t sleep_time;
 };
 
 static void db_ctdb_parse_record_parser(
@@ -1290,26 +1847,50 @@ static void db_ctdb_parse_record_parser_nonpersistent(
 	struct db_ctdb_parse_record_state *state =
 		(struct db_ctdb_parse_record_state *)private_data;
 
-	if (db_ctdb_can_use_local_hdr(header, state->my_vnn, true)) {
-		/*
-		 * A record consisting only of the ctdb header can be
-		 * a validly created empty record or a tombstone
-		 * record of a deleted record (not vacuumed yet). Mark
-		 * it accordingly.
-		 */
-		state->empty_record = (data.dsize == 0);
-		if (!state->empty_record) {
-			state->parser(key, data, state->private_data);
+	if (!db_ctdb_can_use_local_hdr(header,
+				       data,
+				       state->my_vnn,
+				       true,
+				       &state->persistent_in_progress))
+	{
+		if (state->persistent_in_progress) {
+			return;
 		}
-		state->done = true;
-	} else {
-		/*
-		 * We found something in the db, so it seems that this record,
-		 * while not usable locally right now, is popular. Ask for a
-		 * R/O copy.
-		 */
-		state->ask_for_readonly_copy = true;
+		if (state->local) {
+			/*
+			 * We found something in the db, so it seems that this record,
+			 * while not usable locally right now, is popular. Ask for a
+			 * R/O copy.
+			 */
+			state->ask_for_readonly_copy = true;
+		}
+		return;
 	}
+
+	if (state->persistent_in_progress) {
+		/*
+		 * The record carries the server_id of an in-progress
+		 * DBWRAP_STORE_PERSISTENT store in front of the value.
+		 *
+		 * Clear the flag again: we were able to use the record, so
+		 * the caller must not treat this as "back off and retry".
+		 */
+		data.dptr += SERVER_ID_BUF_LENGTH;
+		data.dsize -= SERVER_ID_BUF_LENGTH;
+		state->persistent_in_progress = false;
+	}
+
+	/*
+	 * A record consisting only of the ctdb header can be
+	 * a validly created empty record or a tombstone
+	 * record of a deleted record (not vacuumed yet). Mark
+	 * it accordingly.
+	 */
+	state->empty_record = (data.dsize == 0);
+	if (!state->empty_record) {
+		state->parser(key, data, state->private_data);
+	}
+	state->done = true;
 }
 
 static NTSTATUS db_ctdb_try_parse_local_record(struct db_ctdb_ctx *ctx,
@@ -1377,21 +1958,53 @@ static NTSTATUS db_ctdb_parse_record(struct db_context *db, TDB_DATA key,
 	struct db_ctdb_ctx *ctx = talloc_get_type_abort(
 		db->private_data, struct db_ctdb_ctx);
 	struct db_ctdb_parse_record_state state;
+	useconds_t sleep_time = 10000; /* Start with 10ms */
 	NTSTATUS status;
 	int ret;
 
-	state.parser = parser;
-	state.private_data = private_data;
-	state.my_vnn = get_my_vnn();
-	state.empty_record = false;
+again_local:
+	state = (struct db_ctdb_parse_record_state) {
+		.parser = parser,
+		.private_data = private_data,
+		.my_vnn = get_my_vnn(),
+		.local = true,
+	};
 
 	status = db_ctdb_try_parse_local_record(ctx, key, &state);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
 		return status;
 	}
+	if (state.persistent_in_progress) {
+		/*
+		 * Someone else is in the middle of doing a store with
+		 * DBWRAP_STORE_PERSISTENT, give him enough time to grab
+		 * the record and finish.
+		 */
+		usleep(sleep_time);
+		if (sleep_time < 1000000) {
+			sleep_time *= 2;
+		}
+		goto again_local;
+	}
 
-	ret = ctdbd_parse(messaging_ctdb_connection(), ctx->db_id, key,
-			  state.ask_for_readonly_copy, parser, private_data);
+	state.local = false;
+	if (db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT) {
+		/*
+		 * TODO: check compatibility of using push-record with read-only
+		 * copies. For now disable read-only records.
+		 */
+		state.ask_for_readonly_copy = false;
+	}
+
+	sleep_time = 10000; /* Start with 10ms */
+
+again_ctdb:
+	ret = ctdbd_parse(messaging_ctdb_connection(),
+			  ctx->db_id,
+			  key,
+			  state.ask_for_readonly_copy,
+			  db_ctdb_parse_record_parser_nonpersistent,
+			  &state);
 	if (ret != 0) {
 		if (ret == ENOENT) {
 			/*
@@ -1404,6 +2017,18 @@ static NTSTATUS db_ctdb_parse_record(struct db_context *db, TDB_DATA key,
 			return NT_STATUS_NOT_FOUND;
 		}
 		return map_nt_error_from_unix(ret);
+	}
+	if (state.persistent_in_progress) {
+		/*
+		 * Someone else is in the middle of doing a store with
+		 * DBWRAP_STORE_PERSISTENT, give him enough time to grab
+		 * the record and finish.
+		 */
+		usleep(sleep_time);
+		if (sleep_time < 1000000) {
+			sleep_time *= 2;
+		}
+		goto again_ctdb;
 	}
 	return NT_STATUS_OK;
 }
@@ -1437,12 +2062,18 @@ static struct tevent_req *db_ctdb_parse_record_send(
 	}
 
 	*state = (struct db_ctdb_parse_record_state) {
+		.ev = ev,
+		.db = db,
+		.key = key,
 		.parser = parser,
 		.private_data = private_data,
+		.req_state = req_state,
 		.my_vnn = get_my_vnn(),
 		.empty_record = false,
+		.sleep_time = 10000, /* start with 10 ms */
 	};
 
+again_local:
 	status = db_ctdb_try_parse_local_record(ctx, key, state);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
 		if (tevent_req_nterror(req, status)) {
@@ -1453,6 +2084,28 @@ static struct tevent_req *db_ctdb_parse_record_send(
 		tevent_req_done(req);
 		return tevent_req_post(req, ev);
 	}
+	if (state->persistent_in_progress) {
+		/*
+		 * Someone else is in the middle of doing a store with
+		 * DBWRAP_STORE_PERSISTENT, give him enough time to grab
+		 * the record and finish.
+		 */
+		usleep(state->sleep_time);
+		if (state->sleep_time < 1000000) {
+			state->sleep_time *= 2;
+		}
+		goto again_local;
+	}
+
+	if (db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT) {
+		/*
+		 * TODO: check compatibility of using push-record with read-only
+		 * copies. For now disable read-only records.
+		 */
+		state->ask_for_readonly_copy = false;
+	}
+
+	state->sleep_time = 10000; /* start with 10 ms */
 
 	subreq = ctdbd_parse_send(state,
 				  ev,
@@ -1460,7 +2113,7 @@ static struct tevent_req *db_ctdb_parse_record_send(
 				  ctx->db_id,
 				  key,
 				  state->ask_for_readonly_copy,
-				  parser,
+				  db_ctdb_parse_record_parser_nonpersistent,
 				  private_data,
 				  req_state);
 	if (tevent_req_nomem(subreq, req)) {
@@ -1476,6 +2129,10 @@ static void db_ctdb_parse_record_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
+	struct db_ctdb_parse_record_state *state = tevent_req_data(
+		req, struct db_ctdb_parse_record_state);
+	struct db_ctdb_ctx *ctx = talloc_get_type_abort(
+		state->db->private_data, struct db_ctdb_ctx);
 	int ret;
 
 	ret = ctdbd_parse_recv(subreq);
@@ -1495,6 +2152,33 @@ static void db_ctdb_parse_record_done(struct tevent_req *subreq)
 		return;
 	}
 
+	if (state->persistent_in_progress) {
+		/*
+		 * Someone else is in the middle of doing a store with
+		 * DBWRAP_STORE_PERSISTENT, give him enough time to grab
+		 * the record and finish.
+		 */
+		usleep(state->sleep_time);
+		if (state->sleep_time < 1000000) {
+			state->sleep_time *= 2;
+		}
+		subreq = ctdbd_parse_send(state,
+					  state->ev,
+					  ctdb_async_ctx.async_conn,
+					  ctx->db_id,
+					  state->key,
+					  state->ask_for_readonly_copy,
+					  db_ctdb_parse_record_parser_nonpersistent,
+					  state->private_data,
+					  state->req_state);
+		if (tevent_req_nomem(subreq, req)) {
+			*(state->req_state) = DBWRAP_REQ_ERROR;
+			return;
+		}
+		tevent_req_set_callback(subreq, db_ctdb_parse_record_done, req);
+		return;
+	}
+
 	tevent_req_done(req);
 	return;
 }
@@ -1509,6 +2193,7 @@ struct traverse_state {
 	int (*fn)(struct db_record *rec, void *private_data);
 	void *private_data;
 	int count;
+	bool filter;
 };
 
 static void traverse_callback(TDB_DATA key, TDB_DATA data, void *private_data)
@@ -1516,6 +2201,24 @@ static void traverse_callback(TDB_DATA key, TDB_DATA data, void *private_data)
 	struct traverse_state *state = (struct traverse_state *)private_data;
 	struct db_record *rec = NULL;
 	TALLOC_CTX *tmp_ctx = NULL;
+
+	if ((state->db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT) &&
+	    state->filter &&
+	    (key.dsize == sizeof(DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY)))
+	{
+		int cmp;
+		cmp = memcmp(key.dptr,
+			     DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY,
+			     sizeof(DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY));
+		if (cmp == 0) {
+			return;
+		}
+	}
+
+	if (data.dsize < sizeof(struct ctdb_ltdb_header)) {
+		dbwrap_log_key("Small record for key\n", key);
+		return;
+	}
 
 	tmp_ctx = talloc_new(state->db);
 	if (tmp_ctx == NULL) {
@@ -1597,11 +2300,11 @@ static int db_ctdbd_traverse(uint32_t db_id,
 	return 0;
 }
 
-
-static int db_ctdb_traverse(struct db_context *db,
-			    int (*fn)(struct db_record *rec,
-				      void *private_data),
-			    void *private_data)
+static int db_ctdb_traverse_internal(struct db_context *db,
+				     int (*fn)(struct db_record *rec,
+					       void *private_data),
+				     bool filter,
+				     void *private_data)
 {
 	int ret;
         struct db_ctdb_ctx *ctx = talloc_get_type_abort(db->private_data,
@@ -1611,6 +2314,7 @@ static int db_ctdb_traverse(struct db_context *db,
 	state = (struct traverse_state) {
 		.db = db,
 		.fn = fn,
+		.filter = filter,
 		.private_data = private_data,
 	};
 
@@ -1669,6 +2373,14 @@ static int db_ctdb_traverse(struct db_context *db,
 	return state.count;
 }
 
+static int db_ctdb_traverse(struct db_context *db,
+			    int (*fn)(struct db_record *rec,
+				      void *private_data),
+			    void *private_data)
+{
+	return db_ctdb_traverse_internal(db, fn, true, private_data);
+}
+
 static NTSTATUS db_ctdb_storev_deny(struct db_record *rec,
 				    const TDB_DATA *dbufs, int num_dbufs, int flag)
 {
@@ -1683,15 +2395,63 @@ static NTSTATUS db_ctdb_delete_deny(struct db_record *rec)
 static void traverse_read_callback(TDB_DATA key, TDB_DATA data, void *private_data)
 {
 	struct traverse_state *state = (struct traverse_state *)private_data;
-	struct db_record rec;
+	struct ctdb_ltdb_header h = {};
+	struct db_record rec = {};
 
-	ZERO_STRUCT(rec);
+	if ((state->db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT) &&
+	    (key.dsize == sizeof(DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY)))
+	{
+		int cmp;
+		cmp = memcmp(key.dptr,
+			     DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY,
+			     sizeof(DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY));
+		if (cmp == 0) {
+			return;
+		}
+	}
+
+	if (data.dsize < sizeof(h)) {
+		DBG_ERR("Small record for key [%s]\n",
+			hex_encode_talloc(
+				talloc_tos(),
+				(unsigned char *)key.dptr,
+				key.dsize));
+		return;
+	}
+
+	if (state->db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT) {
+		memcpy(&h, data.dptr, sizeof(h));
+	}
+	data.dsize -= sizeof(h);
+	data.dptr += sizeof(h);
+
+	if (h.flags & CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS) {
+		/*
+		 * A store with DBWRAP_STORE_PERSISTENT is in progress for
+		 * this record, the value is prefixed with the server_id of
+		 * the storing process.
+		 */
+		if (data.dsize < SERVER_ID_BUF_LENGTH) {
+			DBG_ERR("Small in-progress record for key [%s]\n",
+				hex_encode_talloc(
+					talloc_tos(),
+					(unsigned char *)key.dptr,
+					key.dsize));
+			return;
+		}
+		data.dsize -= SERVER_ID_BUF_LENGTH;
+		data.dptr += SERVER_ID_BUF_LENGTH;
+	}
+
 	rec.db = state->db;
 	rec.key = key;
 	rec.value = data;
 	rec.storev = db_ctdb_storev_deny;
 	rec.delete_rec = db_ctdb_delete_deny;
 	rec.private_data = NULL;
+	if (h.flags & CTDB_REC_FLAG_PERSISTENT) {
+		rec.flags.persistent = true;
+	}
 	rec.value_valid = true;
 	state->fn(&rec, state->private_data);
 	state->count++;
@@ -1770,6 +2530,82 @@ static int db_ctdb_traverse_read(struct db_context *db,
 	return state.count;
 }
 
+static int traverse_perrec_persistent_read_cb(TDB_CONTEXT *tdb,
+					      TDB_DATA kbuf,
+					      TDB_DATA dbuf,
+					      void *private_data)
+{
+	struct traverse_state *state = (struct traverse_state *)private_data;
+	struct db_record rec;
+
+	/*
+	 * Skip the __db_sequence_number__ key:
+	 * This is used for persistent transactions internally.
+	 */
+	if (kbuf.dsize == strlen(CTDB_DB_SEQNUM_KEY) + 1 &&
+	    strcmp((const char*)kbuf.dptr, CTDB_DB_SEQNUM_KEY) == 0)
+	{
+		return 0;
+	}
+
+	ZERO_STRUCT(rec);
+	rec.db = state->db;
+	rec.key = kbuf;
+	rec.value = dbuf;
+	rec.value_valid = true;
+	rec.storev = db_ctdb_storev_deny;
+	rec.delete_rec = db_ctdb_delete_deny;
+	rec.private_data = NULL;
+
+	if (rec.value.dsize <= sizeof(struct ctdb_ltdb_header)) {
+		/* A deleted record */
+		return 0;
+	}
+	rec.value.dsize -= sizeof(struct ctdb_ltdb_header);
+	rec.value.dptr += sizeof(struct ctdb_ltdb_header);
+
+	state->count++;
+	return state->fn(&rec, state->private_data);
+}
+
+static int db_ctdb_traverse_per_rec_persistent_read(
+	struct db_context *db,
+	int (*fn)(struct db_record *rec,
+		  void *private_data),
+	void *private_data)
+{
+	struct db_ctdb_ctx *ctx = talloc_get_type_abort(db->private_data,
+							struct db_ctdb_ctx);
+	struct db_ctdb_ctx *pctx = NULL;
+	struct traverse_state state;
+	int nrecs;
+
+	if (!(db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT)) {
+		return 0;
+	}
+
+	if (ctx->pdb == NULL) {
+		/* "persistent handles durability = partial_outage" */
+		return 0;
+	}
+
+	pctx = talloc_get_type_abort(ctx->pdb->private_data,
+				     struct db_ctdb_ctx);
+
+	state.db = db;
+	state.fn = fn;
+	state.private_data = private_data;
+	state.count = 0;
+
+	nrecs = tdb_traverse_read(pctx->wtdb->tdb,
+				  traverse_perrec_persistent_read_cb,
+				  &state);
+	if (nrecs == -1) {
+		return -1;
+	}
+	return state.count;
+}
+
 static int db_ctdb_get_seqnum(struct db_context *db)
 {
         struct db_ctdb_ctx *ctx = talloc_get_type_abort(db->private_data,
@@ -1789,13 +2625,416 @@ static size_t db_ctdb_id(struct db_context *db, uint8_t *id, size_t idlen)
 	return sizeof(ctx->db_id);
 }
 
-struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
-				struct messaging_context *msg_ctx,
-				const char *name,
-				int hash_size, int tdb_flags,
-				int open_flags, mode_t mode,
-				enum dbwrap_lock_order lock_order,
-				uint64_t dbwrap_flags)
+static int wipe_delete_fn(struct db_record *rec, void *private_data)
+{
+	NTSTATUS status;
+
+	/*
+	 * Avoid deleting the persistent backup record
+	 */
+	rec->flags.persistent = false;
+
+	status = rec->delete_rec(rec);
+	if (!NT_STATUS_IS_OK(status)) {
+		return -1;
+	}
+	return 0;
+}
+
+static NTSTATUS wipe_trans_fn(struct db_context *db, void *private_data)
+{
+	int ret;
+
+	ret = db_ctdb_traverse(db, wipe_delete_fn, NULL);
+	if (ret == -1) {
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+	return NT_STATUS_OK;
+}
+
+static int db_ctdb_wipe(struct db_context *db,
+			struct dbwrap_wipe_flags flags)
+{
+	struct db_ctdb_ctx *ctx = talloc_get_type_abort(
+		db->private_data, struct db_ctdb_ctx);
+	NTSTATUS status;
+	int ret;
+
+	if (flags.wipe_persistent_backup_db) {
+		if (!(db->flags & DBWRAP_FLAG_PER_REC_PERSISTENT)) {
+			return 0;
+		}
+
+		if (ctx->pdb == NULL) {
+			/*
+			 * "persistent handles durability = partial_outage",
+			 * there is no backup db to wipe.
+			 */
+			return 0;
+		}
+
+		status = dbwrap_trans_do(ctx->pdb, wipe_trans_fn, NULL);
+		if (!NT_STATUS_IS_OK(status)) {
+			return -1;
+		}
+	}
+
+	if (flags.wipe_default) {
+		if (db->persistent) {
+			status = dbwrap_trans_do(db, wipe_trans_fn, NULL);
+			if (!NT_STATUS_IS_OK(status)) {
+				return -1;
+			}
+			return 0;
+		}
+
+		ret = db_ctdb_traverse_internal(db, wipe_delete_fn, false, NULL);
+		if (ret == -1) {
+			return -1;
+		}
+	}
+	return 0;
+}
+
+struct migrate_persistent_state {
+	struct db_ctdb_ctx *db_ctdb_ctx;
+	TALLOC_CTX *tmp_ctx;
+};
+
+static int migrate_persistent_traverse_fn(struct tdb_context *ctdb,
+					  TDB_DATA key,
+					  TDB_DATA data,
+					  void *private_data)
+{
+	struct migrate_persistent_state *state =
+		(struct migrate_persistent_state *)private_data;
+	struct db_record *rec = NULL;
+	struct db_ctdb_rec *crec = NULL;
+	struct ctdb_ltdb_header header;
+	struct ctdb_ltdb_header push_header;
+	TDB_DATA d;
+	int cmp;
+	NTSTATUS status;
+	int ret;
+
+	if (key.dsize == strlen(CTDB_DB_SEQNUM_KEY) + 1) {
+		cmp = strncmp(CTDB_DB_SEQNUM_KEY,
+			      (char *)key.dptr,
+			      key.dsize);
+		if (cmp == 0) {
+			return 0;
+		}
+	}
+
+	if (data.dsize <= sizeof(struct ctdb_ltdb_header)) {
+		/* A deleted record */
+		return 0;
+	}
+
+	rec = fetch_locked_internal(state->db_ctdb_ctx, state->db_ctdb_ctx, key);
+	if (rec == NULL) {
+		DBG_ERR("db_tdb_fetch_locked() failed\n");
+		ret = -1;
+		goto out;
+	}
+	crec = talloc_get_type_abort(rec->private_data, struct db_ctdb_rec);
+
+	d = (TDB_DATA) {
+		.dptr = data.dptr + sizeof(struct ctdb_ltdb_header),
+		.dsize = data.dsize - sizeof(struct ctdb_ltdb_header)
+	};
+
+	crec->header.flags |= CTDB_REC_FLAG_PERSISTENT;
+	push_header = crec->header;
+	header = crec->header;
+	prepare_local_header_for_push_record(&header);
+
+	status = db_ctdb_ltdb_store(state->db_ctdb_ctx,
+				    key,
+				    &header,
+				    &d,
+				    1);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("db_ctdb_ltdb_store failed: %s\n", nt_errstr(status));
+		ret = -1;
+		goto out;
+	}
+
+	/*
+	 * Release the record, and with it the chainlock, before talking to
+	 * the local ctdbd below. key and d point into the traverse buffers
+	 * of the persistent db, they stay valid.
+	 */
+	TALLOC_FREE(rec);
+	crec = NULL;
+
+	status = db_ctdb_push_record(state->tmp_ctx,
+				     state->db_ctdb_ctx,
+				     &push_header,
+				     key,
+				     &d,
+				     1);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("db_ctdb_push_record failed: %s\n", nt_errstr(status));
+		ret = -1;
+		goto out;
+	}
+
+	ret = 0;
+out:
+	TALLOC_FREE(rec);
+	return ret;
+}
+
+static int db_ctdb_migrate_persistent_recs(struct db_context *db,
+					   struct messaging_context *msg)
+{
+	struct db_ctdb_ctx *db_ctdb_ctx = talloc_get_type_abort(
+		db->private_data, struct db_ctdb_ctx);
+	struct db_ctdb_ctx *pdb_ctdb_ctx = talloc_get_type_abort(
+		db_ctdb_ctx->pdb->private_data, struct db_ctdb_ctx);
+	struct server_id id = messaging_server_id(msg);
+	uint8_t idbuf[SERVER_ID_BUF_LENGTH];
+	struct migrate_persistent_state migration_state;
+	struct db_record *marker_rec = NULL;
+	struct db_ctdb_rec *crec = NULL;
+	struct ctdb_ltdb_header header;
+	struct ctdb_ltdb_header push_header;
+	TDB_DATA marker_key;
+	TDB_DATA marker_val;
+	char *curtime = NULL;
+	NTSTATUS status;
+	int ret;
+
+	migration_state = (struct migrate_persistent_state) {
+		.db_ctdb_ctx = db_ctdb_ctx,
+		.tmp_ctx = talloc_stackframe(),
+	};
+
+	/*
+	 * First let's check if the volatile db was cleared by
+	 * clear-if-first. That would imply an smbd or cluster restart, so we
+	 * have to trigger migration of records from the persistent db back to
+	 * the volatile db.
+	 */
+	marker_key = string_term_tdb_data(
+		DBWRAP_PERSISTENT_MIGRATION_MARKER_KEY);
+
+	marker_rec = fetch_locked_internal(db_ctdb_ctx,
+					   db_ctdb_ctx,
+					   marker_key);
+	if (marker_rec == NULL) {
+		DBG_ERR("db_tdb_fetch_locked() failed\n");
+		ret = -1;
+		goto out;
+	}
+
+	marker_val = dbwrap_record_get_value(marker_rec);
+	if (marker_val.dptr != NULL) {
+		DBG_DEBUG("db [%s] already migrated at %s\n",
+			  db->name, marker_val.dptr);
+		TALLOC_FREE(marker_rec);
+
+		ret = 0;
+		goto out;
+	}
+
+	server_id_put(idbuf, id);
+	marker_val = (TDB_DATA) {
+		.dptr = idbuf,
+		.dsize = SERVER_ID_BUF_LENGTH,
+	};
+	crec = talloc_get_type_abort(marker_rec->private_data,
+				     struct db_ctdb_rec);
+	crec->header.flags |= CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+
+	status = db_ctdb_ltdb_store(db_ctdb_ctx,
+				    marker_key,
+				    &crec->header,
+				    &marker_val,
+				    1);
+	if (!NT_STATUS_IS_OK(status)) {
+		ret = -1;
+		goto out;
+	}
+
+	TALLOC_FREE(marker_rec);
+
+	ret = tdb_traverse_read(pdb_ctdb_ctx->wtdb->tdb,
+				migrate_persistent_traverse_fn,
+				&migration_state);
+	if (ret == -1) {
+		DBG_ERR("tdb_traverse_read failed\n");
+		goto out;
+	}
+
+	DBG_INFO("Migrated %d records of db [%s]\n", ret, db->name);
+
+	marker_rec = fetch_locked_internal(db_ctdb_ctx,
+					   db_ctdb_ctx,
+					   marker_key);
+	if (marker_rec == NULL) {
+		DBG_ERR("db_tdb_fetch_locked() failed\n");
+		ret = -1;
+		goto out;
+	}
+
+	curtime = current_timestring(db_ctdb_ctx, false);
+	if (curtime == NULL) {
+		ret = -1;
+		goto out;
+	}
+	marker_val = string_term_tdb_data(curtime);
+
+	crec = talloc_get_type_abort(marker_rec->private_data,
+				     struct db_ctdb_rec);
+
+	push_header = crec->header;
+	push_header.flags &= ~CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+
+	header = crec->header;
+	prepare_local_header_for_push_record(&header);
+	header.flags &= ~CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS;
+
+	status = db_ctdb_ltdb_store(db_ctdb_ctx,
+				    marker_key,
+				    &header,
+				    &marker_val,
+				    1);
+	if (!NT_STATUS_IS_OK(status)) {
+		ret = -1;
+		goto out;
+	}
+
+	/*
+	 * Release the record, and with it the chainlock, before talking to
+	 * the local ctdbd below.
+	 */
+	TALLOC_FREE(marker_rec);
+	crec = NULL;
+
+	status = db_ctdb_push_record(migration_state.tmp_ctx,
+				     db_ctdb_ctx,
+				     &push_header,
+				     marker_key,
+				     &marker_val,
+				     1);
+	if (!NT_STATUS_IS_OK(status)) {
+		ret = -1;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	TALLOC_FREE(migration_state.tmp_ctx);
+	TALLOC_FREE(curtime);
+	TALLOC_FREE(marker_rec);
+	return ret;
+}
+
+static NTSTATUS db_ctdb_open_per_rec_persistent_db(
+	struct db_context *db,
+	struct messaging_context *msg_ctx,
+	int hash_size,
+	int tdb_flags,
+	int open_flags,
+	mode_t mode,
+	enum dbwrap_lock_order lock_order,
+	uint64_t dbwrap_flags)
+{
+	struct db_ctdb_ctx *db_ctx = talloc_get_type_abort(
+		db->private_data, struct db_ctdb_ctx);
+	char *tmpname = NULL;
+	char *dot = NULL;
+	char *persistent_name = NULL;
+	int ptdb_flags;
+	int ret;
+
+	if (!(dbwrap_flags & DBWRAP_FLAG_PER_REC_PERSISTENT)) {
+		return NT_STATUS_OK;
+	}
+
+	if (db->persistent) {
+		DBG_WARNING("DBWRAP_FLAG_PER_REC_PERSISTENT only allowed with "
+			    "TDB_CLEAR_IF_FIRST\n");
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	if (lp_persistent_handles_durability() == PH_DURABILITY_PARTIAL_OUTAGE) {
+		/*
+		 * The records are kept on every node by the push-record, which
+		 * covers any outage that leaves a node running. The backup db
+		 * only adds surviving an outage of all nodes at once, and the
+		 * admin has told us not to pay for that.
+		 */
+		DBG_NOTICE("No persistent backup db for %s, persistent handles "
+			   "durability is partial_outage\n", db->name);
+		return NT_STATUS_OK;
+	}
+
+	ptdb_flags = tdb_flags & ~(TDB_CLEAR_IF_FIRST | TDB_MUTEX_LOCKING);
+	dbwrap_flags &= ~DBWRAP_FLAG_PER_REC_PERSISTENT;
+
+	tmpname = talloc_strdup(db_ctx, db->name);
+	if (tmpname == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	dot = strrchr(tmpname, '.');
+	if (dot != NULL) {
+		*dot = '\0';
+	}
+	persistent_name = talloc_asprintf(db,
+					  "%s_persistent.tdb",
+					  tmpname);
+	TALLOC_FREE(tmpname);
+	if (persistent_name == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	db_ctx->pdb = db_open_ctdb(db_ctx,
+				   msg_ctx,
+				   persistent_name,
+				   hash_size,
+				   ptdb_flags,
+				   open_flags,
+				   mode,
+				   lock_order,
+				   dbwrap_flags);
+	TALLOC_FREE(persistent_name);
+	if (db_ctx->pdb == NULL) {
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+
+	db->traverse_per_rec_persistent_read =
+		db_ctdb_traverse_per_rec_persistent_read;
+
+	if ((open_flags & O_ACCMODE) != O_RDWR) {
+		return NT_STATUS_OK;
+	}
+
+	ret = db_ctdb_migrate_persistent_recs(db, msg_ctx);
+	if (ret != 0) {
+		DBG_ERR("Record migration in db %s failed\n", db->name);
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+
+	return NT_STATUS_OK;
+}
+
+struct db_context *db_open_ctdb_ex(TALLOC_CTX *mem_ctx,
+				   struct tevent_context *ev_ctx,
+				   struct messaging_context *msg_ctx,
+				   struct ctdbd_connection *ctdb_conn,
+				   bool persistent,
+				   bool allow_transactions,
+				   const char *name,
+				   int hash_size,
+				   int tdb_flags,
+				   int open_flags,
+				   mode_t mode,
+				   enum dbwrap_lock_order lock_order,
+				   uint64_t dbwrap_flags)
 {
 	struct db_context *result;
 	struct db_ctdb_ctx *db_ctdb;
@@ -1803,13 +3042,21 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	struct loadparm_context *lp_ctx;
 	TDB_DATA data;
 	TDB_DATA outdata = {0};
-	bool persistent = (tdb_flags & TDB_CLEAR_IF_FIRST) == 0;
 	int32_t cstatus;
+	NTSTATUS status;
 	int ret;
 
-	if (!lp_clustering()) {
-		DEBUG(10, ("Clustering disabled -- no ctdb\n"));
-		return NULL;
+	SMB_ASSERT(lp_clustering());
+	SMB_ASSERT(ctdb_conn != NULL);
+	if (allow_transactions) {
+		SMB_ASSERT(persistent);
+		SMB_ASSERT(msg_ctx != NULL);
+	}
+	if (!persistent) {
+		SMB_ASSERT(ev_ctx != NULL);
+	}
+	if (dbwrap_flags & DBWRAP_FLAG_PER_REC_PERSISTENT) {
+		SMB_ASSERT(msg_ctx != NULL);
 	}
 
 	if (!(result = talloc_zero(mem_ctx, struct db_context))) {
@@ -1818,7 +3065,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
-	if (!(db_ctdb = talloc(result, struct db_ctdb_ctx))) {
+	if (!(db_ctdb = talloc_zero(result, struct db_ctdb_ctx))) {
 		DEBUG(0, ("talloc failed\n"));
 		TALLOC_FREE(result);
 		return NULL;
@@ -1831,10 +3078,16 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
+	if (msg_ctx != NULL) {
+		db_ctdb->msg_server_id = messaging_server_id(msg_ctx);
+	} else {
+		server_id_set_disconnected(&db_ctdb->msg_server_id);
+	}
+	db_ctdb->allow_transactions = allow_transactions;
 	db_ctdb->transaction = NULL;
 	db_ctdb->db = result;
 
-	ret = ctdbd_db_attach(messaging_ctdb_connection(), name,
+	ret = ctdbd_db_attach(ctdb_conn, name,
 			      &db_ctdb->db_id, persistent);
 	if (ret != 0) {
 		DEBUG(0, ("ctdbd_db_attach failed for %s: %s\n", name,
@@ -1847,7 +3100,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		data.dptr = (uint8_t *)&db_ctdb->db_id;
 		data.dsize = sizeof(db_ctdb->db_id);
 
-		ret = ctdbd_control_local(messaging_ctdb_connection(),
+		ret = ctdbd_control_local(ctdb_conn,
 					  CTDB_CONTROL_ENABLE_SEQNUM,
 					  0, 0, data,
 					  NULL, NULL, &cstatus);
@@ -1859,7 +3112,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	db_path = ctdbd_dbpath(messaging_ctdb_connection(), db_ctdb,
+	db_path = ctdbd_dbpath(ctdb_conn, db_ctdb,
 			       db_ctdb->db_id);
 	if (db_path == NULL) {
 		DBG_ERR("ctdbd_dbpath failed\n");
@@ -1873,7 +3126,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	data.dptr = (uint8_t *)&db_ctdb->db_id;
 	data.dsize = sizeof(db_ctdb->db_id);
 
-	ret = ctdbd_control_local(messaging_ctdb_connection(),
+	ret = ctdbd_control_local(ctdb_conn,
 				  CTDB_CONTROL_DB_OPEN_FLAGS,
 				  0, 0, data, NULL, &outdata, &cstatus);
 	if (ret != 0) {
@@ -1894,12 +3147,20 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	TALLOC_FREE(outdata.dptr);
 
 	if (!result->persistent) {
-		ret = ctdb_async_ctx_init(NULL, messaging_tevent_context(msg_ctx));
+		ret = ctdb_async_ctx_init(NULL, ev_ctx);
 		if (ret != 0) {
 			DBG_ERR("ctdb_async_ctx_init failed: %s\n", strerror(ret));
 			TALLOC_FREE(result);
 			return NULL;
 		}
+	}
+
+	if (dbwrap_flags & DBWRAP_FLAG_PER_REC_PERSISTENT) {
+		/*
+		 * TODO: check compatibility of using push-record with read-only
+		 * copies. For now disable read-only records.
+		 */
+		dbwrap_flags &= ~DBWRAP_FLAG_OPTIMIZE_READONLY_ACCESS;
 	}
 
 	if (!result->persistent &&
@@ -1911,7 +3172,7 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 				       sizeof(db_ctdb->db_id));
 
 		ret = ctdbd_control_local(
-			messaging_ctdb_connection(),
+			ctdb_conn,
 			CTDB_CONTROL_SET_DB_READONLY, 0, 0,
 			indata, NULL, NULL, &cstatus);
 		if ((ret != 0) || (cstatus != 0)) {
@@ -1952,10 +3213,13 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	if (result->persistent) {
-		db_ctdb->lock_ctx = g_lock_ctx_init(db_ctdb, msg_ctx);
+	if (db_ctdb->allow_transactions) {
+		db_ctdb->lock_ctx = g_lock_ctx_init_ex(db_ctdb,
+						       msg_ctx,
+						       ev_ctx,
+						       ctdb_conn);
 		if (db_ctdb->lock_ctx == NULL) {
-			DEBUG(0, ("g_lock_ctx_init failed\n"));
+			DEBUG(0, ("g_lock_ctx_init_ex failed\n"));
 			TALLOC_FREE(result);
 			return NULL;
 		}
@@ -1980,10 +3244,61 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	result->transaction_start = db_ctdb_transaction_start;
 	result->transaction_commit = db_ctdb_transaction_commit;
 	result->transaction_cancel = db_ctdb_transaction_cancel;
+	result->wipe = db_ctdb_wipe;
 	result->id = db_ctdb_id;
+	result->flags = dbwrap_flags;
 
-	DEBUG(3,("db_open_ctdb: opened database '%s' with dbid 0x%x\n",
-		 name, db_ctdb->db_id));
+	DBG_NOTICE("opened database '%s' with dbid 0x%x\n",
+		   name, db_ctdb->db_id);
+
+	status = db_ctdb_open_per_rec_persistent_db(result,
+						    msg_ctx,
+						    hash_size,
+						    tdb_flags,
+						    open_flags,
+						    mode,
+						    lock_order,
+						    dbwrap_flags);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
 
 	return result;
+
+fail:
+	TALLOC_FREE(result);
+	return NULL;
+}
+
+struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
+				struct messaging_context *msg_ctx,
+				const char *name,
+				int hash_size,
+				int tdb_flags,
+				int open_flags,
+				mode_t mode,
+				enum dbwrap_lock_order lock_order,
+				uint64_t dbwrap_flags)
+{
+	bool persistent = (tdb_flags & TDB_CLEAR_IF_FIRST) == 0;
+	bool allow_transactions = persistent;
+
+	if (!lp_clustering()) {
+		DEBUG(10, ("Clustering disabled -- no ctdb\n"));
+		return NULL;
+	}
+
+	return db_open_ctdb_ex(mem_ctx,
+			       messaging_tevent_context(msg_ctx),
+			       msg_ctx,
+			       messaging_ctdb_connection(),
+			       persistent,
+			       allow_transactions,
+			       name,
+			       hash_size,
+			       tdb_flags,
+			       open_flags,
+			       mode,
+			       lock_order,
+			       dbwrap_flags);
 }

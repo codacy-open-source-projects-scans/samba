@@ -97,6 +97,13 @@ struct ctdb_vnn {
 	   This helps to avoid races. */
 	bool update_in_flight;
 
+	/*
+	 * Help avoid removing connections when a RELEASE_IP is in
+	 * progress.  In this case the takeover node will need the
+	 * connection information to send tickle ACKs.
+	 */
+	bool release_in_flight;
+
 	/* If CTDB_CONTROL_DEL_PUBLIC_IP is received for this IP
 	 * address then this flag is set.  It will be deleted in the
 	 * release IP callback. */
@@ -282,21 +289,20 @@ static int32_t ctdb_vnn_assign_iface(struct ctdb_context *ctdb,
 	best->references++;
 	vnn->pnn = ctdb->pnn;
 
-	DBG_INFO("public address '%s' now assigned to iface '%s' refs[%d]\n",
-		 ctdb_vnn_address_string(vnn),
-		 ctdb_vnn_iface_string(vnn),
-		 best->references);
+	D_INFO("Assigned: %s (now on %s[refs=%d])\n",
+	       ctdb_vnn_address_string(vnn),
+	       ctdb_vnn_iface_string(vnn),
+	       best->references);
 	return 0;
 }
 
 static void ctdb_vnn_unassign_iface(struct ctdb_context *ctdb,
 				    struct ctdb_vnn *vnn)
 {
-	DBG_INFO("public address '%s' "
-		 "now unassigned (old iface '%s' refs[%d])\n",
-		 ctdb_vnn_address_string(vnn),
-		 ctdb_vnn_iface_string(vnn),
-		 vnn->iface != NULL ? vnn->iface->references : 0);
+	D_INFO("Unassigned: %s (was on %s[refs=%d])\n",
+	       ctdb_vnn_address_string(vnn),
+	       ctdb_vnn_iface_string(vnn),
+	       vnn->iface != NULL ? vnn->iface->references : 0);
 	if (vnn->iface) {
 		vnn->iface->references--;
 	}
@@ -507,7 +513,7 @@ static void ctdb_do_takeip_callback(struct ctdb_context *ctdb, int status,
 	data.dptr  = (uint8_t *)discard_const(
 		ctdb_vnn_address_string(state->vnn));
 	data.dsize = strlen((char *)data.dptr) + 1;
-	DEBUG(DEBUG_INFO,(__location__ " sending TAKE_IP for '%s'\n", data.dptr));
+	D_INFO("Sending TAKE_IP message [%s]\n", data.dptr);
 
 	ctdb_daemon_send_message(ctdb, ctdb->pnn, CTDB_SRVID_TAKE_IP, data);
 
@@ -881,7 +887,7 @@ static struct ctdb_vnn *release_ip_post(struct ctdb_context *ctdb,
 	 */
 	data.dptr = (uint8_t *)ctdb_addr_to_str(addr);
 	data.dsize = strlen((char *)data.dptr)+1;
-	DEBUG(DEBUG_INFO, ("Sending RELEASE_IP message for %s\n", data.dptr));
+	D_INFO("Sending RELEASE_IP message [%s]\n", data.dptr);
 	ctdb_daemon_send_message(ctdb, ctdb->pnn, CTDB_SRVID_RELEASE_IP, data);
 
 	ctdb_vnn_unassign_iface(ctdb, vnn);
@@ -939,6 +945,7 @@ static int ctdb_releaseip_destructor(struct release_ip_callback_state *state)
 {
 	if (state->vnn != NULL) {
 		state->vnn->update_in_flight = false;
+		state->vnn->release_in_flight = false;
 	}
 	return 0;
 }
@@ -1040,6 +1047,7 @@ int32_t ctdb_control_release_ip(struct ctdb_context *ctdb,
 	state->vnn   = vnn;
 
 	vnn->update_in_flight = true;
+	vnn->release_in_flight = true;
 	talloc_set_destructor(state, ctdb_releaseip_destructor);
 
 	ret = ctdb_event_script_callback(ctdb, 
@@ -1393,6 +1401,7 @@ int32_t ctdb_control_tcp_client_disconnected(struct ctdb_context *ctdb,
 	int ret;
 	TDB_DATA data;
 	char conn_str[132] = { 0, };
+	struct ctdb_vnn *vnn = NULL;
 	bool found = false;
 
 	tcp_sock = (struct ctdb_connection *)indata.dptr;
@@ -1420,6 +1429,22 @@ int32_t ctdb_control_tcp_client_disconnected(struct ctdb_context *ctdb,
 	D_INFO("deregistered TCP connection %s "
 	       "(client_id %u pid %u)\n",
 	       conn_str, client_id, client->pid);
+
+	/*
+	 * If the public IP has been released or is in the process of
+	 * being released, don't remove connection info from all
+	 * nodes.  The takeover node will need it send a tickle ACK.
+	 */
+	vnn = find_public_ip_vnn(ctdb, &tcp_sock->dst);
+	if (vnn != NULL) {
+		if (vnn->pnn != ctdb->pnn) {
+			/* Moved elsewhere */
+			return 0;
+		}
+		if (vnn->release_in_flight) {
+			return 0;
+		}
+	}
 
 	data.dptr = (uint8_t *)tcp_sock;
 	data.dsize = sizeof(*tcp_sock);
@@ -1775,6 +1800,7 @@ void ctdb_release_all_ips(struct ctdb_context *ctdb)
 			continue;
 		}
 		vnn->update_in_flight = true;
+		vnn->release_in_flight = true;
 
 		D_INFO("Release of IP %s/%u on interface %s node:-1\n",
 		       ctdb_vnn_address_string(vnn),
@@ -1804,18 +1830,21 @@ void ctdb_release_all_ips(struct ctdb_context *ctdb)
 					ctdb_vnn_address_string(vnn));
 			}
 			vnn->update_in_flight = false;
+			vnn->release_in_flight = false;
 			continue;
 		}
 		if (ret != 0) {
 			DBG_ERR("Error releasing IP %s (but IP is gone!)\n",
 				ctdb_vnn_address_string(vnn));
 			vnn->update_in_flight = false;
+			vnn->release_in_flight = false;
 			continue;
 		}
 
 		vnn = release_ip_post(ctdb, vnn, &vnn->public_address);
 		if (vnn != NULL) {
 			vnn->update_in_flight = false;
+			vnn->release_in_flight = false;
 		}
 		count++;
 	}
@@ -2468,8 +2497,6 @@ int32_t ctdb_control_ipreallocated(struct ctdb_context *ctdb,
 	state = talloc(ctdb, struct ipreallocated_callback_state);
 	CTDB_NO_MEMORY(ctdb, state);
 
-	DEBUG(DEBUG_INFO,(__location__ " Running \"ipreallocated\" event\n"));
-
 	ret = ctdb_event_script_callback(ctdb, state,
 					 ctdb_ipreallocated_callback, state,
 					 CTDB_EVENT_IPREALLOCATED,
@@ -2538,8 +2565,6 @@ int32_t ctdb_control_start_ipreallocate(struct ctdb_context *ctdb,
 		DBG_ERR("Memory allocation error\n");
 		return -1;
 	}
-
-	DBG_INFO("Running \"startipreallocate\" event\n");
 
 	ret = ctdb_event_script_callback(ctdb,
 					 state,

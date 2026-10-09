@@ -131,6 +131,7 @@ NTSTATUS gmsa_password_based_on_key_id(
 	uint8_t password[static const GMSA_PASSWORD_NULL_TERMINATED_LEN])
 {
 	NTSTATUS status = NT_STATUS_OK;
+	bool ok = true;
 
 	/* Ensure that a specific seed key is being requested. */
 
@@ -156,19 +157,11 @@ NTSTATUS gmsa_password_based_on_key_id(
 		goto out;
 	}
 
-	{
-		/*
-		 * The key being requested must not be from the future. That
-		 * said, we allow for a little bit of clock skew so that samdb
-		 * can compute the next managed password prior to the expiration
-		 * of the current one.
-		 */
-		const struct Gkid current_gkid = gkdi_get_interval_id(
-			current_time + gkdi_max_clock_skew);
-		if (!gkid_less_than_or_equal_to(gkid, current_gkid)) {
-			status = NT_STATUS_INVALID_PARAMETER;
-			goto out;
-		}
+	/* Ensure the key being requested is not from the future. */
+	ok = gkid_start_time_valid(gkid, current_time);
+	if (!ok) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
 	/*
@@ -255,14 +248,5 @@ NTSTATUS gmsa_talloc_password_based_on_key_id(
 
 bool gmsa_current_time(NTTIME *current_time_out)
 {
-	struct timespec current_timespec;
-	int ret;
-
-	ret = clock_gettime(CLOCK_REALTIME, &current_timespec);
-	if (ret) {
-		return false;
-	}
-
-	*current_time_out = full_timespec_to_nt_time(&current_timespec);
-	return true;
+	return gkdi_current_time(current_time_out);
 }

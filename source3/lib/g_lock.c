@@ -137,7 +137,8 @@ static NTSTATUS g_lock_store(
 	struct g_lock *lck,
 	struct server_id *new_shared,
 	const TDB_DATA *new_dbufs,
-	size_t num_new_dbufs)
+	size_t num_new_dbufs,
+	int dbwrap_flags)
 {
 	uint8_t exclusive[SERVER_ID_BUF_LENGTH];
 	uint8_t seqnum_buf[sizeof(uint64_t)*2];
@@ -191,7 +192,7 @@ static NTSTATUS g_lock_store(
 
 	SIVAL(sizebuf, 0, lck->num_shared);
 
-	return dbwrap_record_storev(rec, dbufs, ARRAY_SIZE(dbufs), 0);
+	return dbwrap_record_storev(rec, dbufs, ARRAY_SIZE(dbufs), dbwrap_flags);
 }
 
 struct g_lock_ctx *g_lock_ctx_init_backend(
@@ -223,20 +224,27 @@ void g_lock_set_lock_order(struct g_lock_ctx *ctx,
 	ctx->lock_order = lock_order;
 }
 
-struct g_lock_ctx *g_lock_ctx_init(TALLOC_CTX *mem_ctx,
-				   struct messaging_context *msg)
+struct g_lock_ctx *g_lock_ctx_init_ex(TALLOC_CTX *mem_ctx,
+				      struct messaging_context *msg,
+				      struct tevent_context *ev_ctx_ex,
+				      struct ctdbd_connection *ctdb_conn_ex)
 {
 	char *db_path = NULL;
 	struct db_context *backend = NULL;
 	struct g_lock_ctx *ctx = NULL;
+
+	SMB_ASSERT(msg != NULL);
 
 	db_path = lock_path(mem_ctx, "g_lock.tdb");
 	if (db_path == NULL) {
 		return NULL;
 	}
 
-	backend = db_open(
+	backend = db_open_ex(
 		mem_ctx,
+		ev_ctx_ex,
+		msg,
+		ctdb_conn_ex,
 		db_path,
 		0,
 		TDB_CLEAR_IF_FIRST|TDB_INCOMPATIBLE_HASH|TDB_VOLATILE,
@@ -251,6 +259,24 @@ struct g_lock_ctx *g_lock_ctx_init(TALLOC_CTX *mem_ctx,
 	}
 
 	ctx = g_lock_ctx_init_backend(mem_ctx, msg, &backend);
+	return ctx;
+}
+
+struct g_lock_ctx *g_lock_ctx_init(TALLOC_CTX *mem_ctx,
+				   struct messaging_context *msg)
+{
+	struct g_lock_ctx *ctx = NULL;
+	static bool busy;
+
+	SMB_ASSERT(!busy);
+
+	busy = true;
+	ctx = g_lock_ctx_init_ex(mem_ctx,
+				 msg,
+				 NULL,  /* ev_ctx_ex */
+				 NULL); /* ctdb_conn_ex */
+	busy = false;
+
 	return ctx;
 }
 
@@ -349,6 +375,7 @@ struct g_lock_lock_cb_state {
 	bool existed;
 	bool modified;
 	bool unlock;
+	int dbwrap_flags;
 };
 
 NTSTATUS g_lock_lock_cb_dump(struct g_lock_lock_cb_state *cb_state,
@@ -377,7 +404,8 @@ NTSTATUS g_lock_lock_cb_dump(struct g_lock_lock_cb_state *cb_state,
 
 NTSTATUS g_lock_lock_cb_writev(struct g_lock_lock_cb_state *cb_state,
 			       const TDB_DATA *dbufs,
-			       size_t num_dbufs)
+			       size_t num_dbufs,
+			       int flags)
 {
 	NTSTATUS status;
 
@@ -391,6 +419,7 @@ NTSTATUS g_lock_lock_cb_writev(struct g_lock_lock_cb_state *cb_state,
 	cb_state->modified = true;
 	cb_state->lck->data = cb_state->updated_data.dptr;
 	cb_state->lck->datalen = cb_state->updated_data.dsize;
+	cb_state->dbwrap_flags = flags;
 
 	return NT_STATUS_OK;
 }
@@ -647,7 +676,9 @@ static NTSTATUS g_lock_lock_cb_run_and_store(struct g_lock_lock_cb_state *cb_sta
 	status = g_lock_store(cb_state->rec,
 			      cb_state->lck,
 			      cb_state->new_shared,
-			      NULL, 0);
+			      NULL,
+			      0,
+			      cb_state->dbwrap_flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_store() failed: %s\n",
 			    nt_errstr(status));
@@ -697,6 +728,8 @@ static NTSTATUS g_lock_trylock(
 		.cb_private = req_state->cb_private,
 		.existed = data.dsize != 0,
 		.update_mem_ctx = talloc_tos(),
+		.dbwrap_flags = dbwrap_record_get_flags(rec).persistent ?
+			DBWRAP_STORE_PERSISTENT : 0,
 	};
 	struct server_id_buf tmp;
 	NTSTATUS status;
@@ -719,6 +752,8 @@ static NTSTATUS g_lock_trylock(
 		if (!self_exclusive) {
 			bool exists = serverid_exists(&lck.exclusive);
 			if (!exists) {
+				DBG_INFO("Exclusive locker %s died -- removing\n",
+					 server_id_str_buf(lck.exclusive, &tmp));
 				lck.exclusive = (struct server_id) { .pid=0 };
 				goto noexclusive;
 			}
@@ -860,6 +895,8 @@ noexclusive:
 
 	if (type == G_LOCK_WRITE) {
 		ssize_t shared_idx = g_lock_find_shared(&lck, &self);
+		int flags = dbwrap_record_get_flags(rec).persistent ?
+			DBWRAP_STORE_PERSISTENT : 0;
 
 		if (shared_idx != -1) {
 			dbwrap_watched_watch_remove_instance(rec,
@@ -898,7 +935,7 @@ noexclusive:
 				dbwrap_watched_watch_add_instance(rec);
 		}
 
-		status = g_lock_store(rec, &lck, NULL, NULL, 0);
+		status = g_lock_store(rec, &lck, NULL, NULL, 0, flags);
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_DEBUG("g_lock_store() failed: %s\n",
 				  nt_errstr(status));
@@ -1171,6 +1208,8 @@ static void g_lock_lock_simple_fn(
 		.cb_private = state->cb_private,
 		.existed = value.dsize != 0,
 		.update_mem_ctx = talloc_tos(),
+		.dbwrap_flags = dbwrap_record_get_flags(rec).persistent ?
+			DBWRAP_STORE_PERSISTENT : 0,
 	};
 	bool ok;
 
@@ -1249,6 +1288,8 @@ NTSTATUS g_lock_lock(struct g_lock_ctx *ctx, TDB_DATA key,
 		return NT_STATUS_INVALID_PARAMETER_5;
 	}
 
+	frame = talloc_stackframe();
+
 	if ((type == G_LOCK_READ) || (type == G_LOCK_WRITE)) {
 		/*
 		 * This is an abstraction violation: Normally we do
@@ -1271,7 +1312,7 @@ NTSTATUS g_lock_lock(struct g_lock_ctx *ctx, TDB_DATA key,
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_DEBUG("dbwrap_do_locked() failed: %s\n",
 				  nt_errstr(status));
-			return status;
+			goto done;
 		}
 
 		DBG_DEBUG("status=%s, state.status=%s\n",
@@ -1283,19 +1324,23 @@ NTSTATUS g_lock_lock(struct g_lock_ctx *ctx, TDB_DATA key,
 				const char *name = dbwrap_name(ctx->db);
 				dbwrap_lock_order_lock(name, ctx->lock_order);
 			}
-			return NT_STATUS_OK;
+			status = NT_STATUS_OK;
+			goto done;
 		}
 		if (NT_STATUS_EQUAL(state.status, NT_STATUS_WAS_UNLOCKED)) {
 			/* without dbwrap_lock_order_lock() */
-			return NT_STATUS_OK;
+			status = NT_STATUS_OK;
+			goto done;
 		}
 		if (!NT_STATUS_EQUAL(
 			    state.status, NT_STATUS_LOCK_NOT_GRANTED)) {
-			return state.status;
+			status = state.status;
+			goto done;
 		}
 
 		if (timeval_is_zero(&timeout)) {
-			return NT_STATUS_LOCK_NOT_GRANTED;
+			status = NT_STATUS_LOCK_NOT_GRANTED;
+			goto done;
 		}
 
 		/*
@@ -1305,26 +1350,25 @@ NTSTATUS g_lock_lock(struct g_lock_ctx *ctx, TDB_DATA key,
 		 */
 	}
 
-	frame = talloc_stackframe();
 	status = NT_STATUS_NO_MEMORY;
 
 	ev = samba_tevent_context_init(frame);
 	if (ev == NULL) {
-		goto fail;
+		goto done;
 	}
 	req = g_lock_lock_send(frame, ev, ctx, key, type, cb_fn, cb_private);
 	if (req == NULL) {
-		goto fail;
+		goto done;
 	}
 	end = timeval_current_ofs(timeout.tv_sec, timeout.tv_usec);
 	if (!tevent_req_set_endtime(req, ev, end)) {
-		goto fail;
+		goto done;
 	}
 	if (!tevent_req_poll_ntstatus(req, ev, &status)) {
-		goto fail;
+		goto done;
 	}
 	status = g_lock_lock_recv(req);
- fail:
+done:
 	TALLOC_FREE(frame);
 	return status;
 }
@@ -1340,6 +1384,8 @@ static void g_lock_unlock_fn(
 	void *private_data)
 {
 	struct g_lock_unlock_state *state = private_data;
+	int flags = dbwrap_record_get_flags(rec).persistent ?
+		DBWRAP_STORE_PERSISTENT : 0;
 	struct server_id_buf tmp1, tmp2;
 	struct g_lock lck;
 	size_t i;
@@ -1407,7 +1453,7 @@ static void g_lock_unlock_fn(
 
 	lck.unique_lock_epoch = generate_unique_u64(lck.unique_lock_epoch);
 
-	state->status = g_lock_store(rec, &lck, NULL, NULL, 0);
+	state->status = g_lock_store(rec, &lck, NULL, NULL, 0, flags);
 }
 
 NTSTATUS g_lock_unlock(struct g_lock_ctx *ctx, TDB_DATA key)
@@ -1445,6 +1491,7 @@ struct g_lock_writev_data_state {
 	const TDB_DATA *dbufs;
 	size_t num_dbufs;
 	NTSTATUS status;
+	int dbwrap_flags;
 };
 
 static void g_lock_writev_data_fn(
@@ -1498,21 +1545,28 @@ static void g_lock_writev_data_fn(
 	lck.unique_data_epoch = generate_unique_u64(lck.unique_data_epoch);
 	lck.data = NULL;
 	lck.datalen = 0;
-	state->status = g_lock_store(
-		rec, &lck, NULL, state->dbufs, state->num_dbufs);
+
+	state->status = g_lock_store(rec,
+				     &lck,
+				     NULL,
+				     state->dbufs,
+				     state->num_dbufs,
+				     state->dbwrap_flags);
 }
 
 NTSTATUS g_lock_writev_data(
 	struct g_lock_ctx *ctx,
 	TDB_DATA key,
 	const TDB_DATA *dbufs,
-	size_t num_dbufs)
+	size_t num_dbufs,
+	int flags)
 {
 	struct g_lock_writev_data_state state = {
 		.key = key,
 		.self = messaging_server_id(ctx->msg),
 		.dbufs = dbufs,
 		.num_dbufs = num_dbufs,
+		.dbwrap_flags = flags,
 	};
 	NTSTATUS status;
 
@@ -1541,7 +1595,7 @@ NTSTATUS g_lock_write_data(struct g_lock_ctx *ctx, TDB_DATA key,
 		.dptr = discard_const_p(uint8_t, buf),
 		.dsize = buflen,
 	};
-	return g_lock_writev_data(ctx, key, &dbuf, 1);
+	return g_lock_writev_data(ctx, key, &dbuf, 1, 0);
 }
 
 struct g_lock_locks_state {
@@ -1977,6 +2031,8 @@ static void g_lock_wake_watchers_fn(
 	void *private_data)
 {
 	struct g_lock lck = { .exclusive.pid = 0 };
+	int flags = dbwrap_record_get_flags(rec).persistent ?
+		DBWRAP_STORE_PERSISTENT : 0;
 	NTSTATUS status;
 	bool ok;
 
@@ -1988,7 +2044,7 @@ static void g_lock_wake_watchers_fn(
 
 	lck.unique_data_epoch = generate_unique_u64(lck.unique_data_epoch);
 
-	status = g_lock_store(rec, &lck, NULL, NULL, 0);
+	status = g_lock_store(rec, &lck, NULL, NULL, 0, flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_store failed: %s\n", nt_errstr(status));
 		return;
@@ -2006,4 +2062,15 @@ void g_lock_wake_watchers(struct g_lock_ctx *ctx, TDB_DATA key)
 		DBG_DEBUG("dbwrap_do_locked returned %s\n",
 			  nt_errstr(status));
 	}
+}
+
+NTSTATUS g_lock_wipe(struct g_lock_ctx *ctx, struct dbwrap_wipe_flags flags)
+{
+	int ret;
+
+	ret = dbwrap_wipe(ctx->db, flags);
+	if (ret != 0) {
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+	return NT_STATUS_OK;
 }

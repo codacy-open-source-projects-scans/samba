@@ -186,7 +186,7 @@ bool interpret_string_addr_internal(struct addrinfo **ppres,
 	}
 
 	if (strchr_m(str, ':')) {
-		char *p = strchr_m(str, SCOPE_DELIMITER);
+		const char *p = strchr_m(str, SCOPE_DELIMITER);
 
 		/*
 		 * Cope with link-local.
@@ -475,7 +475,7 @@ bool is_ipaddress_v6(const char *str)
 {
 #if defined(HAVE_IPV6)
 	int ret = -1;
-	char *p = NULL;
+	const char *p = NULL;
 	char buf[INET6_ADDRSTRLEN] = { 0, };
 	size_t len;
 	const char *addr = str;
@@ -885,6 +885,38 @@ char *print_canonical_sockaddr(TALLOC_CTX *ctx,
 	return dest;
 }
 
+char *ssaddr_str_buf(const struct samba_sockaddr *addr, struct ssaddr_buf *dst)
+{
+	socklen_t salen;
+
+	switch (addr->u.ss.ss_family) {
+	case AF_INET:
+		salen = sizeof(addr->u.in);
+		break;
+	case AF_INET6:
+		salen = sizeof(addr->u.in6);
+		break;
+	case AF_UNIX:
+		/*
+		 * Not sure what getnameinfo does for AF_UNIX, but
+		 * lets put it in for completeness.
+		 */
+		salen = sizeof(addr->u.un);
+		break;
+	default:
+		snprintf(dst->buf,
+			 sizeof(dst->buf),
+			 "AF %d unknown",
+			 addr->u.ss.ss_family);
+		return dst->buf;
+	}
+
+	return print_sockaddr_len(dst->buf,
+				  sizeof(dst->buf),
+				  &addr->u.sa,
+				  salen);
+}
+
 enum SOCK_OPT_TYPES {OPT_BOOL,OPT_INT,OPT_ON};
 
 typedef struct smb_socket_option {
@@ -1067,60 +1099,4 @@ void set_socket_options(int fd, const char *options)
 
 	print_socket_options(ctx, fd);
 	TALLOC_FREE(ctx);
-}
-
-/*
- * Utility function that copes only with AF_INET and AF_INET6
- * as that's all we're going to get out of DNS / NetBIOS / WINS
- * name resolution functions.
- */
-
-bool sockaddr_storage_to_samba_sockaddr(
-	struct samba_sockaddr *sa, const struct sockaddr_storage *ss)
-{
-	sa->u.ss = *ss;
-
-	switch (ss->ss_family) {
-	case AF_INET:
-		sa->sa_socklen = sizeof(struct sockaddr_in);
-		break;
-#ifdef HAVE_IPV6
-	case AF_INET6:
-		sa->sa_socklen = sizeof(struct sockaddr_in6);
-		break;
-#endif
-	default:
-		return false;
-	}
-	return true;
-}
-
-bool samba_sockaddr_set_port(struct samba_sockaddr *sa, uint16_t port)
-{
-	if (sa->u.sa.sa_family == AF_INET) {
-		sa->u.in.sin_port = htons(port);
-		return true;
-	}
-#ifdef HAVE_IPV6
-	if (sa->u.sa.sa_family == AF_INET6) {
-		sa->u.in6.sin6_port = htons(port);
-		return true;
-	}
-#endif
-	return false;
-}
-
-bool samba_sockaddr_get_port(const struct samba_sockaddr *sa, uint16_t *port)
-{
-	if (sa->u.sa.sa_family == AF_INET) {
-		*port = ntohs(sa->u.in.sin_port);
-		return true;
-	}
-#ifdef HAVE_IPV6
-	if (sa->u.sa.sa_family == AF_INET6) {
-		*port = ntohs(sa->u.in6.sin6_port);
-		return true;
-	}
-#endif
-	return false;
 }

@@ -337,7 +337,7 @@ static bool test_wbc_users(struct torture_context *tctx)
 		const char *user;
 		char *c;
 
-		c = strchr(users[i], separator);
+		c = discard_const_p(char, strchr_m(users[i], separator));
 
 		if (c == NULL) {
 			/*
@@ -470,7 +470,7 @@ static bool test_wbc_groups(struct torture_context *tctx)
 		const char *group;
 		char *c;
 
-		c = strchr(groups[i], separator);
+		c = discard_const_p(char, strchr_m(groups[i], separator));
 
 		if (c == NULL) {
 			/*
@@ -667,7 +667,7 @@ static bool test_wbc_resolve_winsbyip(struct torture_context *tctx)
 
 	make_nbt_name_server(&nbt_name, host);
 
-	status = resolve_name_ex(lpcfg_resolve_context(tctx->lp_ctx),
+	status = resolve_name_ex(lpcfg_resolve_context(tctx->lp_ctx, tctx),
 				 0, 0, &nbt_name, tctx, &ip, tctx->ev);
 	torture_assert_ntstatus_ok(tctx, status,
 			talloc_asprintf(tctx,"Failed to resolve %s: %s",

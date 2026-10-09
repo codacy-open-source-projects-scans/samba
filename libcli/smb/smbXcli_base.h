@@ -22,6 +22,7 @@
 #define _SMBXCLI_BASE_H_
 
 #define SMB_SUICIDE_PACKET 0x74697865
+#define SMB_SUICIDE_EXIT_STATUS_BYPASS_CLEANUP 234
 
 #include "replace.h"
 #include <tevent.h>
@@ -356,6 +357,54 @@ NTSTATUS smb1cli_close(struct smbXcli_conn *conn,
 		       struct smbXcli_session *session,
 		       uint16_t fnum,
 		       uint32_t last_modified);
+struct smb1_lock_element;
+struct tevent_req *smb1cli_lockingx_create(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct smbXcli_conn *conn,
+	uint32_t timeout_msec,
+	uint32_t pid,
+	struct smbXcli_tcon *tcon,
+	struct smbXcli_session *session,
+	uint16_t fnum,
+	uint8_t typeoflock,
+	uint8_t newoplocklevel,
+	int32_t timeout,
+	uint16_t num_unlocks,
+	const struct smb1_lock_element *unlocks,
+	uint16_t num_locks,
+	const struct smb1_lock_element *locks,
+	struct tevent_req **psmbreq);
+struct tevent_req *smb1cli_lockingx_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct smbXcli_conn *conn,
+	uint32_t timeout_msec,
+	uint32_t pid,
+	struct smbXcli_tcon *tcon,
+	struct smbXcli_session *session,
+	uint16_t fnum,
+	uint8_t typeoflock,
+	uint8_t newoplocklevel,
+	int32_t timeout,
+	uint16_t num_unlocks,
+	const struct smb1_lock_element *unlocks,
+	uint16_t num_locks,
+	const struct smb1_lock_element *locks);
+NTSTATUS smb1cli_lockingx_recv(struct tevent_req *req);
+NTSTATUS smb1cli_lockingx(struct smbXcli_conn *conn,
+			  uint32_t timeout_msec,
+			  uint32_t pid,
+			  struct smbXcli_tcon *tcon,
+			  struct smbXcli_session *session,
+			  uint16_t fnum,
+			  uint8_t typeoflock,
+			  uint8_t newoplocklevel,
+			  int32_t timeout,
+			  uint16_t num_unlocks,
+			  const struct smb1_lock_element *unlocks,
+			  uint16_t num_locks,
+			  const struct smb1_lock_element *locks);
 struct tevent_req *smb1cli_writex_send(TALLOC_CTX *mem_ctx,
 				       struct tevent_context *ev,
 				       struct smbXcli_conn *conn,
@@ -577,6 +626,8 @@ NTSTATUS smb2cli_session_create_channel(TALLOC_CTX *mem_ctx,
 NTSTATUS smb2cli_session_set_channel_key(struct smbXcli_session *session,
 					 const DATA_BLOB channel_key,
 					 const struct iovec *recv_iov);
+NTSTATUS smb2cli_session_check_reauth(struct smbXcli_session *session,
+				      const struct iovec *recv_iov);
 NTSTATUS smb2cli_session_encryption_on(struct smbXcli_session *session);
 uint16_t smb2cli_session_get_encryption_cipher(struct smbXcli_session *session);
 
@@ -822,6 +873,30 @@ NTSTATUS smb2cli_flush(struct smbXcli_conn *conn,
 		       struct smbXcli_tcon *tcon,
 		       uint64_t fid_persistent,
 		       uint64_t fid_volatile);
+
+struct smb2_lock_element;
+
+struct tevent_req *smb2cli_lock_send(TALLOC_CTX *mem_ctx,
+				     struct tevent_context *ev,
+				     struct smbXcli_conn *conn,
+				     uint32_t timeout_msec,
+				     struct smbXcli_session *session,
+				     struct smbXcli_tcon *tcon,
+				     uint64_t fid_persistent,
+				     uint64_t fid_volatile,
+				     uint32_t lock_sequence,
+				     uint16_t num_locks,
+				     const struct smb2_lock_element *locks);
+NTSTATUS smb2cli_lock_recv(struct tevent_req *req);
+NTSTATUS smb2cli_lock(struct smbXcli_conn *conn,
+		      uint32_t timeout_msec,
+		      struct smbXcli_session *session,
+		      struct smbXcli_tcon *tcon,
+		      uint64_t fid_persistent,
+		      uint64_t fid_volatile,
+		      uint32_t lock_sequence,
+		      uint16_t num_locks,
+		      const struct smb2_lock_element *locks);
 
 struct tevent_req *smb2cli_set_info_send(TALLOC_CTX *mem_ctx,
 					 struct tevent_context *ev,

@@ -128,6 +128,93 @@ out:
 	return key_env_ret;
 }
 
+NTSTATUS GroupKeyEnvelope(TALLOC_CTX *mem_ctx,
+			  const struct Gkid gkid,
+			  const struct ProvRootKey *const root_key,
+			  uint8_t *const l1_key,
+			  const size_t l1_key_len,
+			  uint8_t *const l2_key,
+			  const size_t l2_key_len,
+			  const char *const domain_name,
+			  const char *const forest_name,
+			  const struct GroupKeyEnvelope **const envelope_out)
+{
+	TALLOC_CTX *tmp_ctx = NULL;
+	NTSTATUS status = NT_STATUS_OK;
+	struct GroupKeyEnvelope *envelope = NULL;
+	const char *kdf_algorithm_id = NULL;
+	DATA_BLOB kdf_param = {};
+
+	if (envelope_out == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+	*envelope_out = NULL;
+
+	if (root_key == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+
+	if (l1_key_len > UINT32_MAX) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+
+	if (l2_key_len > UINT32_MAX) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+
+	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	envelope = talloc(tmp_ctx, struct GroupKeyEnvelope);
+	if (envelope == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	status = kdf_params_from_algorithm(envelope,
+					   &root_key->kdf_algorithm,
+					   &kdf_algorithm_id,
+					   &kdf_param);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto out;
+	}
+
+	*envelope = (struct GroupKeyEnvelope){
+		.version = root_key->version,
+		.flags = ENVELOPE_FLAG_KEY_MAY_ENCRYPT_NEW_DATA,
+		.l0_index = gkid.l0_idx,
+		.l1_index = gkid.l1_idx,
+		.l2_index = gkid.l2_idx,
+		.root_key_id = root_key->id,
+		.kdf_parameters_len = kdf_param.length,
+		.secret_agreement_parameters_len = 0,
+		.private_key_len = 0,
+		.public_key_len = 0,
+		.l1_key_len = l1_key_len,
+		.l2_key_len = l2_key_len,
+		.kdf_algorithm = kdf_algorithm_id,
+		.kdf_parameters = kdf_param.data,
+		.secret_agreement_algorithm = "",
+		.secret_agreement_parameters = NULL,
+		.domain_name = domain_name,
+		.forest_name = forest_name,
+		.l1_key = l1_key,
+		.l2_key = l2_key,
+	};
+
+	*envelope_out = talloc_steal(mem_ctx, envelope);
+out:
+	talloc_free(tmp_ctx);
+	return status;
+}
+
 NTSTATUS ProvRootKey(TALLOC_CTX *mem_ctx,
 		     const struct GUID root_key_id,
 		     const int32_t version,
@@ -236,6 +323,20 @@ bool gkid_less_than_or_equal_to(const struct Gkid g1, const struct Gkid g2)
 	}
 
 	return g1.l2_idx <= g2.l2_idx;
+}
+
+bool gkid_start_time_valid(const struct Gkid gkid, NTTIME current_time)
+{
+	struct Gkid current_gkid;
+
+	/*
+	 * The key being requested must not be from the future. That said, we
+	 * allow for a little bit of clock skew so that the next managed
+	 * password can be computed prior to the expiration of the current one.
+	 */
+	current_gkid = gkdi_get_interval_id(current_time +
+					    gkdi_max_clock_skew);
+	return gkid_less_than_or_equal_to(gkid, current_gkid);
 }
 
 bool gkdi_rollover_interval(const int64_t managed_password_interval,
@@ -677,6 +778,52 @@ out:
 	return status;
 }
 
+static NTSTATUS kdf_params_from_kdf_sp_800_108(
+	TALLOC_CTX *mem_ctx,
+	const enum KdfSp800_108Param sp800_108,
+	DATA_BLOB *const kdf_param_out)
+{
+	NTSTATUS status = NT_STATUS_OK;
+	enum ndr_err_code err;
+	const char *hash_algorithm = NULL;
+	struct KdfParameters kdf_parameters;
+
+	switch (sp800_108) {
+	case KDF_PARAM_SHA1:
+		hash_algorithm = "SHA1";
+		break;
+	case KDF_PARAM_SHA256:
+		hash_algorithm = "SHA256";
+		break;
+	case KDF_PARAM_SHA384:
+		hash_algorithm = "SHA384";
+		break;
+	case KDF_PARAM_SHA512:
+		hash_algorithm = "SHA512";
+		break;
+	default:
+		status = NT_STATUS_NOT_SUPPORTED;
+		goto out;
+	}
+
+	kdf_parameters = (struct KdfParameters){
+		.hash_algorithm = hash_algorithm,
+	};
+
+	err = ndr_push_struct_blob(kdf_param_out,
+				   mem_ctx,
+				   &kdf_parameters,
+				   (ndr_push_flags_fn_t)
+					   ndr_push_KdfParameters);
+	if (!NDR_ERR_CODE_IS_SUCCESS(err)) {
+		status = ndr_map_error2ntstatus(err);
+		goto out;
+	}
+
+out:
+	return status;
+}
+
 NTSTATUS kdf_algorithm_from_params(const char *const kdf_algorithm_id,
 				   const DATA_BLOB *const kdf_param,
 				   struct KdfAlgorithm *const kdf_algorithm_out)
@@ -692,4 +839,41 @@ NTSTATUS kdf_algorithm_from_params(const char *const kdf_algorithm_id,
 
 	/* Unknown algorithm. */
 	return NT_STATUS_NOT_SUPPORTED;
+}
+
+NTSTATUS kdf_params_from_algorithm(
+	TALLOC_CTX *mem_ctx,
+	const struct KdfAlgorithm *const kdf_algorithm,
+	const char **const kdf_algorithm_id_out,
+	DATA_BLOB *const kdf_param_out)
+{
+	if (kdf_algorithm == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	switch (kdf_algorithm->id) {
+	case KDF_ALGORITHM_SP800_108_CTR_HMAC:
+		*kdf_algorithm_id_out = SP800_108_CTR_HMAC;
+		return kdf_params_from_kdf_sp_800_108(
+			mem_ctx,
+			kdf_algorithm->param.sp800_108,
+			kdf_param_out);
+	}
+
+	/* Unknown algorithm. */
+	return NT_STATUS_NOT_SUPPORTED;
+}
+
+bool gkdi_current_time(NTTIME *current_time_out)
+{
+	struct timespec current_timespec;
+	int ret;
+
+	ret = clock_gettime(CLOCK_REALTIME, &current_timespec);
+	if (ret) {
+		return false;
+	}
+
+	*current_time_out = full_timespec_to_nt_time(&current_timespec);
+	return true;
 }

@@ -32,7 +32,17 @@ unit_test ctdb-path etcdir
 ok <<EOF
 $CTDB_BASE/run
 EOF
-unit_test ctdb-path rundir
+unit_test ctdb-path lockdir
+
+ok <<EOF
+$CTDB_BASE/run
+EOF
+unit_test ctdb-path piddir
+
+ok <<EOF
+$CTDB_BASE/run
+EOF
+unit_test ctdb-path socketdir
 
 ok <<EOF
 $CTDB_BASE/var
@@ -52,7 +62,17 @@ unit_test ctdb-path etcdir append foobar
 ok <<EOF
 $CTDB_BASE/run/foobar
 EOF
-unit_test ctdb-path rundir append foobar
+unit_test ctdb-path lockdir append foobar
+
+ok <<EOF
+$CTDB_BASE/run/foobar
+EOF
+unit_test ctdb-path piddir append foobar
+
+ok <<EOF
+$CTDB_BASE/run/foobar
+EOF
+unit_test ctdb-path socketdir append foobar
 
 ok <<EOF
 $CTDB_BASE/var/foobar

@@ -52,7 +52,7 @@
 #include "conf/node.h"
 
 #ifdef HAVE_JANSSON
-#include <jansson.h>
+#include "lib/util/tjson.h"
 #endif /* HAVE_JANSSON */
 
 #define TIMEOUT() timeval_current_ofs(options.timelimit, 0)
@@ -801,27 +801,28 @@ static int get_leader(TALLOC_CTX *mem_ctx,
 #ifdef HAVE_JANSSON
 static int print_json_version(void)
 {
-	int ret;
-	json_t *root_json = json_object();
+	TALLOC_CTX *mem_ctx = talloc_new(NULL);
+	struct tjson *root_json = NULL;
+	char *json_str = NULL;
 
-	if (root_json == NULL) {
-		fprintf(stderr, "failed to create json object\n");
-		return 1;
-	}
-	ret = json_object_set_new(root_json,
-				  "version",
-				  json_string(SAMBA_VERSION_STRING));
-	if (ret != 0) {
-		fprintf(stderr, "failed to create json object\n");
+	if (mem_ctx == NULL) {
+		fprintf(stderr, "talloc_new failed\n");
 		return 1;
 	}
 
-	ret = json_dumpf(root_json, stdout, JSON_INDENT(2));
-	if (ret != 0) {
+	root_json = tjson_new_object(mem_ctx);
+
+	tjson_add_string(root_json, "version", SAMBA_VERSION_STRING);
+
+	json_str = tjson_to_string_flags(mem_ctx, root_json, JSON_INDENT(2));
+	if (json_str == NULL) {
 		fprintf(stderr, "failed to create json object\n");
+		TALLOC_FREE(mem_ctx);
 		return 1;
 	}
-	json_decref(root_json);
+
+	printf("%s\n", json_str);
+	TALLOC_FREE(mem_ctx);
 	return 0;
 }
 #endif
@@ -1013,7 +1014,7 @@ static void print_status(TALLOC_CTX *mem_ctx,
 }
 
 #ifdef HAVE_JANSSON
-static int build_json_node_flags(json_t *parent_obj, uint32_t flags)
+static void build_json_node_flags(struct tjson *parent_obj, uint32_t flags)
 {
 	static const struct {
 		uint32_t flag;
@@ -1028,208 +1029,92 @@ static int build_json_node_flags(json_t *parent_obj, uint32_t flags)
 		{NODE_FLAGS_STOPPED, "stopped"},
 		{NODE_FLAGS_INACTIVE, "inactive"},
 	};
+	struct tjson *flags_map = tjson_new_object(parent_obj);
 	unsigned int i;
-	int ret = 0;
-	json_t *flags_map = json_object();
-
-	if (flags_map == NULL) {
-		return 1;
-	}
 
 	for (i = 0; i < ARRAY_SIZE(flag_names); i++) {
-		ret = json_object_set_new(flags_map,
-					  flag_names[i].name,
-					  json_boolean(flags &
-						       flag_names[i].flag));
-		if (ret != 0) {
-			goto done;
-		}
+		tjson_add_bool(flags_map,
+			       flag_names[i].name,
+			       flags & flag_names[i].flag);
 	}
 
-	ret = json_object_set(parent_obj, "flags", flags_map);
-done:
-	json_decref(flags_map);
-	return (ret == 0) ? 0 : 1;
+	tjson_add_object(parent_obj, "flags", &flags_map);
 }
 
-static int build_json_nodemap(json_t *root_object,
-			      TALLOC_CTX *mem_ctx,
-			      struct ctdb_context *ctdb,
-			      struct ctdb_node_map *nodemap,
-			      uint32_t mypnn)
+static void build_json_nodemap(struct tjson *root_object,
+			       TALLOC_CTX *mem_ctx,
+			       struct ctdb_context *ctdb,
+			       struct ctdb_node_map *nodemap,
+			       uint32_t mypnn)
 {
 	struct ctdb_node_and_flags *node;
 	int num_deleted_nodes = 0;
-	int ret = 0;
 	unsigned int i;
-	json_t *nodemap_obj = json_object();
-	json_t *nodes_obj = json_object();
-	json_t *node_obj = NULL;
+	struct tjson *nodemap_obj = tjson_new_object(root_object);
+	struct tjson *nodes_obj = tjson_new_object(root_object);
 	char *pnn_name = NULL;
 
-	if (nodemap_obj == NULL) {
-		return 1;
-	}
-	if (nodes_obj == NULL) {
-		ret = 1;
-		goto done;
-	}
-
 	for (i = 0; i < nodemap->num; i++) {
-		node_obj = json_object();
-		if (node_obj == NULL) {
-			ret = 1;
-			goto done;
-		}
+		struct tjson *node_obj = NULL;
 
 		node = &nodemap->node[i];
 		if (node->flags & NODE_FLAGS_DELETED) {
 			num_deleted_nodes++;
 			continue;
 		}
-		ret = json_object_set_new(node_obj,
-					  "pnn",
-					  json_integer(node->pnn));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(
-			node_obj,
-			"address",
-			json_string(ctdb_sock_addr_to_string(mem_ctx,
-							     &node->addr,
-							     false)));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(
-			node_obj,
-			"partially_online",
-			json_boolean(partially_online(mem_ctx, ctdb, node)));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(node_obj,
-					  "flags_raw",
-					  json_integer(node->flags));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(node_obj,
-					  "flags_ok",
-					  json_boolean(node->flags == 0));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = build_json_node_flags(node_obj, node->flags);
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(node_obj,
-					  "this_node",
-					  json_boolean(node->pnn == mypnn));
-		if (ret != 0) {
-			goto done;
-		}
+
+		node_obj = tjson_new_object(nodes_obj);
+
+		tjson_add_int(node_obj, "pnn", node->pnn);
+		tjson_add_string(node_obj,
+				 "address",
+				 ctdb_sock_addr_to_string(mem_ctx,
+							  &node->addr,
+							  false));
+		tjson_add_bool(node_obj,
+			       "partially_online",
+			       partially_online(mem_ctx, ctdb, node));
+		tjson_add_int(node_obj, "flags_raw", node->flags);
+		tjson_add_bool(node_obj, "flags_ok", node->flags == 0);
+		build_json_node_flags(node_obj, node->flags);
+		tjson_add_bool(node_obj, "this_node", node->pnn == mypnn);
+
 		pnn_name = talloc_asprintf(mem_ctx, "%d", node->pnn);
-		ret = json_object_set_new(nodes_obj, pnn_name, node_obj);
-		if (ret != 0) {
-			goto done;
-		}
+		tjson_add_object(nodes_obj, pnn_name, &node_obj);
 	}
 
-	ret = json_object_set_new(nodemap_obj,
-				  "node_count",
-				  json_integer(nodemap->num));
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set_new(nodemap_obj,
-				  "deleted_node_count",
-				  json_integer(num_deleted_nodes));
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set(nodemap_obj, "nodes", nodes_obj);
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set(root_object, "node_status", nodemap_obj);
-done:
-	json_decref(nodes_obj);
-	json_decref(nodemap_obj);
-	return (ret == 0) ? 0 : 1;
+	tjson_add_int(nodemap_obj, "node_count", nodemap->num);
+	tjson_add_int(nodemap_obj, "deleted_node_count", num_deleted_nodes);
+	tjson_add_object(nodemap_obj, "nodes", &nodes_obj);
+	tjson_add_object(root_object, "node_status", &nodemap_obj);
 }
 
-static int build_json_vnnmap(json_t *root_object,
-			     TALLOC_CTX *mem_ctx,
-			     struct ctdb_context *ctdb,
-			     struct ctdb_vnn_map *vnnmap)
+static void build_json_vnnmap(struct tjson *root_object,
+			      TALLOC_CTX *mem_ctx,
+			      struct ctdb_context *ctdb,
+			      struct ctdb_vnn_map *vnnmap)
 {
-	int ret = 0;
 	unsigned int i;
-	json_t *vnnmap_obj = json_object();
-	json_t *vnn_lst = json_array();
-	json_t *vnn_obj = NULL;
-	json_t *gen_value = NULL;
-
-	if (vnnmap_obj == NULL) {
-		return 1;
-	}
-	if (vnn_lst == NULL) {
-		ret = 1;
-		goto done;
-	}
+	struct tjson *vnnmap_obj = tjson_new_object(root_object);
+	struct tjson *vnn_lst = tjson_new_array(root_object);
+	struct tjson *vnn_obj = NULL;
 
 	if (vnnmap->generation == INVALID_GENERATION) {
-		gen_value = json_null();
+		tjson_add_string(vnnmap_obj, "generation", NULL);
 	} else {
-		gen_value = json_integer(vnnmap->generation);
-	}
-	if (gen_value == NULL) {
-		ret = 1;
-		goto done;
-	}
-	ret = json_object_set(vnnmap_obj, "generation", gen_value);
-	if (ret != 0) {
-		goto done;
+		tjson_add_int(vnnmap_obj, "generation", vnnmap->generation);
 	}
 
-	ret = json_object_set_new(vnnmap_obj,
-				  "size",
-				  json_integer(vnnmap->size));
+	tjson_add_int(vnnmap_obj, "size", vnnmap->size);
 	for (i = 0; i < vnnmap->size; i++) {
-		vnn_obj = json_object();
-		if (vnn_obj == NULL) {
-			ret = 1;
-			goto done;
-		}
-		ret = json_object_set_new(vnn_obj, "hash", json_integer(i));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_object_set_new(vnn_obj,
-					  "lmaster",
-					  json_integer(vnnmap->map[i]));
-		if (ret != 0) {
-			goto done;
-		}
-		ret = json_array_append_new(vnn_lst, vnn_obj);
-		if (ret != 0) {
-			goto done;
-		}
+		vnn_obj = tjson_new_object(vnn_lst);
+		tjson_add_int(vnn_obj, "hash", i);
+		tjson_add_int(vnn_obj, "lmaster", vnnmap->map[i]);
+		tjson_add_object(vnn_lst, NULL, &vnn_obj);
 	}
 
-	ret = json_object_set(vnnmap_obj, "vnn_map", vnn_lst);
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set(root_object, "vnn_status", vnnmap_obj);
-done:
-	json_decref(gen_value);
-	json_decref(vnn_lst);
-	json_decref(vnnmap_obj);
-	return (ret == 0) ? 0 : 1;
+	tjson_add_object(vnnmap_obj, "vnn_map", &vnn_lst);
+	tjson_add_object(root_object, "vnn_status", &vnnmap_obj);
 }
 
 static int print_json_status(TALLOC_CTX *mem_ctx,
@@ -1240,48 +1125,36 @@ static int print_json_status(TALLOC_CTX *mem_ctx,
 			     int recmode,
 			     uint32_t leader)
 {
-	int ret;
-	json_t *root_json = json_object();
+	TALLOC_CTX *tmp_ctx = talloc_new(ctdb);
+	struct tjson *root_json = NULL;
+	char *json_str = NULL;
 
-	if (root_json == NULL) {
-		fprintf(stderr, "failed to create json object\n");
+	if (tmp_ctx == NULL) {
+		fprintf(stderr, "talloc_new failed\n");
 		return 1;
 	}
-	ret = build_json_nodemap(root_json, mem_ctx, ctdb, nodemap, mypnn);
-	if (ret != 0) {
-		goto done;
-	}
-	ret = build_json_vnnmap(root_json, mem_ctx, ctdb, vnnmap);
-	if (ret != 0) {
-		goto done;
-	}
 
-	ret = json_object_set_new(root_json,
-				  "recovery_mode",
-				  json_string(recmode == CTDB_RECOVERY_NORMAL
-						      ? "NORMAL"
-						      : "RECOVERY"));
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set_new(root_json,
-				  "recovery_mode_raw",
-				  json_integer(recmode));
-	if (ret != 0) {
-		goto done;
-	}
-	ret = json_object_set_new(root_json, "leader", json_integer(leader));
-	if (ret != 0) {
-		goto done;
-	}
+	root_json = tjson_new_object(tmp_ctx);
 
-	ret = json_dumpf(root_json, stdout, JSON_INDENT(2));
-done:
-	json_decref(root_json);
-	if (ret != 0) {
+	build_json_nodemap(root_json, mem_ctx, ctdb, nodemap, mypnn);
+	build_json_vnnmap(root_json, mem_ctx, ctdb, vnnmap);
+
+	tjson_add_string(root_json,
+			 "recovery_mode",
+			 recmode == CTDB_RECOVERY_NORMAL ? "NORMAL"
+							 : "RECOVERY");
+	tjson_add_int(root_json, "recovery_mode_raw", recmode);
+	tjson_add_int(root_json, "leader", leader);
+
+	json_str = tjson_to_string_flags(tmp_ctx, root_json, JSON_INDENT(2));
+	if (json_str == NULL) {
 		fprintf(stderr, "failed to create json object\n");
+		TALLOC_FREE(tmp_ctx);
 		return 1;
 	}
+
+	printf("%s\n", json_str);
+	TALLOC_FREE(tmp_ctx);
 	return 0;
 }
 #endif /* HAVE_JANSSON */
@@ -2785,6 +2658,12 @@ static void dump_ltdb_header(struct ctdb_ltdb_header *header)
 	}
 	if (header->flags & CTDB_REC_RO_REVOKE_COMPLETE) {
 		fprintf(stdout, " RO_REVOKE_COMPLETE");
+	}
+	if (header->flags & CTDB_REC_FLAG_PERSISTENT) {
+		fprintf(stdout, " PERSISTENT");
+	}
+	if (header->flags & CTDB_REC_FLAG_PERSISTENT_IN_PROGRESS) {
+		fprintf(stdout, " PERSISTENT_IN_PROGRESS");
 	}
 	fprintf(stdout, "\n");
 }
@@ -7073,6 +6952,125 @@ static int control_reloadips(TALLOC_CTX *mem_ctx,
 	return ipreallocate(mem_ctx, ctdb);
 }
 
+static int control_push_record(TALLOC_CTX *mem_ctx,
+			       struct ctdb_context *ctdb,
+			       int argc,
+			       const char **argv)
+{
+	const char *db_name = NULL;
+	struct ctdb_db_context *db = NULL;
+	struct ctdb_record_handle *h = NULL;
+	uint8_t db_flags;
+	struct ctdb_push_record_data prd = {};
+	int ret = 0;
+
+	if (argc != 3) {
+		usage("pushrecord");
+		return 1;
+	}
+
+	if (!db_exists(mem_ctx, ctdb, argv[0], NULL, &db_name, &db_flags)) {
+		return 1;
+	}
+
+	if (db_flags & (CTDB_DB_FLAGS_PERSISTENT | CTDB_DB_FLAGS_REPLICATED)) {
+		fprintf(stderr, "DB %s is not a volatile database\n",
+			db_name);
+		return 1;
+	}
+
+	ret = ctdb_attach(ctdb->ev,
+			  ctdb->client,
+			  TIMEOUT(),
+			  db_name,
+			  db_flags,
+			  &db);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to attach to DB %s\n", db_name);
+		return ret;
+	}
+
+	ret = get_generation(mem_ctx, ctdb, &prd.generation);
+	if (ret != 0) {
+		return ret;
+	}
+
+	prd.db_id = ctdb_db_id(db);
+
+	ret = str_to_data(argv[1], strlen(argv[1]), mem_ctx, &prd.key);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to parse key %s\n", argv[1]);
+		return ret;
+	}
+
+	ret = str_to_data(argv[2], strlen(argv[2]), mem_ctx, &prd.value);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to parse value %s\n", argv[2]);
+		return ret;
+	}
+
+	ret = ctdb_fetch_lock(mem_ctx,
+			      ctdb->ev,
+			      ctdb->client,
+			      db,
+			      prd.key,
+			      false,
+			      &h,
+			      &prd.hdr,
+			      NULL);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to fetch record for key %s\n",
+			argv[1]);
+		return ret;
+	}
+
+	/*
+	 * The combination of ctdb_store_record() and ctdb_ctrl_push_record()
+	 * below causes the record to be written to all active nodes in the
+	 * cluster.  This needs to be done carefully, otherwise it will interact
+	 * badly with vacuuming.  The behaviour needs to simulate what happens
+	 * during CTDB recovery, since this is the only other time the same
+	 * record in a volatile database may be written to all nodes.
+	 *
+	 * MIGRATED_WITH_DATA: All records need to be written with this flag.
+	 * For other nodes, this is handled by the ctdbd push record
+	 * implementation.  For this (dmaster) node this flag needs to be
+	 * explicitly set.
+	 *
+	 * dmaster has rsn++: The current dmaster needs to have the highest
+	 * RSN so CTDB vacuuming recognises copies elsewhere as out-of-date,
+	 * causing them to be deleted.  This would normally be done when
+	 * ctdb_ltdb_store() calls ctdb_ltdb_store_server().  However, the
+	 * record is stored directly here, so the RSN increment needs to be
+	 * done here.
+	 */
+
+	prd.hdr.rsn++;
+	prd.hdr.flags |= CTDB_REC_FLAG_MIGRATED_WITH_DATA;
+	ctdb_record_set_header(h, &prd.hdr);
+
+	ret = ctdb_store_record(h, prd.value);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to store record for key %s\n",
+			argv[1]);
+	}
+
+	prd.hdr.rsn--;
+	ret = ctdb_ctrl_push_record(mem_ctx,
+				    ctdb->ev,
+				    ctdb->client,
+				    ctdb->cmd_pnn,
+				    TIMEOUT(),
+				    &prd);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to push record for key %s\n",
+			argv[1]);
+		return ret;
+	}
+
+	return ret;
+}
+
 static const struct ctdb_cmd {
 	const char *name;
 	int (*fn)(TALLOC_CTX *, struct ctdb_context *, int, const char **);
@@ -7538,6 +7536,13 @@ static const struct ctdb_cmd {
 	 false,
 	 "delete a database key",
 	 "<dbname|dbid> <key>"},
+	{ "pushrecord",
+	  control_push_record,
+	  false,
+	  false,
+	  false,
+	  "push a record to all nodes",
+	  "<dbname|dbid> <key> <value>"},
 	{"checktcpport",
 	 control_checktcpport,
 	 true,

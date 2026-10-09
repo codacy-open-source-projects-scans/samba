@@ -573,7 +573,7 @@ struct smb311_capabilities smb311_capabilities_parse(
 		size_t di;
 		bool ignore = false;
 
-		if (c.signing.num_algos >= SMB3_ENCRYTION_CAPABILITIES_MAX_ALGOS) {
+		if (c.signing.num_algos >= ARRAY_SIZE(c.signing.algos)) {
 			DBG_ERR("WARNING: Ignoring trailing value '%s' for parameter '%s'\n",
 				  algoname, sign_param);
 			continue;
@@ -612,7 +612,7 @@ struct smb311_capabilities smb311_capabilities_parse(
 		size_t di;
 		bool ignore = false;
 
-		if (c.encryption.num_algos >= SMB3_ENCRYTION_CAPABILITIES_MAX_ALGOS) {
+		if (c.encryption.num_algos >= ARRAY_SIZE(c.encryption.algos)) {
 			DBG_ERR("WARNING: Ignoring trailing value '%s' for parameter '%s'\n",
 				  algoname, enc_param);
 			continue;
@@ -782,4 +782,26 @@ struct smb_transports smb_transports_parse(const char *param_name,
 	}
 
 	return ts;
+}
+
+uint32_t smb2_util_lease_state(const char *ls)
+{
+	uint32_t val = 0;
+	int i;
+
+	for (i = 0; ls[i] != '\0'; i++) {
+		switch (ls[i]) {
+		case 'R':
+			val |= SMB2_LEASE_READ;
+			break;
+		case 'H':
+			val |= SMB2_LEASE_HANDLE;
+			break;
+		case 'W':
+			val |= SMB2_LEASE_WRITE;
+			break;
+		}
+	}
+
+	return val;
 }

@@ -55,6 +55,7 @@ NTSTATUS brl_lock(
 	br_off size,
 	enum brl_type lock_type,
 	enum brl_flavour lock_flav,
+	bool persistent,
 	struct server_id *blocker_pid,
 	uint64_t *psmblctx);
 bool brl_unlock(struct byte_range_lock *br_lck,
@@ -102,10 +103,14 @@ NTSTATUS share_mode_do_locked_brl(files_struct *fsp,
 		 void *private_data);
 struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx,
 					files_struct *fsp);
+struct byte_range_lock *brl_get_locks_for_cleanup(TALLOC_CTX *mem_ctx,
+						  struct file_id *file_id);
 struct byte_range_lock *brl_get_locks_readonly(files_struct *fsp);
 bool brl_cleanup_disconnected(struct file_id fid, uint64_t open_persistent_id);
 void brl_set_modified(struct byte_range_lock *br_lck, bool modified);
 bool file_has_brlocks(files_struct *fsp);
+struct dbwrap_wipe_flags;
+NTSTATUS brlock_wipe(struct dbwrap_wipe_flags flags);
 
 /* The following definitions come from locking/locking.c  */
 
@@ -166,8 +171,11 @@ bool get_delete_on_close_token(struct share_mode_lock *lck,
 				const struct security_token **pp_nt_tok,
 				const struct security_unix_token **pp_tok,
 				struct smb2_lease_key *parent_lease_key);
-void reset_delete_on_close_lck(files_struct *fsp,
-			       struct share_mode_lock *lck);
+void reset_delete_on_close_lck(struct share_mode_lock *lck,
+			       uint32_t name_hash);
+void reset_delete_on_close_lck_open_id(struct share_mode_lock *lck,
+				       uint32_t name_hash,
+				       uint64_t open_persistent_id);
 void set_delete_on_close_lck(files_struct *fsp,
 			struct share_mode_lock *lck,
 			const struct security_token *nt_tok,

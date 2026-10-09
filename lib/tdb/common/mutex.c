@@ -94,11 +94,7 @@ size_t tdb_mutex_size(struct tdb_context *tdb)
 	return TDB_ALIGN(mutex_size, tdb->page_size);
 }
 
-/*
- * Get the index for a chain mutex
- */
-static bool tdb_mutex_index(struct tdb_context *tdb, off_t off, off_t len,
-			    unsigned *idx)
+static inline off_t tdb_freelist_lock_ofs(void)
 {
 	/*
 	 * Weird but true: We fcntl lock 1 byte at an offset 4 bytes before
@@ -107,7 +103,15 @@ static bool tdb_mutex_index(struct tdb_context *tdb, off_t off, off_t len,
 	 * "+1" in TDB_HASH_TOP(). Because the mutex array is represented in
 	 * the tdb file itself as data, we need to adjust the offset here.
 	 */
-	const off_t freelist_lock_ofs = FREELIST_TOP - sizeof(tdb_off_t);
+	return FREELIST_TOP - sizeof(tdb_off_t);
+}
+
+/*
+ * Check whether a byte-range lock at (off, len) is handled by a chain mutex.
+ */
+bool tdb_is_mutex_lock(struct tdb_context *tdb, off_t off, off_t len)
+{
+	const off_t freelist_lock_ofs = tdb_freelist_lock_ofs();
 
 	if (!tdb_have_mutexes(tdb)) {
 		return false;
@@ -137,14 +141,18 @@ static bool tdb_mutex_index(struct tdb_context *tdb, off_t off, off_t len,
 		abort();
 	}
 
+	return true;
+}
+
+static unsigned tdb_mutex_offset_to_idx(off_t off)
+{
 	/*
 	 * Re-index the fcntl offset into an offset into the mutex array
 	 */
-	off -= freelist_lock_ofs; /* rebase to index 0 */
+	off -= tdb_freelist_lock_ofs(); /* rebase to index 0 */
 	off /= sizeof(tdb_off_t); /* 0 for freelist 1-n for hashchain */
 
-	*idx = off;
-	return true;
+	return (unsigned)off;
 }
 
 static bool tdb_have_mutex_chainlocks(struct tdb_context *tdb)
@@ -155,14 +163,14 @@ static bool tdb_have_mutex_chainlocks(struct tdb_context *tdb)
 		bool ret;
 		unsigned idx;
 
-		ret = tdb_mutex_index(tdb,
-				      tdb->lockrecs[i].off,
-				      tdb->lockrecs[i].count,
-				      &idx);
+		ret = tdb_is_mutex_lock(tdb,
+					tdb->lockrecs[i].off,
+					tdb->lockrecs[i].count);
 		if (!ret) {
 			continue;
 		}
 
+		idx = tdb_mutex_offset_to_idx(tdb->lockrecs[i].off);
 		if (idx == 0) {
 			/* this is the freelist mutex */
 			continue;
@@ -216,19 +224,17 @@ static int allrecord_mutex_lock(struct tdb_mutexes *m, bool waitflag)
 	return pthread_mutex_consistent(&m->allrecord_mutex);
 }
 
-bool tdb_mutex_lock(struct tdb_context *tdb, int rw, off_t off, off_t len,
-		    bool waitflag, int *pret)
+int tdb_mutex_lock(struct tdb_context *tdb,
+		   int rw,
+		   off_t off,
+		   off_t len,
+		   bool waitflag)
 {
 	struct tdb_mutexes *m = tdb->mutexes;
-	pthread_mutex_t *chain;
+	unsigned idx = tdb_mutex_offset_to_idx(off);
+	pthread_mutex_t *chain = &m->hashchains[idx];
 	int ret;
-	unsigned idx;
 	bool allrecord_ok;
-
-	if (!tdb_mutex_index(tdb, off, len, &idx)) {
-		return false;
-	}
-	chain = &m->hashchains[idx];
 
 again:
 	ret = chain_mutex_lock(chain, waitflag);
@@ -236,8 +242,7 @@ again:
 		ret = EAGAIN;
 	}
 	if (ret != 0) {
-		errno = ret;
-		goto fail;
+		return ret;
 	}
 
 	if (idx == 0) {
@@ -246,8 +251,7 @@ again:
 		 * the allrecord lock. So we're done once we got the
 		 * freelist mutex.
 		 */
-		*pret = 0;
-		return true;
+		return 0;
 	}
 
 	if (tdb_have_mutex_chainlocks(tdb)) {
@@ -268,8 +272,7 @@ again:
 		 * chain lock.
 		 */
 
-		*pret = 0;
-		return true;
+		return 0;
 	}
 
 	/*
@@ -293,16 +296,14 @@ again:
 	}
 
 	if (allrecord_ok) {
-		*pret = 0;
-		return true;
+		return 0;
 	}
 
 	ret = pthread_mutex_unlock(chain);
 	if (ret != 0) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "pthread_mutex_unlock"
 			 "(chain_mutex) failed: %s\n", strerror(ret)));
-		errno = ret;
-		goto fail;
+		return ret;
 	}
 	ret = allrecord_mutex_lock(m, waitflag);
 	if (ret == EBUSY) {
@@ -314,44 +315,24 @@ again:
 				 "(allrecord_mutex) failed: %s\n",
 				 waitflag ? "" : "try_",  strerror(ret)));
 		}
-		errno = ret;
-		goto fail;
+		return ret;
 	}
 	ret = pthread_mutex_unlock(&m->allrecord_mutex);
 	if (ret != 0) {
 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "pthread_mutex_unlock"
 			 "(allrecord_mutex) failed: %s\n", strerror(ret)));
-		errno = ret;
-		goto fail;
+		return ret;
 	}
 	goto again;
-
-fail:
-	*pret = -1;
-	return true;
 }
 
-bool tdb_mutex_unlock(struct tdb_context *tdb, int rw, off_t off, off_t len,
-		      int *pret)
+int tdb_mutex_unlock(struct tdb_context *tdb, int rw, off_t off, off_t len)
 {
 	struct tdb_mutexes *m = tdb->mutexes;
-	pthread_mutex_t *chain;
-	int ret;
-	unsigned idx;
-
-	if (!tdb_mutex_index(tdb, off, len, &idx)) {
-		return false;
-	}
-	chain = &m->hashchains[idx];
-
-	ret = pthread_mutex_unlock(chain);
-	if (ret == 0) {
-		*pret = 0;
-		return true;
-	}
-	errno = ret;
-	*pret = -1;
-	return true;
+	unsigned idx = tdb_mutex_offset_to_idx(off);
+	pthread_mutex_t *chain = &m->hashchains[idx];
+	int ret = pthread_mutex_unlock(chain);
+	return ret;
 }
 
 int tdb_mutex_allrecord_lock(struct tdb_context *tdb, int ltype,

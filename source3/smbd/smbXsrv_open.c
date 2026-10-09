@@ -56,6 +56,7 @@ NTSTATUS smbXsrv_open_global_init(void)
 {
 	char *global_path = NULL;
 	struct db_context *db_ctx = NULL;
+	uint64_t dbwrap_flags = DBWRAP_FLAG_NONE;
 
 	if (smbXsrv_open_global_db_ctx != NULL) {
 		return NT_STATUS_OK;
@@ -66,12 +67,16 @@ NTSTATUS smbXsrv_open_global_init(void)
 		return NT_STATUS_NO_MEMORY;
 	}
 
+	if (lp_persistent_handles()) {
+		dbwrap_flags = DBWRAP_FLAG_PER_REC_PERSISTENT;
+	}
+
 	db_ctx = db_open(NULL, global_path,
 			 SMBD_VOLATILE_TDB_HASH_SIZE,
 			 SMBD_VOLATILE_TDB_FLAGS,
 			 O_RDWR | O_CREAT, 0600,
 			 DBWRAP_LOCK_ORDER_1,
-			 DBWRAP_FLAG_NONE);
+			 dbwrap_flags);
 	TALLOC_FREE(global_path);
 	if (db_ctx == NULL) {
 		NTSTATUS status = map_nt_error_from_unix_common(errno);
@@ -198,11 +203,11 @@ static NTSTATUS smbXsrv_open_local_lookup(struct smbXsrv_open_table *table,
 	return NT_STATUS_OK;
 }
 
-static NTSTATUS smbXsrv_open_global_parse_record(
+NTSTATUS smbXsrv_open_global_parse_record(
 	TALLOC_CTX *mem_ctx,
 	TDB_DATA key,
 	TDB_DATA val,
-	struct smbXsrv_open_global0 **global)
+	struct smbXsrv_open_global **global)
 {
 	DATA_BLOB blob = data_blob_const(val.dptr, val.dsize);
 	struct smbXsrv_open_globalB global_blob;
@@ -226,7 +231,7 @@ static NTSTATUS smbXsrv_open_global_parse_record(
 		NDR_PRINT_DEBUG(smbXsrv_open_globalB, &global_blob);
 	}
 
-	if (global_blob.version != SMBXSRV_VERSION_0) {
+	if (global_blob.version != SMBXSRV_VERSION_1) {
 		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
 		DEBUG(1,("Invalid record in smbXsrv_open_global.tdb:"
 			 "key '%s' unsupported version - %d - %s\n",
@@ -236,7 +241,7 @@ static NTSTATUS smbXsrv_open_global_parse_record(
 		goto done;
 	}
 
-	if (global_blob.info.info0 == NULL) {
+	if (global_blob.info.info1 == NULL) {
 		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
 		DEBUG(1,("Invalid record in smbXsrv_open_global.tdb:"
 			 "key '%s' info0 NULL pointer - %s\n",
@@ -245,7 +250,7 @@ static NTSTATUS smbXsrv_open_global_parse_record(
 		goto done;
 	}
 
-	*global = talloc_move(mem_ctx, &global_blob.info.info0);
+	*global = talloc_move(mem_ctx, &global_blob.info.info1);
 	status = NT_STATUS_OK;
 done:
 	talloc_free(frame);
@@ -256,9 +261,9 @@ static NTSTATUS smbXsrv_open_global_verify_record(
 	TDB_DATA key,
 	TDB_DATA val,
 	TALLOC_CTX *mem_ctx,
-	struct smbXsrv_open_global0 **_global0)
+	struct smbXsrv_open_global **_global)
 {
-	struct smbXsrv_open_global0 *global0 = NULL;
+	struct smbXsrv_open_global *global = NULL;
 	struct server_id_buf buf;
 	NTSTATUS status;
 
@@ -266,7 +271,7 @@ static NTSTATUS smbXsrv_open_global_verify_record(
 		return NT_STATUS_NOT_FOUND;
 	}
 
-	status = smbXsrv_open_global_parse_record(mem_ctx, key, val, &global0);
+	status = smbXsrv_open_global_parse_record(mem_ctx, key, val, &global);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("smbXsrv_open_global_parse_record for %s failed: "
 			    "%s\n",
@@ -274,17 +279,20 @@ static NTSTATUS smbXsrv_open_global_verify_record(
 			    nt_errstr(status));
 		return status;
 	}
-	*_global0 = global0;
+	*_global = global;
 
-	if (server_id_is_disconnected(&global0->server_id)) {
+	if (server_id_is_disconnected(&global->server_id)) {
 		return NT_STATUS_REMOTE_DISCONNECT;
 	}
-	if (serverid_exists(&global0->server_id)) {
+	if (serverid_exists(&global->server_id)) {
 		return NT_STATUS_OBJECTID_EXISTS;
+	}
+	if (global->persistent) {
+		return NT_STATUS_REMOTE_DISCONNECT;
 	}
 
 	DBG_WARNING("smbd %s did not clean up record %s\n",
-		    server_id_str_buf(global0->server_id, &buf),
+		    server_id_str_buf(global->server_id, &buf),
 		    tdb_data_dbg(key));
 
 	return NT_STATUS_FATAL_APP_EXIT;
@@ -292,7 +300,7 @@ static NTSTATUS smbXsrv_open_global_verify_record(
 
 struct smbXsrv_open_global_lookup_state {
 	TALLOC_CTX *mem_ctx;
-	struct smbXsrv_open_global0 *global;
+	struct smbXsrv_open_global *global;
 	NTSTATUS status;
 };
 
@@ -315,11 +323,10 @@ static void smbXsrv_open_global_lookup_fn(struct db_record *rec,
 							 &state->global);
 }
 
-static NTSTATUS smbXsrv_open_global_lookup(
-			struct smbXsrv_open_table *table,
+NTSTATUS smbXsrv_open_global_lookup(
 			TALLOC_CTX *mem_ctx,
 			uint32_t open_global_id,
-			const struct smbXsrv_open_global0 **_global)
+			const struct smbXsrv_open_global **_global)
 {
 	struct smbXsrv_open_global_key_buf key_buf;
 	TDB_DATA key = smbXsrv_open_global_id_to_key(open_global_id, &key_buf);
@@ -328,7 +335,7 @@ static NTSTATUS smbXsrv_open_global_lookup(
 	};
 	NTSTATUS status;
 
-	status = dbwrap_do_locked(table->global.db_ctx,
+	status = dbwrap_do_locked(smbXsrv_open_global_db_ctx,
 				  key,
 				  smbXsrv_open_global_lookup_fn,
 				  &state);
@@ -352,16 +359,17 @@ static NTSTATUS smbXsrv_open_global_store(
 	struct db_record *rec,
 	TDB_DATA key,
 	TDB_DATA oldval,
-	struct smbXsrv_open_global0 *global)
+	struct smbXsrv_open_global *global)
 {
 	struct smbXsrv_open_globalB global_blob;
 	DATA_BLOB blob = data_blob_null;
 	TDB_DATA val = { .dptr = NULL, };
 	NTSTATUS status;
 	enum ndr_err_code ndr_err;
+	int dbwrap_flags = DBWRAP_REPLACE;
 
 	/*
-	 * TODO: if we use other versions than '0'
+	 * TODO: if we use other versions than '1'
 	 * we would add glue code here, that would be able to
 	 * store the information in the old format.
 	 */
@@ -374,7 +382,7 @@ static NTSTATUS smbXsrv_open_global_store(
 		global_blob.seqnum = IVAL(oldval.dptr, 4);
 	}
 	global_blob.seqnum += 1;
-	global_blob.info.info0 = global;
+	global_blob.info.info1 = global;
 
 	ndr_err = ndr_push_struct_blob(&blob, talloc_tos(), &global_blob,
 			(ndr_push_flags_fn_t)ndr_push_smbXsrv_open_globalB);
@@ -386,7 +394,11 @@ static NTSTATUS smbXsrv_open_global_store(
 	}
 
 	val = make_tdb_data(blob.data, blob.length);
-	status = dbwrap_record_store(rec, val, TDB_REPLACE);
+
+	if (global->persistent) {
+		dbwrap_flags |= DBWRAP_STORE_PERSISTENT;
+	}
+	status = dbwrap_record_store(rec, val, dbwrap_flags);
 	TALLOC_FREE(blob.data);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("key '%s' store - %s\n",
@@ -405,7 +417,7 @@ static NTSTATUS smbXsrv_open_global_store(
 
 struct smbXsrv_open_global_allocate_state {
 	uint32_t id;
-	struct smbXsrv_open_global0 *global;
+	struct smbXsrv_open_global *global;
 	NTSTATUS status;
 };
 
@@ -413,18 +425,18 @@ static void smbXsrv_open_global_allocate_fn(
 	struct db_record *rec, TDB_DATA oldval, void *private_data)
 {
 	struct smbXsrv_open_global_allocate_state *state = private_data;
-	struct smbXsrv_open_global0 *global = state->global;
-	struct smbXsrv_open_global0 *tmp_global0 = NULL;
+	struct smbXsrv_open_global *global = state->global;
+	struct smbXsrv_open_global *tmp_global = NULL;
 	TDB_DATA key = dbwrap_record_get_key(rec);
 
 	state->status = smbXsrv_open_global_verify_record(
-		key, oldval, talloc_tos(), &tmp_global0);
+		key, oldval, talloc_tos(), &tmp_global);
 
 	if (!NT_STATUS_EQUAL(state->status, NT_STATUS_NOT_FOUND)) {
 		/*
 		 * Found an existing record
 		 */
-		TALLOC_FREE(tmp_global0);
+		TALLOC_FREE(tmp_global);
 		state->status = NT_STATUS_RETRY;
 		return;
 	}
@@ -450,7 +462,7 @@ static void smbXsrv_open_global_allocate_fn(
 	if (NT_STATUS_EQUAL(state->status, NT_STATUS_FATAL_APP_EXIT)) {
 		NTSTATUS status;
 
-		TALLOC_FREE(tmp_global0);
+		TALLOC_FREE(tmp_global);
 
 		/*
 		 * smbd crashed
@@ -469,7 +481,7 @@ static void smbXsrv_open_global_allocate_fn(
 }
 
 static NTSTATUS smbXsrv_open_global_allocate(
-	struct db_context *db, struct smbXsrv_open_global0 *global)
+	struct db_context *db, struct smbXsrv_open_global *global)
 {
 	struct smbXsrv_open_global_allocate_state state = {
 		.global = global,
@@ -567,13 +579,15 @@ static int smbXsrv_open_destructor(struct smbXsrv_open *op)
 NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 			     struct smbXsrv_session *session,
 			     struct smbXsrv_tcon *tcon,
+			     struct file_id *file_id,
+			     uint32_t name_hash,
 			     NTTIME now,
 			     struct smbXsrv_open **_open)
 {
 	struct smbXsrv_open_table *table = conn->client->open_table;
 	struct auth_session_info *session_info = NULL;
 	struct smbXsrv_open *op = NULL;
-	struct smbXsrv_open_global0 *global = NULL;
+	struct smbXsrv_open_global *global = NULL;
 	NTSTATUS status;
 	struct dom_sid *current_sid = NULL;
 	struct security_token *current_token = NULL;
@@ -605,7 +619,7 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 	op->session = session;
 	op->tcon = tcon;
 
-	global = talloc_zero(op, struct smbXsrv_open_global0);
+	global = talloc_zero(op, struct smbXsrv_open_global);
 	if (global == NULL) {
 		TALLOC_FREE(op);
 		return NT_STATUS_NO_MEMORY;
@@ -633,6 +647,8 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 	global->open_volatile_id = op->local_id;
 
 	global->server_id = messaging_server_id(conn->client->msg_ctx);
+	global->file_id = *file_id;
+	global->name_hash = name_hash;
 	global->open_time = now;
 	global->open_owner = *current_sid;
 	global->session_global_id = session->global->session_global_id;
@@ -658,8 +674,8 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 
 	if (CHECK_DEBUGLVL(10)) {
 		struct smbXsrv_openB open_blob = {
-			.version = SMBXSRV_VERSION_0,
-			.info.info0 = op,
+			.version = SMBXSRV_VERSION_1,
+			.info.info1 = op,
 		};
 
 		DEBUG(10,("smbXsrv_open_create: global_id (0x%08x) stored\n",
@@ -810,7 +826,7 @@ static NTSTATUS smbXsrv_open_clear_replay_cache(struct smbXsrv_open *op)
 }
 
 struct smbXsrv_open_update_state {
-	struct smbXsrv_open_global0 *global;
+	struct smbXsrv_open_global *global;
 	NTSTATUS status;
 };
 
@@ -859,8 +875,8 @@ NTSTATUS smbXsrv_open_update(struct smbXsrv_open *op)
 
 	if (CHECK_DEBUGLVL(10)) {
 		struct smbXsrv_openB open_blob = {
-			.version = SMBXSRV_VERSION_0,
-			.info.info0 = op,
+			.version = SMBXSRV_VERSION_1,
+			.info.info1 = op,
 		};
 
 		DEBUG(10,("smbXsrv_open_update: global_id (0x%08x) stored\n",
@@ -880,7 +896,7 @@ static void smbXsrv_open_close_fn(
 	struct db_record *rec, TDB_DATA oldval, void *private_data)
 {
 	struct smbXsrv_open_close_state *state = private_data;
-	struct smbXsrv_open_global0 *global = state->op->global;
+	struct smbXsrv_open_global *global = state->op->global;
 	TDB_DATA key = dbwrap_record_get_key(rec);
 
 	if (global->durable) {
@@ -899,8 +915,8 @@ static void smbXsrv_open_close_fn(
 
 		if (CHECK_DEBUGLVL(10)) {
 			struct smbXsrv_openB open_blob = {
-				.version = SMBXSRV_VERSION_0,
-				.info.info0 = state->op,
+				.version = SMBXSRV_VERSION_1,
+				.info.info1 = state->op,
 			};
 
 			DBG_DEBUG("(0x%08x) stored disconnect\n",
@@ -921,7 +937,7 @@ static void smbXsrv_open_close_fn(
 NTSTATUS smbXsrv_open_close(struct smbXsrv_open *op, NTTIME now)
 {
 	struct smbXsrv_open_close_state state = { .op = op, };
-	struct smbXsrv_open_global0 *global = op->global;
+	struct smbXsrv_open_global *global = op->global;
 	struct smbXsrv_open_table *table;
 	NTSTATUS status;
 	NTSTATUS error = NT_STATUS_OK;
@@ -1129,6 +1145,8 @@ NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 					  struct smbXsrv_session *session,
 					  struct GUID create_guid,
 					  const char *name,
+					  bool replay_operation,
+					  bool persistent_requested,
 					  NTTIME now,
 					  uint64_t *persistent_id,
 					  struct smbXsrv_open **_open)
@@ -1140,7 +1158,7 @@ NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 	struct GUID_txt_buf _create_guid_buf;
 	const char *create_guid_str = GUID_buf_string(&create_guid, &_create_guid_buf);
 	struct db_record *db_rec = NULL;
-	const struct smbXsrv_open_global0 *global = NULL;
+	const struct smbXsrv_open_global *global = NULL;
 	struct smbXsrv_open *op = NULL;
 	uint32_t open_global_id;
 	struct smbXsrv_open_replay_cache_key_buf key_buf;
@@ -1162,6 +1180,13 @@ NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 	val = dbwrap_record_get_value(db_rec);
 	if (val.dsize == 0) {
 		struct smbXsrv_open_global_key_buf open_key_buf;
+
+		if (replay_operation && persistent_requested) {
+			DBG_DEBUG("Replay on Persistent Handle, "
+				  "no replay record found\n");
+			TALLOC_FREE(frame);
+			return NT_STATUS_FILE_NOT_AVAILABLE;
+		}
 
 		DBG_DEBUG("Fresh replay-cache record\n");
 
@@ -1206,8 +1231,7 @@ NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 	}
 
 	TALLOC_FREE(db_rec);
-	status = smbXsrv_open_global_lookup(table,
-					    frame,
+	status = smbXsrv_open_global_lookup(frame,
 					    open_global_id,
 					    &global);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1219,7 +1243,7 @@ NTSTATUS smb2srv_open_lookup_replay_cache(struct smbXsrv_connection *conn,
 	}
 
 	if (CHECK_DEBUGLVL(DBGLVL_DEBUG)) {
-		NDR_PRINT_DEBUG(smbXsrv_open_global0, global);
+		NDR_PRINT_DEBUG(smbXsrv_open_global, global);
 	}
 
 	status = smbXsrv_open_local_lookup(table,
@@ -1268,7 +1292,7 @@ static void smb2srv_open_recreate_fn(
 {
 	struct smb2srv_open_recreate_state *state = private_data;
 	TDB_DATA key = dbwrap_record_get_key(rec);
-	struct smbXsrv_open_global0 *global = NULL;
+	struct smbXsrv_open_global *global = NULL;
 	struct GUID_txt_buf buf1, buf2;
 
 	state->status = smbXsrv_open_global_verify_record(
@@ -1439,7 +1463,8 @@ NTSTATUS smb2srv_open_recreate(struct smbXsrv_connection *conn,
 
 	if (CHECK_DEBUGLVL(10)) {
 		struct smbXsrv_openB open_blob = {
-			.info.info0 = state.op,
+			.version = SMBXSRV_VERSION_1,
+			.info.info1 = state.op,
 		};
 		DBG_DEBUG("global_id (0x%08x) stored\n",
 			  state.op->global->open_global_id);
@@ -1460,7 +1485,7 @@ fail:
 
 struct smbXsrv_open_global_traverse_state {
 	int (*fn)(struct db_record *rec,
-		  struct smbXsrv_open_global0 *global,
+		  struct smbXsrv_open_global *global,
 		  TDB_DATA *rc_open_global_key,
 		  void *private_data);
 	void *private_data;
@@ -1470,7 +1495,7 @@ static int smbXsrv_open_global_traverse_fn(struct db_record *rec, void *data)
 {
 	struct smbXsrv_open_global_traverse_state *state =
 		(struct smbXsrv_open_global_traverse_state*)data;
-	struct smbXsrv_open_global0 *global = NULL;
+	struct smbXsrv_open_global *global = NULL;
 	TDB_DATA key = dbwrap_record_get_key(rec);
 	TDB_DATA val = dbwrap_record_get_value(rec);
 	NTSTATUS status;
@@ -1498,7 +1523,7 @@ static int smbXsrv_open_global_traverse_fn(struct db_record *rec, void *data)
 
 NTSTATUS smbXsrv_open_global_traverse(
 	int (*fn)(struct db_record *rec,
-		  struct smbXsrv_open_global0 *global,
+		  struct smbXsrv_open_global *global,
 		  TDB_DATA *rc_open_global_key,
 		  void *private_data),
 	void *private_data)
@@ -1540,7 +1565,7 @@ static void smbXsrv_open_cleanup_fn(
 	struct db_record *rec, TDB_DATA oldval, void *private_data)
 {
 	struct smbXsrv_open_cleanup_state *state = private_data;
-	struct smbXsrv_open_global0 *global = NULL;
+	struct smbXsrv_open_global *global = NULL;
 	TDB_DATA key = dbwrap_record_get_key(rec);
 	bool delete_open = false;
 
@@ -1617,8 +1642,10 @@ do_delete:
 		  state->global_id,
 		  dbwrap_name(dbwrap_record_get_db(rec)));
 	state->status = NT_STATUS_OK;
-	state->client_guid = global->client_guid;
-	state->create_guid = global->create_guid;
+	if (global != NULL) {
+		state->client_guid = global->client_guid;
+		state->create_guid = global->create_guid;
+	}
 }
 
 NTSTATUS smbXsrv_open_cleanup(uint64_t persistent_id)
@@ -1679,4 +1706,61 @@ NTSTATUS smbXsrv_replay_cleanup(const struct GUID *client_guid,
 			nt_errstr(status));
 	}
 	return status;
+}
+
+NTSTATUS smbXsrv_open_global_traverse_per_rec_persistent_read(
+	int (*fn)(struct db_record *rec,
+		  struct smbXsrv_open_global *global,
+		  TDB_DATA *rc_open_global_key,
+		  void *private_data),
+	void *private_data)
+{
+
+	NTSTATUS status;
+	int count = 0;
+	struct smbXsrv_open_global_traverse_state state = {
+		.fn = fn,
+		.private_data = private_data,
+	};
+
+	become_root();
+	status = smbXsrv_open_global_init();
+	if (!NT_STATUS_IS_OK(status)) {
+		unbecome_root();
+		DEBUG(0, ("Failed to initialize open_global: %s\n",
+			  nt_errstr(status)));
+		return status;
+	}
+	unbecome_root();
+
+	status = dbwrap_traverse_per_rec_persistent_read(
+		smbXsrv_open_global_db_ctx,
+		smbXsrv_open_global_traverse_fn,
+		&state,
+		&count);
+	return status;
+}
+
+NTSTATUS smbXsrv_open_global_wipe(struct dbwrap_wipe_flags flags)
+{
+	NTSTATUS status;
+	int ret;
+
+	become_root();
+	status = smbXsrv_open_global_init();
+	if (!NT_STATUS_IS_OK(status)) {
+		unbecome_root();
+		DBG_ERR("Failed to initialize open_global: %s\n",
+			nt_errstr(status));
+		return status;
+	}
+	unbecome_root();
+
+	ret = dbwrap_wipe(smbXsrv_open_global_db_ctx, flags);
+	if (ret != 0) {
+		DBG_ERR("dbwrap_wipe failed\n");
+		return NT_STATUS_INTERNAL_DB_ERROR;
+	}
+
+	return NT_STATUS_OK;
 }
